@@ -17,7 +17,8 @@ type M2MResult = { translated_text: string };
 async function handleNovaMessage(
   data: string | ArrayBuffer,
   clientWs: WebSocket,
-  env: Bindings
+  env: Bindings,
+  state: { pending: string }
 ) {
   if (typeof data !== "string") return;
 
@@ -31,24 +32,31 @@ async function handleNovaMessage(
   if (msg.type !== "Results") return;
 
   const transcript = msg.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
-  if (!transcript) return;
 
   if (!msg.speech_final) {
-    // Interim: stream live words to the client immediately
+    if (!transcript) return;
+    // Track last non-empty interim so we can use it if speech_final arrives empty
+    state.pending = transcript;
     clientWs.send(JSON.stringify({ type: "interim", transcript }));
     return;
   }
 
+  // speech_final: Deepgram sometimes sends it with empty transcript (endpoint signal only),
+  // having already sent the text in the preceding is_final message. Fall back to last interim.
+  const finalTranscript = transcript || state.pending;
+  state.pending = "";
+  if (!finalTranscript) return;
+
   // speech_final: complete utterance — assign ID so translation can find it
   const utteranceId = Date.now();
-  clientWs.send(JSON.stringify({ type: "final", transcript, utteranceId }));
+  clientWs.send(JSON.stringify({ type: "final", transcript: finalTranscript, utteranceId }));
 
   // Translate English → Spanish via M2M100 (dedicated seq2seq, faster than LLM)
   const t0 = Date.now();
   const m2mResult = await (
     env.AI.run as (m: string, i: object) => Promise<M2MResult>
   )("@cf/meta/m2m100-1.2b", {
-    text: transcript,
+    text: finalTranscript,
     source_lang: "en",
     target_lang: "es",
   });
@@ -126,8 +134,9 @@ realtimeApp.get("/realtime", async (c) => {
   }
 
   // Nova-3 → Client
+  const novaState = { pending: "" };
   novaWs.addEventListener("message", (event) => {
-    handleNovaMessage(event.data, server, env).catch(console.error);
+    handleNovaMessage(event.data, server, env, novaState).catch(console.error);
   });
   novaWs.addEventListener("close", () => server.close());
   novaWs.addEventListener("error", () => server.close());
