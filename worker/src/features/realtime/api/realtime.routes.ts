@@ -59,7 +59,7 @@ async function handleNovaMessage(
   )("@cf/meta/m2m100-1.2b", {
     text: finalTranscript,
     source_lang: "en",
-    target_lang: "ja",
+    target_lang: "fr",
   });
   const translateMs = Date.now() - t0;
 
@@ -79,18 +79,44 @@ async function handleNovaMessage(
     },
     body: JSON.stringify({
       version: "f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
-      input: { text: translation, voice: "jf_alpha" },
+      input: { text: translation, voice: "ff_siwis" },
     }),
   });
 
-  const kokoroResult = await kokoroResp.json() as { output?: string; error?: string };
-  if (!kokoroResult.output) {
-    console.error("Kokoro TTS failed:", kokoroResult.error);
+  type KokoroResult = { id?: string; status?: string; output?: string; error?: string };
+  const kokoroResult = await kokoroResp.json() as KokoroResult;
+
+  let audioUrl = kokoroResult.output;
+
+  // Prefer: wait may time out and return status:"starting"/"processing" — poll until done
+  if (!audioUrl && kokoroResult.id && kokoroResult.status !== "failed") {
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const poll = await fetch(`https://api.replicate.com/v1/predictions/${kokoroResult.id}`, {
+        headers: { "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}` },
+      });
+      const pollResult = await poll.json() as KokoroResult;
+      if (pollResult.status === "succeeded" && pollResult.output) {
+        audioUrl = pollResult.output;
+        break;
+      }
+      if (pollResult.status === "failed") {
+        console.error("Kokoro prediction failed:", pollResult.error);
+        clientWs.send(JSON.stringify({ type: "error", message: `Kokoro failed: ${pollResult.error}` }));
+        return;
+      }
+    }
+  }
+
+  if (!audioUrl) {
+    const detail = JSON.stringify(kokoroResult);
+    console.error("Kokoro TTS no output:", detail);
+    clientWs.send(JSON.stringify({ type: "error", message: `Kokoro no output: ${detail}` }));
     return;
   }
 
   // Fetch the generated audio and stream it back as binary
-  const audioResp = await fetch(kokoroResult.output);
+  const audioResp = await fetch(audioUrl);
   const audioReader = audioResp.body!.getReader();
 
   clientWs.send(JSON.stringify({ type: "tts_start", utteranceId }));
