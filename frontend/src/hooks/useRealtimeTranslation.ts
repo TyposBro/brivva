@@ -69,7 +69,7 @@ export function useRealtimeTranslation() {
   );
 
   const start = useCallback(
-    async (sourceLang: string) => {
+    async () => {
       setStatus("connecting");
       setUtterances([]);
 
@@ -103,7 +103,6 @@ export function useRealtimeTranslation() {
       };
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "config", sourceLang }));
         recorder.start(250);
         setStatus("listening");
         startSilenceDetection(analyserNode);

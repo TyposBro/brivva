@@ -1,47 +1,23 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useRealtimeTranslation } from "./hooks/useRealtimeTranslation";
 import { AudioRecorder } from "./components/AudioRecorder";
 import { AudioPlayer } from "./components/AudioPlayer";
 
-const LANGUAGES = [
-  { code: "ko", label: "Korean" },
-  { code: "ja", label: "Japanese" },
-  { code: "es", label: "Spanish" },
-  { code: "fr", label: "French" },
-  { code: "de", label: "German" },
-  { code: "it", label: "Italian" },
-  { code: "ru", label: "Russian" },
-  { code: "zh", label: "Chinese" },
-];
-
 export default function App() {
-  const [sourceLang, setSourceLang] = useState("ko");
   const { status, utterances, analyser, start, stop } = useRealtimeTranslation();
   const listRef = useRef<HTMLDivElement>(null);
   const isActive = status !== "idle";
 
-  const handleToggle = () => {
-    if (isActive) {
-      stop();
-    } else {
-      start(sourceLang);
-    }
-  };
+  const handleToggle = () => (isActive ? stop() : start());
 
-  // Auto-scroll utterance list as results arrive
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [utterances]);
 
-  // Map realtime status → RecorderState for the AudioRecorder component
   const recorderState =
-    status === "idle"
-      ? "idle"
-      : status === "connecting"
-        ? "processing"
-        : "recording"; // listening + processing both show as active
+    status === "idle" ? "idle" : status === "connecting" ? "processing" : "recording";
 
   const latestTranslation = utterances[utterances.length - 1]?.translation ?? null;
 
@@ -53,20 +29,10 @@ export default function App() {
       </header>
 
       <main className="main">
-        <div className="lang-row">
-          <select
-            className="lang-select"
-            value={sourceLang}
-            onChange={(e) => setSourceLang(e.target.value)}
-            disabled={isActive}
-          >
-            {LANGUAGES.map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.label}
-              </option>
-            ))}
-          </select>
-          <span className="arrow">→ English</span>
+        <div className="lang-badge">
+          <span>English</span>
+          <span className="arrow">→</span>
+          <span>Spanish</span>
         </div>
 
         <AudioRecorder
@@ -92,13 +58,13 @@ export default function App() {
             <div key={u.id} className="utterance">
               {u.transcription && (
                 <div className="result-card">
-                  <span className="result-label">Original</span>
+                  <span className="result-label">English</span>
                   <p className="result-text">{u.transcription}</p>
                 </div>
               )}
               {u.translation && (
                 <div className="result-card translated">
-                  <span className="result-label">Translation</span>
+                  <span className="result-label">Spanish</span>
                   <p className="result-text">{u.translation}</p>
                 </div>
               )}
@@ -106,7 +72,9 @@ export default function App() {
           ))}
         </div>
 
-        {latestTranslation && <AudioPlayer key={latestTranslation} text={latestTranslation} lang="en" />}
+        {latestTranslation && (
+          <AudioPlayer key={latestTranslation} text={latestTranslation} lang="es" />
+        )}
       </main>
     </div>
   );

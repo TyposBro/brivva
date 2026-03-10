@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { Buffer } from "node:buffer";
 import type { Bindings, Variables } from "../../../core/types";
 
 const realtimeApp = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -19,44 +18,45 @@ type Nova3Result = {
   results: { channels: [{ alternatives: [{ transcript: string }] }] };
 };
 
-async function processUtterance(
-  env: Bindings,
-  ws: WebSocket,
-  audio: Uint8Array,
-  sourceLang: string
-) {
+type LlmResult = { response: string };
+
+async function processUtterance(env: Bindings, ws: WebSocket, audio: Uint8Array) {
   try {
-    const base64 = Buffer.from(audio).toString("base64");
-    // Nova-3 needs a ReadableStream; create one per call (streams are single-use)
     const novaStream = new Blob([audio], { type: "audio/webm;codecs=opus" }).stream();
 
-    const [novaResult, whisperResult] = await Promise.all([
-      // Nova-3: accurate transcription in source language
-      (env.AI.run as (m: string, i: object) => Promise<Nova3Result>)(
-        "@cf/deepgram/nova-3",
-        {
-          audio: { body: novaStream, contentType: "audio/webm;codecs=opus" },
-          language: sourceLang,
-          punctuate: true,
-          smart_format: true,
-        }
-      ),
-      // Whisper: translate audio → English
-      env.AI.run("@cf/openai/whisper-large-v3-turbo", {
-        audio: base64,
-        task: "translate",
-        language: sourceLang,
-        vad_filter: true,
-      }),
-    ]);
+    // 1. Nova-3: transcribe English speech → English text
+    const novaResult = await (
+      env.AI.run as (m: string, i: object) => Promise<Nova3Result>
+    )("@cf/deepgram/nova-3", {
+      audio: { body: novaStream, contentType: "audio/webm;codecs=opus" },
+      language: "en",
+      punctuate: true,
+      smart_format: true,
+    });
 
     const transcription =
       novaResult.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? "";
-    const translation = whisperResult.text?.trim() ?? "";
 
-    if (transcription || translation) {
-      ws.send(JSON.stringify({ type: "result", transcription, translation }));
-    }
+    if (!transcription) return;
+
+    // 2. LLM: translate English text → Spanish
+    const llmResult = await (
+      env.AI.run as (m: string, i: object) => Promise<LlmResult>
+    )("@cf/meta/llama-3.1-8b-instruct", {
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a translator. Translate the English text to Spanish. Output only the Spanish translation, nothing else.",
+        },
+        { role: "user", content: transcription },
+      ],
+      max_tokens: 512,
+    });
+
+    const translation = llmResult.response?.trim() ?? "";
+
+    ws.send(JSON.stringify({ type: "result", transcription, translation }));
   } catch (err) {
     console.error("processUtterance error:", err);
     ws.send(JSON.stringify({ type: "error", message: "Processing failed" }));
@@ -72,9 +72,6 @@ realtimeApp.get("/realtime", (c) => {
   server.accept();
 
   const env = c.env;
-  let sourceLang = "ko";
-  // First chunk from MediaRecorder is the WebM init segment (codec info).
-  // It must prefix every utterance for valid audio decoding.
   let initChunk: Uint8Array | null = null;
   let mediaChunks: Uint8Array[] = [];
 
@@ -84,7 +81,7 @@ realtimeApp.get("/realtime", (c) => {
     if (data instanceof ArrayBuffer) {
       const chunk = new Uint8Array(data);
       if (!initChunk) {
-        initChunk = chunk; // Save init segment; reuse for every utterance
+        initChunk = chunk;
       } else {
         mediaChunks.push(chunk);
       }
@@ -93,21 +90,17 @@ realtimeApp.get("/realtime", (c) => {
 
     if (typeof data !== "string") return;
 
-    let msg: { type: string; sourceLang?: string };
+    let msg: { type: string };
     try {
-      msg = JSON.parse(data) as { type: string; sourceLang?: string };
+      msg = JSON.parse(data) as { type: string };
     } catch {
       return;
     }
 
-    if (msg.type === "config" && msg.sourceLang) {
-      sourceLang = msg.sourceLang;
-    }
-
     if (msg.type === "process" && initChunk && mediaChunks.length > 0) {
       const utterance = combineChunks([initChunk, ...mediaChunks]);
-      mediaChunks = []; // Reset media chunks; keep initChunk for next utterance
-      processUtterance(env, server, utterance, sourceLang).catch(console.error);
+      mediaChunks = [];
+      processUtterance(env, server, utterance).catch(console.error);
     }
   });
 
