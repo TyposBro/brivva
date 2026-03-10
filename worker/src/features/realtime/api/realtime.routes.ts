@@ -68,23 +68,40 @@ async function handleNovaMessage(
 
   clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId, translateMs }));
 
-  // TTS — Kokoro via Replicate (jf_alpha: best quality Japanese female voice)
+  // TTS — Kokoro via Replicate (ff_siwis: French female voice)
   const t1 = Date.now();
-  const kokoroResp = await fetch("https://api.replicate.com/v1/predictions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}`,
-      "Content-Type": "application/json",
-      "Prefer": "wait",
-    },
-    body: JSON.stringify({
-      version: "f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
-      input: { text: translation, voice: "ff_siwis" },
-    }),
-  });
 
   type KokoroResult = { id?: string; status?: string; output?: string; error?: string };
-  const kokoroResult = await kokoroResp.json() as KokoroResult;
+
+  // Retry up to 5 times on 429 — respect retry_after from Replicate
+  let kokoroResult: KokoroResult | null = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const resp = await fetch("https://api.replicate.com/v1/predictions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}`,
+        "Content-Type": "application/json",
+        "Prefer": "wait",
+      },
+      body: JSON.stringify({
+        version: "f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
+        input: { text: translation, voice: "ff_siwis" },
+      }),
+    });
+    if (resp.status === 429) {
+      const retryData = await resp.json() as { retry_after?: number };
+      const waitMs = ((retryData.retry_after ?? 10) + 1) * 1000;
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+    kokoroResult = await resp.json() as KokoroResult;
+    break;
+  }
+
+  if (!kokoroResult) {
+    clientWs.send(JSON.stringify({ type: "error", message: "Kokoro rate limited after retries" }));
+    return;
+  }
 
   let audioUrl = kokoroResult.output;
 
