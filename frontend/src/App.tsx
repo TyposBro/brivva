@@ -49,9 +49,11 @@ export default function App() {
 
         <div className="utterances" ref={listRef}>
           {utterances.map((u) => {
-            const { finalAt, translationAt, ttsStartAt, ttsEndAt } = u.timing;
+            const { sttStartAt, finalAt, translationAt, ttsStartAt, ttsEndAt } = u.timing;
             const hasLatency = ttsEndAt && translationAt && ttsStartAt;
-            const total    = hasLatency ? ttsEndAt - finalAt : 0;
+            const start    = sttStartAt ?? finalAt;
+            const total    = hasLatency ? ttsEndAt - start : 0;
+            const sPhase   = hasLatency ? finalAt - start : 0;
             const tPhase   = hasLatency ? translationAt - finalAt : 0;
             const gPhase   = hasLatency ? ttsStartAt - translationAt : 0;
             const aPhase   = hasLatency ? ttsEndAt - ttsStartAt : 0;
@@ -89,6 +91,7 @@ export default function App() {
                       <div className="latency-row">
                         <span className="latency-lbl">Actual</span>
                         <div className="bar-track">
+                          <div className="bar-seg seg-stt" style={{ width: `${(sPhase / total) * 100}%` }} />
                           <div className="bar-seg seg-translate" style={{ width: `${(tPhase / total) * 100}%` }} />
                           <div className="bar-seg seg-tts" style={{ width: `${(gPhase / total) * 100}%` }} />
                           <div className="bar-seg seg-audio" style={{ width: `${(aPhase / total) * 100}%` }} />
@@ -97,6 +100,7 @@ export default function App() {
                       </div>
                     </div>
                     <div className="latency-legend">
+                      <span className="leg-item"><span className="leg-dot seg-stt" />{sPhase}ms STT</span>
                       <span className="leg-item"><span className="leg-dot seg-translate" />{tPhase}ms Translate</span>
                       <span className="leg-item"><span className="leg-dot seg-tts" />{gPhase}ms TTS Gen</span>
                       <span className="leg-item"><span className="leg-dot seg-audio" />{aPhase}ms Transfer</span>

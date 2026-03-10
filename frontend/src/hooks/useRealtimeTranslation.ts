@@ -7,6 +7,7 @@ const SAMPLE_RATE = 16000; // Nova-3 expects 16kHz PCM
 const BUFFER_SIZE = 4096;  // ScriptProcessor chunk size
 
 export type Timing = {
+  sttStartAt?: number;   // first interim received (proxy for speech start)
   finalAt: number;
   translationAt?: number;
   translateMs?: number;  // M2M100 duration on CF edge
@@ -63,6 +64,9 @@ export function useRealtimeTranslation() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
+
+  // Tracks first interim arrival for current utterance (STT phase start)
+  const interimStartRef = useRef<number | null>(null);
 
   // TTS queue — collect each clip fully, play sequentially (no overlap)
   const ttsQueueRef = useRef<ArrayBuffer[][]>([]);
@@ -166,14 +170,17 @@ export function useRealtimeTranslation() {
         };
 
         if (msg.type === "interim") {
+          if (interimStartRef.current === null) interimStartRef.current = Date.now();
           setLiveTranscript(msg.transcript ?? "");
           setStatus("listening");
           log("INTERIM", { transcript: msg.transcript });
         } else if (msg.type === "final") {
           const finalAt = Date.now();
+          const sttStartAt = interimStartRef.current ?? finalAt;
+          interimStartRef.current = null;
           setUtterances((prev) => [
             ...prev,
-            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "", timing: { finalAt } },
+            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "", timing: { sttStartAt, finalAt } },
           ]);
           setLiveTranscript("");
           setStatus("processing");

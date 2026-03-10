@@ -390,6 +390,7 @@ body {
   height: 100%;
 }
 
+.seg-stt       { background: #38bdf8; }
 .seg-translate { background: var(--accent); }
 .seg-tts       { background: #f59e0b; }
 .seg-audio     { background: var(--success); }
