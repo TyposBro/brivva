@@ -3,7 +3,9 @@ import type { Context as HonoContext } from "hono";
 export type Bindings = {
   AI: Ai;
   ENVIRONMENT: string;
-  // Future: REPLICA_API_KEY: string;
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
+  CF_AI_GATEWAY_ID: string;
 };
 
 export type Variables = {

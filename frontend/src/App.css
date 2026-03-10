@@ -298,6 +298,26 @@ body {
   gap: 0.5rem;
 }
 
+/* Live interim card — pulses to show it's updating */
+.live-card {
+  border-color: var(--accent) !important;
+  background: rgba(108, 99, 255, 0.04) !important;
+}
+
+/* Translating spinner card */
+.result-card.translating {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1.25rem;
+  min-height: 48px;
+}
+
+.result-card.translating .spinner {
+  border-top-color: var(--accent2);
+  width: 16px;
+  height: 16px;
+}
+
 /* Error */
 .error {
   background: rgba(248, 113, 113, 0.1);

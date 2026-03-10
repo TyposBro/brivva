@@ -5,52 +5,101 @@
 Demo prototype for Brivva interview — showing a real-time voice translation pipeline.
 This is to impress them at the paid technical test stage. I'm the top candidate out of 15 and they want to proceed.
 
+## Current Status (Mar 10 2026)
+
+**Working and deployed.** Full real-time pipeline is live:
+- **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
+- **Worker:** https://brivva-translation.milliytechnology.workers.dev
+- **Repo:** https://github.com/TyposBro/brivva (private)
+
+Real-time WebSocket streaming is implemented but pending CF AI Gateway secrets before it goes live.
+The silence-detection batch pipeline works in the meantime.
+
 ## What This Is
 
-A working MVP of Brivva's core product pipeline: **Record voice → STT → Translate → TTS → Playback**
-No video/lip-sync for now — audio-only pipeline first.
+A working MVP of Brivva's core product pipeline: **Speak → STT → Translate → TTS → Playback**
+Hardcoded: English → Spanish. Audio-only (no video/lip-sync).
 
-## Architecture
+## Architecture (current)
 
 ```
 Browser (React/TS)
-├── Record audio from mic
-├── Send audio to Cloudflare Worker
-├── Display transcription + translation
-└── Play back translated audio
+├── Web Audio API → PCM linear16 @ 16kHz
+├── WebSocket → Cloudflare Worker
+├── Receive: interim words (live) + final + translation + TTS audio
+└── Play TTS audio via Audio API
 
-Cloudflare Worker (JS — will port to Rust WASM later)
-├── Receive audio from frontend
-├── Deepgram STT (Cloudflare has Deepgram integrated)
-├── Translation (Cloudflare AI or external API)
-├── Kokoro TTS (generate speech in target language)
-└── Return translated audio + text to frontend
+Cloudflare Worker (Hono/TS)
+├── /api/realtime   ← WebSocket endpoint
+│   ├── Proxy PCM audio → Nova-3 via CF AI Gateway WebSocket
+│   ├── Stream interim transcripts back immediately
+│   ├── On speech_final → Llama 3.1 8B translate → aura-2-es TTS
+│   └── Stream TTS audio back through same WebSocket
+├── /api/translate  ← legacy batch HTTP (kept as fallback)
+└── /api/tts        ← standalone TTS endpoint
 ```
 
 ## Tech Stack
 
-- **Frontend:** React + TypeScript + Vite
-- **Backend:** Cloudflare Workers (JavaScript first, Rust WASM later)
-- **STT:** Deepgram via Cloudflare (real-time transcription)
-- **Translation:** Cloudflare Workers AI (or DeepL API as fallback)
-- **TTS:** Kokoro TTS (small, fast, good quality — replaces expensive 3B param "Emotive TTS")
+- **Frontend:** React + TypeScript + Vite, deployed on Cloudflare Pages
+- **Backend:** Cloudflare Workers (Hono framework)
+- **STT:** `@cf/deepgram/nova-3` via CF AI Gateway WebSocket (real-time streaming)
+- **Translation:** `@cf/meta/llama-3.1-8b-instruct` (English → Spanish)
+- **TTS:** `@cf/deepgram/aura-2-es` (Spanish, speaker: aquila)
+
+## Real-Time Pipeline Detail
+
+```
+PCM audio (250-byte chunks, 16kHz)
+    ↓ WebSocket
+Nova-3 (CF AI Gateway WS)
+    ├── is_final=false  → interim transcript → show live in UI
+    └── speech_final=true → final transcript
+                              ↓
+                    Llama 3.1 8B → Spanish text
+                              ↓
+                    aura-2-es → MPEG audio stream
+                              ↓
+                    WebSocket binary → browser Audio API
+```
+
+**Message protocol (Worker ↔ Browser):**
+```
+{ type: "interim",     transcript, utteranceId }   ← live words
+{ type: "final",       transcript, utteranceId }   ← sentence done
+{ type: "translation", text,       utteranceId }   ← Spanish text
+{ type: "tts_start",               utteranceId }   ← audio coming
+[ArrayBuffer...]                                   ← MPEG chunks
+{ type: "tts_end",                 utteranceId }   ← audio done
+```
+
+## Worker Secrets Required
+
+```bash
+cd worker
+wrangler secret put CF_ACCOUNT_ID     # Cloudflare account ID
+wrangler secret put CF_API_TOKEN      # CF API token (AI Gateway: Run permission)
+wrangler secret put CF_AI_GATEWAY_ID  # Gateway ID from CF dashboard > AI Gateway
+```
 
 ## Key Technical Decisions
 
-- Start with JS Workers to prove the pipeline works fast. Port to Rust WASM as a second step.
-- Cloudflare edge handles STT + translation + orchestration (cheap, fast, no server management)
-- Only GPU-heavy tasks (lip-sync in future) would need AWS/GCP
-- Kokoro TTS chosen over larger models because it's fast enough for real-time and sounds natural
+- Cloudflare edge for entire pipeline — no external services, minimal latency
+- PCM linear16 @ 16kHz → standard for STT APIs, no codec overhead
+- `utteranceId = Date.now()` — prevents out-of-order translations updating wrong card
+- TTS streamed through same WebSocket — avoids second HTTP round-trip
+- ScriptProcessorNode for PCM (deprecated but universal; AudioWorklet is the upgrade path)
 
 ## Why This Matters for the Interview
 
 Brivva's current listed pipeline: Whisper STT → Context NMT → Emotive TTS → Wav2Lip
-My proposed improvements:
+My proposed improvements (now demonstrated):
 
-1. **Deepgram** over Whisper — Cloudflare has it built in, real-time streaming support
-2. **Kokoro TTS** over Emotive TTS — much smaller, near-instant, good quality
-3. **InfiniteTalk** over Wav2Lip (future) — syncs lips + head + body + expressions, Apache 2.0
-4. **Cloudflare edge** for orchestration — only use GPU servers for lip-sync, massive cost reduction
+1. **Deepgram Nova-3** over Whisper — real-time WebSocket streaming, better accuracy
+2. **Llama 3.1 on CF edge** over Context NMT — no external API, runs at the edge
+3. **Deepgram Aura-2** over Emotive TTS — natural voice, CF-native, streaming
+4. **Cloudflare edge** for entire STT+translate+TTS pipeline — only GPU needed for lip-sync
+5. **InfiniteTalk** over Wav2Lip (future) — full body + expression sync, Apache 2.0
 
 ## About Brivva (from interview Mar 10)
 
@@ -77,39 +126,41 @@ My proposed improvements:
 ## Project Structure
 
 ```
-brivva-prototype/
-├── CLAUDE.md          ← you are here
-├── frontend/          ← React + TypeScript + Vite
+brivva/
+├── CLAUDE.md
+├── frontend/                          ← React + TypeScript + Vite
 │   ├── src/
-│   │   ├── App.tsx
+│   │   ├── App.tsx                    ← main UI (live transcript + utterances)
+│   │   ├── App.css
 │   │   ├── components/
-│   │   │   ├── AudioRecorder.tsx
-│   │   │   ├── TranscriptionDisplay.tsx
-│   │   │   └── AudioPlayer.tsx
+│   │   │   ├── AudioRecorder.tsx      ← waveform canvas + record button
+│   │   │   ├── AudioPlayer.tsx        ← standalone TTS player (legacy)
+│   │   │   └── TranscriptionDisplay.tsx
 │   │   └── hooks/
-│   │       └── useAudioRecorder.ts
-│   └── package.json
-└── worker/            ← Cloudflare Worker
+│   │       ├── useRealtimeTranslation.ts  ← WebSocket + PCM capture + TTS playback
+│   │       └── useAudioRecorder.ts        ← legacy batch recorder
+│   └── .env                           ← VITE_WORKER_URL=https://...workers.dev
+└── worker/                            ← Cloudflare Worker (Hono)
     ├── src/
-    │   └── index.ts
+    │   ├── index.ts                   ← app entry, routes mounted
+    │   ├── core/
+    │   │   ├── types.ts               ← Bindings (AI, CF secrets), Variables
+    │   │   └── middleware/
+    │   │       └── error.middleware.ts
+    │   └── features/
+    │       ├── realtime/api/
+    │       │   └── realtime.routes.ts ← /api/realtime WebSocket proxy
+    │       ├── translation/
+    │       │   ├── api/translation.routes.ts
+    │       │   └── core/translation.service.ts
+    │       └── tts/api/
+    │           └── tts.routes.ts
     ├── wrangler.toml
     └── package.json
-```
-
-## Implementation Order
-
-1. Set up project structure (frontend + worker)
-2. Build audio recording in React (MediaRecorder API)
-3. Set up Cloudflare Worker with Deepgram STT
-4. Add translation (Cloudflare AI)
-5. Add Kokoro TTS
-6. Wire everything together — record → transcribe → translate → speak
-7. Polish UI — language selector, waveform visualization, loading states
 
 ## Rules
 
 - Ship fast. This is a demo, not production code.
-- Use existing Cloudflare account (I run Spiko on it)
-- Test with Korean → English first (matches Brivva's K-Beauty use case)
-- Keep it simple — no auth, no database, no deployment pipeline
+- Use existing Cloudflare account (Spiko runs on same account)
+- Keep it simple — no auth, no database
 - If something is hard to integrate, mock it and move on

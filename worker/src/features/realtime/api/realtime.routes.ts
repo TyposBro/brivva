@@ -3,67 +3,82 @@ import type { Bindings, Variables } from "../../../core/types";
 
 const realtimeApp = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-function combineChunks(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
-}
-
-type Nova3Result = {
-  results: { channels: [{ alternatives: [{ transcript: string }] }] };
+type NovaMessage = {
+  type: string;
+  channel?: { alternatives: [{ transcript: string }] };
+  is_final?: boolean;
+  speech_final?: boolean;
 };
 
 type LlmResult = { response: string };
 
-async function processUtterance(env: Bindings, ws: WebSocket, audio: Uint8Array) {
+// Each speech_final utterance gets a stable ID so out-of-order
+// translations (when user speaks fast) update the right card.
+async function handleNovaMessage(
+  data: string | ArrayBuffer,
+  clientWs: WebSocket,
+  env: Bindings
+) {
+  if (typeof data !== "string") return;
+
+  let msg: NovaMessage;
   try {
-    const novaStream = new Blob([audio], { type: "audio/webm;codecs=opus" }).stream();
-
-    // 1. Nova-3: transcribe English speech → English text
-    const novaResult = await (
-      env.AI.run as (m: string, i: object) => Promise<Nova3Result>
-    )("@cf/deepgram/nova-3", {
-      audio: { body: novaStream, contentType: "audio/webm;codecs=opus" },
-      language: "en",
-      punctuate: true,
-      smart_format: true,
-    });
-
-    const transcription =
-      novaResult.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? "";
-
-    if (!transcription) return;
-
-    // 2. LLM: translate English text → Spanish
-    const llmResult = await (
-      env.AI.run as (m: string, i: object) => Promise<LlmResult>
-    )("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a translator. Translate the English text to Spanish. Output only the Spanish translation, nothing else.",
-        },
-        { role: "user", content: transcription },
-      ],
-      max_tokens: 512,
-    });
-
-    const translation = llmResult.response?.trim() ?? "";
-
-    ws.send(JSON.stringify({ type: "result", transcription, translation }));
-  } catch (err) {
-    console.error("processUtterance error:", err);
-    ws.send(JSON.stringify({ type: "error", message: "Processing failed" }));
+    msg = JSON.parse(data) as NovaMessage;
+  } catch {
+    return;
   }
+
+  if (msg.type !== "Results") return;
+
+  const transcript = msg.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
+  if (!transcript) return;
+
+  if (!msg.speech_final) {
+    // Interim: stream live words to the client immediately
+    clientWs.send(JSON.stringify({ type: "interim", transcript }));
+    return;
+  }
+
+  // speech_final: complete utterance — assign ID so translation can find it
+  const utteranceId = Date.now();
+  clientWs.send(JSON.stringify({ type: "final", transcript, utteranceId }));
+
+  // Translate English → Spanish
+  const llmResult = await (
+    env.AI.run as (m: string, i: object) => Promise<LlmResult>
+  )("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [
+      {
+        role: "system",
+        content:
+          "Translate English to Spanish. Output only the Spanish translation, nothing else.",
+      },
+      { role: "user", content: transcript },
+    ],
+    max_tokens: 512,
+  });
+
+  const translation = llmResult.response?.trim() ?? "";
+  if (!translation) return;
+
+  clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId }));
+
+  // TTS — stream aura-2-es audio back through the same WebSocket
+  const ttsStream = await (
+    env.AI.run as (m: string, i: object) => Promise<ReadableStream<Uint8Array>>
+  )("@cf/deepgram/aura-2-es", { text: translation, speaker: "aquila" });
+
+  clientWs.send(JSON.stringify({ type: "tts_start", utteranceId }));
+  const reader = ttsStream.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    clientWs.send(value.buffer as ArrayBuffer);
+  }
+  clientWs.send(JSON.stringify({ type: "tts_end", utteranceId }));
 }
 
-realtimeApp.get("/realtime", (c) => {
+realtimeApp.get("/realtime", async (c) => {
   if (c.req.header("Upgrade") !== "websocket") {
     return c.text("WebSocket upgrade required", 426);
   }
@@ -72,37 +87,60 @@ realtimeApp.get("/realtime", (c) => {
   server.accept();
 
   const env = c.env;
-  let initChunk: Uint8Array | null = null;
-  let mediaChunks: Uint8Array[] = [];
 
+  // Connect to Nova-3 via Cloudflare AI Gateway WebSocket
+  // PCM linear16 @ 16kHz — matches what the frontend sends
+  const url = new URL(
+    `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_AI_GATEWAY_ID}/workers-ai`
+  );
+  url.searchParams.set("model", "@cf/deepgram/nova-3");
+  url.searchParams.set("encoding", "linear16");
+  url.searchParams.set("sample_rate", "16000");
+  url.searchParams.set("channels", "1");
+  url.searchParams.set("language", "en");
+  url.searchParams.set("interim_results", "true");
+  url.searchParams.set("punctuate", "true");
+  url.searchParams.set("smart_format", "true");
+  url.searchParams.set("endpointing", "300");
+  url.searchParams.set("utterance_end_ms", "1000");
+
+  let novaWs: WebSocket;
+  try {
+    const novaResponse = await fetch(url.toString(), {
+      headers: {
+        Upgrade: "websocket",
+        "cf-aig-authorization": `Bearer ${env.CF_API_TOKEN}`,
+      },
+    });
+
+    if (novaResponse.status !== 101) {
+      const body = await novaResponse.text().catch(() => "");
+      throw new Error(`Nova-3 WS ${novaResponse.status}: ${body}`);
+    }
+
+    novaWs = novaResponse.webSocket!;
+    novaWs.accept();
+  } catch (err) {
+    console.error("Nova-3 WS connection failed:", err);
+    server.send(JSON.stringify({ type: "error", message: String(err) }));
+    server.close();
+    return new Response(null, { status: 101, webSocket: client } as ResponseInit);
+  }
+
+  // Nova-3 → Client
+  novaWs.addEventListener("message", (event) => {
+    handleNovaMessage(event.data, server, env).catch(console.error);
+  });
+  novaWs.addEventListener("close", () => server.close());
+  novaWs.addEventListener("error", () => server.close());
+
+  // Client → Nova-3: forward raw PCM audio
   server.addEventListener("message", (event) => {
-    const { data } = event;
-
-    if (data instanceof ArrayBuffer) {
-      const chunk = new Uint8Array(data);
-      if (!initChunk) {
-        initChunk = chunk;
-      } else {
-        mediaChunks.push(chunk);
-      }
-      return;
-    }
-
-    if (typeof data !== "string") return;
-
-    let msg: { type: string };
-    try {
-      msg = JSON.parse(data) as { type: string };
-    } catch {
-      return;
-    }
-
-    if (msg.type === "process" && initChunk && mediaChunks.length > 0) {
-      const utterance = combineChunks([initChunk, ...mediaChunks]);
-      mediaChunks = [];
-      processUtterance(env, server, utterance).catch(console.error);
+    if (event.data instanceof ArrayBuffer && novaWs.readyState === WebSocket.OPEN) {
+      novaWs.send(event.data);
     }
   });
+  server.addEventListener("close", () => novaWs.close());
 
   return new Response(null, { status: 101, webSocket: client } as ResponseInit);
 });
