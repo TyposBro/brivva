@@ -5,22 +5,23 @@
 Demo prototype for Brivva interview — showing a real-time voice translation pipeline.
 This is to impress them at the paid technical test stage. I'm the top candidate out of 15 and they want to proceed.
 
-## Current Status (Mar 10 2026)
+## Current Status (Mar 11 2026)
 
 **Fully working and deployed.** Complete real-time pipeline is live and verified:
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Worker:** https://brivva-translation.milliytechnology.workers.dev
 - **Repo:** https://github.com/TyposBro/brivva (private)
 
-Verified latency from session logs:
-- Translation (M2M100): 565–1168ms total, 565–1145ms CF-side
-- TTS (aura-2-es): 2–3.4s total (CF model inference dominates)
+Verified latency from session logs (English → French, Kokoro `ff_siwis`):
+- Translation (M2M100): 446–757ms CF-side
+- TTS (Kokoro): cold start ~2.3s CF, warm ~1–1.3s CF
+- Total from final transcript to audio ready: ~1.6–3.1s (1.6s warm)
 - Continuous speech correctly segmented — multiple translation cards appear while speaking
 
 ## What This Is
 
 A working MVP of Brivva's core product pipeline: **Speak → STT → Translate → TTS → Playback**
-Hardcoded: English → Spanish. Audio-only (no video/lip-sync).
+Hardcoded: English → French. Audio-only (no video/lip-sync).
 
 ## Architecture (current)
 
@@ -46,8 +47,8 @@ Cloudflare Worker (Hono/TS)
 - **Frontend:** React + TypeScript + Vite, deployed on Cloudflare Pages
 - **Backend:** Cloudflare Workers (Hono framework)
 - **STT:** `@cf/deepgram/nova-3` via CF AI Gateway WebSocket (real-time streaming)
-- **Translation:** `@cf/meta/m2m100-1.2b` (dedicated seq2seq, ~600ms)
-- **TTS:** `@cf/deepgram/aura-2-es` (Spanish, speaker: aquila)
+- **Translation:** `@cf/meta/m2m100-1.2b` (dedicated seq2seq, ~500ms CF)
+- **TTS:** Kokoro `jaaari/kokoro-82m` via Replicate API (French voice: `ff_siwis`, ~1–2.3s CF)
 
 ## Real-Time Pipeline Detail
 
@@ -60,9 +61,9 @@ Nova-3 (CF AI Gateway WS)
     └── speech_final=true → utterance endpoint → translate + TTS (uses
                              last interim if transcript is empty)
                               ↓
-                    M2M100 1.2B → Spanish text (~600ms CF)
+                    M2M100 1.2B → French text (~500ms CF)
                               ↓
-                    aura-2-es → MPEG audio stream (~1-2s CF)
+                    Kokoro ff_siwis via Replicate → WAV audio (~1-2.3s CF)
                               ↓
                     WebSocket binary → browser AudioContext queue
 ```
@@ -71,7 +72,7 @@ Nova-3 (CF AI Gateway WS)
 ```
 { type: "interim",     transcript, utteranceId }              ← live words
 { type: "final",       transcript, utteranceId }              ← chunk done
-{ type: "translation", text, utteranceId, translateMs }       ← Spanish text + CF timing
+{ type: "translation", text, utteranceId, translateMs }       ← French text + CF timing
 { type: "tts_start",   utteranceId }                          ← audio coming
 [ArrayBuffer...]                                              ← raw audio bytes
 { type: "tts_end",     utteranceId, ttsMs }                   ← audio done + CF timing
@@ -89,16 +90,17 @@ Nova-3 (CF AI Gateway WS)
 ## Worker Secrets (already set)
 
 ```
-CF_ACCOUNT_ID     = 80a55132ae169d5b282ccf505bc66bf7
-CF_API_TOKEN      = (set via wrangler secret)
-CF_AI_GATEWAY_ID  = default
+CF_ACCOUNT_ID       = 80a55132ae169d5b282ccf505bc66bf7
+CF_API_TOKEN        = (set via wrangler secret)
+CF_AI_GATEWAY_ID    = default
+REPLICATE_API_TOKEN = (set via wrangler secret)
 ```
 
 To update: `cd worker && npx wrangler secret put <NAME> --env=""`
 
 ## Key Technical Decisions & Bug Fixes
 
-- **M2M100 over LLM for translation** — dedicated seq2seq, ~3x faster than llama-3.2-1b for EN→ES
+- **M2M100 over LLM for translation** — dedicated seq2seq, ~3x faster than llama-3.2-1b for EN→FR
 - **Trigger on `is_final` not just `speech_final`** — speech_final only fires on silence; is_final fires for each Deepgram chunk during continuous speech
 - **`state.pending` fallback** — speech_final sometimes arrives with empty transcript (endpoint signal only); we use last non-empty interim
 - **TTS queue** — `isTtsPlayingRef` prevents overlap; each clip plays after previous ends
@@ -106,6 +108,9 @@ To update: `cd worker && npx wrangler secret put <NAME> --env=""`
 - **`clientWs.send(value)` not `value.buffer`** — Uint8Array subview bug; full underlying buffer contained garbage bytes
 - **ScriptProcessorNode + Int16 PCM** — MediaRecorder gives WebM chunks; Nova-3 needs raw PCM linear16; Web Audio captures Float32 and converts
 - CF secrets needed for AI Gateway: `CF_ACCOUNT_ID`, `CF_API_TOKEN` (AI Gateway Run + Workers AI Run), `CF_AI_GATEWAY_ID=default`
+- **Kokoro via Replicate** — `jaaari/kokoro-82m`, voice `ff_siwis` (French female); Japanese (`jf_alpha`) not available due to missing `misaki[ja]` on Replicate deployment
+- **Replicate 429 retry** — Prefer:wait requests retry up to 5× with `retry_after+1s` backoff; <$5 credit triggers burst limit of 1 req/min
+- **Kokoro Prefer:wait polling fallback** — if synchronous response times out (cold start), polls prediction URL every 1s up to 60×
 
 ## Why This Matters for the Interview
 
@@ -113,9 +118,9 @@ Brivva's current listed pipeline: Whisper STT → Context NMT → Emotive TTS �
 My proposed improvements (now demonstrated):
 
 1. **Deepgram Nova-3** over Whisper — real-time WebSocket streaming, better accuracy
-2. **M2M100 on CF edge** over Context NMT — no external API, dedicated translation model
-3. **Deepgram Aura-2** over Emotive TTS — natural voice, CF-native, streaming
-4. **Cloudflare edge** for entire STT+translate+TTS pipeline — only GPU needed for lip-sync
+2. **M2M100 on CF edge** over Context NMT — no external API, dedicated translation model, ~500ms
+3. **Kokoro TTS** over Emotive TTS — highest quality open-source TTS, natural French voice
+4. **Cloudflare edge** for STT+translate pipeline — only TTS needs external API (Replicate)
 5. **InfiniteTalk** over Wav2Lip (future) — full body + expression sync, Apache 2.0
 
 ## About Brivva (from interview Mar 10)
