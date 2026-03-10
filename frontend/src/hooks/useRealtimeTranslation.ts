@@ -64,16 +64,33 @@ export function useRealtimeTranslation() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
 
-  // MSE streaming TTS — start playback with first chunk, don't wait for full audio
-  const mediaSourceRef = useRef<MediaSource | null>(null);
-  const sourceBufferRef = useRef<SourceBuffer | null>(null);
-  const pendingTtsRef = useRef<ArrayBuffer[]>([]);
-  const ttsStreamEndedRef = useRef(false);
+  // TTS queue — collect each clip fully, play sequentially (no overlap)
+  const ttsQueueRef = useRef<ArrayBuffer[][]>([]);
+  const currentTtsChunksRef = useRef<ArrayBuffer[]>([]);
+  const isTtsPlayingRef = useRef(false);
+
+  const playNextTts = useCallback(() => {
+    if (isTtsPlayingRef.current || ttsQueueRef.current.length === 0) return;
+    isTtsPlayingRef.current = true;
+    const chunks = ttsQueueRef.current.shift()!;
+    const blob = new Blob(chunks, { type: "audio/mpeg" });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      isTtsPlayingRef.current = false;
+      playNextTts();
+    };
+    audio.play().catch(console.error);
+  }, []);
 
   const start = useCallback(async () => {
     logRef.current = [];
     sessionStartRef.current = Date.now();
     log("SESSION_START");
+    ttsQueueRef.current = [];
+    currentTtsChunksRef.current = [];
+    isTtsPlayingRef.current = false;
     setStatus("connecting");
     setUtterances([]);
     setLiveTranscript("");
@@ -161,47 +178,7 @@ export function useRealtimeTranslation() {
               return { ...u, timing: { ...u.timing, ttsStartAt: Date.now() } };
             })
           );
-          mediaSourceRef.current = null;
-          sourceBufferRef.current = null;
-          pendingTtsRef.current = [];
-          ttsStreamEndedRef.current = false;
-
-          const canMSE =
-            typeof MediaSource !== "undefined" &&
-            MediaSource.isTypeSupported("audio/mpeg");
-
-          if (canMSE) {
-            const ms = new MediaSource();
-            mediaSourceRef.current = ms;
-            const url = URL.createObjectURL(ms);
-            const audio = new Audio(url);
-            audio.onended = () => URL.revokeObjectURL(url);
-
-            ms.addEventListener("sourceopen", () => {
-              let sb: SourceBuffer;
-              try {
-                sb = ms.addSourceBuffer("audio/mpeg");
-              } catch {
-                return;
-              }
-              sourceBufferRef.current = sb;
-
-              const flush = () => {
-                if (sb.updating) return;
-                if (pendingTtsRef.current.length > 0) {
-                  sb.appendBuffer(pendingTtsRef.current.shift()!);
-                } else if (ttsStreamEndedRef.current && ms.readyState === "open") {
-                  ms.endOfStream();
-                }
-              };
-
-              sb.addEventListener("updateend", flush);
-              flush();
-            });
-
-            audio.play().catch(console.error);
-          }
-          // else: chunks accumulate in pendingTtsRef, played on tts_end
+          currentTtsChunksRef.current = [];
         } else if (msg.type === "tts_end") {
           setUtterances((prev) =>
             prev.map((u) => {
@@ -212,36 +189,17 @@ export function useRealtimeTranslation() {
               return { ...u, timing: { ...u.timing, ttsEndAt, ttsMs: msg.ttsMs } };
             })
           );
-          ttsStreamEndedRef.current = true;
-          const sb = sourceBufferRef.current;
-          const ms = mediaSourceRef.current;
-          if (ms) {
-            // MSE path — signal end of stream
-            if (sb && !sb.updating && ms.readyState === "open" && pendingTtsRef.current.length === 0) {
-              ms.endOfStream();
-            }
-            sourceBufferRef.current = null;
-          } else {
-            // Buffered fallback (Firefox / no MSE support for audio/mpeg)
-            const blob = new Blob(pendingTtsRef.current, { type: "audio/mpeg" });
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-            audio.onended = () => URL.revokeObjectURL(url);
-            audio.play().catch(console.error);
-            pendingTtsRef.current = [];
-          }
+          // Enqueue completed clip and play when previous finishes
+          ttsQueueRef.current.push(currentTtsChunksRef.current);
+          currentTtsChunksRef.current = [];
+          playNextTts();
         } else if (msg.type === "error") {
           console.error("Worker error:", msg);
           log("ERROR", { message: msg });
           setStatus("idle");
         }
       } else if (event.data instanceof ArrayBuffer) {
-        pendingTtsRef.current.push(event.data);
-        // Append immediately if source buffer is ready
-        const sb = sourceBufferRef.current;
-        if (sb && !sb.updating) {
-          sb.appendBuffer(pendingTtsRef.current.shift()!);
-        }
+        currentTtsChunksRef.current.push(event.data);
       }
     };
 
