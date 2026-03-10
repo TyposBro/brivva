@@ -24,7 +24,12 @@ export function useRealtimeTranslation() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
-  const ttsChunksRef = useRef<ArrayBuffer[]>([]);
+
+  // MSE streaming TTS — start playback with first chunk, don't wait for full audio
+  const mediaSourceRef = useRef<MediaSource | null>(null);
+  const sourceBufferRef = useRef<SourceBuffer | null>(null);
+  const pendingTtsRef = useRef<ArrayBuffer[]>([]);
+  const ttsStreamEndedRef = useRef(false);
 
   const start = useCallback(async () => {
     setStatus("connecting");
@@ -98,20 +103,60 @@ export function useRealtimeTranslation() {
           );
           setStatus("listening");
         } else if (msg.type === "tts_start") {
-          ttsChunksRef.current = [];
-        } else if (msg.type === "tts_end") {
-          const blob = new Blob(ttsChunksRef.current, { type: "audio/mpeg" });
-          const url = URL.createObjectURL(blob);
+          // Reset MSE state for new utterance
+          mediaSourceRef.current = null;
+          sourceBufferRef.current = null;
+          pendingTtsRef.current = [];
+          ttsStreamEndedRef.current = false;
+
+          const ms = new MediaSource();
+          mediaSourceRef.current = ms;
+          const url = URL.createObjectURL(ms);
           const audio = new Audio(url);
           audio.onended = () => URL.revokeObjectURL(url);
+
+          ms.addEventListener("sourceopen", () => {
+            let sb: SourceBuffer;
+            try {
+              sb = ms.addSourceBuffer("audio/mpeg");
+            } catch {
+              return;
+            }
+            sourceBufferRef.current = sb;
+
+            const flush = () => {
+              if (sb.updating) return;
+              if (pendingTtsRef.current.length > 0) {
+                sb.appendBuffer(pendingTtsRef.current.shift()!);
+              } else if (ttsStreamEndedRef.current && ms.readyState === "open") {
+                ms.endOfStream();
+              }
+            };
+
+            sb.addEventListener("updateend", flush);
+            flush(); // drain chunks that arrived before sourceopen
+          });
+
           audio.play().catch(console.error);
-          ttsChunksRef.current = [];
+        } else if (msg.type === "tts_end") {
+          ttsStreamEndedRef.current = true;
+          const sb = sourceBufferRef.current;
+          const ms = mediaSourceRef.current;
+          if (sb && !sb.updating && ms?.readyState === "open" && pendingTtsRef.current.length === 0) {
+            ms.endOfStream();
+          }
+          sourceBufferRef.current = null;
         } else if (msg.type === "error") {
           console.error("Worker error:", msg);
           setStatus("idle");
         }
       } else if (event.data instanceof ArrayBuffer) {
-        ttsChunksRef.current.push(event.data);
+        pendingTtsRef.current.push(event.data);
+        // Append immediately if source buffer is ready
+        const sb = sourceBufferRef.current;
+        if (sb && !sb.updating) {
+          sb.appendBuffer(pendingTtsRef.current.shift()!);
+        }
       }
     };
 

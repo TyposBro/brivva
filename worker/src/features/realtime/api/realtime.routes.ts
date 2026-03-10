@@ -46,7 +46,7 @@ async function handleNovaMessage(
   // Translate English → Spanish
   const llmResult = await (
     env.AI.run as (m: string, i: object) => Promise<LlmResult>
-  )("@cf/meta/llama-3.1-8b-instruct", {
+  )("@cf/meta/llama-3.2-1b-instruct", {
     messages: [
       {
         role: "system",
