@@ -1,54 +1,69 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
-// BCP-47 tags for SpeechSynthesis
-// TODO: swap this for Replica.com TTS API call (set VITE_REPLICA_API_KEY)
-const LANG_BCP47: Record<string, string> = {
-  en: "en-US",
-  ko: "ko-KR",
-  ja: "ja-JP",
-  zh: "zh-CN",
-  es: "es-ES",
-  fr: "fr-FR",
-  de: "de-DE",
-  pt: "pt-BR",
-  ar: "ar-SA",
-  ru: "ru-RU",
-};
+const WORKER_URL = import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787";
 
 interface AudioPlayerProps {
   text: string;
-  lang: string;
 }
 
-export function AudioPlayer({ text, lang }: AudioPlayerProps) {
+export function AudioPlayer({ text }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
+    audioRef.current?.pause();
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
     setIsPlaying(false);
-    window.speechSynthesis.cancel();
+    setIsLoading(false);
   }, [text]);
 
-  const handlePlay = () => {
+  const handlePlay = async () => {
     if (isPlaying) {
-      window.speechSynthesis.cancel();
+      audioRef.current?.pause();
       setIsPlaying(false);
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = LANG_BCP47[lang] ?? "en-US";
-    utterance.rate = 0.95;
-    utterance.onend = () => setIsPlaying(false);
-    utterance.onerror = () => setIsPlaying(false);
+    setIsLoading(true);
+    try {
+      const res = await fetch(`${WORKER_URL}/api/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
 
-    window.speechSynthesis.speak(utterance);
-    setIsPlaying(true);
+      if (!res.ok) throw new Error("TTS failed");
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      objectUrlRef.current = url;
+
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => setIsPlaying(false);
+      audio.onerror = () => setIsPlaying(false);
+      audio.play();
+      setIsPlaying(true);
+    } catch {
+      setIsPlaying(false);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
     <div className="audio-player">
-      <button className={`play-btn ${isPlaying ? "playing" : ""}`} onClick={handlePlay}>
-        {isPlaying ? "⏹ Stop" : "▶ Play Translation"}
+      <button
+        className={`play-btn ${isPlaying ? "playing" : ""}`}
+        onClick={handlePlay}
+        disabled={isLoading}
+      >
+        {isLoading ? <span className="spinner" /> : isPlaying ? "⏹ Stop" : "▶ Play Translation"}
       </button>
     </div>
   );

@@ -126,7 +126,7 @@ export default function App() {
         />
 
         {result?.translation && (
-          <AudioPlayer text={result.translation} lang={result.targetLang} />
+          <AudioPlayer text={result.translation} />
         )}
       </main>
     </div>
