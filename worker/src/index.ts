@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { globalErrorHandler } from "./core/middleware/error.middleware";
 import translationApp from "./features/translation/api/translation.routes";
 import ttsApp from "./features/tts/api/tts.routes";
+import realtimeApp from "./features/realtime/api/realtime.routes";
 import type { Bindings, Variables } from "./core/types";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -20,6 +21,7 @@ app.get("/live", (c) => c.json({ status: "ok", env: c.env.ENVIRONMENT }));
 
 app.route("/api", translationApp);
 app.route("/api", ttsApp);
+app.route("/api", realtimeApp);
 
 app.onError(globalErrorHandler);
 

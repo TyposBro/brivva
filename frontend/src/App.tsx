@@ -1,74 +1,49 @@
-import { useState, useCallback } from "react";
-import { useAudioRecorder } from "./hooks/useAudioRecorder";
+import { useState, useEffect, useRef } from "react";
+import { useRealtimeTranslation } from "./hooks/useRealtimeTranslation";
 import { AudioRecorder } from "./components/AudioRecorder";
-import { TranscriptionDisplay } from "./components/TranscriptionDisplay";
 import { AudioPlayer } from "./components/AudioPlayer";
 
 const LANGUAGES = [
   { code: "ko", label: "Korean" },
-  { code: "en", label: "English" },
   { code: "ja", label: "Japanese" },
-  { code: "zh", label: "Chinese" },
   { code: "es", label: "Spanish" },
   { code: "fr", label: "French" },
   { code: "de", label: "German" },
+  { code: "it", label: "Italian" },
+  { code: "ru", label: "Russian" },
+  { code: "zh", label: "Chinese" },
 ];
-
-type Result = {
-  transcription: string;
-  translation: string;
-  sourceLang: string;
-  targetLang: string;
-  durationMs: number;
-};
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787";
 
 export default function App() {
   const [sourceLang, setSourceLang] = useState("ko");
-  const [targetLang, setTargetLang] = useState("en");
-  const [result, setResult] = useState<Result | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { status, utterances, analyser, start, stop } = useRealtimeTranslation();
+  const listRef = useRef<HTMLDivElement>(null);
+  const isActive = status !== "idle";
 
-  const handleAudioReady = useCallback(
-    async (blob: Blob) => {
-      setError(null);
-      setResult(null);
-
-      const formData = new FormData();
-      formData.append("audio", blob, "recording.webm");
-      formData.append("sourceLang", sourceLang);
-      formData.append("targetLang", targetLang);
-
-      try {
-        const res = await fetch(`${WORKER_URL}/api/translate`, {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ message: "Unknown error" }));
-          throw new Error((err as { message: string }).message);
-        }
-
-        const data = (await res.json()) as Result;
-        setResult(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Something went wrong");
-      } finally {
-        recorderControls.reset();
-      }
-    },
-    [sourceLang, targetLang]
-  );
-
-  const recorderControls = useAudioRecorder(handleAudioReady);
-
-  const swapLanguages = () => {
-    setSourceLang(targetLang);
-    setTargetLang(sourceLang);
-    setResult(null);
+  const handleToggle = () => {
+    if (isActive) {
+      stop();
+    } else {
+      start(sourceLang);
+    }
   };
+
+  // Auto-scroll utterance list as results arrive
+  useEffect(() => {
+    if (listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    }
+  }, [utterances]);
+
+  // Map realtime status → RecorderState for the AudioRecorder component
+  const recorderState =
+    status === "idle"
+      ? "idle"
+      : status === "connecting"
+        ? "processing"
+        : "recording"; // listening + processing both show as active
+
+  const latestTranslation = utterances[utterances.length - 1]?.translation ?? null;
 
   return (
     <div className="app">
@@ -83,7 +58,7 @@ export default function App() {
             className="lang-select"
             value={sourceLang}
             onChange={(e) => setSourceLang(e.target.value)}
-            disabled={recorderControls.state !== "idle"}
+            disabled={isActive}
           >
             {LANGUAGES.map((l) => (
               <option key={l.code} value={l.code}>
@@ -91,43 +66,47 @@ export default function App() {
               </option>
             ))}
           </select>
-
-          <button className="swap-btn" onClick={swapLanguages} disabled={recorderControls.state !== "idle"}>
-            ⇄
-          </button>
-
-          <select
-            className="lang-select"
-            value={targetLang}
-            onChange={(e) => setTargetLang(e.target.value)}
-            disabled={recorderControls.state !== "idle"}
-          >
-            {LANGUAGES.map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.label}
-              </option>
-            ))}
-          </select>
+          <span className="arrow">→ English</span>
         </div>
 
         <AudioRecorder
-          state={recorderControls.state}
-          analyser={recorderControls.analyser}
-          onStart={recorderControls.start}
-          onStop={recorderControls.stop}
+          state={recorderState}
+          analyser={analyser}
+          onStart={handleToggle}
+          onStop={handleToggle}
         />
 
-        {error && <div className="error">{error}</div>}
-
-        <TranscriptionDisplay
-          transcription={result?.transcription ?? ""}
-          translation={result?.translation ?? ""}
-          durationMs={result?.durationMs}
-        />
-
-        {result?.translation && (
-          <AudioPlayer text={result.translation} lang={result.targetLang} />
+        {status === "listening" && (
+          <div className="status-bar">
+            <span className="dot listening-dot" /> Listening...
+          </div>
         )}
+        {status === "processing" && (
+          <div className="status-bar">
+            <span className="spinner" /> Translating...
+          </div>
+        )}
+
+        <div className="utterances" ref={listRef}>
+          {utterances.map((u) => (
+            <div key={u.id} className="utterance">
+              {u.transcription && (
+                <div className="result-card">
+                  <span className="result-label">Original</span>
+                  <p className="result-text">{u.transcription}</p>
+                </div>
+              )}
+              {u.translation && (
+                <div className="result-card translated">
+                  <span className="result-label">Translation</span>
+                  <p className="result-text">{u.translation}</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {latestTranslation && <AudioPlayer key={latestTranslation} text={latestTranslation} lang="en" />}
       </main>
     </div>
   );

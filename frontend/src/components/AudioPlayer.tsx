@@ -13,15 +13,18 @@ export function AudioPlayer({ text, lang }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
 
+  // Auto-play when mounted with new text (key={text} on parent ensures remount per utterance)
   useEffect(() => {
-    audioRef.current?.pause();
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-    setIsPlaying(false);
-    setIsLoading(false);
-  }, [text]);
+    handlePlay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
 
   const handlePlay = async () => {
     if (isPlaying) {
