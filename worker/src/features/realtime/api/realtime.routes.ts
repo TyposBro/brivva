@@ -33,16 +33,17 @@ async function handleNovaMessage(
 
   const transcript = msg.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
 
-  if (!msg.speech_final) {
+  if (!msg.is_final && !msg.speech_final) {
+    // Pure streaming interim — update live UI only, don't translate
     if (!transcript) return;
-    // Track last non-empty interim so we can use it if speech_final arrives empty
     state.pending = transcript;
     clientWs.send(JSON.stringify({ type: "interim", transcript }));
     return;
   }
 
-  // speech_final: Deepgram sometimes sends it with empty transcript (endpoint signal only),
-  // having already sent the text in the preceding is_final message. Fall back to last interim.
+  // is_final=true or speech_final=true: Deepgram has locked in this chunk.
+  // speech_final sometimes arrives with empty transcript (endpoint signal only) —
+  // fall back to last interim in that case.
   const finalTranscript = transcript || state.pending;
   state.pending = "";
   if (!finalTranscript) return;
