@@ -59,7 +59,7 @@ async function handleNovaMessage(
   )("@cf/meta/m2m100-1.2b", {
     text: finalTranscript,
     source_lang: "en",
-    target_lang: "es",
+    target_lang: "ja",
   });
   const translateMs = Date.now() - t0;
 
@@ -68,16 +68,34 @@ async function handleNovaMessage(
 
   clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId, translateMs }));
 
-  // TTS — stream aura-2-es audio back through the same WebSocket
+  // TTS — Kokoro via Replicate (jf_alpha: best quality Japanese female voice)
   const t1 = Date.now();
-  const ttsStream = await (
-    env.AI.run as (m: string, i: object) => Promise<ReadableStream<Uint8Array>>
-  )("@cf/deepgram/aura-2-es", { text: translation, speaker: "aquila" });
+  const kokoroResp = await fetch("https://api.replicate.com/v1/predictions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}`,
+      "Content-Type": "application/json",
+      "Prefer": "wait",
+    },
+    body: JSON.stringify({
+      version: "f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
+      input: { text: translation, voice: "jf_alpha" },
+    }),
+  });
+
+  const kokoroResult = await kokoroResp.json() as { output?: string; error?: string };
+  if (!kokoroResult.output) {
+    console.error("Kokoro TTS failed:", kokoroResult.error);
+    return;
+  }
+
+  // Fetch the generated audio and stream it back as binary
+  const audioResp = await fetch(kokoroResult.output);
+  const audioReader = audioResp.body!.getReader();
 
   clientWs.send(JSON.stringify({ type: "tts_start", utteranceId }));
-  const reader = ttsStream.getReader();
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await audioReader.read();
     if (done) break;
     clientWs.send(value);
   }

@@ -37,7 +37,7 @@ export default function App() {
         <div className="lang-badge">
           <span>English</span>
           <span className="arrow">→</span>
-          <span>Spanish</span>
+          <span>Japanese</span>
         </div>
 
         <AudioRecorder
@@ -60,7 +60,7 @@ export default function App() {
                 </div>
                 {u.translation ? (
                   <div className="result-card translated">
-                    <span className="result-label">Spanish</span>
+                    <span className="result-label">Japanese</span>
                     <p className="result-text">{u.translation}</p>
                   </div>
                 ) : (

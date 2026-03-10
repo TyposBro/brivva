@@ -6,6 +6,7 @@ export type Bindings = {
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
   CF_AI_GATEWAY_ID: string;
+  REPLICATE_API_TOKEN: string;
 };
 
 export type Variables = {
