@@ -7,13 +7,13 @@ This is to impress them at the paid technical test stage. I'm the top candidate 
 
 ## Current Status (Mar 10 2026)
 
-**Working and deployed.** Full real-time pipeline is live:
+**Fully working and deployed.** Complete real-time pipeline is live end-to-end:
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Worker:** https://brivva-translation.milliytechnology.workers.dev
 - **Repo:** https://github.com/TyposBro/brivva (private)
 
-Real-time WebSocket streaming is implemented but pending CF AI Gateway secrets before it goes live.
-The silence-detection batch pipeline works in the meantime.
+All 3 CF AI Gateway secrets are set (`CF_ACCOUNT_ID`, `CF_API_TOKEN`, `CF_AI_GATEWAY_ID=default`).
+Real-time WebSocket streaming is live — speak English, get live transcript + Spanish translation + TTS playback.
 
 ## What This Is
 
@@ -73,14 +73,15 @@ Nova-3 (CF AI Gateway WS)
 { type: "tts_end",                 utteranceId }   ← audio done
 ```
 
-## Worker Secrets Required
+## Worker Secrets (already set)
 
-```bash
-cd worker
-wrangler secret put CF_ACCOUNT_ID     # Cloudflare account ID
-wrangler secret put CF_API_TOKEN      # CF API token (AI Gateway: Run permission)
-wrangler secret put CF_AI_GATEWAY_ID  # Gateway ID from CF dashboard > AI Gateway
 ```
+CF_ACCOUNT_ID     = 80a55132ae169d5b282ccf505bc66bf7
+CF_API_TOKEN      = (set via wrangler secret)
+CF_AI_GATEWAY_ID  = default
+```
+
+To update: `cd worker && npx wrangler secret put <NAME> --env=""`
 
 ## Key Technical Decisions
 
@@ -89,6 +90,7 @@ wrangler secret put CF_AI_GATEWAY_ID  # Gateway ID from CF dashboard > AI Gatewa
 - `utteranceId = Date.now()` — prevents out-of-order translations updating wrong card
 - TTS streamed through same WebSocket — avoids second HTTP round-trip
 - ScriptProcessorNode for PCM (deprecated but universal; AudioWorklet is the upgrade path)
+- `clientWs.send(value)` not `value.buffer` — Uint8Array subview bug fix; sending the full underlying ArrayBuffer caused TTS decode failures
 
 ## Why This Matters for the Interview
 

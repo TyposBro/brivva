@@ -73,7 +73,7 @@ async function handleNovaMessage(
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    clientWs.send(value.buffer as ArrayBuffer);
+    clientWs.send(value);
   }
   clientWs.send(JSON.stringify({ type: "tts_end", utteranceId }));
 }
