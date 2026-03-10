@@ -318,6 +318,20 @@ body {
   height: 16px;
 }
 
+/* Timing */
+.timing {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0 0.15rem;
+}
+
+.timing-cf {
+  color: var(--accent2);
+  opacity: 0.8;
+}
+
 /* Error */
 .error {
   background: rgba(248, 113, 113, 0.1);

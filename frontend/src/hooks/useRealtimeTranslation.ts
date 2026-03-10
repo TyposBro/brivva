@@ -6,10 +6,20 @@ const WS_URL = WORKER_URL.replace(/^http/, "ws");
 const SAMPLE_RATE = 16000; // Nova-3 expects 16kHz PCM
 const BUFFER_SIZE = 4096;  // ScriptProcessor chunk size
 
+export type Timing = {
+  finalAt: number;
+  translationAt?: number;
+  translateMs?: number;  // M2M100 duration on CF edge
+  ttsStartAt?: number;
+  ttsEndAt?: number;
+  ttsMs?: number;        // TTS generation duration on CF edge
+};
+
 export type Utterance = {
   id: number;
-  transcript: string;  // English (finalized)
-  translation: string; // Spanish
+  transcript: string;   // English (finalized)
+  translation: string;  // Spanish
+  timing: Timing;
 };
 
 export type RealtimeStatus = "idle" | "connecting" | "listening" | "processing";
@@ -83,6 +93,8 @@ export function useRealtimeTranslation() {
           transcript?: string;
           text?: string;
           utteranceId?: number;
+          translateMs?: number;
+          ttsMs?: number;
         };
 
         if (msg.type === "interim") {
@@ -91,18 +103,25 @@ export function useRealtimeTranslation() {
         } else if (msg.type === "final") {
           setUtterances((prev) => [
             ...prev,
-            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "" },
+            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "", timing: { finalAt: Date.now() } },
           ]);
           setLiveTranscript("");
           setStatus("processing");
         } else if (msg.type === "translation") {
           setUtterances((prev) =>
             prev.map((u) =>
-              u.id === msg.utteranceId ? { ...u, translation: msg.text ?? "" } : u
+              u.id === msg.utteranceId
+                ? { ...u, translation: msg.text ?? "", timing: { ...u.timing, translationAt: Date.now(), translateMs: msg.translateMs } }
+                : u
             )
           );
           setStatus("listening");
         } else if (msg.type === "tts_start") {
+          setUtterances((prev) =>
+            prev.map((u) =>
+              u.id === msg.utteranceId ? { ...u, timing: { ...u.timing, ttsStartAt: Date.now() } } : u
+            )
+          );
           mediaSourceRef.current = null;
           sourceBufferRef.current = null;
           pendingTtsRef.current = [];
@@ -145,6 +164,11 @@ export function useRealtimeTranslation() {
           }
           // else: chunks accumulate in pendingTtsRef, played on tts_end
         } else if (msg.type === "tts_end") {
+          setUtterances((prev) =>
+            prev.map((u) =>
+              u.id === msg.utteranceId ? { ...u, timing: { ...u.timing, ttsEndAt: Date.now(), ttsMs: msg.ttsMs } } : u
+            )
+          );
           ttsStreamEndedRef.current = true;
           const sb = sourceBufferRef.current;
           const ms = mediaSourceRef.current;

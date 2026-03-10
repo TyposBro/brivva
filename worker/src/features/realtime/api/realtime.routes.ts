@@ -44,6 +44,7 @@ async function handleNovaMessage(
   clientWs.send(JSON.stringify({ type: "final", transcript, utteranceId }));
 
   // Translate English → Spanish via M2M100 (dedicated seq2seq, faster than LLM)
+  const t0 = Date.now();
   const m2mResult = await (
     env.AI.run as (m: string, i: object) => Promise<M2MResult>
   )("@cf/meta/m2m100-1.2b", {
@@ -51,13 +52,15 @@ async function handleNovaMessage(
     source_lang: "en",
     target_lang: "es",
   });
+  const translateMs = Date.now() - t0;
 
   const translation = m2mResult.translated_text?.trim() ?? "";
   if (!translation) return;
 
-  clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId }));
+  clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId, translateMs }));
 
   // TTS — stream aura-2-es audio back through the same WebSocket
+  const t1 = Date.now();
   const ttsStream = await (
     env.AI.run as (m: string, i: object) => Promise<ReadableStream<Uint8Array>>
   )("@cf/deepgram/aura-2-es", { text: translation, speaker: "aquila" });
@@ -69,7 +72,8 @@ async function handleNovaMessage(
     if (done) break;
     clientWs.send(value);
   }
-  clientWs.send(JSON.stringify({ type: "tts_end", utteranceId }));
+  const ttsMs = Date.now() - t1;
+  clientWs.send(JSON.stringify({ type: "tts_end", utteranceId, ttsMs }));
 }
 
 realtimeApp.get("/realtime", async (c) => {

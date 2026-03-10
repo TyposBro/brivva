@@ -41,24 +41,35 @@ export default function App() {
         />
 
         <div className="utterances" ref={listRef}>
-          {utterances.map((u) => (
-            <div key={u.id} className="utterance">
-              <div className="result-card">
-                <span className="result-label">English</span>
-                <p className="result-text">{u.transcript}</p>
+          {utterances.map((u) => {
+            const { finalAt, translationAt, translateMs, ttsEndAt, ttsMs } = u.timing;
+            const translateTotal = translationAt ? translationAt - finalAt : null;
+            const audioTotal = ttsEndAt ? ttsEndAt - finalAt : null;
+            return (
+              <div key={u.id} className="utterance">
+                <div className="result-card">
+                  <span className="result-label">English</span>
+                  <p className="result-text">{u.transcript}</p>
+                </div>
+                {u.translation ? (
+                  <div className="result-card translated">
+                    <span className="result-label">Spanish</span>
+                    <p className="result-text">{u.translation}</p>
+                  </div>
+                ) : (
+                  <div className="result-card translating">
+                    <span className="spinner" />
+                  </div>
+                )}
+                {audioTotal && (
+                  <div className="timing">
+                    <span>translate: {translateTotal}ms {translateMs != null && <span className="timing-cf">(CF: {translateMs}ms)</span>}</span>
+                    <span>audio: {audioTotal}ms {ttsMs != null && <span className="timing-cf">(CF: {ttsMs}ms)</span>}</span>
+                  </div>
+                )}
               </div>
-              {u.translation ? (
-                <div className="result-card translated">
-                  <span className="result-label">Spanish</span>
-                  <p className="result-text">{u.translation}</p>
-                </div>
-              ) : (
-                <div className="result-card translating">
-                  <span className="spinner" />
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           {/* Live interim transcript */}
           {liveTranscript && (
