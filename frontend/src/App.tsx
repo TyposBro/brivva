@@ -1,6 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 import { useRealtimeTranslation } from "./hooks/useRealtimeTranslation";
 import { AudioRecorder } from "./components/AudioRecorder";
+import type { Timing } from "./hooks/useRealtimeTranslation";
+
+const TARGET_MS = 300;
+
+function LatencyPanel({ timing, isProcessing }: { timing: Timing | null; isProcessing: boolean }) {
+  if (!timing?.ttsEndAt || !timing.translationAt || !timing.ttsStartAt) {
+    return (
+      <div className="latency-panel latency-panel--empty">
+        <span className="lp-title">Pipeline Latency</span>
+        <span className="lp-placeholder">
+          {isProcessing ? <><span className="spinner lp-spinner" /> Processing…</> : "Speak to see latency breakdown"}
+        </span>
+      </div>
+    );
+  }
+
+  const { sttStartAt, finalAt, translationAt, ttsStartAt, ttsEndAt } = timing;
+  const start  = sttStartAt ?? finalAt;
+  const total  = ttsEndAt - start;
+  const sPhase = finalAt - start;
+  const tPhase = translationAt - finalAt;
+  const gPhase = ttsStartAt - translationAt;
+  const aPhase = ttsEndAt - ttsStartAt;
+
+  return (
+    <div className="latency-panel">
+      <div className="lp-header">
+        <span className="lp-title">Pipeline Latency</span>
+        {isProcessing && <span className="lp-active"><span className="spinner lp-spinner" /> Processing…</span>}
+        <span className="lp-mult">{(total / TARGET_MS).toFixed(1)}× over &lt;{TARGET_MS}ms target</span>
+      </div>
+      <div className="latency-rows">
+        <div className="latency-row">
+          <span className="latency-lbl">Target</span>
+          <div className="bar-track">
+            <div className="bar-target" style={{ width: `${Math.min((TARGET_MS / total) * 100, 100)}%` }} />
+          </div>
+          <span className="bar-ms">{TARGET_MS}ms</span>
+        </div>
+        <div className="latency-row">
+          <span className="latency-lbl">Actual</span>
+          <div className="bar-track">
+            <div className="bar-seg seg-stt"       style={{ width: `${(sPhase / total) * 100}%` }} />
+            <div className="bar-seg seg-translate"  style={{ width: `${(tPhase / total) * 100}%` }} />
+            <div className="bar-seg seg-tts"        style={{ width: `${(gPhase / total) * 100}%` }} />
+            <div className="bar-seg seg-audio"      style={{ width: `${(aPhase / total) * 100}%` }} />
+          </div>
+          <span className="bar-ms">{total}ms</span>
+        </div>
+      </div>
+      <div className="latency-legend">
+        <span className="leg-item"><span className="leg-dot seg-stt"       />{sPhase}ms STT finalize</span>
+        <span className="leg-item"><span className="leg-dot seg-translate"  />{tPhase}ms Translate</span>
+        <span className="leg-item"><span className="leg-dot seg-tts"        />{gPhase}ms TTS Gen</span>
+        <span className="leg-item"><span className="leg-dot seg-audio"      />{aPhase}ms Transfer</span>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const { status, liveTranscript, utterances, analyser, start, stop, copyLog } =
@@ -26,6 +85,10 @@ export default function App() {
   const recorderState =
     status === "idle" ? "idle" : status === "connecting" ? "processing" : "recording";
 
+  // Last fully completed utterance for the latency panel
+  const lastCompleted = [...utterances].reverse().find(u => u.timing.ttsEndAt) ?? null;
+  const isProcessing = isActive && utterances[utterances.length - 1]?.id !== lastCompleted?.id;
+
   return (
     <div className="app">
       <header className="header">
@@ -47,69 +110,27 @@ export default function App() {
           onStop={handleToggle}
         />
 
+        <LatencyPanel timing={lastCompleted?.timing ?? null} isProcessing={isProcessing} />
+
         <div className="utterances" ref={listRef}>
-          {utterances.map((u) => {
-            const { sttStartAt, finalAt, translationAt, ttsStartAt, ttsEndAt } = u.timing;
-            const hasLatency = ttsEndAt && translationAt && ttsStartAt;
-            const start    = sttStartAt ?? finalAt;
-            const total    = hasLatency ? ttsEndAt - start : 0;
-            const sPhase   = hasLatency ? finalAt - start : 0;
-            const tPhase   = hasLatency ? translationAt - finalAt : 0;
-            const gPhase   = hasLatency ? ttsStartAt - translationAt : 0;
-            const aPhase   = hasLatency ? ttsEndAt - ttsStartAt : 0;
-            const TARGET   = 300;
-            return (
-              <div key={u.id} className="utterance">
-                <div className="result-card">
-                  <span className="result-label">English</span>
-                  <p className="result-text">{u.transcript}</p>
-                </div>
-                {u.translation ? (
-                  <div className="result-card translated">
-                    <span className="result-label">French</span>
-                    <p className="result-text">{u.translation}</p>
-                  </div>
-                ) : (
-                  <div className="result-card translating">
-                    <span className="spinner" />
-                  </div>
-                )}
-                {hasLatency && (
-                  <div className="latency-dashboard">
-                    <div className="latency-header">
-                      <span className="latency-total">{total}ms total</span>
-                      <span className="latency-mult">{(total / TARGET).toFixed(1)}× over &lt;300ms target</span>
-                    </div>
-                    <div className="latency-rows">
-                      <div className="latency-row">
-                        <span className="latency-lbl">Target</span>
-                        <div className="bar-track">
-                          <div className="bar-target" style={{ width: `${Math.min((TARGET / total) * 100, 100)}%` }} />
-                        </div>
-                        <span className="bar-ms">300ms</span>
-                      </div>
-                      <div className="latency-row">
-                        <span className="latency-lbl">Actual</span>
-                        <div className="bar-track">
-                          <div className="bar-seg seg-stt" style={{ width: `${(sPhase / total) * 100}%` }} />
-                          <div className="bar-seg seg-translate" style={{ width: `${(tPhase / total) * 100}%` }} />
-                          <div className="bar-seg seg-tts" style={{ width: `${(gPhase / total) * 100}%` }} />
-                          <div className="bar-seg seg-audio" style={{ width: `${(aPhase / total) * 100}%` }} />
-                        </div>
-                        <span className="bar-ms">{total}ms</span>
-                      </div>
-                    </div>
-                    <div className="latency-legend">
-                      <span className="leg-item"><span className="leg-dot seg-stt" />{sPhase}ms STT</span>
-                      <span className="leg-item"><span className="leg-dot seg-translate" />{tPhase}ms Translate</span>
-                      <span className="leg-item"><span className="leg-dot seg-tts" />{gPhase}ms TTS Gen</span>
-                      <span className="leg-item"><span className="leg-dot seg-audio" />{aPhase}ms Transfer</span>
-                    </div>
-                  </div>
-                )}
+          {utterances.map((u) => (
+            <div key={u.id} className="utterance">
+              <div className="result-card">
+                <span className="result-label">English</span>
+                <p className="result-text">{u.transcript}</p>
               </div>
-            );
-          })}
+              {u.translation ? (
+                <div className="result-card translated">
+                  <span className="result-label">French</span>
+                  <p className="result-text">{u.translation}</p>
+                </div>
+              ) : (
+                <div className="result-card translating">
+                  <span className="spinner" />
+                </div>
+              )}
+            </div>
+          ))}
 
           {/* Live interim transcript */}
           {liveTranscript && (

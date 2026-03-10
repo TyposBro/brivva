@@ -170,7 +170,7 @@ export function useRealtimeTranslation() {
         };
 
         if (msg.type === "interim") {
-          if (interimStartRef.current === null) interimStartRef.current = Date.now();
+          interimStartRef.current = Date.now(); // update every time → last interim on FINAL
           setLiveTranscript(msg.transcript ?? "");
           setStatus("listening");
           log("INTERIM", { transcript: msg.transcript });
