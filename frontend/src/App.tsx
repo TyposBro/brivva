@@ -49,9 +49,13 @@ export default function App() {
 
         <div className="utterances" ref={listRef}>
           {utterances.map((u) => {
-            const { finalAt, translationAt, translateMs, ttsEndAt, ttsMs } = u.timing;
-            const translateTotal = translationAt ? translationAt - finalAt : null;
-            const audioTotal = ttsEndAt ? ttsEndAt - finalAt : null;
+            const { finalAt, translationAt, ttsStartAt, ttsEndAt } = u.timing;
+            const hasLatency = ttsEndAt && translationAt && ttsStartAt;
+            const total    = hasLatency ? ttsEndAt - finalAt : 0;
+            const tPhase   = hasLatency ? translationAt - finalAt : 0;
+            const gPhase   = hasLatency ? ttsStartAt - translationAt : 0;
+            const aPhase   = hasLatency ? ttsEndAt - ttsStartAt : 0;
+            const TARGET   = 300;
             return (
               <div key={u.id} className="utterance">
                 <div className="result-card">
@@ -68,10 +72,35 @@ export default function App() {
                     <span className="spinner" />
                   </div>
                 )}
-                {audioTotal && (
-                  <div className="timing">
-                    <span>translate: {translateTotal}ms {translateMs != null && <span className="timing-cf">(CF: {translateMs}ms)</span>}</span>
-                    <span>audio: {audioTotal}ms {ttsMs != null && <span className="timing-cf">(CF: {ttsMs}ms)</span>}</span>
+                {hasLatency && (
+                  <div className="latency-dashboard">
+                    <div className="latency-header">
+                      <span className="latency-total">{total}ms total</span>
+                      <span className="latency-mult">{(total / TARGET).toFixed(1)}× over &lt;300ms target</span>
+                    </div>
+                    <div className="latency-rows">
+                      <div className="latency-row">
+                        <span className="latency-lbl">Target</span>
+                        <div className="bar-track">
+                          <div className="bar-target" style={{ width: `${Math.min((TARGET / total) * 100, 100)}%` }} />
+                        </div>
+                        <span className="bar-ms">300ms</span>
+                      </div>
+                      <div className="latency-row">
+                        <span className="latency-lbl">Actual</span>
+                        <div className="bar-track">
+                          <div className="bar-seg seg-translate" style={{ width: `${(tPhase / total) * 100}%` }} />
+                          <div className="bar-seg seg-tts" style={{ width: `${(gPhase / total) * 100}%` }} />
+                          <div className="bar-seg seg-audio" style={{ width: `${(aPhase / total) * 100}%` }} />
+                        </div>
+                        <span className="bar-ms">{total}ms</span>
+                      </div>
+                    </div>
+                    <div className="latency-legend">
+                      <span className="leg-item"><span className="leg-dot seg-translate" />{tPhase}ms Translate</span>
+                      <span className="leg-item"><span className="leg-dot seg-tts" />{gPhase}ms TTS Gen</span>
+                      <span className="leg-item"><span className="leg-dot seg-audio" />{aPhase}ms Transfer</span>
+                    </div>
                   </div>
                 )}
               </div>

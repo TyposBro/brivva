@@ -318,18 +318,109 @@ body {
   height: 16px;
 }
 
-/* Timing */
-.timing {
+/* Latency Dashboard */
+.latency-dashboard {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
   display: flex;
-  gap: 1rem;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  padding: 0 0.15rem;
+  flex-direction: column;
+  gap: 0.55rem;
 }
 
-.timing-cf {
-  color: var(--accent2);
-  opacity: 0.8;
+.latency-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.latency-total {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.latency-mult {
+  font-size: 0.72rem;
+  color: var(--error);
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.latency-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.latency-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.latency-lbl {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  width: 40px;
+  flex-shrink: 0;
+  text-align: right;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bar-track {
+  flex: 1;
+  height: 14px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+}
+
+.bar-target {
+  height: 100%;
+  background: var(--success);
+  opacity: 0.75;
+  border-radius: 4px;
+}
+
+.bar-seg {
+  height: 100%;
+}
+
+.seg-translate { background: var(--accent); }
+.seg-tts       { background: #f59e0b; }
+.seg-audio     { background: var(--success); }
+
+.bar-ms {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  width: 48px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.latency-legend {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.leg-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.leg-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 
 /* Copy log button */
