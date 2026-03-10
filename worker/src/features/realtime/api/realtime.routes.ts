@@ -10,7 +10,7 @@ type NovaMessage = {
   speech_final?: boolean;
 };
 
-type LlmResult = { response: string };
+type M2MResult = { translated_text: string };
 
 // Each speech_final utterance gets a stable ID so out-of-order
 // translations (when user speaks fast) update the right card.
@@ -43,22 +43,16 @@ async function handleNovaMessage(
   const utteranceId = Date.now();
   clientWs.send(JSON.stringify({ type: "final", transcript, utteranceId }));
 
-  // Translate English → Spanish
-  const llmResult = await (
-    env.AI.run as (m: string, i: object) => Promise<LlmResult>
-  )("@cf/meta/llama-3.2-1b-instruct", {
-    messages: [
-      {
-        role: "system",
-        content:
-          "Translate English to Spanish. Output only the Spanish translation, nothing else.",
-      },
-      { role: "user", content: transcript },
-    ],
-    max_tokens: 512,
+  // Translate English → Spanish via M2M100 (dedicated seq2seq, faster than LLM)
+  const m2mResult = await (
+    env.AI.run as (m: string, i: object) => Promise<M2MResult>
+  )("@cf/meta/m2m100-1.2b", {
+    text: transcript,
+    source_lang: "en",
+    target_lang: "es",
   });
 
-  const translation = llmResult.response?.trim() ?? "";
+  const translation = m2mResult.translated_text?.trim() ?? "";
   if (!translation) return;
 
   clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId }));
