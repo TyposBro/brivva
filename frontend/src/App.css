@@ -332,6 +332,25 @@ body {
   opacity: 0.8;
 }
 
+/* Copy log button */
+.copy-log-btn {
+  display: block;
+  margin: 1.5rem auto 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.45rem 1rem;
+  transition: all 0.2s;
+}
+
+.copy-log-btn:hover {
+  border-color: var(--accent2);
+  color: var(--accent2);
+}
+
 /* Error */
 .error {
   background: rgba(248, 113, 113, 0.1);

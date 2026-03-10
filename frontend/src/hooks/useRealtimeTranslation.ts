@@ -24,11 +24,40 @@ export type Utterance = {
 
 export type RealtimeStatus = "idle" | "connecting" | "listening" | "processing";
 
+type LogEntry = {
+  t: string;         // ISO timestamp
+  ms: number;        // ms since session start
+  event: string;
+  [key: string]: unknown;
+};
+
 export function useRealtimeTranslation() {
   const [status, setStatus] = useState<RealtimeStatus>("idle");
   const [liveTranscript, setLiveTranscript] = useState("");
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+
+  const logRef = useRef<LogEntry[]>([]);
+  const sessionStartRef = useRef<number>(0);
+
+  const log = (event: string, data?: Record<string, unknown>) => {
+    logRef.current.push({
+      t: new Date().toISOString(),
+      ms: Date.now() - sessionStartRef.current,
+      event,
+      ...data,
+    });
+  };
+
+  const copyLog = useCallback(() => {
+    const text = JSON.stringify(logRef.current, null, 2);
+    navigator.clipboard.writeText(text).catch(() => {
+      // fallback: open in new tab
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    });
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -42,6 +71,9 @@ export function useRealtimeTranslation() {
   const ttsStreamEndedRef = useRef(false);
 
   const start = useCallback(async () => {
+    logRef.current = [];
+    sessionStartRef.current = Date.now();
+    log("SESSION_START");
     setStatus("connecting");
     setUtterances([]);
     setLiveTranscript("");
@@ -100,27 +132,34 @@ export function useRealtimeTranslation() {
         if (msg.type === "interim") {
           setLiveTranscript(msg.transcript ?? "");
           setStatus("listening");
+          log("INTERIM", { transcript: msg.transcript });
         } else if (msg.type === "final") {
+          const finalAt = Date.now();
           setUtterances((prev) => [
             ...prev,
-            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "", timing: { finalAt: Date.now() } },
+            { id: msg.utteranceId!, transcript: msg.transcript ?? "", translation: "", timing: { finalAt } },
           ]);
           setLiveTranscript("");
           setStatus("processing");
+          log("FINAL", { utteranceId: msg.utteranceId, transcript: msg.transcript });
         } else if (msg.type === "translation") {
+          const translationAt = Date.now();
           setUtterances((prev) =>
-            prev.map((u) =>
-              u.id === msg.utteranceId
-                ? { ...u, translation: msg.text ?? "", timing: { ...u.timing, translationAt: Date.now(), translateMs: msg.translateMs } }
-                : u
-            )
+            prev.map((u) => {
+              if (u.id !== msg.utteranceId) return u;
+              const totalMs = translationAt - u.timing.finalAt;
+              log("TRANSLATION", { utteranceId: msg.utteranceId, text: msg.text, cfMs: msg.translateMs, totalMs });
+              return { ...u, translation: msg.text ?? "", timing: { ...u.timing, translationAt, translateMs: msg.translateMs } };
+            })
           );
           setStatus("listening");
         } else if (msg.type === "tts_start") {
           setUtterances((prev) =>
-            prev.map((u) =>
-              u.id === msg.utteranceId ? { ...u, timing: { ...u.timing, ttsStartAt: Date.now() } } : u
-            )
+            prev.map((u) => {
+              if (u.id !== msg.utteranceId) return u;
+              log("TTS_START", { utteranceId: msg.utteranceId, msFromFinal: Date.now() - u.timing.finalAt });
+              return { ...u, timing: { ...u.timing, ttsStartAt: Date.now() } };
+            })
           );
           mediaSourceRef.current = null;
           sourceBufferRef.current = null;
@@ -165,9 +204,13 @@ export function useRealtimeTranslation() {
           // else: chunks accumulate in pendingTtsRef, played on tts_end
         } else if (msg.type === "tts_end") {
           setUtterances((prev) =>
-            prev.map((u) =>
-              u.id === msg.utteranceId ? { ...u, timing: { ...u.timing, ttsEndAt: Date.now(), ttsMs: msg.ttsMs } } : u
-            )
+            prev.map((u) => {
+              if (u.id !== msg.utteranceId) return u;
+              const ttsEndAt = Date.now();
+              const totalMs = ttsEndAt - u.timing.finalAt;
+              log("TTS_END", { utteranceId: msg.utteranceId, cfMs: msg.ttsMs, totalMs });
+              return { ...u, timing: { ...u.timing, ttsEndAt, ttsMs: msg.ttsMs } };
+            })
           );
           ttsStreamEndedRef.current = true;
           const sb = sourceBufferRef.current;
@@ -189,6 +232,7 @@ export function useRealtimeTranslation() {
           }
         } else if (msg.type === "error") {
           console.error("Worker error:", msg);
+          log("ERROR", { message: msg });
           setStatus("idle");
         }
       } else if (event.data instanceof ArrayBuffer) {
@@ -202,6 +246,7 @@ export function useRealtimeTranslation() {
     };
 
     const cleanup = () => {
+      log("SESSION_END");
       processorRef.current?.disconnect();
       processorRef.current = null;
       stream.getTracks().forEach((t) => t.stop());
@@ -219,5 +264,5 @@ export function useRealtimeTranslation() {
     wsRef.current?.close();
   }, []);
 
-  return { status, liveTranscript, utterances, analyser, start, stop };
+  return { status, liveTranscript, utterances, analyser, start, stop, copyLog };
 }

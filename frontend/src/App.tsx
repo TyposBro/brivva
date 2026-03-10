@@ -1,14 +1,21 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRealtimeTranslation } from "./hooks/useRealtimeTranslation";
 import { AudioRecorder } from "./components/AudioRecorder";
 
 export default function App() {
-  const { status, liveTranscript, utterances, analyser, start, stop } =
+  const { status, liveTranscript, utterances, analyser, start, stop, copyLog } =
     useRealtimeTranslation();
+  const [copied, setCopied] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const isActive = status !== "idle";
 
   const handleToggle = () => (isActive ? stop() : start());
+
+  const handleCopyLog = () => {
+    copyLog();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   useEffect(() => {
     if (listRef.current) {
@@ -84,6 +91,12 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {utterances.length > 0 && (
+        <button className="copy-log-btn" onClick={handleCopyLog}>
+          {copied ? "✓ Copied!" : "Copy log"}
+        </button>
+      )}
     </div>
   );
 }
