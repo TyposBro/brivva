@@ -73,15 +73,34 @@ export function useRealtimeTranslation() {
     if (isTtsPlayingRef.current || ttsQueueRef.current.length === 0) return;
     isTtsPlayingRef.current = true;
     const chunks = ttsQueueRef.current.shift()!;
-    const blob = new Blob(chunks, { type: "audio/mpeg" });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
+
+    // Concatenate all chunks into one buffer
+    const totalBytes = chunks.reduce((n, c) => n + c.byteLength, 0);
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+
+    // decodeAudioData auto-detects format — works on all browsers regardless of MIME type
+    const ctx = new AudioContext();
+    ctx.decodeAudioData(combined.buffer.slice(0)).then((audioBuffer) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      source.onended = () => {
+        ctx.close();
+        isTtsPlayingRef.current = false;
+        playNextTts();
+      };
+      source.start();
+    }).catch((err) => {
+      console.error("TTS decode error:", err);
+      ctx.close();
       isTtsPlayingRef.current = false;
       playNextTts();
-    };
-    audio.play().catch(console.error);
+    });
   }, []);
 
   const start = useCallback(async () => {
