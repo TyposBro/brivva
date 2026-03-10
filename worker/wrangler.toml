@@ -7,7 +7,11 @@ compatibility_flags = ["nodejs_compat"]
 binding = "AI"
 
 [vars]
-ENVIRONMENT = "development"
+ENVIRONMENT = "production"
 
 [dev]
 port = 8787
+
+# Local dev overrides
+[env.dev.vars]
+ENVIRONMENT = "development"

@@ -4,9 +4,10 @@ const WORKER_URL = import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787";
 
 interface AudioPlayerProps {
   text: string;
+  lang: string;
 }
 
-export function AudioPlayer({ text }: AudioPlayerProps) {
+export function AudioPlayer({ text, lang }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -34,7 +35,7 @@ export function AudioPlayer({ text }: AudioPlayerProps) {
       const res = await fetch(`${WORKER_URL}/api/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, lang }),
       });
 
       if (!res.ok) throw new Error("TTS failed");
