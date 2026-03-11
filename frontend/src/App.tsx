@@ -1,68 +1,77 @@
 import { useEffect, useRef, useState } from "react";
 import { useRealtimeTranslation } from "./hooks/useRealtimeTranslation";
 import { AudioRecorder } from "./components/AudioRecorder";
-import type { Timing } from "./hooks/useRealtimeTranslation";
+import type { Utterance } from "./hooks/useRealtimeTranslation";
 
 const TARGET_MS = 300;
+const SCALE_MS  = 5000; // fixed bar scale — all utterances comparable
 
-function LatencyPanel({ timing, isProcessing }: { timing: Timing | null; isProcessing: boolean }) {
-  if (!timing?.ttsEndAt || !timing.translationAt || !timing.ttsStartAt) {
-    return (
-      <div className="latency-panel latency-panel--empty">
-        <span className="lp-title">Pipeline Latency</span>
-        <span className="lp-placeholder">
-          {isProcessing ? <><span className="spinner lp-spinner" /> Processing…</> : "Speak to see latency breakdown"}
-        </span>
-      </div>
-    );
-  }
-
-  const { sttStartAt, finalAt, translationAt, ttsStartAt, ttsEndAt } = timing;
-  const start  = sttStartAt ?? finalAt;
-  const total  = ttsEndAt - start;
-  const sPhase = finalAt - start;
-  const tPhase = translationAt - finalAt;
-  const gPhase = ttsStartAt - translationAt;
-  const aPhase = ttsEndAt - ttsStartAt;
+function LatencyPanel({ utterances, isProcessing }: { utterances: Utterance[]; isProcessing: boolean }) {
+  const completed = utterances.filter(
+    u => u.timing.ttsEndAt && u.timing.translationAt && u.timing.ttsStartAt
+  );
 
   return (
     <div className="latency-panel">
       <div className="lp-header">
         <span className="lp-title">Pipeline Latency</span>
         {isProcessing && <span className="lp-active"><span className="spinner lp-spinner" /> Processing…</span>}
-        <span className="lp-mult">{(total / TARGET_MS).toFixed(1)}× over &lt;{TARGET_MS}ms target</span>
+        <span className="lp-scale-label">{SCALE_MS / 1000}s max scale · target {TARGET_MS}ms</span>
       </div>
-      <div className="latency-rows">
-        <div className="latency-row">
-          <span className="latency-lbl">Target</span>
-          <div className="bar-track">
-            <div className="bar-target" style={{ width: `${Math.min((TARGET_MS / total) * 100, 100)}%` }} />
+
+      {completed.length === 0 ? (
+        <span className="lp-placeholder">
+          {isProcessing ? "Waiting for first utterance…" : "Speak to see latency breakdown"}
+        </span>
+      ) : (
+        <>
+          <div className="lp-bars">
+            {/* Target reference line header */}
+            <div className="lp-target-line" style={{ left: `${(TARGET_MS / SCALE_MS) * 100}%` }}>
+              <span className="lp-target-label">▲ 300ms</span>
+            </div>
+
+            {completed.map((u, i) => {
+              const { sttStartAt, finalAt, translationAt, ttsStartAt, ttsEndAt } = u.timing;
+              const start  = sttStartAt ?? finalAt;
+              const total  = ttsEndAt! - start;
+              const sPhase = finalAt - start;
+              const tPhase = translationAt! - finalAt;
+              const gPhase = ttsStartAt! - translationAt!;
+              const aPhase = ttsEndAt! - ttsStartAt!;
+
+              return (
+                <div key={u.id} className="lp-row">
+                  <span className="lp-row-label">#{i + 1}</span>
+                  <div className="lp-bar-wrap">
+                    <div className="lp-bar">
+                      <div className="bar-seg seg-stt"       style={{ width: `${(sPhase / SCALE_MS) * 100}%` }} />
+                      <div className="bar-seg seg-translate"  style={{ width: `${(tPhase / SCALE_MS) * 100}%` }} />
+                      <div className="bar-seg seg-tts"        style={{ width: `${(gPhase / SCALE_MS) * 100}%` }} />
+                      <div className="bar-seg seg-audio"      style={{ width: `${(aPhase / SCALE_MS) * 100}%` }} />
+                    </div>
+                    <div className="lp-target-marker" style={{ left: `${(TARGET_MS / SCALE_MS) * 100}%` }} />
+                  </div>
+                  <span className="lp-row-ms">{total}ms</span>
+                </div>
+              );
+            })}
           </div>
-          <span className="bar-ms">{TARGET_MS}ms</span>
-        </div>
-        <div className="latency-row">
-          <span className="latency-lbl">Actual</span>
-          <div className="bar-track">
-            <div className="bar-seg seg-stt"       style={{ width: `${(sPhase / total) * 100}%` }} />
-            <div className="bar-seg seg-translate"  style={{ width: `${(tPhase / total) * 100}%` }} />
-            <div className="bar-seg seg-tts"        style={{ width: `${(gPhase / total) * 100}%` }} />
-            <div className="bar-seg seg-audio"      style={{ width: `${(aPhase / total) * 100}%` }} />
+
+          <div className="latency-legend">
+            <span className="leg-item"><span className="leg-dot seg-stt"       />STT finalize</span>
+            <span className="leg-item"><span className="leg-dot seg-translate"  />Translate</span>
+            <span className="leg-item"><span className="leg-dot seg-tts"        />TTS Gen</span>
+            <span className="leg-item"><span className="leg-dot seg-audio"      />Transfer</span>
           </div>
-          <span className="bar-ms">{total}ms</span>
-        </div>
-      </div>
-      <div className="latency-legend">
-        <span className="leg-item"><span className="leg-dot seg-stt"       />{sPhase}ms STT finalize</span>
-        <span className="leg-item"><span className="leg-dot seg-translate"  />{tPhase}ms Translate</span>
-        <span className="leg-item"><span className="leg-dot seg-tts"        />{gPhase}ms TTS Gen</span>
-        <span className="leg-item"><span className="leg-dot seg-audio"      />{aPhase}ms Transfer</span>
-      </div>
+        </>
+      )}
     </div>
   );
 }
 
 export default function App() {
-  const { status, liveTranscript, utterances, analyser, start, stop, copyLog } =
+  const { status, liveTranscript, utterances, analyser, start, stop, clear, copyLog } =
     useRealtimeTranslation();
   const [copied, setCopied] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -82,12 +91,10 @@ export default function App() {
     }
   }, [utterances, liveTranscript]);
 
-  const recorderState =
-    status === "idle" ? "idle" : status === "connecting" ? "processing" : "recording";
+  // Fix: "connecting" used to map to "processing" which disabled the Stop button
+  const recorderState = status === "idle" ? "idle" : "recording";
 
-  // Last fully completed utterance for the latency panel
-  const lastCompleted = [...utterances].reverse().find(u => u.timing.ttsEndAt) ?? null;
-  const isProcessing = isActive && utterances[utterances.length - 1]?.id !== lastCompleted?.id;
+  const isProcessing = isActive && !utterances[utterances.length - 1]?.timing.ttsEndAt;
 
   return (
     <div className="app">
@@ -110,7 +117,11 @@ export default function App() {
           onStop={handleToggle}
         />
 
-        <LatencyPanel timing={lastCompleted?.timing ?? null} isProcessing={isProcessing} />
+        {isActive && utterances.length > 0 && (
+          <button className="clear-btn" onClick={clear}>Clear</button>
+        )}
+
+        <LatencyPanel utterances={utterances} isProcessing={isProcessing} />
 
         <div className="utterances" ref={listRef}>
           {utterances.map((u) => (
@@ -132,7 +143,6 @@ export default function App() {
             </div>
           ))}
 
-          {/* Live interim transcript */}
           {liveTranscript && (
             <div className="utterance live">
               <div className="result-card live-card">

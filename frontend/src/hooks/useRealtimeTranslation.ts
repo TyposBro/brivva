@@ -248,5 +248,18 @@ export function useRealtimeTranslation() {
     wsRef.current?.close();
   }, []);
 
-  return { status, liveTranscript, utterances, analyser, start, stop, copyLog };
+  // Reset session data without closing the connection (accounts for cold starts)
+  const clear = useCallback(() => {
+    setUtterances([]);
+    setLiveTranscript("");
+    interimStartRef.current = null;
+    ttsQueueRef.current = [];
+    currentTtsChunksRef.current = [];
+    isTtsPlayingRef.current = false;
+    logRef.current = [];
+    sessionStartRef.current = Date.now();
+    log("SESSION_CLEAR");
+  }, []);
+
+  return { status, liveTranscript, utterances, analyser, start, stop, clear, copyLog };
 }

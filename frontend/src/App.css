@@ -344,6 +344,12 @@ body {
   flex-shrink: 0;
 }
 
+.lp-scale-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
 .lp-placeholder {
   font-size: 0.8rem;
   color: var(--text-muted);
@@ -372,49 +378,90 @@ body {
   border-width: 1.5px !important;
 }
 
-.lp-mult {
-  font-size: 0.72rem;
-  color: var(--error);
-  font-weight: 600;
-  margin-left: auto;
-}
-
-.latency-rows {
+/* Multi-row bars */
+.lp-bars {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+  position: relative;
 }
 
-.latency-row {
+.lp-row {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
-.latency-lbl {
-  font-size: 0.68rem;
+.lp-row-label {
+  font-size: 0.65rem;
   color: var(--text-muted);
-  width: 40px;
+  width: 24px;
   flex-shrink: 0;
   text-align: right;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
-.bar-track {
+.lp-bar-wrap {
   flex: 1;
+  position: relative;
   height: 14px;
+}
+
+.lp-bar {
+  width: 100%;
+  height: 100%;
   background: rgba(255,255,255,0.05);
   border-radius: 4px;
   overflow: hidden;
   display: flex;
 }
 
-.bar-target {
-  height: 100%;
-  background: var(--success);
-  opacity: 0.75;
-  border-radius: 4px;
+.lp-target-marker {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: rgba(255,255,255,0.25);
+  border-radius: 1px;
+}
+
+.lp-target-line {
+  position: absolute;
+  top: -18px;
+  transform: translateX(-50%);
+}
+
+.lp-target-label {
+  font-size: 0.6rem;
+  color: rgba(255,255,255,0.3);
+  white-space: nowrap;
+}
+
+.lp-row-ms {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  width: 52px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+/* Clear button */
+.clear-btn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.4rem;
+  transition: all 0.2s;
+  text-align: center;
+}
+
+.clear-btn:hover {
+  border-color: var(--accent2);
+  color: var(--accent2);
 }
 
 .bar-seg {
@@ -425,14 +472,6 @@ body {
 .seg-translate { background: var(--accent); }
 .seg-tts       { background: #f59e0b; }
 .seg-audio     { background: var(--success); }
-
-.bar-ms {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  width: 48px;
-  flex-shrink: 0;
-  text-align: right;
-}
 
 .latency-legend {
   display: flex;
