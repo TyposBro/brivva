@@ -300,3 +300,12 @@ brivva/
 - No auth, no persistent storage — in-memory rooms are fine
 - Room system should work with at least 3 simultaneous connections for demo
 - Reuse as much v1 code as possible — the STT/translate/TTS pipeline doesn't change, just add room routing around it
+
+## Next Task: Benchmark Dashboard on Host View
+
+Implement the benchmark dashboard directly on the HostPage. Full spec is in `BENCHMARK.md`.
+Summary: two parts on the host page:
+
+1. **Live latency dashboard** — per-utterance stacked bars (purple=translate, amber=TTS, gray=overhead) with 300ms target line, running averages. Data comes from existing WS messages (final → tts_end timestamps).
+2. **Pipeline comparison** (static, below live dashboard) — my pipeline vs Brivva's listed pipeline, component decision tables (STT/Translation/TTS), gap analysis to 300ms, optimization roadmap. Collapsible sections, default collapsed.
+   Read `BENCHMARK.md` for full implementation details.
