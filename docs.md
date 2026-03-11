@@ -4,28 +4,29 @@
 
 ```
 Host Browser (/host)
-  → Korean speech → PCM linear16 @ 16kHz (ScriptProcessorNode)
-  → WebSocket /api/room?role=host → Worker generates roomId
+  → Korean/English speech → PCM linear16 @ 16kHz (ScriptProcessorNode)
+  → WebSocket /api/room?role=host&sourceLang=en → Worker generates roomId
   → Worker proxies WS to RoomDO (pinned to host's DC, e.g. Tokyo/Seoul)
   → DO sends room:created{roomId} back to host
   → Binary PCM frames → RoomDO
 
 RoomDO (Durable Object — single actor per room, pinned to host's DC)
-  → Nova-3 (Deepgram, streaming STT via CF AI Gateway WS, language=multi)
+  → Nova-3 (Deepgram direct API if DEEPGRAM_API_KEY set, else CF AI Gateway language=en)
   → On is_final/speech_final:
       Promise.all([
-        M2M100 ko→en  (if EN guests),
-        M2M100 ko→ja  (if JA guests),
-        M2M100 ko→zh  (if ZH guests),
+        M2M100 sourceLang→en  (if EN guests),
+        M2M100 sourceLang→ja  (if JA guests),
+        M2M100 sourceLang→zh  (if ZH guests),
       ])
   → Per language: Kokoro TTS → stream audio chunks
   → Broadcast to all guests in that language group
+  → Also sends interim/final to hostWs (host sees own transcription)
 
 Guest Browser (/room/:id)
   → WebSocket /api/room?role=guest&roomId=ABC123&lang=en
   → Worker proxies WS to same RoomDO instance
   → Receives: interim, final, translation, tts_start, [MP3 chunks], tts_end
-  → Blob URL playback (same as v1)
+  → Blob URL playback (FIFO queue, no overlap)
 ```
 
 ## v1 Architecture (single-user, still deployed at /api/realtime)
@@ -94,14 +95,14 @@ This DC placement is optimal for Brivva's primary markets (JA/ZH) and acceptable
 ```
 { type: "room:created",    roomId }
 { type: "room:guest_count", counts: { en: 5, ja: 3, zh: 12 } }
-{ type: "interim",         transcript, utteranceId }
+{ type: "interim",         transcript }
 { type: "final",           transcript, utteranceId }
 ```
 
 **Server → Guest (same pipeline messages as v1):**
 ```
 { type: "room:joined",    roomId, lang }
-{ type: "interim",        transcript, utteranceId }
+{ type: "interim",        transcript }
 { type: "final",          transcript, utteranceId }
 { type: "translation",    text, utteranceId, translateMs }
 { type: "tts_start",      utteranceId }
@@ -118,7 +119,7 @@ Translate ONCE per language, broadcast to all N guests:
 ```
 utterance finalized
   → check active lang groups (e.g. EN: 3 guests, JA: 1 guest, ZH: 0)
-  → Promise.all([translate ko→en, translate ko→ja])   ← parallel
+  → Promise.all([translate sourceLang→en, translate sourceLang→ja])   ← parallel
   → for each lang in parallel:
       Kokoro TTS → stream chunks → broadcast to all N guests in group
 ```
@@ -127,10 +128,11 @@ utterance finalized
 
 ## M2M100 Language Codes
 
-Korean host to all supported guest languages:
-- `source_lang: "ko"` → `target_lang: "en"` (English)
-- `source_lang: "ko"` → `target_lang: "ja"` (Japanese)
-- `source_lang: "ko"` → `target_lang: "zh"` (Chinese)
+Source language is dynamic (`sourceLang` from host URL param, default `ko`):
+- `source_lang: "ko"` → `target_lang: "en"` (Korean → English)
+- `source_lang: "ko"` → `target_lang: "ja"` (Korean → Japanese)
+- `source_lang: "ko"` → `target_lang: "zh"` (Korean → Chinese)
+- `source_lang: "en"` → `target_lang: "ja"` (English → Japanese, for testing)
 
 ---
 
@@ -168,6 +170,12 @@ Whisper is **batch-only** — requires the complete audio clip before transcript
 
 **Use Nova-3 for real-time streaming.** Streaming is non-negotiable for live translation UX.
 
+### CF AI Gateway Limitation
+
+CF AI Gateway's Nova-3 binding (`@cf/deepgram/nova-3`) only supports `language=en`. Using `language=ko` returns error 2002. Using `language=multi` connects but produces no Results.
+
+**Fix:** When `DEEPGRAM_API_KEY` is set as a worker secret, `RoomDO.connectNova()` connects directly to `wss://api.deepgram.com/v1/listen` with the host's `sourceLang`. Without the key, it falls back to CF AI Gateway with `language=en`.
+
 ---
 
 ## TTS: Kokoro vs CF Aura-2-fr
@@ -190,7 +198,10 @@ Whisper is **batch-only** — requires the complete audio clip before transcript
 
 - **`is_final` trigger**: Nova-3 fires `is_final=true` for each finalized chunk during continuous speech. `speech_final` only fires on silence. Both trigger translation.
 - **`state.pending` fallback**: `speech_final` sometimes arrives with empty transcript. Use last non-empty interim as fallback.
+- **Host receives transcripts**: `handleNovaMessage` sends `interim`/`final` to both `hostWs` and all guests. Host sees Korean transcription cards in real time.
 - **TTS queue**: `isTtsPlayingRef` prevents audio overlap. Clips play FIFO. All chunks buffered until `tts_end`, then played via Blob URL.
+- **TTS queue freeze fix**: `audio.play()` rejection (browser autoplay policy) previously left `isTtsPlayingRef.current = true` forever. Fixed: `.catch()` now calls `onDone()`.
+- **AudioContext unlock**: Guest language picker button calls `new AudioContext(); ctx.resume().then(() => ctx.close())` on click to satisfy browser autoplay policy before first `audio.play()`.
 - **TTS playback — Blob URL not MSE**: `MediaSource.addSourceBuffer("audio/mpeg")` throws on Safari. Fixed by buffering all chunks → `new Blob(chunks, {type: "audio/mpeg"})` → `new Audio(blobUrl)`. Works everywhere.
 - **`clientWs.send(value)` not `value.buffer`**: Uint8Array subview — `.buffer` references the underlying SharedArrayBuffer which may contain garbage outside the view's range.
 - **ScriptProcessorNode**: Deprecated but universally supported. AudioWorklet is the modern alternative.
@@ -199,11 +210,14 @@ Whisper is **batch-only** — requires the complete audio clip before transcript
 
 ## CF AI Gateway
 
-Nova-3 connects via CF AI Gateway WebSocket (not direct Deepgram API). Required headers:
+Nova-3 connects via CF AI Gateway WebSocket (English-only fallback). Required headers:
 - `Upgrade: websocket`
 - `cf-aig-authorization: Bearer {CF_API_TOKEN}`
 
 The token needs "Workers AI Run" + "AI Gateway Run" permissions on the CF account.
+
+Direct Deepgram API (all languages):
+- `Authorization: Token {DEEPGRAM_API_KEY}`
 
 ## Secrets
 
@@ -212,9 +226,10 @@ CF_ACCOUNT_ID    = 80a55132ae169d5b282ccf505bc66bf7
 CF_AI_GATEWAY_ID = default
 CF_API_TOKEN     = (wrangler secret) — CF AI Gateway auth
 KOKORO_URL       = https://kokoro.milliytechnology.org
+DEEPGRAM_API_KEY = (wrangler secret, optional) — enables Korean + multi-language STT
 ```
 
-Update: `cd worker && npx wrangler secret put <NAME> --env=""`
+Update: `cd worker && echo "value" | npx wrangler secret put <NAME> --env=""`
 
 ## Kokoro Self-Hosted Setup
 

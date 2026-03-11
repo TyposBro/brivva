@@ -7,16 +7,17 @@ I'm the top candidate out of 15 and they want to proceed to a paid technical tes
 
 ## Current Status (Mar 11 2026)
 
-**v1 — WORKING and deployed.** Single-user pipeline is live:
+**v2 — WORKING and deployed.** Rooms + multi-language pipeline is live:
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Worker:** https://brivva-translation.milliytechnology.workers.dev
 - **Repo:** https://github.com/TyposBro/brivva (private)
-- Hardcoded: English → Japanese. Audio-only (no video/lip-sync).
-- Latency: translation 394–870ms, TTS ~430ms+ (short text), total ~1–3s from stop speaking
-- Self-hosted Kokoro TTS on M1 Pro MPS, exposed via cloudflared tunnel
+- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated Kokoro audio
+- Rooms backed by Durable Objects (single actor per room, pinned to host's DC)
+- STT: CF AI Gateway Nova-3 (English), direct Deepgram API (Korean, requires `DEEPGRAM_API_KEY`)
+- Deploy: `npm run deploy` in both `worker/` and `frontend/`
 
-**v2 — IN PROGRESS.** Adding rooms + multi-language support.
+**v1** still deployed at `/api/realtime` (EN→JA, single-user, untouched).
 
 ---
 
@@ -44,8 +45,8 @@ Guest Browser (React/TS)
 ├── WebSocket → receive translated audio + subtitles
 └── Auto-play translated TTS audio (Blob URL queue, same as v1)
 
-Cloudflare Worker (Hono)
-├── Room management via in-memory Map (no Durable Objects needed for demo)
+Cloudflare Worker (Hono + Durable Objects)
+├── Room management via RoomDO (one DO instance per room, keyed by roomId)
 ├── Per-room state: host WS, guest WSs grouped by language
 ├── On host audio:
 │   1. Deepgram Nova-3 STT (streaming WebSocket, same as v1)
@@ -193,6 +194,11 @@ Browser mic
 - **Trigger on `is_final` not just `speech_final`** — speech_final only fires on silence
 - **`state.pending` fallback** — speech_final sometimes has empty transcript, use last interim
 - **TTS playback — Blob URL** — MSE addSourceBuffer("audio/mpeg") throws on Safari; Blob URL works everywhere
+- **TTS queue freeze** — `audio.play()` rejection must call `onDone()` or `isTtsPlayingRef` stays true forever
+- **AudioContext unlock** — call `ctx.resume()` on user gesture (language picker click) before first `audio.play()`
+- **Host transcript** — `handleNovaMessage` must send interim/final to both `hostWs` and all guests
+- **CF AI Gateway language support** — Nova-3 only works with `language=en`; Korean requires direct Deepgram API
+- **Durable Objects over in-memory Map** — CF Workers can run in multiple isolates; in-memory Map causes "Room not found" for guests on a different isolate
 - **`clientWs.send(value)` not `value.buffer`** — Uint8Array subview bug
 - **UniDic required for Japanese** — `python -m unidic download` (526MB), checked by kokoro-start.sh
 

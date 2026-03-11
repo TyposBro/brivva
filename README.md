@@ -1,43 +1,51 @@
 # Brivva Real-Time Translation Demo
 
-Real-time voice translation pipeline: **Speak (EN) → STT → Translate → TTS → Play (FR)**
+Real-time multilingual live commerce prototype: **Host speaks → guests hear translated audio in their language.**
 
 Live: https://brivva.pages.dev
+
+## What It Does (v2)
+
+- Host creates a room, speaks into mic (English or Korean)
+- Guests join with a room code, pick their language (EN / JA / ZH)
+- Each guest sees live subtitles + hears Kokoro TTS audio in their language
+- Translation runs once per language group — 50 JA guests = 1 translation call, not 50
 
 ## Prerequisites
 
 - Node.js + npm
-- Python (via `uv`)
+- Python (via `uv`) — for Kokoro TTS
 - Cloudflare account (already configured)
-- Homebrew (for cloudflared)
+- Homebrew + cloudflared
 
 ---
 
 ## Running End-to-End
 
-### 1. Start Kokoro + Tunnel (one command)
+### 1. Start Kokoro + Tunnel
 
 ```bash
 cd ~/Documents/private/brivva
 bash kokoro-start.sh
 ```
 
-Starts Kokoro on `:8880` and the cloudflared tunnel together. `Ctrl+C` stops both.
+Starts Kokoro on `:8880` and the cloudflared tunnel. `Ctrl+C` stops both.
 
 Verify: `curl http://localhost:8880/health` → `{"status":"healthy"}`
 
----
-
-### 3. Deploy Worker (only needed after code changes)
+### 2. Deploy Worker (after code changes)
 
 ```bash
 cd ~/Documents/private/brivva/worker
-npx wrangler deploy --env=""
+npm run deploy
 ```
 
-Worker is already live at `https://brivva-translation.milliytechnology.workers.dev`.
+### 3. Deploy Frontend (after code changes)
 
----
+```bash
+cd ~/Documents/private/brivva/frontend
+npm run deploy
+```
 
 ### 4. Open the App
 
@@ -53,41 +61,61 @@ npm run dev
 
 ---
 
-## Architecture
+## Architecture (v2)
 
 ```
-Browser mic
-  → PCM 16kHz → WebSocket → Cloudflare Worker
-  → Nova-3 (Deepgram, streaming STT via CF AI Gateway)
-  → M2M100-1.2B (CF Workers AI, EN→FR translation)
-  → Kokoro-FastAPI (self-hosted M1 Pro, MPS, ff_siwis voice)
-  → WebSocket → Browser MSE streaming playback
+Host Browser (/host)
+  → mic → PCM linear16 @ 16kHz (ScriptProcessorNode)
+  → WebSocket /api/room?role=host&sourceLang=en
+  → Worker generates roomId → RoomDO (Durable Object)
+  → room:created{roomId} → host sees room code + guest counts
+
+RoomDO (single actor per room, pinned to host's DC)
+  → Nova-3 STT (Deepgram direct API or CF AI Gateway fallback)
+  → On is_final / speech_final:
+      Promise.all([M2M100 →en, M2M100 →ja, M2M100 →zh])  (active langs only)
+  → Per language: Kokoro TTS → stream audio chunks to all guests in group
+
+Guest Browser (/room/:id)
+  → pick language → WebSocket /api/room?role=guest&roomId=...&lang=ja
+  → receives: interim, final, translation, tts_start, [MP3 chunks], tts_end
+  → Blob URL playback queue, FIFO, no overlap
 ```
 
-## Measured Latency (self-hosted Kokoro, M1 Pro MPS)
+## Measured Latency
 
 | Phase | Typical |
 |-------|---------|
-| STT (first interim → final) | 1–2s (includes speech duration) |
-| Translation (M2M100 CF) | 394–870ms |
-| TTS generation (Kokoro MPS) | 584ms–2300ms |
-| Time-to-first-audio (MSE streaming) | ~200ms after TTS starts |
+| STT (Nova-3, first interim → final) | 1–2s (includes speech) |
+| Translation (M2M100, CF Workers AI) | 394–870ms |
+| TTS generation (Kokoro, M1 Pro MPS) | 584ms–2300ms |
 | **Total from stop speaking** | **~1.5–3s** |
 
 ## Project Structure
 
 ```
 brivva/
-├── frontend/          React + TypeScript + Vite (Cloudflare Pages)
+├── frontend/                   React + TypeScript + Vite (Cloudflare Pages)
 │   └── src/
-│       ├── App.tsx                          main UI + latency panel
-│       └── hooks/useRealtimeTranslation.ts  WebSocket + MSE TTS streaming
-├── worker/            Cloudflare Worker (Hono)
-│   └── src/features/realtime/api/
-│       └── realtime.routes.ts               Nova-3 proxy + M2M100 + Kokoro
-├── kokoro/            Kokoro-FastAPI (cloned, self-hosted)
-├── docs.md            Full technical analysis + decisions
-└── CLAUDE.md          Project context for Claude Code
+│       ├── App.tsx             router wrapper
+│       ├── pages/
+│       │   ├── HomePage.tsx    create/join room
+│       │   ├── HostPage.tsx    room code + guest counts + mic
+│       │   └── GuestPage.tsx   language picker + subtitles + audio
+│       └── hooks/
+│           ├── useHostRoom.ts  WebSocket + PCM capture + STT display
+│           └── useGuestRoom.ts WebSocket + TTS Blob URL queue
+├── worker/                     Cloudflare Worker (Hono + Durable Objects)
+│   └── src/
+│       ├── index.ts            routes + RoomDO export
+│       ├── core/types.ts       Bindings
+│       └── features/rooms/
+│           ├── api/room.routes.ts   thin DO proxy
+│           └── room.do.ts           all room state + STT/translate/TTS fan-out
+├── kokoro/                     Kokoro-FastAPI (self-hosted)
+├── kokoro-start.sh             starts Kokoro + cloudflared tunnel
+├── docs.md                     full technical analysis
+└── CLAUDE.md                   project context for Claude Code
 ```
 
 ## Worker Secrets
@@ -95,20 +123,21 @@ brivva/
 ```
 CF_ACCOUNT_ID    = 80a55132ae169d5b282ccf505bc66bf7
 CF_AI_GATEWAY_ID = default
-CF_API_TOKEN     = (CF AI Gateway auth — wrangler secret)
+CF_API_TOKEN     = (CF AI Gateway auth)
 KOKORO_URL       = https://kokoro.milliytechnology.org
+DEEPGRAM_API_KEY = (optional — enables Korean STT via direct Deepgram API)
 ```
 
-Update a secret:
+Set a secret:
 ```bash
 cd worker && echo "value" | npx wrangler secret put SECRET_NAME --env=""
 ```
 
-## Deploying Frontend
+## STT: Language Support
 
-```bash
-cd frontend && npm run build
-# Cloudflare Pages auto-deploys on git push to main
-```
+| Config | STT path | Languages |
+|--------|----------|-----------|
+| No `DEEPGRAM_API_KEY` | CF AI Gateway (`@cf/deepgram/nova-3`) | English only |
+| `DEEPGRAM_API_KEY` set | Direct Deepgram API | All languages incl. Korean |
 
-Or trigger manually from the Cloudflare dashboard.
+Host passes `sourceLang=en` (or `ko`) in the WebSocket URL. Default is `ko`.
