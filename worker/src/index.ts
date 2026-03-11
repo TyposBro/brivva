@@ -7,6 +7,8 @@ import realtimeApp from "./features/realtime/api/realtime.routes";
 import roomApp from "./features/rooms/api/room.routes";
 import type { Bindings, Variables } from "./core/types";
 
+export { RoomDO } from "./features/rooms/room.do";
+
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 app.use(

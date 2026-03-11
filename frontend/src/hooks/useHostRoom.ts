@@ -46,13 +46,9 @@ export function useHostRoom() {
     setUtterances([]);
     setLiveTranscript("");
 
-    const ws = new WebSocket(`${WS_URL}/api/room`);
+    const ws = new WebSocket(`${WS_URL}/api/room?role=host`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "host:create", sourceLang: "ko" }));
-    };
 
     ws.onmessage = (event) => {
       if (typeof event.data !== "string") return;

@@ -5,12 +5,13 @@
 ```
 Host Browser (/host)
   → Korean speech → PCM linear16 @ 16kHz (ScriptProcessorNode)
-  → WebSocket /api/room → host:create → room:created{roomId}
-  → Binary PCM frames → Worker
+  → WebSocket /api/room?role=host → Worker generates roomId
+  → Worker proxies WS to RoomDO (pinned to host's DC, e.g. Tokyo/Seoul)
+  → DO sends room:created{roomId} back to host
+  → Binary PCM frames → RoomDO
 
-Worker (Cloudflare, Hono)
-  → Room state in-memory Map (one isolate, one DC)
-  → Nova-3 (Deepgram, streaming STT via CF AI Gateway WS, language=ko)
+RoomDO (Durable Object — single actor per room, pinned to host's DC)
+  → Nova-3 (Deepgram, streaming STT via CF AI Gateway WS, language=multi)
   → On is_final/speech_final:
       Promise.all([
         M2M100 ko→en  (if EN guests),
@@ -21,7 +22,8 @@ Worker (Cloudflare, Hono)
   → Broadcast to all guests in that language group
 
 Guest Browser (/room/:id)
-  → WebSocket /api/room → guest:join{roomId, lang}
+  → WebSocket /api/room?role=guest&roomId=ABC123&lang=en
+  → Worker proxies WS to same RoomDO instance
   → Receives: interim, final, translation, tts_start, [MP3 chunks], tts_end
   → Blob URL playback (same as v1)
 ```
@@ -38,15 +40,24 @@ Browser mic
   → WebSocket binary → Browser Blob URL playback → speaker
 ```
 
-## Worker Statefulness
+## Worker Statefulness — Durable Objects
 
-**No Durable Objects.** Room state is a module-level `Map<string, Room>` in the JS isolate:
+Each room is a `RoomDO` instance, keyed by room ID (`ROOMS.idFromName(roomId)`). The DO is a single-actor process — all WebSocket connections for a room land on the same DO instance regardless of which CF data center handled the incoming HTTP request.
 
-```typescript
-const rooms = new Map<string, Room>();
-```
+**DO placement:** CF pins a DO to the data center that first created it — whichever DC handled the host's `?role=host` request. Since Brivva hosts are Korean beauty sellers, DOs are created in Seoul or Tokyo.
 
-CF Workers run in V8 isolates. An open WebSocket connection keeps the isolate alive. All connections that hit the same isolate share the same `rooms` Map.
+**Latency by market:**
+
+| Audience | DC routing | WS round-trip |
+|----------|-----------|---------------|
+| Korean host | Seoul/Tokyo DC | ~5ms |
+| Japanese guests | Same or adjacent DC | ~30–50ms |
+| Chinese guests | Shanghai/Tokyo hop | ~40–80ms |
+| English guests (US/EU) | Trans-Pacific | ~100–200ms |
+
+The trans-Pacific hop for EN guests is a one-time WebSocket setup cost. Once connected, audio chunks stream from Tokyo — perceived latency for EN guests is dominated by the translation+TTS pipeline (~1–2s), not the extra ~150ms of network.
+
+This DC placement is optimal for Brivva's primary markets (JA/ZH) and acceptable for secondary markets (EN). Exactly the right trade-off for K-Beauty live commerce.
 
 ### Limits
 

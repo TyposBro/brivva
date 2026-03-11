@@ -68,12 +68,8 @@ export function useGuestRoom(roomId: string, lang: Lang | null) {
     receivingEntryRef.current = null;
     isTtsPlayingRef.current = false;
 
-    const ws = new WebSocket(`${WS_URL}/api/room`);
+    const ws = new WebSocket(`${WS_URL}/api/room?role=guest&roomId=${encodeURIComponent(roomId)}&lang=${lang}`);
     ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "guest:join", roomId, lang }));
-    };
 
     ws.onmessage = (event) => {
       if (typeof event.data === "string") {
