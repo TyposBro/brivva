@@ -436,12 +436,50 @@ body {
   white-space: nowrap;
 }
 
+.lp-row-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
 .lp-row-ms {
   font-size: 0.68rem;
   color: var(--text-muted);
   width: 52px;
   flex-shrink: 0;
   text-align: right;
+}
+
+.lp-row-detail {
+  display: flex;
+  gap: 0.75rem;
+  padding-left: 30px; /* align with bar start */
+  flex-wrap: wrap;
+}
+
+.lp-row-detail span {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.lp-legend-row {
+  display: flex;
+  gap: 0.9rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.lp-legend-row span {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* Clear button */

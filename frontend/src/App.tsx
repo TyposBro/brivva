@@ -41,28 +41,36 @@ function LatencyPanel({ utterances, isProcessing }: { utterances: Utterance[]; i
               const aPhase = ttsEndAt! - ttsStartAt!;
 
               return (
-                <div key={u.id} className="lp-row">
-                  <span className="lp-row-label">#{i + 1}</span>
-                  <div className="lp-bar-wrap">
-                    <div className="lp-bar">
-                      <div className="bar-seg seg-stt"       style={{ width: `${(sPhase / SCALE_MS) * 100}%` }} />
-                      <div className="bar-seg seg-translate"  style={{ width: `${(tPhase / SCALE_MS) * 100}%` }} />
-                      <div className="bar-seg seg-tts"        style={{ width: `${(gPhase / SCALE_MS) * 100}%` }} />
-                      <div className="bar-seg seg-audio"      style={{ width: `${(aPhase / SCALE_MS) * 100}%` }} />
+                <div key={u.id} className="lp-row-group">
+                  <div className="lp-row">
+                    <span className="lp-row-label">#{i + 1}</span>
+                    <div className="lp-bar-wrap">
+                      <div className="lp-bar">
+                        <div className="bar-seg seg-stt"       style={{ width: `${(sPhase / SCALE_MS) * 100}%` }} />
+                        <div className="bar-seg seg-translate"  style={{ width: `${(tPhase / SCALE_MS) * 100}%` }} />
+                        <div className="bar-seg seg-tts"        style={{ width: `${(gPhase / SCALE_MS) * 100}%` }} />
+                        <div className="bar-seg seg-audio"      style={{ width: `${(aPhase / SCALE_MS) * 100}%` }} />
+                      </div>
+                      <div className="lp-target-marker" style={{ left: `${(TARGET_MS / SCALE_MS) * 100}%` }} />
                     </div>
-                    <div className="lp-target-marker" style={{ left: `${(TARGET_MS / SCALE_MS) * 100}%` }} />
+                    <span className="lp-row-ms">{total}ms</span>
                   </div>
-                  <span className="lp-row-ms">{total}ms</span>
+                  <div className="lp-row-detail">
+                    <span><span className="leg-dot seg-stt" />STT {sPhase}ms</span>
+                    <span><span className="leg-dot seg-translate" />Tr {tPhase}ms</span>
+                    <span><span className="leg-dot seg-tts" />TTS {gPhase}ms</span>
+                    <span><span className="leg-dot seg-audio" />Net {aPhase}ms</span>
+                  </div>
                 </div>
               );
             })}
           </div>
 
-          <div className="latency-legend">
-            <span className="leg-item"><span className="leg-dot seg-stt"       />STT finalize</span>
-            <span className="leg-item"><span className="leg-dot seg-translate"  />Translate</span>
-            <span className="leg-item"><span className="leg-dot seg-tts"        />TTS Gen</span>
-            <span className="leg-item"><span className="leg-dot seg-audio"      />Transfer</span>
+          <div className="lp-legend-row">
+            <span><span className="leg-dot seg-stt" />STT</span>
+            <span><span className="leg-dot seg-translate" />Translate</span>
+            <span><span className="leg-dot seg-tts" />TTS Gen</span>
+            <span><span className="leg-dot seg-audio" />Transfer</span>
           </div>
         </>
       )}
