@@ -181,6 +181,8 @@ export class RoomDO {
         .filter(({ text }) => text.length > 0)
         .map(async ({ lang, text, translateMs }) => {
           this.broadcastToLang(lang, JSON.stringify({ type: "translation", text, utteranceId, translateMs }));
+          // Send translation timing to host for benchmark dashboard
+          if (this.hostWs) this.send(this.hostWs, JSON.stringify({ type: "translation", utteranceId, translateMs }));
 
           const t1 = Date.now();
           let resp: Response;
@@ -204,7 +206,10 @@ export class RoomDO {
             if (done) break;
             this.broadcastToLang(lang, value);
           }
-          this.broadcastToLang(lang, JSON.stringify({ type: "tts_end", utteranceId, ttsMs: Date.now() - t1 }));
+          const ttsMs = Date.now() - t1;
+          this.broadcastToLang(lang, JSON.stringify({ type: "tts_end", utteranceId, ttsMs }));
+          // Send TTS timing to host for benchmark dashboard
+          if (this.hostWs) this.send(this.hostWs, JSON.stringify({ type: "tts_end", utteranceId, ttsMs }));
         })
     );
   }

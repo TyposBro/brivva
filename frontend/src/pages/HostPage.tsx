@@ -2,12 +2,14 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useHostRoom } from "../hooks/useHostRoom";
 import { AudioRecorder } from "../components/AudioRecorder";
+import { LatencyDashboard } from "../components/LatencyDashboard";
+import { PipelineAnalysis } from "../components/PipelineAnalysis";
 
 export default function HostPage() {
   const navigate = useNavigate();
   const {
     status, roomId, guestCounts, liveTranscript, utterances,
-    analyser, error, createRoom, startRecording, stopRecording, closeRoom,
+    analyser, error, timings, createRoom, startRecording, stopRecording, closeRoom,
   } = useHostRoom();
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -126,6 +128,10 @@ export default function HostPage() {
             </div>
           )}
         </div>
+
+        <LatencyDashboard timings={timings} />
+
+        <PipelineAnalysis />
       </main>
     </div>
   );

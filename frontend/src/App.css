@@ -508,8 +508,9 @@ body {
 }
 
 .seg-stt       { background: #38bdf8; }
-.seg-translate { background: var(--accent); }
+.seg-translate { background: #8b5cf6; }
 .seg-tts       { background: #f59e0b; }
+.seg-overhead  { background: #555; }
 .seg-audio     { background: var(--success); }
 
 .latency-legend {
@@ -758,4 +759,291 @@ body {
   border-color: var(--accent);
   background: rgba(108, 99, 255, 0.08);
   color: var(--accent2);
+}
+
+/* ── Shared color utilities ────────────────────────────────────────────────── */
+
+.lp-good, .pa-good { color: #4ade80; }
+.lp-warn, .pa-warn { color: #fbbf24; }
+.lp-bad,  .pa-bad  { color: #f87171; }
+.pa-muted          { color: var(--text-muted); }
+
+/* ── LatencyDashboard extras ───────────────────────────────────────────────── */
+
+.lp-stats {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp-stats strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lp-overhead {
+  font-size: 0.68rem;
+  color: #555;
+}
+
+.lp-text {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* ── Pipeline Analysis ─────────────────────────────────────────────────────── */
+
+.pipeline-analysis {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.pa-main-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.9rem 1.25rem;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 0.15s;
+}
+
+.pa-main-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pa-main-chevron {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.pa-main-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.pa-body {
+  border-top: 1px solid var(--border);
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.pa-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pa-subtitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/* Two-column pipeline compare */
+.pa-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+@media (max-width: 520px) {
+  .pa-compare { grid-template-columns: 1fr; }
+}
+
+.pa-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.pa-col-header {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.pa-col-mine   { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
+.pa-col-brivva { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+
+/* Tables */
+.pa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.pa-table th {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.pa-table td {
+  padding: 0.35rem 0.5rem;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-variant-numeric: tabular-nums;
+}
+
+.pa-table tr:last-child td { border-bottom: none; }
+
+.pa-winner td { background: rgba(139, 92, 246, 0.06); }
+.pa-winner td:first-child { color: #a78bfa; font-weight: 600; }
+
+/* Collapsible component decisions */
+.pa-collapsible {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pa-toggle {
+  width: 100%;
+  background: var(--surface2);
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 0.15s;
+}
+
+.pa-toggle:hover { background: rgba(255, 255, 255, 0.05); }
+
+.pa-chevron {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.pa-content {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.pa-verdict {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  padding: 0.4rem 0.5rem;
+  border-left: 2px solid var(--accent);
+}
+
+/* Gap bars */
+.pa-gap-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.pa-gap-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pa-gap-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  width: 68px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.pa-gap-bar-wrap {
+  flex: 1;
+}
+
+.pa-gap-bar-bg {
+  position: relative;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  overflow: visible;
+}
+
+.pa-gap-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f87171, #f59e0b);
+  border-radius: 4px;
+}
+
+.pa-gap-target-line {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: #4ade80;
+  border-radius: 1px;
+}
+
+.pa-gap-stats {
+  font-size: 0.68rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pa-gap-current { color: #f87171; }
+.pa-gap-arrow   { color: var(--text-muted); }
+.pa-gap-target-val { color: #4ade80; }
+.pa-gap-mult    { color: var(--text-muted); }
+
+.pa-gap-total {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Roadmap table */
+.pa-roadmap td:last-child { min-width: 120px; }
+
+.pa-status-done     { color: #4ade80; }
+.pa-status-medium   { color: #fbbf24; }
+.pa-status-tradeoff { color: #fb923c; }
+.pa-status-cost     { color: #f87171; }
+.pa-status-hard     { color: var(--text-muted); }
+.pa-status-rnd      { color: #a78bfa; }
+
+.pa-footer {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1.5;
 }
