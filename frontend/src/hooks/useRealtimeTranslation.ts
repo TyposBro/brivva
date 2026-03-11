@@ -32,20 +32,11 @@ type LogEntry = {
   [key: string]: unknown;
 };
 
-// One entry per utterance — buffered while waiting, streamed while playing
+// One entry per utterance — buffer chunks until done, then play via Blob URL
 type TtsEntry = {
   utteranceId: number;
-  chunks: ArrayBuffer[];  // buffered until this entry starts playing
-  done: boolean;          // tts_end received
-};
-
-type PlaybackState = {
-  entry: TtsEntry;
-  audio: HTMLAudioElement;
-  mediaSource: MediaSource;
-  sourceBuffer: SourceBuffer;
-  appendQueue: ArrayBuffer[];  // chunks waiting to be appended to MSE
-  objectUrl: string;
+  chunks: ArrayBuffer[];
+  done: boolean;  // tts_end received
 };
 
 export function useRealtimeTranslation() {
@@ -82,75 +73,40 @@ export function useRealtimeTranslation() {
 
   const interimStartRef = useRef<number | null>(null);
 
-  // TTS streaming via MSE — FIFO, no overlap, plays first chunk immediately
-  const receivingEntryRef = useRef<TtsEntry | null>(null);  // entry currently receiving WS chunks
-  const ttsQueueRef = useRef<TtsEntry[]>([]);               // ordered playback queue
+  // TTS playback — FIFO queue, no overlap, plays after all chunks received
+  const receivingEntryRef = useRef<TtsEntry | null>(null);
+  const ttsQueueRef = useRef<TtsEntry[]>([]);
   const isTtsPlayingRef = useRef(false);
-  const playbackRef = useRef<PlaybackState | null>(null);
-  const tryPlayNextRef = useRef<() => void>(() => {});      // ref to break startPlayback↔tryPlayNext cycle
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const tryPlayNextRef = useRef<() => void>(() => {});
 
-  // Append next chunk from queue to MSE source buffer (called on updateend + new chunk)
-  function appendNextFromQueue() {
-    const pb = playbackRef.current;
-    if (!pb || !pb.sourceBuffer) return;
-    if (pb.sourceBuffer.updating) return;
-    if (pb.appendQueue.length > 0) {
-      pb.sourceBuffer.appendBuffer(pb.appendQueue.shift()!);
-    } else if (pb.entry.done && pb.mediaSource.readyState === "open") {
-      pb.mediaSource.endOfStream();
-    }
-  }
-
-  // Begin MSE streaming playback for an entry
+  // Play entry via Blob URL — works on all browsers (no MSE codec issues)
   function startPlayback(entry: TtsEntry) {
     isTtsPlayingRef.current = true;
-
-    const mediaSource = new MediaSource();
-    const objectUrl = URL.createObjectURL(mediaSource);
-    const audio = new Audio(objectUrl);
-
-    const pb: PlaybackState = {
-      entry,
-      audio,
-      mediaSource,
-      sourceBuffer: null as unknown as SourceBuffer, // assigned in sourceopen
-      appendQueue: [...entry.chunks],  // snapshot all buffered chunks
-      objectUrl,
-    };
-    entry.chunks = []; // future chunks go directly to pb.appendQueue
-    playbackRef.current = pb;
-
-    mediaSource.addEventListener("sourceopen", () => {
-      try {
-        const sb = mediaSource.addSourceBuffer("audio/mpeg");
-        pb.sourceBuffer = sb;
-        sb.addEventListener("updateend", appendNextFromQueue);
-        appendNextFromQueue(); // start draining the initial buffer
-      } catch (err) {
-        console.error("MSE setup error:", err);
-      }
-    });
+    const blob = new Blob(entry.chunks, { type: "audio/mpeg" });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    currentAudioRef.current = audio;
 
     const onDone = () => {
-      URL.revokeObjectURL(objectUrl);
-      playbackRef.current = null;
+      URL.revokeObjectURL(url);
+      currentAudioRef.current = null;
       isTtsPlayingRef.current = false;
       ttsQueueRef.current.shift();
       tryPlayNextRef.current();
     };
     audio.onended = onDone;
     audio.onerror = () => { console.error("Audio playback error"); onDone(); };
-
     audio.play().catch(console.error);
   }
 
-  // Start next queued entry if idle and chunks are available
+  // Start next queued entry if idle and fully received
   function tryPlayNext() {
     if (isTtsPlayingRef.current) return;
     const queue = ttsQueueRef.current;
     if (queue.length === 0) return;
     const entry = queue[0];
-    if (entry.chunks.length === 0 && !entry.done) return; // wait for first chunk
+    if (!entry.done) return; // wait for all chunks before playing
     startPlayback(entry);
   }
 
@@ -163,7 +119,7 @@ export function useRealtimeTranslation() {
     ttsQueueRef.current = [];
     receivingEntryRef.current = null;
     isTtsPlayingRef.current = false;
-    playbackRef.current = null;
+    currentAudioRef.current = null;
     setStatus("connecting");
     setUtterances([]);
     setLiveTranscript("");
@@ -258,12 +214,11 @@ export function useRealtimeTranslation() {
           );
 
         } else if (msg.type === "tts_end") {
-          // Mark done → MSE will call endOfStream after last chunk is appended
           const entry = receivingEntryRef.current;
           if (entry && entry.utteranceId === msg.utteranceId) {
             entry.done = true;
             receivingEntryRef.current = null;
-            appendNextFromQueue(); // trigger endOfStream if all chunks already appended
+            tryPlayNextRef.current(); // start playback now that all chunks are received
           }
           setUtterances((prev) =>
             prev.map((u) => {
@@ -284,17 +239,7 @@ export function useRealtimeTranslation() {
       } else if (event.data instanceof ArrayBuffer) {
         const entry = receivingEntryRef.current;
         if (!entry) return;
-
-        const pb = playbackRef.current;
-        if (pb && pb.entry === entry) {
-          // This entry is currently playing — append directly to MSE
-          pb.appendQueue.push(event.data);
-          appendNextFromQueue();
-        } else {
-          // Not playing yet — buffer until it's this entry's turn
-          entry.chunks.push(event.data);
-          tryPlayNextRef.current(); // start playback if this is front-of-queue
-        }
+        entry.chunks.push(event.data);
       }
     };
 
@@ -318,11 +263,10 @@ export function useRealtimeTranslation() {
   }, []);
 
   const clear = useCallback(() => {
-    if (playbackRef.current) {
-      playbackRef.current.audio.pause();
-      playbackRef.current.audio.src = "";
-      URL.revokeObjectURL(playbackRef.current.objectUrl);
-      playbackRef.current = null;
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.src = "";
+      currentAudioRef.current = null;
     }
     isTtsPlayingRef.current = false;
     ttsQueueRef.current = [];
