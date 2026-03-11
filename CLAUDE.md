@@ -12,11 +12,14 @@ This is to impress them at the paid technical test stage. I'm the top candidate 
 - **Worker:** https://brivva-translation.milliytechnology.workers.dev
 - **Repo:** https://github.com/TyposBro/brivva (private)
 
-Verified latency from session logs (English → French, Kokoro `ff_siwis`):
-- Translation (M2M100): 446–757ms CF-side
-- TTS (Kokoro): cold start ~2.3s CF, warm ~1–1.3s CF
-- Total from final transcript to audio ready: ~1.6–3.1s (1.6s warm)
+Verified latency from session logs (English → French, Kokoro `ff_siwis`, self-hosted M1 Pro):
+- Translation (M2M100): 394–870ms CF-side (2826ms for long sentences)
+- TTS (Kokoro self-hosted MPS): 584ms–3407ms, typically 1369–2297ms
+- Total from FINAL to audio done: 1066ms best case, 1857–3032ms typical
+- No cold starts, no rate limits — 20+ consecutive utterances stable
 - Continuous speech correctly segmented — multiple translation cards appear while speaking
+
+See `docs.md` for full technical analysis including STT/TTS provider comparisons.
 
 ## What This Is
 
@@ -36,7 +39,7 @@ Cloudflare Worker (Hono/TS)
 ├── /api/realtime   ← WebSocket endpoint
 │   ├── Proxy PCM audio → Nova-3 via CF AI Gateway WebSocket
 │   ├── Stream interim transcripts back immediately
-│   ├── On is_final OR speech_final → M2M100 translate → aura-2-es TTS
+│   ├── On is_final OR speech_final → M2M100 translate → Kokoro TTS
 │   └── Stream TTS audio back through same WebSocket
 ├── /api/translate  ← legacy batch HTTP (kept as fallback)
 └── /api/tts        ← standalone TTS endpoint
@@ -117,11 +120,15 @@ To update: `cd worker && npx wrangler secret put <NAME> --env=""`
 Brivva's current listed pipeline: Whisper STT → Context NMT → Emotive TTS → Wav2Lip
 My proposed improvements (now demonstrated):
 
-1. **Deepgram Nova-3** over Whisper — real-time WebSocket streaming, better accuracy
+1. **Deepgram Nova-3** over Whisper — real-time WebSocket streaming (interims while speaking); Whisper is batch-only, cannot stream
 2. **M2M100 on CF edge** over Context NMT — no external API, dedicated translation model, ~500ms
-3. **Kokoro TTS** over Emotive TTS — highest quality open-source TTS, natural French voice
-4. **Cloudflare edge** for STT+translate pipeline — only TTS needs external API (Replicate)
+3. **Kokoro TTS** over Emotive TTS — open-source (Apache 2.0), 587ms warm, self-hostable on M1 Pro
+4. **Cloudflare edge** for STT+translate pipeline — only TTS needs external compute
 5. **InfiniteTalk** over Wav2Lip (future) — full body + expression sync, Apache 2.0
+
+**STT decision (settled):** Nova-3 is non-negotiable for real-time. Whisper Large v3 Turbo is faster/cheaper/more accurate in batch (Groq: 375.9x, 4.8% WER, $0.67/1000min vs Nova-3: 222.6x, 6.5% WER, $4.30/1000min) but cannot stream. Different tools for different jobs.
+
+**TTS decision (in progress):** Kokoro self-hosted on M1 Pro to replace Replicate. Eliminates cold starts and rate limiting.
 
 ## About Brivva (from interview Mar 10)
 

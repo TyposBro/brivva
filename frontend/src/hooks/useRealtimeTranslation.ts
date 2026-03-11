@@ -7,33 +7,45 @@ const SAMPLE_RATE = 16000; // Nova-3 expects 16kHz PCM
 const BUFFER_SIZE = 4096;  // ScriptProcessor chunk size
 
 export type Timing = {
-  sttStartAt?: number;       // first interim received (proxy for speech start)
+  sttStartAt?: number;    // first interim received (proxy for speech start)
   finalAt: number;
   translationAt?: number;
-  translateMs?: number;      // M2M100 duration on CF edge
+  translateMs?: number;   // M2M100 duration on CF edge
   ttsStartAt?: number;
   ttsEndAt?: number;
-  ttsMs?: number;            // Kokoro TTS generation duration
-  // Comparison metrics (arrive async, don't block main pipeline)
-  whisperMs?: number;        // Whisper large-v3-turbo batch duration
-  whisperTranscript?: string;
-  cfTtsMs?: number;          // CF aura-2-fr (agathe) duration
+  ttsMs?: number;         // Kokoro TTS generation duration
 };
 
 export type Utterance = {
   id: number;
   transcript: string;   // English (finalized)
-  translation: string;  // Spanish
+  translation: string;  // Japanese
   timing: Timing;
 };
 
 export type RealtimeStatus = "idle" | "connecting" | "listening" | "processing";
 
 type LogEntry = {
-  t: string;         // ISO timestamp
-  ms: number;        // ms since session start
+  t: string;
+  ms: number;
   event: string;
   [key: string]: unknown;
+};
+
+// One entry per utterance — buffered while waiting, streamed while playing
+type TtsEntry = {
+  utteranceId: number;
+  chunks: ArrayBuffer[];  // buffered until this entry starts playing
+  done: boolean;          // tts_end received
+};
+
+type PlaybackState = {
+  entry: TtsEntry;
+  audio: HTMLAudioElement;
+  mediaSource: MediaSource;
+  sourceBuffer: SourceBuffer;
+  appendQueue: ArrayBuffer[];  // chunks waiting to be appended to MSE
+  objectUrl: string;
 };
 
 export function useRealtimeTranslation() {
@@ -57,7 +69,6 @@ export function useRealtimeTranslation() {
   const copyLog = useCallback(() => {
     const text = JSON.stringify(logRef.current, null, 2);
     navigator.clipboard.writeText(text).catch(() => {
-      // fallback: open in new tab
       const blob = new Blob([text], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
@@ -69,68 +80,101 @@ export function useRealtimeTranslation() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
 
-  // Tracks first interim arrival for current utterance (STT phase start)
   const interimStartRef = useRef<number | null>(null);
 
-  // TTS queue — collect each clip fully, play sequentially (no overlap)
-  const ttsQueueRef = useRef<ArrayBuffer[][]>([]);
-  const currentTtsChunksRef = useRef<ArrayBuffer[]>([]);
+  // TTS streaming via MSE — FIFO, no overlap, plays first chunk immediately
+  const receivingEntryRef = useRef<TtsEntry | null>(null);  // entry currently receiving WS chunks
+  const ttsQueueRef = useRef<TtsEntry[]>([]);               // ordered playback queue
   const isTtsPlayingRef = useRef(false);
+  const playbackRef = useRef<PlaybackState | null>(null);
+  const tryPlayNextRef = useRef<() => void>(() => {});      // ref to break startPlayback↔tryPlayNext cycle
 
-  const playNextTts = useCallback(() => {
-    if (isTtsPlayingRef.current || ttsQueueRef.current.length === 0) return;
-    isTtsPlayingRef.current = true;
-    const chunks = ttsQueueRef.current.shift()!;
-
-    // Concatenate all chunks into one buffer
-    const totalBytes = chunks.reduce((n, c) => n + c.byteLength, 0);
-    const combined = new Uint8Array(totalBytes);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(new Uint8Array(chunk), offset);
-      offset += chunk.byteLength;
+  // Append next chunk from queue to MSE source buffer (called on updateend + new chunk)
+  function appendNextFromQueue() {
+    const pb = playbackRef.current;
+    if (!pb || !pb.sourceBuffer) return;
+    if (pb.sourceBuffer.updating) return;
+    if (pb.appendQueue.length > 0) {
+      pb.sourceBuffer.appendBuffer(pb.appendQueue.shift()!);
+    } else if (pb.entry.done && pb.mediaSource.readyState === "open") {
+      pb.mediaSource.endOfStream();
     }
+  }
 
-    // decodeAudioData auto-detects format — works on all browsers regardless of MIME type
-    const ctx = new AudioContext();
-    ctx.decodeAudioData(combined.buffer.slice(0)).then((audioBuffer) => {
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      source.onended = () => {
-        ctx.close();
-        isTtsPlayingRef.current = false;
-        playNextTts();
-      };
-      source.start();
-    }).catch((err) => {
-      console.error("TTS decode error:", err);
-      ctx.close();
-      isTtsPlayingRef.current = false;
-      playNextTts();
+  // Begin MSE streaming playback for an entry
+  function startPlayback(entry: TtsEntry) {
+    isTtsPlayingRef.current = true;
+
+    const mediaSource = new MediaSource();
+    const objectUrl = URL.createObjectURL(mediaSource);
+    const audio = new Audio(objectUrl);
+
+    const pb: PlaybackState = {
+      entry,
+      audio,
+      mediaSource,
+      sourceBuffer: null as unknown as SourceBuffer, // assigned in sourceopen
+      appendQueue: [...entry.chunks],  // snapshot all buffered chunks
+      objectUrl,
+    };
+    entry.chunks = []; // future chunks go directly to pb.appendQueue
+    playbackRef.current = pb;
+
+    mediaSource.addEventListener("sourceopen", () => {
+      try {
+        const sb = mediaSource.addSourceBuffer("audio/mpeg");
+        pb.sourceBuffer = sb;
+        sb.addEventListener("updateend", appendNextFromQueue);
+        appendNextFromQueue(); // start draining the initial buffer
+      } catch (err) {
+        console.error("MSE setup error:", err);
+      }
     });
-  }, []);
+
+    const onDone = () => {
+      URL.revokeObjectURL(objectUrl);
+      playbackRef.current = null;
+      isTtsPlayingRef.current = false;
+      ttsQueueRef.current.shift();
+      tryPlayNextRef.current();
+    };
+    audio.onended = onDone;
+    audio.onerror = () => { console.error("Audio playback error"); onDone(); };
+
+    audio.play().catch(console.error);
+  }
+
+  // Start next queued entry if idle and chunks are available
+  function tryPlayNext() {
+    if (isTtsPlayingRef.current) return;
+    const queue = ttsQueueRef.current;
+    if (queue.length === 0) return;
+    const entry = queue[0];
+    if (entry.chunks.length === 0 && !entry.done) return; // wait for first chunk
+    startPlayback(entry);
+  }
+
+  tryPlayNextRef.current = tryPlayNext; // keep ref fresh each render
 
   const start = useCallback(async () => {
     logRef.current = [];
     sessionStartRef.current = Date.now();
     log("SESSION_START");
     ttsQueueRef.current = [];
-    currentTtsChunksRef.current = [];
+    receivingEntryRef.current = null;
     isTtsPlayingRef.current = false;
+    playbackRef.current = null;
     setStatus("connecting");
     setUtterances([]);
     setLiveTranscript("");
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    // Web Audio at 16kHz — matches Nova-3 linear16 encoding
     const audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     audioCtxRef.current = audioCtx;
 
     const source = audioCtx.createMediaStreamSource(stream);
 
-    // Analyser for waveform visualisation only
     const analyserNode = audioCtx.createAnalyser();
     analyserNode.fftSize = 512;
     source.connect(analyserNode);
@@ -141,15 +185,12 @@ export function useRealtimeTranslation() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      // ScriptProcessor captures raw PCM and streams it immediately
-      // (deprecated but widely supported; AudioWorklet is the modern alternative)
       const processor = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
         if (ws.readyState !== WebSocket.OPEN) return;
         const float32 = e.inputBuffer.getChannelData(0);
-        // Convert Float32 [-1,1] → Int16 [-32768,32767]
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
@@ -171,16 +212,14 @@ export function useRealtimeTranslation() {
           utteranceId?: number;
           translateMs?: number;
           ttsMs?: number;
-          whisperMs?: number;
-          whisperTranscript?: string;
-          cfTtsMs?: number;
         };
 
         if (msg.type === "interim") {
-          if (interimStartRef.current === null) interimStartRef.current = Date.now(); // first interim = speech start
+          if (interimStartRef.current === null) interimStartRef.current = Date.now();
           setLiveTranscript(msg.transcript ?? "");
           setStatus("listening");
           log("INTERIM", { transcript: msg.transcript });
+
         } else if (msg.type === "final") {
           const finalAt = Date.now();
           const sttStartAt = interimStartRef.current ?? finalAt;
@@ -192,6 +231,7 @@ export function useRealtimeTranslation() {
           setLiveTranscript("");
           setStatus("processing");
           log("FINAL", { utteranceId: msg.utteranceId, transcript: msg.transcript });
+
         } else if (msg.type === "translation") {
           const translationAt = Date.now();
           setUtterances((prev) =>
@@ -203,7 +243,12 @@ export function useRealtimeTranslation() {
             })
           );
           setStatus("listening");
+
         } else if (msg.type === "tts_start") {
+          // Create entry, push to queue, try to start playing immediately
+          const entry: TtsEntry = { utteranceId: msg.utteranceId!, chunks: [], done: false };
+          receivingEntryRef.current = entry;
+          ttsQueueRef.current.push(entry);
           setUtterances((prev) =>
             prev.map((u) => {
               if (u.id !== msg.utteranceId) return u;
@@ -211,44 +256,45 @@ export function useRealtimeTranslation() {
               return { ...u, timing: { ...u.timing, ttsStartAt: Date.now() } };
             })
           );
-          currentTtsChunksRef.current = [];
+
         } else if (msg.type === "tts_end") {
+          // Mark done → MSE will call endOfStream after last chunk is appended
+          const entry = receivingEntryRef.current;
+          if (entry && entry.utteranceId === msg.utteranceId) {
+            entry.done = true;
+            receivingEntryRef.current = null;
+            appendNextFromQueue(); // trigger endOfStream if all chunks already appended
+          }
           setUtterances((prev) =>
             prev.map((u) => {
               if (u.id !== msg.utteranceId) return u;
               const ttsEndAt = Date.now();
               const totalMs = ttsEndAt - u.timing.finalAt;
-              log("TTS_END", { utteranceId: msg.utteranceId, cfMs: msg.ttsMs, totalMs });
+              log("TTS_END", { utteranceId: msg.utteranceId, ttsMs: msg.ttsMs, totalMs });
               return { ...u, timing: { ...u.timing, ttsEndAt, ttsMs: msg.ttsMs } };
             })
           );
-          // Enqueue completed clip and play when previous finishes
-          ttsQueueRef.current.push(currentTtsChunksRef.current);
-          currentTtsChunksRef.current = [];
-          playNextTts();
-        } else if (msg.type === "stt_compare") {
-          setUtterances((prev) =>
-            prev.map((u) => {
-              if (u.id !== msg.utteranceId) return u;
-              log("STT_COMPARE", { utteranceId: msg.utteranceId, whisperMs: msg.whisperMs, whisperTranscript: msg.whisperTranscript });
-              return { ...u, timing: { ...u.timing, whisperMs: msg.whisperMs as number, whisperTranscript: msg.whisperTranscript as string } };
-            })
-          );
-        } else if (msg.type === "tts_compare") {
-          setUtterances((prev) =>
-            prev.map((u) => {
-              if (u.id !== msg.utteranceId) return u;
-              log("TTS_COMPARE", { utteranceId: msg.utteranceId, cfTtsMs: msg.cfTtsMs });
-              return { ...u, timing: { ...u.timing, cfTtsMs: msg.cfTtsMs as number } };
-            })
-          );
+
         } else if (msg.type === "error") {
           console.error("Worker error:", msg);
           log("ERROR", { message: msg });
           setStatus("idle");
         }
+
       } else if (event.data instanceof ArrayBuffer) {
-        currentTtsChunksRef.current.push(event.data);
+        const entry = receivingEntryRef.current;
+        if (!entry) return;
+
+        const pb = playbackRef.current;
+        if (pb && pb.entry === entry) {
+          // This entry is currently playing — append directly to MSE
+          pb.appendQueue.push(event.data);
+          appendNextFromQueue();
+        } else {
+          // Not playing yet — buffer until it's this entry's turn
+          entry.chunks.push(event.data);
+          tryPlayNextRef.current(); // start playback if this is front-of-queue
+        }
       }
     };
 
@@ -271,16 +317,21 @@ export function useRealtimeTranslation() {
     wsRef.current?.close();
   }, []);
 
-  // Reset session data without closing the connection (accounts for cold starts)
   const clear = useCallback(() => {
-    setUtterances([]);
-    setLiveTranscript("");
-    interimStartRef.current = null;
-    ttsQueueRef.current = [];
-    currentTtsChunksRef.current = [];
+    if (playbackRef.current) {
+      playbackRef.current.audio.pause();
+      playbackRef.current.audio.src = "";
+      URL.revokeObjectURL(playbackRef.current.objectUrl);
+      playbackRef.current = null;
+    }
     isTtsPlayingRef.current = false;
+    ttsQueueRef.current = [];
+    receivingEntryRef.current = null;
+    interimStartRef.current = null;
     logRef.current = [];
     sessionStartRef.current = Date.now();
+    setUtterances([]);
+    setLiveTranscript("");
     log("SESSION_CLEAR");
   }, []);
 

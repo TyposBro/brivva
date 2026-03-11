@@ -14,29 +14,7 @@ type M2MResult = { translated_text: string };
 
 type State = {
   pending: string;
-  audioChunks: ArrayBuffer[]; // PCM buffer for Whisper comparison
 };
-
-// Build a minimal WAV from raw Int16 PCM chunks (mono 16kHz)
-function pcmChunksToWavArray(chunks: ArrayBuffer[]): number[] {
-  if (chunks.length === 0) return [];
-  const totalPcm = chunks.reduce((n, c) => n + c.byteLength, 0);
-  const pcm = new Uint8Array(totalPcm);
-  let off = 0;
-  for (const c of chunks) { pcm.set(new Uint8Array(c), off); off += c.byteLength; }
-
-  const wav = new Uint8Array(44 + totalPcm);
-  const v = new DataView(wav.buffer);
-  // RIFF header
-  wav.set([82,73,70,70], 0); v.setUint32(4, 36 + totalPcm, true);
-  wav.set([87,65,86,69], 8); wav.set([102,109,116,32], 12);
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true);
-  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
-  wav.set([100,97,116,97], 36); v.setUint32(40, totalPcm, true);
-  wav.set(pcm, 44);
-  return [...wav];
-}
 
 async function handleNovaMessage(
   data: string | ArrayBuffer,
@@ -71,32 +49,6 @@ async function handleNovaMessage(
   const utteranceId = Date.now();
   clientWs.send(JSON.stringify({ type: "final", transcript: finalTranscript, utteranceId }));
 
-  // Snapshot + reset audio buffer
-  const capturedChunks = state.audioChunks;
-  state.audioChunks = [];
-
-  // ── Background: Whisper STT comparison ────────────────────────────────────
-  // Runs concurrently — does NOT block the main translate+TTS pipeline.
-  // Sends { type: "stt_compare" } when done.
-  (async () => {
-    const wavArr = pcmChunksToWavArray(capturedChunks);
-    if (wavArr.length === 0) return;
-    try {
-      const t = Date.now();
-      const result = await (
-        env.AI.run as (m: string, i: object) => Promise<{ text: string }>
-      )("@cf/openai/whisper-large-v3-turbo", { audio: wavArr });
-      clientWs.send(JSON.stringify({
-        type: "stt_compare",
-        utteranceId,
-        whisperMs: Date.now() - t,
-        whisperTranscript: result.text?.trim() ?? "",
-      }));
-    } catch (err) {
-      console.error("Whisper compare failed:", err);
-    }
-  })();
-
   // ── Main pipeline: M2M100 translation ────────────────────────────────────
   const t0 = Date.now();
   const m2mResult = await (
@@ -104,7 +56,7 @@ async function handleNovaMessage(
   )("@cf/meta/m2m100-1.2b", {
     text: finalTranscript,
     source_lang: "en",
-    target_lang: "fr",
+    target_lang: "ja",
   });
   const translateMs = Date.now() - t0;
 
@@ -113,94 +65,23 @@ async function handleNovaMessage(
 
   clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId, translateMs }));
 
-  // ── Background: CF TTS comparison (aura-2-fr / agathe) ───────────────────
-  // Runs concurrently with Kokoro — does NOT block audio delivery.
-  // Sends { type: "tts_compare" } when done.
-  (async () => {
-    try {
-      const t = Date.now();
-      const stream = await (
-        env.AI.run as (m: string, i: object) => Promise<ReadableStream>
-      )("@cf/deepgram/aura-2-fr", { text: translation, speaker: "agathe" });
-      const reader = stream.getReader();
-      while (true) {
-        const { done } = await reader.read();
-        if (done) break;
-      }
-      clientWs.send(JSON.stringify({
-        type: "tts_compare",
-        utteranceId,
-        cfTtsMs: Date.now() - t,
-      }));
-    } catch (err) {
-      console.error("CF TTS compare failed:", err);
-    }
-  })();
-
-  // ── Main pipeline: Kokoro TTS via Replicate ───────────────────────────────
+  // ── Main pipeline: Kokoro TTS (self-hosted via Kokoro-FastAPI) ───────────
   const t1 = Date.now();
 
-  type KokoroResult = { id?: string; status?: string; output?: string; error?: string };
+  const kokoroResp = await fetch(`${env.KOKORO_URL}/v1/audio/speech`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "kokoro", voice: "jf_alpha", input: translation }),
+  });
 
-  let kokoroResult: KokoroResult | null = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const resp = await fetch("https://api.replicate.com/v1/predictions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}`,
-        "Content-Type": "application/json",
-        "Prefer": "wait",
-      },
-      body: JSON.stringify({
-        version: "f559560eb822dc509045f3921a1921234918b91739db4bf3daab2169b71c7a13",
-        input: { text: translation, voice: "ff_siwis" },
-      }),
-    });
-    if (resp.status === 429) {
-      const retryData = await resp.json() as { retry_after?: number };
-      const waitMs = ((retryData.retry_after ?? 10) + 1) * 1000;
-      await new Promise((r) => setTimeout(r, waitMs));
-      continue;
-    }
-    kokoroResult = await resp.json() as KokoroResult;
-    break;
-  }
-
-  if (!kokoroResult) {
-    clientWs.send(JSON.stringify({ type: "error", message: "Kokoro rate limited after retries" }));
+  if (!kokoroResp.ok || !kokoroResp.body) {
+    const detail = await kokoroResp.text().catch(() => "");
+    console.error("Kokoro TTS error:", kokoroResp.status, detail);
+    clientWs.send(JSON.stringify({ type: "error", message: `Kokoro error ${kokoroResp.status}: ${detail}` }));
     return;
   }
 
-  let audioUrl = kokoroResult.output;
-
-  if (!audioUrl && kokoroResult.id && kokoroResult.status !== "failed") {
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const poll = await fetch(`https://api.replicate.com/v1/predictions/${kokoroResult.id}`, {
-        headers: { "Authorization": `Bearer ${env.REPLICATE_API_TOKEN}` },
-      });
-      const pollResult = await poll.json() as KokoroResult;
-      if (pollResult.status === "succeeded" && pollResult.output) {
-        audioUrl = pollResult.output;
-        break;
-      }
-      if (pollResult.status === "failed") {
-        console.error("Kokoro prediction failed:", pollResult.error);
-        clientWs.send(JSON.stringify({ type: "error", message: `Kokoro failed: ${pollResult.error}` }));
-        return;
-      }
-    }
-  }
-
-  if (!audioUrl) {
-    const detail = JSON.stringify(kokoroResult);
-    console.error("Kokoro TTS no output:", detail);
-    clientWs.send(JSON.stringify({ type: "error", message: `Kokoro no output: ${detail}` }));
-    return;
-  }
-
-  const audioResp = await fetch(audioUrl);
-  const audioReader = audioResp.body!.getReader();
+  const audioReader = kokoroResp.body.getReader();
 
   clientWs.send(JSON.stringify({ type: "tts_start", utteranceId }));
   while (true) {
@@ -259,7 +140,7 @@ realtimeApp.get("/realtime", async (c) => {
     return new Response(null, { status: 101, webSocket: client } as ResponseInit);
   }
 
-  const novaState: State = { pending: "", audioChunks: [] };
+  const novaState: State = { pending: "" };
 
   // Nova-3 → Client
   novaWs.addEventListener("message", (event) => {
@@ -268,13 +149,10 @@ realtimeApp.get("/realtime", async (c) => {
   novaWs.addEventListener("close", () => server.close());
   novaWs.addEventListener("error", () => server.close());
 
-  // Client → Nova-3: forward PCM + buffer for Whisper comparison
+  // Client → Nova-3: forward PCM
   server.addEventListener("message", (event) => {
     if (event.data instanceof ArrayBuffer && novaWs.readyState === WebSocket.OPEN) {
       novaWs.send(event.data);
-      if (novaState.audioChunks.length < 50) { // cap ~10s
-        novaState.audioChunks.push(event.data);
-      }
     }
   });
   server.addEventListener("close", () => novaWs.close());
