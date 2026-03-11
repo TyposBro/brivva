@@ -17,6 +17,7 @@ const VOICE_MAP: Record<Lang, string> = {
 
 export class RoomDO {
   private roomId = "";
+  private sourceLang = "ko";
   private hostWs: WebSocket | null = null;
   private novaWs: WebSocket | null = null;
   private novaState = { pending: "" };
@@ -65,25 +66,48 @@ export class RoomDO {
   // ── Nova-3 ─────────────────────────────────────────────────────────────────
 
   private async connectNova(): Promise<void> {
-    const url = new URL(
-      `https://gateway.ai.cloudflare.com/v1/${this.env.CF_ACCOUNT_ID}/${this.env.CF_AI_GATEWAY_ID}/workers-ai`
-    );
-    url.searchParams.set("model", "@cf/deepgram/nova-3");
-    url.searchParams.set("encoding", "linear16");
-    url.searchParams.set("sample_rate", "16000");
-    url.searchParams.set("channels", "1");
-    url.searchParams.set("language", "multi");
-    url.searchParams.set("interim_results", "true");
-    url.searchParams.set("punctuate", "true");
-    url.searchParams.set("smart_format", "true");
-    url.searchParams.set("endpointing", "300");
-    url.searchParams.set("utterance_end_ms", "1000");
+    // Direct Deepgram API supports all languages including Korean.
+    // CF AI Gateway Nova-3 binding only supports language=en.
+    const useDirect = !!this.env.DEEPGRAM_API_KEY;
 
-    const resp = await fetch(url.toString(), {
-      headers: {
-        Upgrade: "websocket",
-        "cf-aig-authorization": `Bearer ${this.env.CF_API_TOKEN}`,
-      },
+    let wsUrl: string;
+    let authHeader: Record<string, string>;
+
+    if (useDirect) {
+      const url = new URL("https://api.deepgram.com/v1/listen");
+      url.searchParams.set("model", "nova-3");
+      url.searchParams.set("encoding", "linear16");
+      url.searchParams.set("sample_rate", "16000");
+      url.searchParams.set("channels", "1");
+      url.searchParams.set("language", this.sourceLang);
+      url.searchParams.set("interim_results", "true");
+      url.searchParams.set("punctuate", "true");
+      url.searchParams.set("smart_format", "true");
+      url.searchParams.set("endpointing", "300");
+      url.searchParams.set("utterance_end_ms", "1000");
+      wsUrl = url.toString();
+      authHeader = { Authorization: `Token ${this.env.DEEPGRAM_API_KEY}` };
+    } else {
+      // CF AI Gateway fallback — English only
+      const url = new URL(
+        `https://gateway.ai.cloudflare.com/v1/${this.env.CF_ACCOUNT_ID}/${this.env.CF_AI_GATEWAY_ID}/workers-ai`
+      );
+      url.searchParams.set("model", "@cf/deepgram/nova-3");
+      url.searchParams.set("encoding", "linear16");
+      url.searchParams.set("sample_rate", "16000");
+      url.searchParams.set("channels", "1");
+      url.searchParams.set("language", "en");
+      url.searchParams.set("interim_results", "true");
+      url.searchParams.set("punctuate", "true");
+      url.searchParams.set("smart_format", "true");
+      url.searchParams.set("endpointing", "300");
+      url.searchParams.set("utterance_end_ms", "1000");
+      wsUrl = url.toString();
+      authHeader = { "cf-aig-authorization": `Bearer ${this.env.CF_API_TOKEN}` };
+    }
+
+    const resp = await fetch(wsUrl, {
+      headers: { Upgrade: "websocket", ...authHeader },
     });
 
     if (resp.status !== 101) {
@@ -112,7 +136,9 @@ export class RoomDO {
     if (!msg.is_final && !msg.speech_final) {
       if (!transcript) return;
       this.novaState.pending = transcript;
-      this.broadcastToAllGuests(JSON.stringify({ type: "interim", transcript }));
+      const interimMsg = JSON.stringify({ type: "interim", transcript });
+      if (this.hostWs) this.send(this.hostWs, interimMsg);
+      this.broadcastToAllGuests(interimMsg);
       return;
     }
 
@@ -121,7 +147,9 @@ export class RoomDO {
     if (!finalTranscript) return;
 
     const utteranceId = Date.now();
-    this.broadcastToAllGuests(JSON.stringify({ type: "final", transcript: finalTranscript, utteranceId }));
+    const finalMsg = JSON.stringify({ type: "final", transcript: finalTranscript, utteranceId });
+    if (this.hostWs) this.send(this.hostWs, finalMsg);
+    this.broadcastToAllGuests(finalMsg);
     await this.fanOut(finalTranscript, utteranceId);
   }
 
@@ -139,7 +167,7 @@ export class RoomDO {
         try {
           const result = await (
             this.env.AI.run as (m: string, i: object) => Promise<M2MResult>
-          )("@cf/meta/m2m100-1.2b", { text: transcript, source_lang: "ko", target_lang: lang });
+          )("@cf/meta/m2m100-1.2b", { text: transcript, source_lang: this.sourceLang, target_lang: lang });
           return { lang, text: result.translated_text?.trim() ?? "", translateMs: Date.now() - t0 };
         } catch (err) {
           console.error(`[room:${this.roomId}] translate ${lang} error:`, err);
@@ -205,6 +233,7 @@ export class RoomDO {
 
       this.hostWs = server;
       this.roomId = roomId;
+      this.sourceLang = url.searchParams.get("sourceLang") ?? "ko";
 
       try {
         await this.connectNova();

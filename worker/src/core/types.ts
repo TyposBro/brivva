@@ -8,6 +8,7 @@ export type Bindings = {
   CF_AI_GATEWAY_ID: string;
   KOKORO_URL: string;
   ROOMS: DurableObjectNamespace;
+  DEEPGRAM_API_KEY?: string;
 };
 
 export type Variables = {

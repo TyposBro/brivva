@@ -46,7 +46,7 @@ export function useHostRoom() {
     setUtterances([]);
     setLiveTranscript("");
 
-    const ws = new WebSocket(`${WS_URL}/api/room?role=host`);
+    const ws = new WebSocket(`${WS_URL}/api/room?role=host&sourceLang=en`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 

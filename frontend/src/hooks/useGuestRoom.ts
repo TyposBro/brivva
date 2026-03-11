@@ -43,7 +43,7 @@ export function useGuestRoom(roomId: string, lang: Lang | null) {
     };
     audio.onended = onDone;
     audio.onerror = () => { console.error("Audio playback error"); onDone(); };
-    audio.play().catch(console.error);
+    audio.play().catch((err) => { console.error("Audio play() rejected:", err); onDone(); });
   }
 
   function tryPlayNext() {

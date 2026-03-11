@@ -38,7 +38,12 @@ export default function GuestPage() {
               <button
                 key={lang}
                 className="lang-pick-btn"
-                onClick={() => setSelectedLang(lang)}
+                onClick={() => {
+                  // Unlock browser audio on user gesture so later audio.play() calls succeed
+                  const ctx = new AudioContext();
+                  ctx.resume().then(() => ctx.close());
+                  setSelectedLang(lang);
+                }}
               >
                 {LANG_LABELS[lang]}
               </button>
