@@ -45,7 +45,7 @@ export default function HostPage() {
       <header className="header">
         <button className="back-btn" onClick={handleBack}>← Back</button>
         <h1 className="logo">brivva</h1>
-        <p className="tagline">Host · Korean</p>
+        <p className="tagline">Host · English</p>
       </header>
 
       <main className="main">
@@ -92,9 +92,9 @@ export default function HostPage() {
 
         {isReady && (
           <div className="lang-badge">
-            <span>한국어</span>
+            <span>English</span>
             <span className="arrow">→</span>
-            <span>EN / 日本語 / 中文</span>
+            <span>日本語 / 中文</span>
           </div>
         )}
 
@@ -111,7 +111,7 @@ export default function HostPage() {
           {utterances.map((u) => (
             <div key={u.id} className="utterance">
               <div className="result-card">
-                <span className="result-label">Korean</span>
+                <span className="result-label">English</span>
                 <p className="result-text">{u.transcript}</p>
               </div>
             </div>
