@@ -1,6 +1,32 @@
 # Brivva Technical Documentation
 
-## Pipeline Overview
+## v2 Architecture (current — rooms + multi-language)
+
+```
+Host Browser (/host)
+  → Korean speech → PCM linear16 @ 16kHz (ScriptProcessorNode)
+  → WebSocket /api/room → host:create → room:created{roomId}
+  → Binary PCM frames → Worker
+
+Worker (Cloudflare, Hono)
+  → Room state in-memory Map (one isolate, one DC)
+  → Nova-3 (Deepgram, streaming STT via CF AI Gateway WS, language=ko)
+  → On is_final/speech_final:
+      Promise.all([
+        M2M100 ko→en  (if EN guests),
+        M2M100 ko→ja  (if JA guests),
+        M2M100 ko→zh  (if ZH guests),
+      ])
+  → Per language: Kokoro TTS → stream audio chunks
+  → Broadcast to all guests in that language group
+
+Guest Browser (/room/:id)
+  → WebSocket /api/room → guest:join{roomId, lang}
+  → Receives: interim, final, translation, tts_start, [MP3 chunks], tts_end
+  → Blob URL playback (same as v1)
+```
+
+## v1 Architecture (single-user, still deployed at /api/realtime)
 
 ```
 Browser mic
@@ -12,7 +38,92 @@ Browser mic
   → WebSocket binary → Browser Blob URL playback → speaker
 ```
 
-## Measured Latency (Mar 11 2026)
+## Worker Statefulness
+
+**No Durable Objects.** Room state is a module-level `Map<string, Room>` in the JS isolate:
+
+```typescript
+const rooms = new Map<string, Room>();
+```
+
+CF Workers run in V8 isolates. An open WebSocket connection keeps the isolate alive. All connections that hit the same isolate share the same `rooms` Map.
+
+### Limits
+
+| Thing | Limit | Notes |
+|-------|-------|-------|
+| Room lifetime | As long as host WS is open | Open WS keeps isolate alive |
+| Isolate eviction | ~30s after last request/message | All rooms wiped — guests see "closed" |
+| Multiple data centers | Each DC has its own isolate | Host + guest must land on same DC |
+| Worker CPU per request | 30s (paid) / 50ms (free) | WS handlers are event-driven, not a single long request |
+| Concurrent WS connections | ~1000 per isolate (practical) | Fine for demo |
+| Room persistence across restarts | None | In-memory only |
+
+**For the demo:** 3 tabs on one machine → same data center → same isolate. Works.
+
+**For production:** Durable Objects. One DO per room = single-instance actor, survives idle gaps, globally consistent. ~2h refactor.
+
+---
+
+## WebSocket Protocol (v2, /api/room)
+
+**Host messages (client → server):**
+```
+{ type: "host:create", sourceLang: "ko" }   → server responds room:created
+[ArrayBuffer]                               → PCM audio frames (same as v1)
+{ type: "host:end" }                        → close room
+```
+
+**Guest messages (client → server):**
+```
+{ type: "guest:join", roomId: "ABC123", lang: "en"|"ja"|"zh" }
+```
+
+**Server → Host:**
+```
+{ type: "room:created",    roomId }
+{ type: "room:guest_count", counts: { en: 5, ja: 3, zh: 12 } }
+{ type: "interim",         transcript, utteranceId }
+{ type: "final",           transcript, utteranceId }
+```
+
+**Server → Guest (same pipeline messages as v1):**
+```
+{ type: "room:joined",    roomId, lang }
+{ type: "interim",        transcript, utteranceId }
+{ type: "final",          transcript, utteranceId }
+{ type: "translation",    text, utteranceId, translateMs }
+{ type: "tts_start",      utteranceId }
+[ArrayBuffer...]                                    ← raw MP3 chunks
+{ type: "tts_end",        utteranceId, ttsMs }
+{ type: "room:closed" }                             ← host disconnected
+{ type: "error",          message }
+```
+
+## Fan-out Optimization
+
+Translate ONCE per language, broadcast to all N guests:
+
+```
+utterance finalized
+  → check active lang groups (e.g. EN: 3 guests, JA: 1 guest, ZH: 0)
+  → Promise.all([translate ko→en, translate ko→ja])   ← parallel
+  → for each lang in parallel:
+      Kokoro TTS → stream chunks → broadcast to all N guests in group
+```
+
+50 JA guests = 1 translation + 1 TTS call. Not 50.
+
+## M2M100 Language Codes
+
+Korean host to all supported guest languages:
+- `source_lang: "ko"` → `target_lang: "en"` (English)
+- `source_lang: "ko"` → `target_lang: "ja"` (Japanese)
+- `source_lang: "ko"` → `target_lang: "zh"` (Chinese)
+
+---
+
+## Measured Latency (Mar 11 2026, v1 baseline)
 
 From `FINAL` event to `TTS_END` (full pipeline, browser perspective):
 
@@ -22,15 +133,7 @@ From `FINAL` event to `TTS_END` (full pipeline, browser perspective):
 | Typical sentence | 394–870ms | 1369–2297ms | 1857–3032ms |
 | Long sentence | ~2826ms | ~3407ms | ~3803ms |
 
-**Translation (M2M100 on CF):** 394–870ms typical, near-zero network overhead. Up to 2826ms for longer sentences.
-
-**TTS (Kokoro self-hosted on M1 Pro MPS, Japanese jf_alpha):**
-- Best case: ~430ms (short Japanese text — more compact than French)
-- Typical: varies by utterance length
-- No cold starts, no rate limits
-- Occasional 502 from cloudflared tunnel (transient, self-resolving)
-
-**vs Replicate:** M1 MPS eliminates cold starts (2–4s) and rate limiting (10–14s). Consistency wins for live demo use.
+v2 adds parallel translation overhead (negligible — same M2M100 call, just parallel). TTS fan-out runs concurrently per language.
 
 ---
 
@@ -38,11 +141,11 @@ From `FINAL` event to `TTS_END` (full pipeline, browser perspective):
 
 ### Why Nova-3
 
-Nova-3 is a **streaming** STT model — it returns interim transcripts token-by-token while the user is still speaking. This enables:
+Nova-3 is a **streaming** STT model — returns interim transcripts token-by-token while the user is still speaking. Enables:
 - Live transcript display (words appear in real-time)
 - Pipeline starts translating the moment speech ends (no extra wait)
 
-Whisper is **batch-only** — it requires the complete audio clip before transcription begins. No interims possible.
+Whisper is **batch-only** — requires the complete audio clip before transcription begins. No interims possible.
 
 ### Accuracy & Cost (Artificial Analysis, Mar 2026)
 
@@ -52,62 +155,36 @@ Whisper is **batch-only** — it requires the complete audio clip before transcr
 | Whisper Large v3 (Fireworks) | 4.8% | 301.7x | $1.00/1000min |
 | Nova-3 (Deepgram) | 6.5% | 222.6x | $4.30/1000min |
 
-Whisper is more accurate and cheaper in batch mode. Nova-3 is more expensive and slightly less accurate.
-
-### Verdict
-
-**Use Nova-3 for real-time streaming.** The streaming capability is non-negotiable for live translation UX — it's what makes interims visible and keeps pipeline latency tight. Whisper cannot replace it without fundamentally changing the product (VAD + batch → no live transcript).
-
-Whisper is the right choice for batch transcription workloads (post-processing, analytics).
+**Use Nova-3 for real-time streaming.** Streaming is non-negotiable for live translation UX.
 
 ---
 
 ## TTS: Kokoro vs CF Aura-2-fr
 
-### Kokoro 82M (self-hosted M1 Pro, voice: jf_alpha)
+### Kokoro 82M (self-hosted M1 Pro, voice: jf_alpha / af_bella / zf_xiaobei)
 
-- Quality: Arena ELO ~1050, natural Japanese female voice
+- Quality: Arena ELO ~1050, natural voices
 - Latency: ~430ms short text, no cold starts, no rate limits
 - Price: free (self-hosted)
 - Open source (Apache 2.0)
 - Requires `misaki[ja]` + UniDic dictionary for Japanese tokenization
 
-### CF Aura-2-fr (Deepgram, speaker: agathe)
-
-- Not on Artificial Analysis TTS leaderboard (quality unknown)
-- Expected latency: ~1.5–3s (based on CF aura-2-es measurements)
-- Price: included in CF Workers AI usage
-- No cold starts (serverless CF edge)
-- Not self-hostable
-
 ### Verdict
 
-**Kokoro self-hosted wins.** Better quality, lower latency, no cold starts, no rate limits. CF Aura-2-fr was a fallback option — no longer needed.
+**Kokoro self-hosted wins.** Better quality, lower latency, no cold starts, no rate limits.
 
 ---
 
-## Message Protocol (Worker ↔ Browser)
-
-```
-{ type: "interim",     transcript, utteranceId }          ← live words while speaking
-{ type: "final",       transcript, utteranceId }          ← utterance finalized
-{ type: "translation", text, utteranceId, translateMs }   ← Japanese text + M2M100 ms
-{ type: "tts_start",   utteranceId }                      ← audio stream starting
-[ArrayBuffer...]                                          ← raw MP3 audio bytes
-{ type: "tts_end",     utteranceId, ttsMs }               ← audio done + Kokoro ms
-{ type: "error",       message }                          ← pipeline error
-```
-
 ## Key Implementation Notes
 
-- **`is_final` trigger**: Nova-3 fires `is_final=true` for each finalized chunk during continuous speech. `speech_final` only fires on silence. Both trigger translation to keep pipeline responsive.
-- **`state.pending` fallback**: `speech_final` sometimes arrives with empty transcript (endpointing signal only). Use last non-empty interim as fallback.
+- **`is_final` trigger**: Nova-3 fires `is_final=true` for each finalized chunk during continuous speech. `speech_final` only fires on silence. Both trigger translation.
+- **`state.pending` fallback**: `speech_final` sometimes arrives with empty transcript. Use last non-empty interim as fallback.
 - **TTS queue**: `isTtsPlayingRef` prevents audio overlap. Clips play FIFO. All chunks buffered until `tts_end`, then played via Blob URL.
-- **TTS playback — Blob URL not MSE**: `MediaSource.addSourceBuffer("audio/mpeg")` throws on Safari (not supported). Fixed by buffering all chunks, creating `new Blob(chunks, {type: "audio/mpeg"})` on `tts_end`, playing via `new Audio(blobUrl)`. Works on all browsers.
+- **TTS playback — Blob URL not MSE**: `MediaSource.addSourceBuffer("audio/mpeg")` throws on Safari. Fixed by buffering all chunks → `new Blob(chunks, {type: "audio/mpeg"})` → `new Audio(blobUrl)`. Works everywhere.
 - **`clientWs.send(value)` not `value.buffer`**: Uint8Array subview — `.buffer` references the underlying SharedArrayBuffer which may contain garbage outside the view's range.
-- **ScriptProcessorNode**: Deprecated but universally supported. AudioWorklet is the modern alternative but requires more setup.
-- **PCM encoding**: Web Audio captures Float32 [-1,1]. Nova-3 requires Int16 [-32768,32767] linear16. Convert per sample: `Math.max(-32768, Math.min(32767, float32 * 32768))`.
-- **Japanese TTS — UniDic required**: Kokoro's `misaki[ja]` Japanese tokenizer uses MeCab + UniDic. The `unidic` pip package installs without dictionary data — must run `python -m unidic download` separately (526MB). Missing data causes `MeCab initialization failed` on every Japanese request.
+- **ScriptProcessorNode**: Deprecated but universally supported. AudioWorklet is the modern alternative.
+- **PCM encoding**: Web Audio captures Float32 [-1,1]. Nova-3 requires Int16. Convert: `Math.max(-32768, Math.min(32767, float32 * 32768))`.
+- **Japanese TTS — UniDic required**: `python -m unidic download` (526MB). Missing data causes `MeCab initialization failed`.
 
 ## CF AI Gateway
 
