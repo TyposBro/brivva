@@ -12,11 +12,11 @@ This is to impress them at the paid technical test stage. I'm the top candidate 
 - **Worker:** https://brivva-translation.milliytechnology.workers.dev
 - **Repo:** https://github.com/TyposBro/brivva (private)
 
-Verified latency from session logs (English → French, Kokoro `ff_siwis`, self-hosted M1 Pro):
-- Translation (M2M100): 394–870ms CF-side (2826ms for long sentences)
-- TTS (Kokoro self-hosted MPS): 584ms–3407ms, typically 1369–2297ms
-- Total from FINAL to audio done: 1066ms best case, 1857–3032ms typical
-- No cold starts, no rate limits — 20+ consecutive utterances stable
+Verified latency from session logs (English → Japanese, Kokoro `jf_alpha`, self-hosted M1 Pro):
+- Translation (M2M100): 394–870ms CF-side
+- TTS (Kokoro self-hosted MPS): ~430ms short text (Japanese is compact)
+- Total from FINAL to audio done: ~887ms short utterance
+- No cold starts, no rate limits
 - Continuous speech correctly segmented — multiple translation cards appear while speaking
 
 See `docs.md` for full technical analysis including STT/TTS provider comparisons.
@@ -24,7 +24,7 @@ See `docs.md` for full technical analysis including STT/TTS provider comparisons
 ## What This Is
 
 A working MVP of Brivva's core product pipeline: **Speak → STT → Translate → TTS → Playback**
-Hardcoded: English → French. Audio-only (no video/lip-sync).
+Hardcoded: English → Japanese. Audio-only (no video/lip-sync).
 
 ## Architecture (current)
 
@@ -33,7 +33,7 @@ Browser (React/TS)
 ├── Web Audio API → PCM linear16 @ 16kHz (ScriptProcessorNode)
 ├── WebSocket → Cloudflare Worker
 ├── Receive: interim words (live) + final + translation + TTS audio
-└── Play TTS audio via AudioContext.decodeAudioData (queued, no overlap)
+└── Play TTS audio via Blob URL + new Audio() (FIFO queue, no overlap)
 
 Cloudflare Worker (Hono/TS)
 ├── /api/realtime   ← WebSocket endpoint
@@ -51,7 +51,7 @@ Cloudflare Worker (Hono/TS)
 - **Backend:** Cloudflare Workers (Hono framework)
 - **STT:** `@cf/deepgram/nova-3` via CF AI Gateway WebSocket (real-time streaming)
 - **Translation:** `@cf/meta/m2m100-1.2b` (dedicated seq2seq, ~500ms CF)
-- **TTS:** Kokoro `jaaari/kokoro-82m` via Replicate API (French voice: `ff_siwis`, ~1–2.3s CF)
+- **TTS:** Kokoro 82M self-hosted on M1 Pro MPS via Kokoro-FastAPI (Japanese voice: `jf_alpha`, ~430ms+)
 
 ## Real-Time Pipeline Detail
 
@@ -64,27 +64,28 @@ Nova-3 (CF AI Gateway WS)
     └── speech_final=true → utterance endpoint → translate + TTS (uses
                              last interim if transcript is empty)
                               ↓
-                    M2M100 1.2B → French text (~500ms CF)
+                    M2M100 1.2B → Japanese text (~500ms CF)
                               ↓
-                    Kokoro ff_siwis via Replicate → WAV audio (~1-2.3s CF)
+                    Kokoro jf_alpha self-hosted MPS → MP3 audio (~430ms+)
                               ↓
-                    WebSocket binary → browser AudioContext queue
+                    WebSocket binary → browser Blob URL playback
 ```
 
 **Message protocol (Worker ↔ Browser):**
 ```
 { type: "interim",     transcript, utteranceId }              ← live words
 { type: "final",       transcript, utteranceId }              ← chunk done
-{ type: "translation", text, utteranceId, translateMs }       ← French text + CF timing
+{ type: "translation", text, utteranceId, translateMs }       ← Japanese text + CF timing
 { type: "tts_start",   utteranceId }                          ← audio coming
 [ArrayBuffer...]                                              ← raw audio bytes
 { type: "tts_end",     utteranceId, ttsMs }                   ← audio done + CF timing
 ```
 
 **TTS playback queue (frontend):**
-- Chunks buffered into `currentTtsChunksRef` while streaming
-- On `tts_end`: clip pushed to `ttsQueueRef`, played via `AudioContext.decodeAudioData`
+- Chunks buffered into `entry.chunks[]` while streaming
+- On `tts_end`: `new Blob(chunks, {type:"audio/mpeg"})` → `new Audio(blobUrl).play()`
 - `isTtsPlayingRef` gates playback — no overlap, FIFO order
+- MSE (`audio/mpeg`) was tried first but throws on Safari — Blob URL works everywhere
 
 **Per-utterance timing display:**
 - Each card shows: `translate: Xms (CF: Yms) · audio: Xms (CF: Yms)`
@@ -93,10 +94,10 @@ Nova-3 (CF AI Gateway WS)
 ## Worker Secrets (already set)
 
 ```
-CF_ACCOUNT_ID       = 80a55132ae169d5b282ccf505bc66bf7
-CF_API_TOKEN        = (set via wrangler secret)
-CF_AI_GATEWAY_ID    = default
-REPLICATE_API_TOKEN = (set via wrangler secret)
+CF_ACCOUNT_ID    = 80a55132ae169d5b282ccf505bc66bf7
+CF_API_TOKEN     = (set via wrangler secret)
+CF_AI_GATEWAY_ID = default
+KOKORO_URL       = https://kokoro.milliytechnology.org
 ```
 
 To update: `cd worker && npx wrangler secret put <NAME> --env=""`
@@ -107,13 +108,12 @@ To update: `cd worker && npx wrangler secret put <NAME> --env=""`
 - **Trigger on `is_final` not just `speech_final`** — speech_final only fires on silence; is_final fires for each Deepgram chunk during continuous speech
 - **`state.pending` fallback** — speech_final sometimes arrives with empty transcript (endpoint signal only); we use last non-empty interim
 - **TTS queue** — `isTtsPlayingRef` prevents overlap; each clip plays after previous ends
-- **`AudioContext.decodeAudioData`** — format-agnostic, works on Firefox/Brave/Chrome/Safari; Blob+Audio with audio/mpeg failed on Firefox
+- **TTS playback — Blob URL** — `MediaSource.addSourceBuffer("audio/mpeg")` throws on Safari; fixed by buffering all chunks, combining into `Blob`, playing via `new Audio(blobUrl)`. Works on all browsers.
 - **`clientWs.send(value)` not `value.buffer`** — Uint8Array subview bug; full underlying buffer contained garbage bytes
 - **ScriptProcessorNode + Int16 PCM** — MediaRecorder gives WebM chunks; Nova-3 needs raw PCM linear16; Web Audio captures Float32 and converts
 - CF secrets needed for AI Gateway: `CF_ACCOUNT_ID`, `CF_API_TOKEN` (AI Gateway Run + Workers AI Run), `CF_AI_GATEWAY_ID=default`
-- **Kokoro via Replicate** — `jaaari/kokoro-82m`, voice `ff_siwis` (French female); Japanese (`jf_alpha`) not available due to missing `misaki[ja]` on Replicate deployment
-- **Replicate 429 retry** — Prefer:wait requests retry up to 5× with `retry_after+1s` backoff; <$5 credit triggers burst limit of 1 req/min
-- **Kokoro Prefer:wait polling fallback** — if synchronous response times out (cold start), polls prediction URL every 1s up to 60×
+- **Kokoro self-hosted** — Kokoro-FastAPI on M1 Pro MPS, voice `jf_alpha` (Japanese female); exposed via cloudflared named tunnel at `kokoro.milliytechnology.org`
+- **UniDic download required** — `misaki[ja]` needs MeCab + UniDic dictionary; `unidic` pip package installs without data — must run `python -m unidic download` once (526MB). `kokoro-start.sh` checks and downloads automatically.
 
 ## Why This Matters for the Interview
 
@@ -128,7 +128,7 @@ My proposed improvements (now demonstrated):
 
 **STT decision (settled):** Nova-3 is non-negotiable for real-time. Whisper Large v3 Turbo is faster/cheaper/more accurate in batch (Groq: 375.9x, 4.8% WER, $0.67/1000min vs Nova-3: 222.6x, 6.5% WER, $4.30/1000min) but cannot stream. Different tools for different jobs.
 
-**TTS decision (in progress):** Kokoro self-hosted on M1 Pro to replace Replicate. Eliminates cold starts and rate limiting.
+**TTS decision (done):** Kokoro self-hosted on M1 Pro MPS. No cold starts, no rate limits, ~430ms for short Japanese text.
 
 ## About Brivva (from interview Mar 10)
 

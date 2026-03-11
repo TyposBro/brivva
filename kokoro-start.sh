@@ -4,6 +4,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KOKORO_DIR="$SCRIPT_DIR/kokoro"
 
+# Check UniDic dictionary (required for Japanese TTS)
+if [ ! -f "$KOKORO_DIR/.venv/lib/python3.10/site-packages/unidic/dicdir/mecabrc" ]; then
+  echo "Downloading UniDic dictionary (526MB, one-time)..."
+  "$KOKORO_DIR/.venv/bin/python" -m unidic download
+fi
+
 # Free port 8880 if already in use
 lsof -ti :8880 | xargs kill -9 2>/dev/null || true
 
