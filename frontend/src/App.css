@@ -465,6 +465,29 @@ body {
   color: var(--text-muted);
 }
 
+.cmp-badge {
+  font-size: 0.62rem;
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 3px;
+}
+
+.cmp-better {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+
+.cmp-worse {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--error);
+}
+
+.cmp-pending {
+  color: var(--text-muted);
+  opacity: 0.6;
+  font-size: 0.62rem;
+}
+
 .lp-legend-row {
   display: flex;
   gap: 0.9rem;

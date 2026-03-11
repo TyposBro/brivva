@@ -12,13 +12,37 @@ type NovaMessage = {
 
 type M2MResult = { translated_text: string };
 
-// Each speech_final utterance gets a stable ID so out-of-order
-// translations (when user speaks fast) update the right card.
+type State = {
+  pending: string;
+  audioChunks: ArrayBuffer[]; // PCM buffer for Whisper comparison
+};
+
+// Build a minimal WAV from raw Int16 PCM chunks (mono 16kHz)
+function pcmChunksToWavArray(chunks: ArrayBuffer[]): number[] {
+  if (chunks.length === 0) return [];
+  const totalPcm = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const pcm = new Uint8Array(totalPcm);
+  let off = 0;
+  for (const c of chunks) { pcm.set(new Uint8Array(c), off); off += c.byteLength; }
+
+  const wav = new Uint8Array(44 + totalPcm);
+  const v = new DataView(wav.buffer);
+  // RIFF header
+  wav.set([82,73,70,70], 0); v.setUint32(4, 36 + totalPcm, true);
+  wav.set([87,65,86,69], 8); wav.set([102,109,116,32], 12);
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  wav.set([100,97,116,97], 36); v.setUint32(40, totalPcm, true);
+  wav.set(pcm, 44);
+  return [...wav];
+}
+
 async function handleNovaMessage(
   data: string | ArrayBuffer,
   clientWs: WebSocket,
   env: Bindings,
-  state: { pending: string }
+  state: State
 ) {
   if (typeof data !== "string") return;
 
@@ -34,25 +58,46 @@ async function handleNovaMessage(
   const transcript = msg.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
 
   if (!msg.is_final && !msg.speech_final) {
-    // Pure streaming interim — update live UI only, don't translate
     if (!transcript) return;
     state.pending = transcript;
     clientWs.send(JSON.stringify({ type: "interim", transcript }));
     return;
   }
 
-  // is_final=true or speech_final=true: Deepgram has locked in this chunk.
-  // speech_final sometimes arrives with empty transcript (endpoint signal only) —
-  // fall back to last interim in that case.
   const finalTranscript = transcript || state.pending;
   state.pending = "";
   if (!finalTranscript) return;
 
-  // speech_final: complete utterance — assign ID so translation can find it
   const utteranceId = Date.now();
   clientWs.send(JSON.stringify({ type: "final", transcript: finalTranscript, utteranceId }));
 
-  // Translate English → Spanish via M2M100 (dedicated seq2seq, faster than LLM)
+  // Snapshot + reset audio buffer
+  const capturedChunks = state.audioChunks;
+  state.audioChunks = [];
+
+  // ── Background: Whisper STT comparison ────────────────────────────────────
+  // Runs concurrently — does NOT block the main translate+TTS pipeline.
+  // Sends { type: "stt_compare" } when done.
+  (async () => {
+    const wavArr = pcmChunksToWavArray(capturedChunks);
+    if (wavArr.length === 0) return;
+    try {
+      const t = Date.now();
+      const result = await (
+        env.AI.run as (m: string, i: object) => Promise<{ text: string }>
+      )("@cf/openai/whisper-large-v3-turbo", { audio: wavArr });
+      clientWs.send(JSON.stringify({
+        type: "stt_compare",
+        utteranceId,
+        whisperMs: Date.now() - t,
+        whisperTranscript: result.text?.trim() ?? "",
+      }));
+    } catch (err) {
+      console.error("Whisper compare failed:", err);
+    }
+  })();
+
+  // ── Main pipeline: M2M100 translation ────────────────────────────────────
   const t0 = Date.now();
   const m2mResult = await (
     env.AI.run as (m: string, i: object) => Promise<M2MResult>
@@ -68,12 +113,35 @@ async function handleNovaMessage(
 
   clientWs.send(JSON.stringify({ type: "translation", text: translation, utteranceId, translateMs }));
 
-  // TTS — Kokoro via Replicate (ff_siwis: French female voice)
+  // ── Background: CF TTS comparison (aura-2-fr / agathe) ───────────────────
+  // Runs concurrently with Kokoro — does NOT block audio delivery.
+  // Sends { type: "tts_compare" } when done.
+  (async () => {
+    try {
+      const t = Date.now();
+      const stream = await (
+        env.AI.run as (m: string, i: object) => Promise<ReadableStream>
+      )("@cf/deepgram/aura-2-fr", { text: translation, speaker: "agathe" });
+      const reader = stream.getReader();
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+      clientWs.send(JSON.stringify({
+        type: "tts_compare",
+        utteranceId,
+        cfTtsMs: Date.now() - t,
+      }));
+    } catch (err) {
+      console.error("CF TTS compare failed:", err);
+    }
+  })();
+
+  // ── Main pipeline: Kokoro TTS via Replicate ───────────────────────────────
   const t1 = Date.now();
 
   type KokoroResult = { id?: string; status?: string; output?: string; error?: string };
 
-  // Retry up to 5 times on 429 — respect retry_after from Replicate
   let kokoroResult: KokoroResult | null = null;
   for (let attempt = 0; attempt < 5; attempt++) {
     const resp = await fetch("https://api.replicate.com/v1/predictions", {
@@ -105,7 +173,6 @@ async function handleNovaMessage(
 
   let audioUrl = kokoroResult.output;
 
-  // Prefer: wait may time out and return status:"starting"/"processing" — poll until done
   if (!audioUrl && kokoroResult.id && kokoroResult.status !== "failed") {
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1000));
@@ -132,7 +199,6 @@ async function handleNovaMessage(
     return;
   }
 
-  // Fetch the generated audio and stream it back as binary
   const audioResp = await fetch(audioUrl);
   const audioReader = audioResp.body!.getReader();
 
@@ -156,8 +222,6 @@ realtimeApp.get("/realtime", async (c) => {
 
   const env = c.env;
 
-  // Connect to Nova-3 via Cloudflare AI Gateway WebSocket
-  // PCM linear16 @ 16kHz — matches what the frontend sends
   const url = new URL(
     `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_AI_GATEWAY_ID}/workers-ai`
   );
@@ -195,18 +259,22 @@ realtimeApp.get("/realtime", async (c) => {
     return new Response(null, { status: 101, webSocket: client } as ResponseInit);
   }
 
+  const novaState: State = { pending: "", audioChunks: [] };
+
   // Nova-3 → Client
-  const novaState = { pending: "" };
   novaWs.addEventListener("message", (event) => {
     handleNovaMessage(event.data, server, env, novaState).catch(console.error);
   });
   novaWs.addEventListener("close", () => server.close());
   novaWs.addEventListener("error", () => server.close());
 
-  // Client → Nova-3: forward raw PCM audio
+  // Client → Nova-3: forward PCM + buffer for Whisper comparison
   server.addEventListener("message", (event) => {
     if (event.data instanceof ArrayBuffer && novaWs.readyState === WebSocket.OPEN) {
       novaWs.send(event.data);
+      if (novaState.audioChunks.length < 50) { // cap ~10s
+        novaState.audioChunks.push(event.data);
+      }
     }
   });
   server.addEventListener("close", () => novaWs.close());

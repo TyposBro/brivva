@@ -56,9 +56,21 @@ function LatencyPanel({ utterances, isProcessing }: { utterances: Utterance[]; i
                     <span className="lp-row-ms">{total}ms</span>
                   </div>
                   <div className="lp-row-detail">
-                    <span><span className="leg-dot seg-stt" />STT {sPhase}ms</span>
+                    <span>
+                      <span className="leg-dot seg-stt" />
+                      STT {sPhase}ms
+                      {u.timing.whisperMs != null
+                        ? <span className="cmp-badge cmp-worse"> Nova-3 · Whisper {u.timing.whisperMs}ms</span>
+                        : <span className="cmp-pending"> · Whisper…</span>}
+                    </span>
                     <span><span className="leg-dot seg-translate" />Tr {tPhase}ms</span>
-                    <span><span className="leg-dot seg-tts" />TTS {gPhase}ms</span>
+                    <span>
+                      <span className="leg-dot seg-tts" />
+                      TTS {gPhase}ms
+                      {u.timing.cfTtsMs != null
+                        ? <span className={u.timing.cfTtsMs < gPhase ? "cmp-badge cmp-better" : "cmp-badge cmp-worse"}> Kokoro · CF {u.timing.cfTtsMs}ms</span>
+                        : <span className="cmp-pending"> · CF…</span>}
+                    </span>
                     <span><span className="leg-dot seg-audio" />Net {aPhase}ms</span>
                   </div>
                 </div>

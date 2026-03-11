@@ -7,13 +7,17 @@ const SAMPLE_RATE = 16000; // Nova-3 expects 16kHz PCM
 const BUFFER_SIZE = 4096;  // ScriptProcessor chunk size
 
 export type Timing = {
-  sttStartAt?: number;   // first interim received (proxy for speech start)
+  sttStartAt?: number;       // first interim received (proxy for speech start)
   finalAt: number;
   translationAt?: number;
-  translateMs?: number;  // M2M100 duration on CF edge
+  translateMs?: number;      // M2M100 duration on CF edge
   ttsStartAt?: number;
   ttsEndAt?: number;
-  ttsMs?: number;        // TTS generation duration on CF edge
+  ttsMs?: number;            // Kokoro TTS generation duration
+  // Comparison metrics (arrive async, don't block main pipeline)
+  whisperMs?: number;        // Whisper large-v3-turbo batch duration
+  whisperTranscript?: string;
+  cfTtsMs?: number;          // CF aura-2-fr (agathe) duration
 };
 
 export type Utterance = {
@@ -167,6 +171,9 @@ export function useRealtimeTranslation() {
           utteranceId?: number;
           translateMs?: number;
           ttsMs?: number;
+          whisperMs?: number;
+          whisperTranscript?: string;
+          cfTtsMs?: number;
         };
 
         if (msg.type === "interim") {
@@ -219,6 +226,22 @@ export function useRealtimeTranslation() {
           ttsQueueRef.current.push(currentTtsChunksRef.current);
           currentTtsChunksRef.current = [];
           playNextTts();
+        } else if (msg.type === "stt_compare") {
+          setUtterances((prev) =>
+            prev.map((u) => {
+              if (u.id !== msg.utteranceId) return u;
+              log("STT_COMPARE", { utteranceId: msg.utteranceId, whisperMs: msg.whisperMs, whisperTranscript: msg.whisperTranscript });
+              return { ...u, timing: { ...u.timing, whisperMs: msg.whisperMs as number, whisperTranscript: msg.whisperTranscript as string } };
+            })
+          );
+        } else if (msg.type === "tts_compare") {
+          setUtterances((prev) =>
+            prev.map((u) => {
+              if (u.id !== msg.utteranceId) return u;
+              log("TTS_COMPARE", { utteranceId: msg.utteranceId, cfTtsMs: msg.cfTtsMs });
+              return { ...u, timing: { ...u.timing, cfTtsMs: msg.cfTtsMs as number } };
+            })
+          );
         } else if (msg.type === "error") {
           console.error("Worker error:", msg);
           log("ERROR", { message: msg });
