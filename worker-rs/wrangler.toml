@@ -1,0 +1,27 @@
+name = "brivva-translation"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-05-30"
+compatibility_flags = ["nodejs_compat"]
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+[ai]
+binding = "AI"
+
+[vars]
+ENVIRONMENT = "production"
+
+[dev]
+port = 8787
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RoomDO"]
