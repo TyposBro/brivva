@@ -1,5 +1,3 @@
-import type { Context as HonoContext } from "hono";
-
 export type Bindings = {
   AI: Ai;
   ENVIRONMENT: string;
@@ -10,9 +8,3 @@ export type Bindings = {
   ROOMS: DurableObjectNamespace;
   DEEPGRAM_API_KEY?: string;
 };
-
-export type Variables = {
-  requestId: string;
-};
-
-export type AppContext = HonoContext<{ Bindings: Bindings; Variables: Variables }>;

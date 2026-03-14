@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import type { Bindings, Variables } from "../../../core/types";
+import type { Bindings } from "../../core/types";
 
-const roomApp = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const roomApp = new Hono<{ Bindings: Bindings }>();
 
 function genRoomId(): string {
   return Math.random().toString(36).slice(2, 8).toUpperCase();

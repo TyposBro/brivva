@@ -1,15 +1,12 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { globalErrorHandler } from "./core/middleware/error.middleware";
-import translationApp from "./features/translation/api/translation.routes";
-import ttsApp from "./features/tts/api/tts.routes";
-import realtimeApp from "./features/realtime/api/realtime.routes";
-import roomApp from "./features/rooms/api/room.routes";
-import type { Bindings, Variables } from "./core/types";
+import roomApp from "./features/room/room.routes";
+import type { Bindings } from "./core/types";
 
-export { RoomDO } from "./features/rooms/room.do";
+export { RoomDO } from "./features/room/room.do";
 
-const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const app = new Hono<{ Bindings: Bindings }>();
 
 app.use(
   "*",
@@ -22,9 +19,6 @@ app.use(
 
 app.get("/live", (c) => c.json({ status: "ok", env: c.env.ENVIRONMENT }));
 
-app.route("/api", translationApp);
-app.route("/api", ttsApp);
-app.route("/api", realtimeApp);
 app.route("/api", roomApp);
 
 app.onError(globalErrorHandler);
