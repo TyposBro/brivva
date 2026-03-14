@@ -46,20 +46,32 @@ export class TtsPlayer {
 
   private play(entry: TtsEntry): void {
     this.playing = true;
-    const blob = new Blob(entry.chunks, { type: "audio/mpeg" });
-    const url = URL.createObjectURL(blob);
+    const url = this.createBlobUrl(entry.chunks);
     this.audio = new Audio(url);
+    this.wirePlaybackHandlers(url);
+    this.audio.play().catch((err) => {
+      console.error("TTS play() rejected:", err);
+      this.advance(url);
+    });
+  }
 
-    const onDone = () => {
-      URL.revokeObjectURL(url);
-      this.audio = null;
-      this.playing = false;
-      this.queue.shift();
-      this.tryPlayNext();
+  private createBlobUrl(chunks: ArrayBuffer[]): string {
+    return URL.createObjectURL(new Blob(chunks, { type: "audio/mpeg" }));
+  }
+
+  private wirePlaybackHandlers(url: string): void {
+    this.audio!.onended = () => this.advance(url);
+    this.audio!.onerror = () => {
+      console.error("TTS playback error");
+      this.advance(url);
     };
+  }
 
-    this.audio.onended = onDone;
-    this.audio.onerror = () => { console.error("TTS playback error"); onDone(); };
-    this.audio.play().catch((err) => { console.error("TTS play() rejected:", err); onDone(); });
+  private advance(url: string): void {
+    URL.revokeObjectURL(url);
+    this.audio = null;
+    this.playing = false;
+    this.queue.shift();
+    this.tryPlayNext();
   }
 }
