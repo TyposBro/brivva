@@ -9,24 +9,35 @@ type NovaMessage = {
   speech_final?: boolean;
 };
 
+const LANGS: Lang[] = ["en", "ja", "zh"];
+
 const VOICE_MAP: Record<Lang, string> = {
   en: "af_bella",
   ja: "jf_alpha",
   zh: "zf_xiaobei",
 };
 
+// Shared Nova-3 streaming params (identical for both Deepgram direct and CF Gateway)
+function setNovaParams(url: URL, language: string) {
+  url.searchParams.set("encoding", "linear16");
+  url.searchParams.set("sample_rate", "16000");
+  url.searchParams.set("channels", "1");
+  url.searchParams.set("language", language);
+  url.searchParams.set("interim_results", "true");
+  url.searchParams.set("punctuate", "true");
+  url.searchParams.set("smart_format", "true");
+  url.searchParams.set("endpointing", "300");
+  url.searchParams.set("utterance_end_ms", "1000");
+}
+
 export class RoomDO {
   private roomId = "";
-  private sourceLang = "ko";
+  private sourceLang = "en";
   private hostWs: WebSocket | null = null;
   private novaWs: WebSocket | null = null;
   private novaState = { pending: "" };
   private guests = new Map<string, { ws: WebSocket; lang: Lang }>();
-  private langGroups = new Map<Lang, Set<string>>([
-    ["en", new Set()],
-    ["ja", new Set()],
-    ["zh", new Set()],
-  ]);
+  private langGroups = new Map<Lang, Set<string>>(LANGS.map((l) => [l, new Set()]));
 
   constructor(
     _state: DurableObjectState,
@@ -76,15 +87,7 @@ export class RoomDO {
     if (useDirect) {
       const url = new URL("https://api.deepgram.com/v1/listen");
       url.searchParams.set("model", "nova-3");
-      url.searchParams.set("encoding", "linear16");
-      url.searchParams.set("sample_rate", "16000");
-      url.searchParams.set("channels", "1");
-      url.searchParams.set("language", this.sourceLang);
-      url.searchParams.set("interim_results", "true");
-      url.searchParams.set("punctuate", "true");
-      url.searchParams.set("smart_format", "true");
-      url.searchParams.set("endpointing", "300");
-      url.searchParams.set("utterance_end_ms", "1000");
+      setNovaParams(url, this.sourceLang);
       wsUrl = url.toString();
       authHeader = { Authorization: `Token ${this.env.DEEPGRAM_API_KEY}` };
     } else {
@@ -93,15 +96,7 @@ export class RoomDO {
         `https://gateway.ai.cloudflare.com/v1/${this.env.CF_ACCOUNT_ID}/${this.env.CF_AI_GATEWAY_ID}/workers-ai`
       );
       url.searchParams.set("model", "@cf/deepgram/nova-3");
-      url.searchParams.set("encoding", "linear16");
-      url.searchParams.set("sample_rate", "16000");
-      url.searchParams.set("channels", "1");
-      url.searchParams.set("language", "en");
-      url.searchParams.set("interim_results", "true");
-      url.searchParams.set("punctuate", "true");
-      url.searchParams.set("smart_format", "true");
-      url.searchParams.set("endpointing", "300");
-      url.searchParams.set("utterance_end_ms", "1000");
+      setNovaParams(url, "en");
       wsUrl = url.toString();
       authHeader = { "cf-aig-authorization": `Bearer ${this.env.CF_API_TOKEN}` };
     }
@@ -156,9 +151,7 @@ export class RoomDO {
   // ── Fan-out ────────────────────────────────────────────────────────────────
 
   private async fanOut(transcript: string, utteranceId: number) {
-    const activeLangs = (["en", "ja", "zh"] as Lang[]).filter(
-      (lang) => (this.langGroups.get(lang)?.size ?? 0) > 0
-    );
+    const activeLangs = LANGS.filter((lang) => (this.langGroups.get(lang)?.size ?? 0) > 0);
     if (!activeLangs.length) return;
 
     const translations = await Promise.all(
@@ -180,7 +173,8 @@ export class RoomDO {
       translations
         .filter(({ text }) => text.length > 0)
         .map(async ({ lang, text, translateMs }) => {
-          this.broadcastToLang(lang, JSON.stringify({ type: "translation", text, utteranceId, translateMs }));
+          const translationMsg = JSON.stringify({ type: "translation", text, utteranceId, translateMs });
+          this.broadcastToLang(lang, translationMsg);
           // Send translation timing to host for benchmark dashboard
           if (this.hostWs) this.send(this.hostWs, JSON.stringify({ type: "translation", utteranceId, translateMs }));
 
@@ -207,9 +201,10 @@ export class RoomDO {
             this.broadcastToLang(lang, value);
           }
           const ttsMs = Date.now() - t1;
-          this.broadcastToLang(lang, JSON.stringify({ type: "tts_end", utteranceId, ttsMs }));
+          const ttsEndMsg = JSON.stringify({ type: "tts_end", utteranceId, ttsMs });
+          this.broadcastToLang(lang, ttsEndMsg);
           // Send TTS timing to host for benchmark dashboard
-          if (this.hostWs) this.send(this.hostWs, JSON.stringify({ type: "tts_end", utteranceId, ttsMs }));
+          if (this.hostWs) this.send(this.hostWs, ttsEndMsg);
         })
     );
   }
@@ -238,12 +233,13 @@ export class RoomDO {
 
       this.hostWs = server;
       this.roomId = roomId;
-      this.sourceLang = url.searchParams.get("sourceLang") ?? "ko";
+      this.sourceLang = url.searchParams.get("sourceLang") ?? "en";
 
       try {
         await this.connectNova();
         server.send(JSON.stringify({ type: "room:created", roomId }));
       } catch (err) {
+        this.hostWs = null; // don't leave DO in broken state with hostWs set but no Nova
         server.send(JSON.stringify({ type: "error", message: String(err) }));
         server.close();
         return new Response(null, { status: 101, webSocket: client } as ResponseInit);
@@ -269,7 +265,7 @@ export class RoomDO {
         return new Response(null, { status: 101, webSocket: client } as ResponseInit);
       }
 
-      if (!lang || !["en", "ja", "zh"].includes(lang)) {
+      if (!lang || !LANGS.includes(lang)) {
         server.send(JSON.stringify({ type: "error", message: "Invalid language" }));
         server.close();
         return new Response(null, { status: 101, webSocket: client } as ResponseInit);
@@ -277,7 +273,7 @@ export class RoomDO {
 
       const guestId = crypto.randomUUID();
       this.guests.set(guestId, { ws: server, lang });
-      this.langGroups.get(lang)!.add(guestId);
+      this.langGroups.get(lang)?.add(guestId);
 
       server.send(JSON.stringify({ type: "room:joined", roomId, lang }));
       this.pushGuestCount();
