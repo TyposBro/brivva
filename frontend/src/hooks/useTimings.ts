@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef } from "react";
 
 const MAX_TIMINGS = 10;
 
@@ -20,15 +20,15 @@ export function useTimings() {
   const translateMsRef = useRef(new Map<string, number>());
   const finalizedRef = useRef(new Set<string>());
 
-  const recordFinal = useCallback((uid: string, text: string, langs: string[]) => {
+  const recordFinal = (uid: string, text: string, langs: string[]) => {
     startTimesRef.current.set(uid, { time: Date.now(), text, langs });
-  }, []);
+  };
 
-  const recordTranslation = useCallback((uid: string, translateMs: number) => {
+  const recordTranslation = (uid: string, translateMs: number) => {
     if (!translateMsRef.current.has(uid)) translateMsRef.current.set(uid, translateMs);
-  }, []);
+  };
 
-  const recordTtsEnd = useCallback((uid: string, ttsMs: number) => {
+  const recordTtsEnd = (uid: string, ttsMs: number) => {
     if (finalizedRef.current.has(uid)) return;
     const entry = startTimesRef.current.get(uid);
     if (!entry) return;
@@ -53,14 +53,14 @@ export function useTimings() {
 
     startTimesRef.current.delete(uid);
     translateMsRef.current.delete(uid);
-  }, []);
+  };
 
-  const reset = useCallback(() => {
+  const reset = () => {
     setTimings([]);
     startTimesRef.current.clear();
     translateMsRef.current.clear();
     finalizedRef.current.clear();
-  }, []);
+  };
 
   return { timings, recordFinal, recordTranslation, recordTtsEnd, reset };
 }
