@@ -8,34 +8,52 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      nllb:
-        condition: service_started
-      whisper-stt:
-        condition: service_started
-      kokoro:
-        condition: service_started
+      - nllb
+      - whisper-stt
+      - kokoro
     restart: unless-stopped
 
   nllb:
     build: ./nllb
     ports:
       - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   whisper-stt:
     build: ./whisper-stt
     ports:
       - "8765:8765"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   kokoro:
     build:
       context: ./kokoro
-      dockerfile: docker/cpu/Dockerfile
+      dockerfile: docker/gpu/Dockerfile
     ports:
       - "8880:8880"
     environment:
       - PYTHONPATH=/app:/app/api
-      - USE_GPU=false
+      - USE_GPU=true
       - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
