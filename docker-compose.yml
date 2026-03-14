@@ -1,0 +1,41 @@
+name: brivva
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server-rs/Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      nllb:
+        condition: service_started
+      whisper-stt:
+        condition: service_started
+      kokoro:
+        condition: service_started
+    restart: unless-stopped
+
+  nllb:
+    build: ./nllb
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  whisper-stt:
+    build: ./whisper-stt
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+
+  kokoro:
+    build:
+      context: ./kokoro
+      dockerfile: docker/cpu/Dockerfile
+    ports:
+      - "8880:8880"
+    environment:
+      - PYTHONPATH=/app:/app/api
+      - USE_GPU=false
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

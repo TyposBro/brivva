@@ -13,8 +13,8 @@ Real-time per-utterance timing as the host speaks.
 Host WebSocket already receives timing data:
 
 - `{ type: "final", utteranceId }` → record `Date.now()` as pipeline start
-- `{ type: "translation", utteranceId, translateMs }` → M2M100 timing (CF-side)
-- `{ type: "tts_end", utteranceId, ttsMs }` → Kokoro timing (CF-side)
+- `{ type: "translation", utteranceId, translateMs }` → NLLB timing (server-side)
+- `{ type: "tts_end", utteranceId, ttsMs }` → Kokoro timing (server-side)
 
 Compute on frontend:
 
@@ -97,7 +97,7 @@ Each utterance gets a row with a horizontal stacked bar:
 
 Colors:
 
-- **Purple (#8b5cf6)** — Translation (M2M100)
+- **Purple (#8b5cf6)** — Translation (NLLB)
 - **Amber (#f59e0b)** — TTS (Kokoro)
 - **Gray (#666)** — Overhead (network/routing)
 - **Green dashed line** — 300ms target marker (always visible as a thin vertical line)
@@ -116,13 +116,13 @@ Below the live timing panel, add a "Pipeline Analysis" section. This is static (
 
 Two columns or two stacked cards:
 
-**My Prototype:**
+**My Prototype (v3 — fully self-hosted):**
 | Phase | Tech | Measured |
 |-------|------|---------|
-| STT | Deepgram Nova-3 (streaming) | real-time interims |
-| Translation | M2M100-1.2B (CF Workers AI) | 394–870ms |
+| STT | WhisperLiveKit (base.en, mlx-whisper) | streaming, real-time interims |
+| Translation | NLLB-200-distilled-600M (localhost) | 200–900ms (warm) |
 | TTS | Kokoro 82M (self-hosted MPS) | 430–2300ms |
-| Rooms | Durable Objects | fan-out per language |
+| Server | Rust axum + DashMap (localhost) | fan-out per language |
 | Lip-sync | — | not implemented |
 
 **Brivva's Listed Pipeline:**
@@ -138,19 +138,21 @@ Two columns or two stacked cards:
 
 Three expandable sections. Each has a comparison table + one-line verdict.
 
-**STT — Why Nova-3:**
+**STT — Why WhisperLiveKit (self-hosted):**
 | Model | WER | Streaming | Price |
 |-------|-----|-----------|-------|
-| ✓ Nova-3 | 6.5% | Yes — live interims | $4.30/1000min |
+| ✓ WhisperLiveKit (base.en) | — | Yes — live interims | Free (self-hosted) |
+| Deepgram Nova-3 | 6.5% | Yes — streaming | $4.30/1000min |
 | Whisper v3 Turbo | 4.8% | No — batch only | $0.67/1000min |
-Verdict: "Streaming is non-negotiable for live translation. Whisper is better for batch/analytics."
+Verdict: "Streaming is non-negotiable for live translation. Self-hosted eliminates API costs and latency to cloud."
 
-**Translation — Why M2M100:**
+**Translation — Why NLLB (self-hosted):**
 | Model | Type | Latency |
 |-------|------|---------|
-| ✓ M2M100-1.2B | Seq2Seq | 394–870ms |
+| ✓ NLLB-200-distilled-600M | Seq2Seq | 200–900ms (warm) |
+| M2M100-1.2B (CF Workers AI) | Seq2Seq | 394–870ms |
 | Llama 3.2 1B | LLM prompted | ~1,500ms |
-Verdict: "Dedicated translation model. 3x faster than prompting an LLM."
+Verdict: "Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no network roundtrip to edge."
 
 **TTS — Why Kokoro (and its limits):**
 | Model | Params | Latency | Expressive |
@@ -163,9 +165,10 @@ Verdict: "Kokoro wins for demo speed. Production needs expressive TTS for live c
 ### Section: Gap to 300ms
 
 ```
-Translation:  ████████████████░░░░  630ms → 50ms target (12x)
+STT:          ██░░░░  100ms → 50ms target (2x)
+Translation:  ████████████████░░░░  550ms → 50ms target (11x)
 TTS:          ██████████████████████████████████████░░░░  1,340ms → 100ms target (13x)
-Overhead:     ████░░░░  130ms → 50ms target (2.6x)
+Overhead:     ████░░░░  110ms → 50ms target (2.2x)
 ─────────────────────────────────────────────────────
 Total:        ~2,100ms → 300ms (7x gap)
 ```
@@ -174,11 +177,12 @@ Total:        ~2,100ms → 300ms (7x gap)
 
 | Optimization                    | Savings               | Status            |
 | ------------------------------- | --------------------- | ----------------- |
+| Self-hosted pipeline (Rust)     | −latency to cloud     | Done ✓            |
 | Parallel translations           | —                     | Done ✓            |
-| Streaming TTS playback          | -500–1000ms perceived | Medium            |
-| Shorter utterance chunks        | -300–500ms            | Quality tradeoff  |
-| GPU TTS (A100/T4)               | -500–1500ms           | Cost increase     |
-| Co-locate all models on one GPU | -100–300ms            | Hard — infra      |
+| Streaming TTS playback          | −500–1000ms perceived | Medium            |
+| Shorter utterance chunks        | −300–500ms            | Quality tradeoff  |
+| GPU TTS (A100/T4)               | −500–1500ms           | Cost increase     |
+| Co-locate all models on one GPU | −100–300ms            | Brivva infra      |
 | End-to-end speech-to-speech     | paradigm shift        | Brivva's R&D goal |
 
 One-line footer: "True 300ms needs co-located models or end-to-end S2S. That's the R&D challenge."

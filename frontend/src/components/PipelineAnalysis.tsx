@@ -5,15 +5,15 @@ import { useState } from "react";
 const MAX_GAP_MS = 1600;
 const TARGET_MS = 300;
 const TOTAL_CURRENT_MS = 2100;
-const TOTAL_GAP_MULTIPLIER = 7;
+const TOTAL_GAP_MULTIPLIER = 7; // ~2100ms / 300ms
 
 type Row = string[];
 
 const MY_PIPELINE: Row[] = [
-  ["STT", "Deepgram Nova-3", "streaming ✓"],
-  ["Translation", "M2M100-1.2B (CF)", "394–870ms"],
+  ["STT", "WhisperLiveKit (base.en, mlx)", "streaming ✓"],
+  ["Translation", "NLLB (self-hosted)", "200–900ms"],
   ["TTS", "Kokoro 82M (MPS)", "430–2300ms"],
-  ["Rooms", "Durable Objects", "fan-out/lang"],
+  ["Server", "Rust axum + DashMap", "fan-out/lang"],
   ["Lip-sync", "—", "not built"],
 ];
 
@@ -26,12 +26,14 @@ const BRIVVA_PIPELINE: Row[] = [
 ];
 
 const STT_ROWS: Row[] = [
-  ["✓ Nova-3", "6.5%", "Yes — live interims", "$4.30/1000min"],
+  ["✓ WhisperLiveKit (base.en)", "—", "Yes — live interims", "Free (self-hosted)"],
+  ["Deepgram Nova-3", "6.5%", "Yes — streaming", "$4.30/1000min"],
   ["Whisper v3 Turbo", "4.8%", "No — batch only", "$0.67/1000min"],
 ];
 
 const TRANSLATION_ROWS: Row[] = [
-  ["✓ M2M100-1.2B", "Seq2Seq", "394–870ms"],
+  ["✓ NLLB (self-hosted)", "Seq2Seq", "200–900ms"],
+  ["M2M100-1.2B (CF Workers AI)", "Seq2Seq", "394–870ms"],
   ["Llama 3.2 1B", "LLM prompted", "~1,500ms"],
 ];
 
@@ -42,17 +44,19 @@ const TTS_ROWS: Row[] = [
 ];
 
 const GAP_ITEMS = [
-  { label: "Translate", currentMs: 630, targetMs: 50 },
+  { label: "STT", currentMs: 100, targetMs: 50 },
+  { label: "Translate", currentMs: 550, targetMs: 50 },
   { label: "TTS", currentMs: 1340, targetMs: 100 },
-  { label: "Overhead", currentMs: 130, targetMs: 50 },
+  { label: "Overhead", currentMs: 110, targetMs: 50 },
 ];
 
 const ROADMAP: Row[] = [
+  ["Self-hosted pipeline (Rust)", "−latency to cloud", "Done ✓"],
   ["Parallel translations", "—", "Done ✓"],
   ["Streaming TTS playback", "−500–1000ms perceived", "Medium"],
   ["Shorter utterance chunks", "−300–500ms", "Quality tradeoff"],
   ["GPU TTS (A100/T4)", "−500–1500ms", "Cost increase"],
-  ["Co-locate all models on one GPU", "−100–300ms", "Hard — infra"],
+  ["Co-locate all models on one GPU", "−100–300ms", "Brivva infra"],
   ["End-to-end speech-to-speech", "paradigm shift", "Brivva's R&D goal"],
 ];
 
@@ -99,13 +103,13 @@ function DecisionsSection() {
   return (
     <div className="pa-section">
       <h4 className="pa-subtitle">Component Decisions</h4>
-      <Collapsible title="STT — Why Nova-3 over Whisper">
+      <Collapsible title="STT — Why WhisperLiveKit (self-hosted)">
         <Table headers={["Model", "WER", "Streaming", "Price"]} rows={STT_ROWS} winnerIndex={0} />
-        <p className="pa-verdict">Streaming is non-negotiable for live translation. Whisper is better for batch/analytics.</p>
+        <p className="pa-verdict">Streaming is non-negotiable for live translation. Self-hosted eliminates API costs and latency to cloud.</p>
       </Collapsible>
-      <Collapsible title="Translation — Why M2M100 over LLM">
+      <Collapsible title="Translation — Why NLLB (self-hosted)">
         <Table headers={["Model", "Type", "Latency"]} rows={TRANSLATION_ROWS} winnerIndex={0} />
-        <p className="pa-verdict">Dedicated translation model. 3x faster than prompting an LLM.</p>
+        <p className="pa-verdict">Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no network roundtrip to edge.</p>
       </Collapsible>
       <Collapsible title="TTS — Why Kokoro (and its limits)">
         <Table headers={["Model", "Params", "Latency", "Expressive"]} rows={TTS_ROWS} winnerIndex={0} />

@@ -124,6 +124,7 @@ pub async fn start_stt(
     let mut last_interim = String::new();
     let mut prev_buffer_was_nonempty = false;
     let mut seen_line_texts: Vec<String> = Vec::new();
+    let mut emitted_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stt_stream.next().await {
@@ -180,7 +181,8 @@ pub async fn start_stt(
 
             // --- Path 2: lines text changed (direct-to-lines mode) ---
             for (i, line) in resp.lines.iter().enumerate() {
-                let line_text = line.text.trim().to_string();
+                // Strip "(silence)" markers that WhisperLiveKit appends during pauses
+                let line_text = line.text.replace("(silence)", "").trim().to_string();
                 if line_text.is_empty() {
                     continue;
                 }
@@ -190,8 +192,10 @@ pub async fn start_stt(
                     seen_line_texts.push(String::new());
                 }
 
-                if seen_line_texts[i] != line_text {
+                // Only emit once per line index — ignore subsequent mutations
+                if seen_line_texts[i] != line_text && !emitted_lines.contains(&i) {
                     seen_line_texts[i] = line_text.clone();
+                    emitted_lines.insert(i);
                     utterance_counter += 1;
                     let uid = utterance_counter;
                     println!("[FINAL #{}] {} (from line {})", uid, line_text, i);
