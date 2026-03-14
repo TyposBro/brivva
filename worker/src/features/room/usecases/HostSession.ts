@@ -1,15 +1,15 @@
-import type { Bindings } from "../../../core/types";
-import { Broadcaster } from "./Broadcaster";
-import { NovaStt } from "./NovaStt";
+import type { HostBroadcaster, SttFactory, TranslatorFactory, TtsFactory } from "../types";
 import { TranslationPipeline } from "./TranslationPipeline";
 
 export class HostSession {
-  private nova: NovaStt | null = null;
+  private stt: ReturnType<SttFactory> | null = null;
   private pipeline: TranslationPipeline | null = null;
 
   constructor(
-    private env: Bindings,
-    private broadcaster: Broadcaster,
+    private broadcaster: HostBroadcaster,
+    private createStt: SttFactory,
+    private createTranslator: TranslatorFactory,
+    private createTts: TtsFactory,
   ) {}
 
   async accept(ws: WebSocket, roomId: string, sourceLang: string): Promise<string | null> {
@@ -31,8 +31,12 @@ export class HostSession {
 
   private async startPipeline(roomId: string, sourceLang: string, ws: WebSocket) {
     this.broadcaster.setHost(ws);
-    this.pipeline = new TranslationPipeline(this.env, roomId, this.broadcaster, sourceLang);
-    this.nova = new NovaStt(this.env, roomId, {
+
+    const translator = this.createTranslator(sourceLang, roomId);
+    const tts = this.createTts(roomId);
+    this.pipeline = new TranslationPipeline(this.broadcaster, translator, tts);
+
+    this.stt = this.createStt(roomId, {
       onInterim: (transcript) => {
         this.broadcaster.sendToEveryone(JSON.stringify({ type: "interim", transcript }));
       },
@@ -42,12 +46,12 @@ export class HostSession {
       },
     });
 
-    await this.nova.connect(sourceLang);
+    await this.stt.connect(sourceLang);
   }
 
   private wireEvents(ws: WebSocket) {
     ws.addEventListener("message", (e) => {
-      if (e.data instanceof ArrayBuffer) this.nova?.sendAudio(e.data);
+      if (e.data instanceof ArrayBuffer) this.stt?.sendAudio(e.data);
       else this.handleText(e.data as string);
     });
     ws.addEventListener("close", () => this.stop());
@@ -62,9 +66,9 @@ export class HostSession {
 
   private stop() {
     this.broadcaster.sendToAllGuests(JSON.stringify({ type: "room:closed" }));
-    this.nova?.close();
+    this.stt?.close();
     this.broadcaster.clearHost();
-    this.nova = null;
+    this.stt = null;
     this.pipeline = null;
   }
 }

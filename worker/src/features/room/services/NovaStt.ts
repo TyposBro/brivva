@@ -1,15 +1,11 @@
 import type { Bindings } from "../../../core/types";
+import type { SttCallbacks } from "../types";
 
 type NovaMessage = {
   type: string;
   channel?: { alternatives: [{ transcript: string }] };
   is_final?: boolean;
   speech_final?: boolean;
-};
-
-export type SttCallbacks = {
-  onInterim: (transcript: string) => void;
-  onFinal: (transcript: string, utteranceId: number) => void;
 };
 
 const NOVA_PARAMS: Record<string, string> = {

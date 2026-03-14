@@ -4,7 +4,7 @@ import { TtsPlayer } from "../lib/TtsPlayer";
 import { guestReducer, INITIAL_STATE } from "../state/guest/reducer";
 import { createGuestMessageHandler } from "../state/guest/messageHandler";
 
-export type { Lang, GuestStatus, GuestUtterance } from "../state/guest/reducer";
+export type { GuestStatus, GuestUtterance } from "../state/guest/reducer";
 
 export function useGuestRoom(roomId: string, lang: string | null) {
   const [state, dispatch] = useReducer(guestReducer, INITIAL_STATE);

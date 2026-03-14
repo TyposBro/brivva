@@ -1,18 +1,15 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useGuestRoom, type Lang } from "../hooks/useGuestRoom";
-
-const LANG_LABELS: Record<Lang, string> = { en: "English", ja: "日本語", zh: "中文" };
-const VALID_LANGS: Lang[] = ["en", "ja", "zh"];
+import { useGuestRoom } from "../hooks/useGuestRoom";
+import { type Lang, LANGS, LANG_LABELS } from "../types";
 
 export default function GuestPage() {
   const { id = "" } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
-  const urlLang = searchParams.get("lang") as Lang | null;
+  const urlLang = searchParams.get("lang");
+  const validUrlLang = urlLang && LANGS.includes(urlLang as Lang) ? (urlLang as Lang) : null;
 
-  const [selectedLang, setSelectedLang] = useState<Lang | null>(
-    urlLang && VALID_LANGS.includes(urlLang) ? urlLang : null
-  );
+  const [selectedLang, setSelectedLang] = useState<Lang | null>(validUrlLang);
 
   const { status, liveTranscript, utterances, error } = useGuestRoom(id, selectedLang);
 
@@ -34,7 +31,7 @@ export default function GuestPage() {
         <main className="main">
           <p className="lang-pick-label">Choose your language</p>
           <div className="lang-picker">
-            {VALID_LANGS.map((lang) => (
+            {LANGS.map((lang) => (
               <button
                 key={lang}
                 className="lang-pick-btn"

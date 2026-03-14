@@ -1,16 +1,14 @@
 import { useRef, useEffect } from "react";
 
-type RecorderState = "idle" | "recording" | "processing";
-
 interface AudioRecorderProps {
-  state: RecorderState;
+  isRecording: boolean;
   analyser: AnalyserNode | null;
   onStart: () => void;
   onStop: () => void;
 }
 
 export function AudioRecorder({
-  state,
+  isRecording,
   analyser,
   onStart,
   onStop,
@@ -28,9 +26,6 @@ export function AudioRecorder({
     return () => cancelAnimationFrame(animRef.current);
   }, [analyser]);
 
-  const isRecording = state === "recording";
-  const isProcessing = state === "processing";
-
   return (
     <div className="recorder">
       <canvas
@@ -42,9 +37,16 @@ export function AudioRecorder({
       <button
         className={`record-btn ${isRecording ? "recording" : ""}`}
         onClick={isRecording ? onStop : onStart}
-        disabled={isProcessing}
       >
-        <ButtonLabel state={state} />
+        {isRecording ? (
+          <>
+            <span className="dot" /> Stop
+          </>
+        ) : (
+          <>
+            <span className="mic-icon">🎙</span> Record
+          </>
+        )}
       </button>
     </div>
   );
@@ -105,19 +107,3 @@ function drawBars(
   }
 }
 
-// --- button label ---
-
-function ButtonLabel({ state }: { state: RecorderState }) {
-  if (state === "processing") return <span className="spinner" />;
-  if (state === "recording")
-    return (
-      <>
-        <span className="dot" /> Stop
-      </>
-    );
-  return (
-    <>
-      <span className="mic-icon">🎙</span> Record
-    </>
-  );
-}

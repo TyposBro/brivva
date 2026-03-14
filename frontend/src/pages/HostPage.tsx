@@ -100,7 +100,7 @@ export default function HostPage() {
 
         {isReady && (
           <AudioRecorder
-            state={isRecording ? "recording" : "idle"}
+            isRecording={isRecording}
             analyser={analyser}
             onStart={startRecording}
             onStop={stopRecording}

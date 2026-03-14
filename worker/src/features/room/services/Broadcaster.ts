@@ -1,5 +1,4 @@
-export type Lang = "en" | "ja" | "zh";
-export const LANGS: Lang[] = ["en", "ja", "zh"];
+import { type Lang, LANGS } from "../types";
 
 export class Broadcaster {
   private hostWs: WebSocket | null = null;

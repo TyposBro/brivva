@@ -1,7 +1,7 @@
-import { Broadcaster, LANGS, type Lang } from "./Broadcaster";
+import { type Lang, LANGS, type GuestBroadcaster } from "../types";
 
 export class GuestManager {
-  constructor(private broadcaster: Broadcaster) {}
+  constructor(private broadcaster: GuestBroadcaster) {}
 
   accept(ws: WebSocket, lang: string | null, roomId: string): string | null {
     if (!this.broadcaster.hasHost) return "Room not found";

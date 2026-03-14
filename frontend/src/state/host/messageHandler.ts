@@ -1,8 +1,7 @@
 import { type Dispatch } from "react";
 import { type RoomMessage } from "../../lib/RoomSocket";
 import { type HostAction, type GuestCounts } from "./reducer";
-
-const GUEST_LANGS = ["en", "ja", "zh"] as const;
+import { LANGS } from "../../types";
 
 type Stopwatch = {
   startTimer: (uid: string, text: string, langs: string[]) => void;
@@ -34,7 +33,7 @@ export function createMessageHandler(
       case "final": {
         const uid = String(msg.utteranceId);
         const text = (msg.transcript as string) ?? "";
-        const activeLangs = GUEST_LANGS.filter((l) => getGuestCounts()[l] > 0);
+        const activeLangs = LANGS.filter((l) => getGuestCounts()[l] > 0);
         dispatch({ type: "final", id: msg.utteranceId as number, transcript: text });
         stopwatch.startTimer(uid, text, activeLangs);
         break;

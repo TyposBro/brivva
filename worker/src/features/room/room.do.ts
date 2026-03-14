@@ -1,7 +1,10 @@
 import type { Bindings } from "../../core/types";
-import { Broadcaster } from "./lib/Broadcaster";
-import { HostSession } from "./lib/HostSession";
-import { GuestManager } from "./lib/GuestManager";
+import { Broadcaster } from "./services/Broadcaster";
+import { NovaStt } from "./services/NovaStt";
+import { Translator } from "./services/Translator";
+import { KokoroTts } from "./services/KokoroTts";
+import { HostSession } from "./usecases/HostSession";
+import { GuestManager } from "./usecases/GuestManager";
 
 export class RoomDO {
   private host: HostSession;
@@ -10,7 +13,14 @@ export class RoomDO {
 
   constructor(_state: DurableObjectState, env: Bindings) {
     const broadcaster = new Broadcaster();
-    this.host = new HostSession(env, broadcaster);
+
+    this.host = new HostSession(
+      broadcaster,
+      (roomId, callbacks) => new NovaStt(env, roomId, callbacks),
+      (sourceLang, roomId) => new Translator(env.AI, sourceLang, roomId),
+      (roomId) => new KokoroTts(env.KOKORO_URL, roomId),
+    );
+
     this.guests = new GuestManager(broadcaster);
   }
 

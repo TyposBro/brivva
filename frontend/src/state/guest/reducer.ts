@@ -1,4 +1,3 @@
-export type Lang = "en" | "ja" | "zh";
 export type GuestStatus = "idle" | "connecting" | "listening" | "closed" | "error";
 export type GuestUtterance = {
   id: number;
