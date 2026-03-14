@@ -9,42 +9,22 @@ interface AudioRecorderProps {
   onStop: () => void;
 }
 
-export function AudioRecorder({ state, analyser, onStart, onStop }: AudioRecorderProps) {
+export function AudioRecorder({
+  state,
+  analyser,
+  onStart,
+  onStop,
+}: AudioRecorderProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
 
-    if (!analyser) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
+    if (!analyser) return clearCanvas(canvas);
 
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    const draw = () => {
-      animRef.current = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArray);
-
-      ctx.fillStyle = "#111118";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      const barWidth = (canvas.width / bufferLength) * 2.5;
-      let x = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const barHeight = (dataArray[i] / 255) * canvas.height * 0.9;
-        const hue = 240 + (i / bufferLength) * 60; // blue → purple
-        ctx.fillStyle = `hsl(${hue}, 80%, 60%)`;
-        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
-        x += barWidth + 1;
-      }
-    };
-
-    draw();
+    startDrawLoop(canvas, analyser, animRef);
     return () => cancelAnimationFrame(animRef.current);
   }, [analyser]);
 
@@ -64,18 +44,80 @@ export function AudioRecorder({ state, analyser, onStart, onStop }: AudioRecorde
         onClick={isRecording ? onStop : onStart}
         disabled={isProcessing}
       >
-        {isProcessing ? (
-          <span className="spinner" />
-        ) : isRecording ? (
-          <>
-            <span className="dot" /> Stop
-          </>
-        ) : (
-          <>
-            <span className="mic-icon">🎙</span> Record
-          </>
-        )}
+        <ButtonLabel state={state} />
       </button>
     </div>
+  );
+}
+
+// --- waveform rendering ---
+
+const BACKGROUND_COLOR = "#111118";
+const BAR_WIDTH_SCALE = 2.5;
+const BAR_GAP = 1;
+const BAR_HEIGHT_SCALE = 0.9;
+const MAX_BYTE_VALUE = 255;
+const HUE_START = 240; // blue
+const HUE_RANGE = 60; // blue → purple
+const SATURATION = 80;
+const LIGHTNESS = 60;
+
+function clearCanvas(canvas: HTMLCanvasElement) {
+  canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function startDrawLoop(
+  canvas: HTMLCanvasElement,
+  analyser: AnalyserNode,
+  animRef: React.RefObject<number>
+) {
+  const ctx = canvas.getContext("2d")!;
+  const bufferLength = analyser.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+
+  const draw = () => {
+    animRef.current = requestAnimationFrame(draw);
+    analyser.getByteFrequencyData(dataArray);
+    drawBars(ctx, canvas, dataArray, bufferLength);
+  };
+
+  draw();
+}
+
+function drawBars(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  data: Uint8Array,
+  length: number
+) {
+  ctx.fillStyle = BACKGROUND_COLOR;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const barWidth = (canvas.width / length) * BAR_WIDTH_SCALE;
+  let x = 0;
+  for (let i = 0; i < length; i++) {
+    const barHeight =
+      (data[i] / MAX_BYTE_VALUE) * canvas.height * BAR_HEIGHT_SCALE;
+    const hue = HUE_START + (i / length) * HUE_RANGE;
+    ctx.fillStyle = `hsl(${hue}, ${SATURATION}%, ${LIGHTNESS}%)`;
+    ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+    x += barWidth + BAR_GAP;
+  }
+}
+
+// --- button label ---
+
+function ButtonLabel({ state }: { state: RecorderState }) {
+  if (state === "processing") return <span className="spinner" />;
+  if (state === "recording")
+    return (
+      <>
+        <span className="dot" /> Stop
+      </>
+    );
+  return (
+    <>
+      <span className="mic-icon">🎙</span> Record
+    </>
   );
 }

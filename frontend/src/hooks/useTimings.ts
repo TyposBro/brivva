@@ -13,54 +13,64 @@ export interface UtteranceTiming {
   langs: string[];
 }
 
+/**
+ * Per-utterance stopwatch.
+ *
+ * Flow: startTimer(uid) → recordSplit("translate", ms) → finalize(uid, ttsMs)
+ *
+ * On finalize, computes total elapsed time and produces an UtteranceTiming
+ * for the latency dashboard. Keeps the last 10 results.
+ */
 export function useTimings() {
   const [timings, setTimings] = useState<UtteranceTiming[]>([]);
+  const pending = useRef(new Map<string, PendingTiming>());
 
-  const startTimesRef = useRef(new Map<string, { time: number; text: string; langs: string[] }>());
-  const translateMsRef = useRef(new Map<string, number>());
-  const finalizedRef = useRef(new Set<string>());
-
-  const recordFinal = (uid: string, text: string, langs: string[]) => {
-    startTimesRef.current.set(uid, { time: Date.now(), text, langs });
+  const startTimer = (uid: string, text: string, langs: string[]) => {
+    pending.current.set(uid, { startedAt: Date.now(), text, langs, translateMs: 0 });
   };
 
-  const recordTranslation = (uid: string, translateMs: number) => {
-    if (!translateMsRef.current.has(uid)) translateMsRef.current.set(uid, translateMs);
+  const recordSplit = (uid: string, translateMs: number) => {
+    const entry = pending.current.get(uid);
+    if (entry && !entry.translateMs) entry.translateMs = translateMs;
   };
 
-  const recordTtsEnd = (uid: string, ttsMs: number) => {
-    if (finalizedRef.current.has(uid)) return;
-    const entry = startTimesRef.current.get(uid);
+  const finalize = (uid: string, ttsMs: number) => {
+    const entry = pending.current.get(uid);
     if (!entry) return;
 
-    finalizedRef.current.add(uid);
-    const totalMs = Date.now() - entry.time;
-    const translateMs = translateMsRef.current.get(uid) ?? 0;
+    pending.current.delete(uid);
 
-    setTimings((prev) => [
-      {
-        id: uid,
-        text: entry.text.slice(0, 40),
-        translateMs,
-        ttsMs,
-        totalMs,
-        overheadMs: Math.max(0, totalMs - translateMs - ttsMs),
-        timestamp: Date.now(),
-        langs: entry.langs,
-      },
-      ...prev.slice(0, MAX_TIMINGS - 1),
-    ]);
-
-    startTimesRef.current.delete(uid);
-    translateMsRef.current.delete(uid);
+    const totalMs = Date.now() - entry.startedAt;
+    const timing = buildTiming(uid, entry, ttsMs, totalMs);
+    setTimings((prev) => [timing, ...prev.slice(0, MAX_TIMINGS - 1)]);
   };
 
   const reset = () => {
     setTimings([]);
-    startTimesRef.current.clear();
-    translateMsRef.current.clear();
-    finalizedRef.current.clear();
+    pending.current.clear();
   };
 
-  return { timings, recordFinal, recordTranslation, recordTtsEnd, reset };
+  return { timings, startTimer, recordSplit, finalize, reset };
+}
+
+// --- internal types & helpers ---
+
+type PendingTiming = {
+  startedAt: number;
+  text: string;
+  langs: string[];
+  translateMs: number;
+};
+
+function buildTiming(uid: string, entry: PendingTiming, ttsMs: number, totalMs: number): UtteranceTiming {
+  return {
+    id: uid,
+    text: entry.text.slice(0, 40),
+    translateMs: entry.translateMs,
+    ttsMs,
+    totalMs,
+    overheadMs: Math.max(0, totalMs - entry.translateMs - ttsMs),
+    timestamp: Date.now(),
+    langs: entry.langs,
+  };
 }
