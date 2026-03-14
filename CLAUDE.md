@@ -5,214 +5,106 @@
 Demo prototype for Brivva interview — showing a real-time voice translation pipeline with rooms.
 I'm the top candidate out of 15 and they want to proceed to a paid technical test.
 
-## Current Status (Mar 11 2026)
+## Current Status (Mar 15 2026)
 
-**v2 — WORKING and deployed.** Rooms + multi-language pipeline is live:
+**v3 — Self-hosted Rust pipeline, WORKING.**
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
-- **Worker:** https://brivva-translation.milliytechnology.workers.dev
+- **Backend:** Rust axum server via cloudflared tunnel at `brivva-server.milliytechnology.org`
 - **Repo:** https://github.com/TyposBro/brivva (private)
-- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated Kokoro audio
-- Rooms backed by Durable Objects (single actor per room, pinned to host's DC)
-- STT: CF AI Gateway Nova-3 (English), direct Deepgram API (Korean, requires `DEEPGRAM_API_KEY`)
-- Deploy: `npm run deploy` in both `worker/` and `frontend/`
+- All ML services self-hosted on localhost (no cloud API dependencies)
+- Dockerized with NVIDIA GPU support for Linux/ECS deployment
+- Host speaks (EN) → guests pick EN/JA/ZH → each gets translated Kokoro audio
 
+**v2** (CF Workers + Durable Objects) still deployed at worker URL but superseded.
 **v1** still deployed at `/api/realtime` (EN→JA, single-user, untouched).
 
 ---
 
-## v2 Goal — Rooms + Multi-Language
-
-Add rooms so it matches Brivva's live commerce use case:
-
-- Host creates room, speaks Korean (or any source language)
-- Guests join room with a code, pick their listening language (EN/JA/ZH)
-- Each guest hears translated audio in their language
-- Translate ONCE per language group, broadcast to all guests in that group
-- This directly mirrors Brivva's product: Korean beauty host → multilingual audience
-
-### Architecture (v2)
+## v3 Architecture (current)
 
 ```
-Host Browser (React/TS)
+Host Browser (/host)
 ├── Record audio from mic (ScriptProcessorNode, PCM linear16 @ 16kHz)
-├── WebSocket → send binary audio frames to Worker
-└── See room code + shareable link + connected guest count per language
+├── WebSocket → wss://brivva-server.milliytechnology.org/api/room?role=host&sourceLang=en
+└── See room code + guest counts + live transcript + latency dashboard
 
-Guest Browser (React/TS)
-├── Join room with code or direct link (/room/:id?lang=ja)
-├── Select listening language (EN/JA/ZH)
+server-rs (Rust, axum, DashMap rooms, tokio tasks)
+├── WhisperLiveKit STT (localhost:8765, mlx-whisper base.en)
+│   - Streaming WebSocket, --no-vac --pcm-input
+│   - Dual detection: buffer_transcription + lines[].text changes
+│   - Strips "(silence)" markers, emits once per line index
+├── NLLB Translation (localhost:8000, nllb-200-distilled-600M)
+│   - POST /translate { text, source_lang, target_lang }
+│   - Parallel tokio::spawn per active language
+├── Kokoro TTS (localhost:8880, kokoro-v1_0 82M)
+│   - POST /v1/audio/speech → streaming MP3 response
+│   - Voices: af_bella (EN), jf_alpha (JA), zf_xiaobei (ZH)
+└── Fan-out: translate once per language, broadcast to all guests in group
+
+Guest Browser (/room/:id)
+├── Join room with code, pick language (EN/JA/ZH)
 ├── WebSocket → receive translated audio + subtitles
-└── Auto-play translated TTS audio (Blob URL queue, same as v1)
-
-Cloudflare Worker (Hono + Durable Objects)
-├── Room management via RoomDO (one DO instance per room, keyed by roomId)
-├── Per-room state: host WS, guest WSs grouped by language
-├── On host audio:
-│   1. Deepgram Nova-3 STT (streaming WebSocket, same as v1)
-│   2. On is_final or speech_final:
-│      ├── M2M100 translate → EN (if EN guests exist)
-│      ├── M2M100 translate → JA (if JA guests exist)
-│      └── M2M100 translate → ZH (if ZH guests exist)
-│      (Run all translations in parallel via Promise.all)
-│   3. Per language: Kokoro TTS → generate audio
-│   4. Broadcast: send audio + transcript to all guests in that language group
-└── Cleanup on host disconnect → notify all guests
+└── Blob URL playback (FIFO queue, no overlap)
 ```
 
-### WebSocket Protocol (v2)
+### WebSocket Protocol (v3)
 
-**Host messages:**
+Connection via query params (no JSON handshake):
+- Host: `ws://host/api/room?role=host&sourceLang=en`
+- Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
 
-- `{ type: "host:create", sourceLang: "ko" }` → server responds `{ type: "room:created", roomId: "ABC123" }`
-- Binary frames → PCM audio from mic (same format as v1)
-- `{ type: "host:end" }` → close room
+**Server → Host:** `room:created`, `room:guest_count`, `interim`, `final`, `translation`, `tts_end`
+**Server → Guest:** `room:joined`, `interim`, `final`, `translation`, `tts_start`, [MP3 chunks], `tts_end`, `room:closed`
 
-**Guest messages:**
+### Key files
 
-- `{ type: "guest:join", roomId: "ABC123", lang: "en" }` → server responds `{ type: "room:joined" }`
-- Server pushes same message types as v1: interim, final, translation, tts_start, [ArrayBuffer...], tts_end
-
-**Server broadcasts:**
-
-- `{ type: "room:guest_count", counts: { en: 5, ja: 3, zh: 12 } }` → to host
-- `{ type: "room:closed" }` → to all guests when host disconnects
-
-### Room State
-
-```typescript
-interface Room {
-  id: string;
-  sourceLang: string; // host's speaking language
-  hostWs: WebSocket;
-  guests: Map<string, { ws: WebSocket; lang: "en" | "ja" | "zh" }>;
-  langGroups: Map<string, Set<string>>; // lang → set of guest IDs
-}
-
-// In-memory — rooms die when worker restarts, fine for demo
-const rooms = new Map<string, Room>();
-```
-
-### Key Optimization: Translate Once, Broadcast Many
-
-If 50 guests listen in Japanese, run ONE JA translation + ONE JA TTS, then send the same audio blob to all 50. This is critical for Brivva's scale — live commerce streams have thousands of viewers.
-
-### UI Design (v2)
-
-**Home page (/):**
-
-- "Create Room" button (becomes host)
-- "Join Room" input + button (becomes guest)
-
-**Host View (/host):**
-
-- Room code displayed prominently (e.g., "ABC123")
-- Shareable link: `brivva.pages.dev/room/ABC123`
-- Live mic waveform + mute button (reuse AudioRecorder from v1)
-- Guest count per language: EN: 5 | JA: 3 | ZH: 12
-- Live transcript of what host is saying (same as v1)
-
-**Guest View (/room/:id):**
-
-- Language picker: English / 日本語 / 中文
-- Live subtitles: original text + translated text
-- Auto-playing translated audio (Blob URL queue from v1)
-- Connection status indicator
-
-### Implementation Order (v2)
-
-v1 pipeline is done. For v2, build in this order:
-
-1. Add room state management to Worker (in-memory Map, create/join/leave)
-2. New WebSocket endpoint: /api/room (or refactor /api/realtime to support rooms)
-3. Host flow: create room → get room ID → start streaming audio (reuse existing STT pipeline)
-4. Guest flow: join room → receive translated audio for their language
-5. Fan-out logic: on utterance complete, check which languages have guests, translate in parallel, TTS per language, broadcast
-6. Frontend routing: / (home) → /host (create) → /room/:id (guest join)
-7. Frontend host view: room code + guest counts + existing mic/transcript UI
-8. Frontend guest view: language picker + subtitles + audio playback
-9. Test with 3 browser tabs: 1 host (Korean), 1 EN guest, 1 JA guest
-
-### Latency Optimization Ideas
-
-- **Parallel translation:** Run EN/JA/ZH translations simultaneously (Promise.all)
-- **Utterance chunking:** Translate shorter utterances for faster turnaround
-- **Warm connections:** Keep Deepgram WebSocket alive between utterances
-- **Edge caching:** Cache repeated TTS for common phrases
+| File | Purpose |
+|------|---------|
+| `server-rs/src/main.rs` | Entry, router, DashMap state |
+| `server-rs/src/types.rs` | Lang, Room, Guest, ServerMsg, Rooms |
+| `server-rs/src/pipeline.rs` | STT → Translate → TTS pipeline |
+| `server-rs/src/room/handler.rs` | WebSocket host/guest handlers |
+| `nllb/server.py` | NLLB FastAPI translation server |
 
 ---
 
-## v1 Architecture (current, working)
-
-```
-Browser mic
-  → PCM linear16 @ 16kHz (ScriptProcessorNode)
-  → WebSocket → Cloudflare Worker
-  → Nova-3 (Deepgram, streaming STT via CF AI Gateway WS)
-  → M2M100-1.2B (CF Workers AI, translation EN→JA)
-  → Kokoro 82M (self-hosted on M1 Pro MPS, voice: jf_alpha)
-  → WebSocket binary → Browser Blob URL playback → speaker
-```
-
-### Measured Latency (self-hosted Kokoro, M1 Pro MPS)
-
-| Phase                        | Typical                         |
-| ---------------------------- | ------------------------------- |
-| STT (first interim → final)  | 1–2s (includes speech duration) |
-| Translation (M2M100 CF)      | 394–870ms                       |
-| TTS generation (Kokoro MPS)  | 584ms–2300ms                    |
-| **Total from stop speaking** | **~1.5–3s**                     |
-
-### Message Protocol (v1, Worker ↔ Browser)
-
-```
-{ type: "interim",     transcript, utteranceId }          ← live words while speaking
-{ type: "final",       transcript, utteranceId }          ← utterance finalized
-{ type: "translation", text, utteranceId, translateMs }   ← translated text + timing
-{ type: "tts_start",   utteranceId }                      ← audio stream starting
-[ArrayBuffer...]                                          ← raw MP3 audio bytes
-{ type: "tts_end",     utteranceId, ttsMs }               ← audio done + timing
-{ type: "error",       message }                          ← pipeline error
-```
-
 ## Tech Stack
 
-- **Frontend:** React + TypeScript + Vite, deployed on Cloudflare Pages
-- **Backend:** Cloudflare Workers (Hono framework)
-- **STT:** `@cf/deepgram/nova-3` via CF AI Gateway WebSocket (real-time streaming)
-- **Translation:** `@cf/meta/m2m100-1.2b` (dedicated seq2seq, ~500ms CF)
-- **TTS:** Kokoro 82M self-hosted on M1 Pro MPS via Kokoro-FastAPI
-  - Japanese voice: `jf_alpha` (~430ms+ short text)
-  - English voice: `af_bella` (Grade A-)
-  - Chinese voice: `zf_xiaobei` (experimental)
-  - French voice: `ff_siwis`
+- **Frontend:** React + TypeScript + Vite (Cloudflare Pages)
+- **Backend:** Rust axum WebSocket server
+- **STT:** WhisperLiveKit (mlx-whisper base.en, streaming)
+- **Translation:** NLLB-200-distilled-600M (self-hosted FastAPI)
+- **TTS:** Kokoro 82M (self-hosted Kokoro-FastAPI, MPS/CUDA)
+- **Rooms:** DashMap + mpsc channels (in-memory, per-process)
+- **Tunnel:** cloudflared (routes brivva-server.milliytechnology.org → localhost:3000)
+- **Docker:** NVIDIA CUDA 12.4 base images for GPU deployment
 
-## Key Technical Decisions & Bug Fixes
+## Running
 
-- **Nova-3 over Whisper** — streaming (interims while speaking) vs batch-only. Non-negotiable for real-time.
-- **M2M100 over LLM** — dedicated seq2seq, ~3x faster than llama-3.2-1b
-- **Trigger on `is_final` not just `speech_final`** — speech_final only fires on silence
-- **`state.pending` fallback** — speech_final sometimes has empty transcript, use last interim
-- **TTS playback — Blob URL** — MSE addSourceBuffer("audio/mpeg") throws on Safari; Blob URL works everywhere
-- **TTS queue freeze** — `audio.play()` rejection must call `onDone()` or `isTtsPlayingRef` stays true forever
-- **AudioContext unlock** — call `ctx.resume()` on user gesture (language picker click) before first `audio.play()`
-- **Host transcript** — `handleNovaMessage` must send interim/final to both `hostWs` and all guests
-- **CF AI Gateway language support** — Nova-3 only works with `language=en`; Korean requires direct Deepgram API
-- **Durable Objects over in-memory Map** — CF Workers can run in multiple isolates; in-memory Map causes "Room not found" for guests on a different isolate
-- **`clientWs.send(value)` not `value.buffer`** — Uint8Array subview bug
-- **UniDic required for Japanese** — `python -m unidic download` (526MB), checked by kokoro-start.sh
+### Local (Mac M1/M2 — MPS)
 
-## Why This Matters for the Interview
+```bash
+bash init.sh    # starts all 5 services + cloudflared tunnel
+```
 
-Brivva's listed pipeline: Whisper STT → Context NMT → Emotive TTS → Wav2Lip
-My improvements (demonstrated in v1, extended in v2):
+### Docker (Linux with NVIDIA GPU)
 
-1. **Deepgram Nova-3** over Whisper — real-time streaming, not batch
-2. **M2M100 on CF edge** — no external API, ~500ms
-3. **Kokoro TTS** over Emotive TTS (3B params) — 82M params, open-source, self-hostable, fast
-4. **Cloudflare edge** for STT+translate — only TTS needs external compute
-5. **Rooms + multi-language** (v2) — directly maps to their live commerce product
-6. **InfiniteTalk** over Wav2Lip (future) — full body + expression sync, Apache 2.0
+```bash
+git clone https://github.com/remsky/Kokoro-FastAPI kokoro
+docker compose up --build
+cloudflared tunnel --config ~/.cloudflared/brivva-kokoro.yml run
+```
+
+### Deploy frontend
+
+```bash
+cd frontend && npm run deploy
+```
+
+See `README.md` for full setup instructions (venvs, tunnel credentials, NixOS, AWS).
+
+---
 
 ## About Brivva (from interview Mar 10)
 
@@ -226,86 +118,68 @@ My improvements (demonstrated in v1, extended in v2):
 - Target latency: <300ms end-to-end
 - They acknowledged I need ~3 months Rust ramp-up and are fine with it
 
-## Worker Secrets (already set)
+## Why This Matters for the Interview
 
-```
-CF_ACCOUNT_ID    = 80a55132ae169d5b282ccf505bc66bf7
-CF_AI_GATEWAY_ID = default
-CF_API_TOKEN     = (wrangler secret) — CF AI Gateway auth
-KOKORO_URL       = https://kokoro.milliytechnology.org
-```
+Brivva's listed pipeline: Whisper STT → Context NMT → Emotive TTS → Wav2Lip
+My improvements across v1→v3:
 
-Update: `cd worker && echo "value" | npx wrangler secret put SECRET_NAME --env=""`
+1. **Streaming STT** (WhisperLiveKit) over batch Whisper — real-time interims
+2. **NLLB self-hosted** — no cloud dependency, 200 languages, fast seq2seq
+3. **Kokoro TTS** over Emotive TTS (3B) — 82M params, open-source, self-hostable
+4. **Rust axum server** — matches Brivva's stack, replaces CF Workers
+5. **Rooms + multi-language fan-out** — directly maps to live commerce product
+6. **Dockerized with GPU** — ready for ECS deployment
+7. **Self-hosted pipeline** — eliminates cloud API latency (~170-350ms saved)
 
-## Running Locally
+## Key Technical Decisions & Bug Fixes
 
-### 1. Start Kokoro + Tunnel
-
-```bash
-cd ~/Documents/private/brivva
-bash kokoro-start.sh
-```
-
-Verify: `curl http://localhost:8880/health` → `{"status":"healthy"}`
-
-### 2. Deploy Worker (after code changes)
-
-```bash
-cd ~/Documents/private/brivva/worker
-npx wrangler deploy --env=""
-```
-
-### 3. Open the App
-
-https://brivva.pages.dev or `cd frontend && npm run dev`
+- **base.en over large-v3-turbo** — turbo caused 164s lag on M1 Pro; base.en streams in real-time
+- **--no-vac required** — WhisperLiveKit's Voice Activity Controller blocks audio from transcriber
+- **"(silence)" bug** — WhisperLiveKit appends "(silence)" to line text; fixed by stripping + emitting once per line index
+- **STT retry loop** — WhisperLiveKit may still be loading when server starts; 10 retries, 3s apart
+- **TTS Blob URL** — MSE addSourceBuffer("audio/mpeg") throws on Safari; Blob URL works everywhere
+- **AudioContext unlock** — call ctx.resume() on user gesture before first audio.play()
+- **UniDic for Japanese** — `python -m unidic download` (526MB), checked by init.sh
+- **Dual STT detection** — track both buffer_transcription transitions AND lines[].text changes (--no-vac mode)
 
 ## Project Structure
 
 ```
 brivva/
-├── CLAUDE.md
-├── frontend/                          ← React + TypeScript + Vite
-│   ├── src/
-│   │   ├── App.tsx                    ← main UI (live transcript + utterances + timing)
-│   │   ├── components/
-│   │   │   ├── AudioRecorder.tsx      ← waveform canvas + record button
-│   │   │   ├── AudioPlayer.tsx        ← standalone TTS player (legacy)
-│   │   │   └── TranscriptionDisplay.tsx
-│   │   └── hooks/
-│   │       ├── useRealtimeTranslation.ts  ← WebSocket + PCM capture + TTS queue
-│   │       └── useAudioRecorder.ts        ← legacy batch recorder
-│   └── .env                           ← VITE_WORKER_URL
-├── worker/                            ← Cloudflare Worker (Hono)
-│   ├── src/
-│   │   ├── index.ts                   ← app entry, routes mounted
-│   │   ├── core/types.ts             ← Bindings (AI, CF secrets)
-│   │   └── features/
-│   │       ├── realtime/api/
-│   │       │   └── realtime.routes.ts ← /api/realtime WebSocket (v1 pipeline)
-│   │       ├── translation/
-│   │       └── tts/
-│   ├── wrangler.toml
-│   └── package.json
-├── kokoro/                            ← Kokoro-FastAPI (self-hosted)
-├── kokoro-start.sh                    ← starts Kokoro + cloudflared tunnel
-└── docs.md                            ← full technical analysis
+├── docker-compose.yml             All 4 services (NVIDIA GPU)
+├── init.sh                        Local dev: starts everything (Mac MPS)
+├── server-rs/                     Rust axum WebSocket server
+│   ├── Dockerfile
+│   └── src/
+│       ├── main.rs                Entry, router, state
+│       ├── types.rs               Lang, Room, Guest, ServerMsg
+│       ├── pipeline.rs            STT → Translate → TTS pipeline
+│       └── room/handler.rs        WebSocket host/guest handlers
+├── nllb/                          NLLB translation server
+│   ├── Dockerfile
+│   └── server.py                  FastAPI, POST /translate
+├── whisper-stt/                   WhisperLiveKit STT
+│   └── Dockerfile
+├── kokoro/                        Kokoro TTS (clone from remsky/Kokoro-FastAPI)
+├── frontend/                      React + TypeScript + Vite
+│   └── src/
+│       ├── pages/                 HostPage, GuestPage, HomePage
+│       ├── components/            LatencyDashboard, PipelineAnalysis
+│       ├── hooks/                 useHostRoom, useGuestRoom, useTimings
+│       ├── lib/                   RoomSocket, TtsPlayer
+│       └── state/                 Host/guest reducers + message handlers
+├── worker/                        CF Worker (v1/v2 legacy)
+├── CLAUDE.md                      This file
+├── BENCHMARK.md                   Benchmark dashboard spec
+├── README.md                      Setup + deployment guide
+└── docs.md                        Full technical documentation
 ```
 
 ## Rules
 
 - Ship fast. This is a demo, not production code.
-- Use existing Cloudflare account (Spiko runs on same account)
-- Host language: Korean (matches Brivva's K-Beauty use case)
+- Host language: English (testing) or Korean (Brivva's K-Beauty use case)
 - Guest languages: EN, JA, ZH (Brivva's priority markets)
 - No auth, no persistent storage — in-memory rooms are fine
 - Room system should work with at least 3 simultaneous connections for demo
-- Reuse as much v1 code as possible — the STT/translate/TTS pipeline doesn't change, just add room routing around it
-
-## Next Task: Benchmark Dashboard on Host View
-
-Implement the benchmark dashboard directly on the HostPage. Full spec is in `BENCHMARK.md`.
-Summary: two parts on the host page:
-
-1. **Live latency dashboard** — per-utterance stacked bars (purple=translate, amber=TTS, gray=overhead) with 300ms target line, running averages. Data comes from existing WS messages (final → tts_end timestamps).
-2. **Pipeline comparison** (static, below live dashboard) — my pipeline vs Brivva's listed pipeline, component decision tables (STT/Translation/TTS), gap analysis to 300ms, optimization roadmap. Collapsible sections, default collapsed.
-   Read `BENCHMARK.md` for full implementation details.
+- kokoro/ is a separate repo (remsky/Kokoro-FastAPI) — clone separately, not committed to brivva
