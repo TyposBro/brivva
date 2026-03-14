@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
-import { AudioPipeline } from "./AudioPipeline";
-import { RoomSocket, type RoomMessage } from "./RoomSocket";
+import { AudioPipeline } from "../lib/AudioPipeline";
+import { RoomSocket, type RoomMessage } from "../lib/RoomSocket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
 
 export type { UtteranceTiming };

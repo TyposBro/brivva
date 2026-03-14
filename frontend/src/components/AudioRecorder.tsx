@@ -1,5 +1,6 @@
 import { useRef, useEffect } from "react";
-import type { RecorderState } from "../hooks/useAudioRecorder";
+
+type RecorderState = "idle" | "recording" | "processing";
 
 interface AudioRecorderProps {
   state: RecorderState;

@@ -1,19 +1,14 @@
 import { useState, useRef, useEffect } from "react";
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787";
-const WS_URL = WORKER_URL.replace(/^http/, "ws");
+import { RoomSocket } from "../lib/RoomSocket";
+import { TtsPlayer } from "../lib/TtsPlayer";
 
 export type Lang = "en" | "ja" | "zh";
-
 export type GuestStatus = "idle" | "connecting" | "listening" | "closed" | "error";
-
 export type GuestUtterance = {
   id: number;
-  original: string;    // Korean
-  translation: string; // in selected lang
+  original: string;
+  translation: string;
 };
-
-type TtsEntry = { utteranceId: number; chunks: ArrayBuffer[]; done: boolean };
 
 export function useGuestRoom(roomId: string, lang: Lang | null) {
   const [status, setStatus] = useState<GuestStatus>("idle");
@@ -21,41 +16,8 @@ export function useGuestRoom(roomId: string, lang: Lang | null) {
   const [utterances, setUtterances] = useState<GuestUtterance[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const receivingEntryRef = useRef<TtsEntry | null>(null);
-  const ttsQueueRef = useRef<TtsEntry[]>([]);
-  const isTtsPlayingRef = useRef(false);
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const tryPlayNextRef = useRef<() => void>(() => {});
-
-  function startPlayback(entry: TtsEntry) {
-    isTtsPlayingRef.current = true;
-    const blob = new Blob(entry.chunks, { type: "audio/mpeg" });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    currentAudioRef.current = audio;
-
-    const onDone = () => {
-      URL.revokeObjectURL(url);
-      currentAudioRef.current = null;
-      isTtsPlayingRef.current = false;
-      ttsQueueRef.current.shift();
-      tryPlayNextRef.current();
-    };
-    audio.onended = onDone;
-    audio.onerror = () => { console.error("Audio playback error"); onDone(); };
-    audio.play().catch((err) => { console.error("Audio play() rejected:", err); onDone(); });
-  }
-
-  function tryPlayNext() {
-    if (isTtsPlayingRef.current) return;
-    const queue = ttsQueueRef.current;
-    if (!queue.length) return;
-    const entry = queue[0];
-    if (!entry.done) return;
-    startPlayback(entry);
-  }
-
-  tryPlayNextRef.current = tryPlayNext;
+  const socket = useRef(new RoomSocket());
+  const player = useRef(new TtsPlayer());
 
   useEffect(() => {
     if (!lang || !roomId) return;
@@ -64,65 +26,64 @@ export function useGuestRoom(roomId: string, lang: Lang | null) {
     setError(null);
     setUtterances([]);
     setLiveTranscript("");
-    ttsQueueRef.current = [];
-    receivingEntryRef.current = null;
-    isTtsPlayingRef.current = false;
+    player.current.reset();
 
-    const ws = new WebSocket(`${WS_URL}/api/room?role=guest&roomId=${encodeURIComponent(roomId)}&lang=${lang}`);
-    ws.binaryType = "arraybuffer";
+    socket.current.connect(
+      { role: "guest", roomId, lang },
+      {
+        onMessage: (msg) => {
+          switch (msg.type) {
+            case "room:joined":
+              setStatus("listening");
+              break;
 
-    ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        const msg = JSON.parse(event.data) as { type: string; [k: string]: unknown };
+            case "interim":
+              setLiveTranscript((msg.transcript as string) ?? "");
+              break;
 
-        if (msg.type === "room:joined") {
-          setStatus("listening");
-        } else if (msg.type === "interim") {
-          setLiveTranscript((msg.transcript as string) ?? "");
-        } else if (msg.type === "final") {
-          const id = msg.utteranceId as number;
-          setUtterances((prev) => [
-            ...prev,
-            { id, original: (msg.transcript as string) ?? "", translation: "" },
-          ]);
-          setLiveTranscript("");
-        } else if (msg.type === "translation") {
-          const id = msg.utteranceId as number;
-          setUtterances((prev) =>
-            prev.map((u) => (u.id === id ? { ...u, translation: (msg.text as string) ?? "" } : u))
-          );
-        } else if (msg.type === "tts_start") {
-          const entry: TtsEntry = { utteranceId: msg.utteranceId as number, chunks: [], done: false };
-          receivingEntryRef.current = entry;
-          ttsQueueRef.current.push(entry);
-        } else if (msg.type === "tts_end") {
-          const entry = receivingEntryRef.current;
-          if (entry && entry.utteranceId === (msg.utteranceId as number)) {
-            entry.done = true;
-            receivingEntryRef.current = null;
-            tryPlayNextRef.current();
+            case "final":
+              setUtterances((prev) => [
+                ...prev,
+                { id: msg.utteranceId as number, original: (msg.transcript as string) ?? "", translation: "" },
+              ]);
+              setLiveTranscript("");
+              break;
+
+            case "translation": {
+              const id = msg.utteranceId as number;
+              setUtterances((prev) =>
+                prev.map((u) => (u.id === id ? { ...u, translation: (msg.text as string) ?? "" } : u)),
+              );
+              break;
+            }
+
+            case "tts_start":
+              player.current.startReceiving(msg.utteranceId as number);
+              break;
+
+            case "tts_end":
+              player.current.finishReceiving(msg.utteranceId as number);
+              break;
+
+            case "room:closed":
+              setStatus("closed");
+              socket.current.close();
+              break;
+
+            case "error":
+              setError((msg.message as string) ?? "Unknown error");
+              setStatus("error");
+              break;
           }
-        } else if (msg.type === "room:closed") {
-          setStatus("closed");
-          ws.close();
-        } else if (msg.type === "error") {
-          setError((msg.message as string) ?? "Unknown error");
-          setStatus("error");
-        }
-      } else if (event.data instanceof ArrayBuffer) {
-        const entry = receivingEntryRef.current;
-        if (entry) entry.chunks.push(event.data);
-      }
-    };
+        },
+        onBinary: (data) => player.current.addChunk(data),
+        onClose: () => {
+          setStatus((prev) => (prev === "listening" || prev === "connecting" ? "closed" : prev));
+        },
+      },
+    );
 
-    ws.onclose = () => {
-      setStatus((prev) =>
-        prev === "listening" || prev === "connecting" ? "closed" : prev
-      );
-    };
-    ws.onerror = () => ws.close();
-
-    return () => ws.close();
+    return () => socket.current.close();
   }, [roomId, lang]);
 
   return { status, liveTranscript, utterances, error };

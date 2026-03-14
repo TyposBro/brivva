@@ -8,21 +8,36 @@ export class AudioPipeline {
   private stream: MediaStream | null = null;
 
   async start(onAudio: (buffer: ArrayBuffer) => void): Promise<AnalyserNode> {
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    this.stream = await this.captureMic();
     this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-
     const source = this.ctx.createMediaStreamSource(this.stream);
 
-    const analyser = this.ctx.createAnalyser();
-    analyser.fftSize = FFT_SIZE;
-    source.connect(analyser);
-
-    this.processor = this.ctx.createScriptProcessor(BUFFER_SIZE, 1, 1);
-    this.processor.onaudioprocess = (e) => onAudio(toInt16(e.inputBuffer.getChannelData(0)));
-    source.connect(this.processor);
-    this.processor.connect(this.ctx.destination);
+    const analyser = this.createAnalyser(source);
+    this.startStreaming(source, onAudio);
 
     return analyser;
+  }
+
+  private captureMic(): Promise<MediaStream> {
+    return navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+
+  private createAnalyser(source: MediaStreamAudioSourceNode): AnalyserNode {
+    const analyser = this.ctx!.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    source.connect(analyser);
+    return analyser;
+  }
+
+  private startStreaming(
+    source: MediaStreamAudioSourceNode,
+    onAudio: (buffer: ArrayBuffer) => void
+  ): void {
+    this.processor = this.ctx!.createScriptProcessor(BUFFER_SIZE, 1, 1);
+    this.processor.onaudioprocess = (e) =>
+      onAudio(toInt16(e.inputBuffer.getChannelData(0)));
+    source.connect(this.processor);
+    this.processor.connect(this.ctx!.destination);
   }
 
   stop(): void {
