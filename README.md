@@ -46,8 +46,30 @@ All ML services co-located on one machine. No cloud API dependencies.
 git clone git@github.com:TyposBro/brivva.git
 cd brivva
 
-# One-time: set up Python venvs for ML services
-# (nllb/, whisper-stt/, kokoro/ each need their own .venv)
+# Clone Kokoro TTS (separate repo, not included in brivva)
+git clone https://github.com/remsky/Kokoro-FastAPI kokoro
+
+# One-time: set up Python venvs for each ML service
+# NLLB
+cd nllb
+python3.10 -m venv .venv
+.venv/bin/pip install fastapi uvicorn transformers torch sentencepiece protobuf
+cd ..
+
+# WhisperLiveKit
+cd whisper-stt
+python3.10 -m venv .venv
+.venv/bin/pip install whisperlivekit faster-whisper torch torchaudio
+cd ..
+
+# Kokoro (uses uv)
+cd kokoro
+uv sync
+.venv/bin/python -m unidic download   # 526MB, required for Japanese TTS
+cd ..
+
+# Build Rust server
+cargo build --release --manifest-path server-rs/Cargo.toml
 
 # Start everything (cloudflared + NLLB + WhisperLiveKit + server-rs + Kokoro)
 bash init.sh
@@ -69,6 +91,9 @@ curl http://localhost:8880/health # → {"status":"healthy"}
 ```bash
 git clone git@github.com:TyposBro/brivva.git
 cd brivva
+
+# Clone Kokoro TTS (separate repo, referenced by docker-compose)
+git clone https://github.com/remsky/Kokoro-FastAPI kokoro
 
 # Build and start all services with GPU
 docker compose up --build
@@ -182,6 +207,7 @@ scp mac:~/.cloudflared/b6e5239e-*.json ~/.cloudflared/
 # 5. Clone and start
 git clone git@github.com:TyposBro/brivva.git
 cd brivva
+git clone https://github.com/remsky/Kokoro-FastAPI kokoro
 docker compose up --build -d
 
 # 6. Start tunnel
@@ -222,6 +248,7 @@ EC2 g5.xlarge (A10G 24GB VRAM, ~$1/hr)
 # On EC2 with NVIDIA GPU + Docker + nvidia-container-toolkit
 git clone git@github.com:TyposBro/brivva.git
 cd brivva
+git clone https://github.com/remsky/Kokoro-FastAPI kokoro
 docker compose up --build -d
 ```
 
