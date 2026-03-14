@@ -1321,6 +1321,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "server-rs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dashmap",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1625,21 +1640,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "translate-cli"
-version = "0.1.0"
-dependencies = [
- "axum",
- "dashmap",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "uuid",
 ]
 
 [[package]]
