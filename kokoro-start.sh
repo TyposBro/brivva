@@ -4,6 +4,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KOKORO_DIR="$SCRIPT_DIR/kokoro"
 SERVER_DIR="$SCRIPT_DIR/server-rs"
+NLLB_DIR="$SCRIPT_DIR/nllb"
+WHISPER_DIR="$SCRIPT_DIR/whisper-stt"
 
 # Check UniDic dictionary (required for Japanese TTS)
 if [ ! -f "$KOKORO_DIR/.venv/lib/python3.10/site-packages/unidic/dicdir/mecabrc" ]; then
@@ -13,12 +15,14 @@ fi
 
 # Free ports if already in use
 lsof -ti :8880 | xargs kill -9 2>/dev/null || true
+lsof -ti :8765 | xargs kill -9 2>/dev/null || true
+lsof -ti :8000 | xargs kill -9 2>/dev/null || true
 lsof -ti :3000 | xargs kill -9 2>/dev/null || true
 
 PIDS=()
 cleanup() {
   echo ""
-  echo "Shutting down..."
+  echo "Shutting down all services..."
   for pid in "${PIDS[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
@@ -26,26 +30,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Start cloudflared tunnel for Kokoro
-echo "Starting cloudflared tunnel (Kokoro)..."
+# 1. Start cloudflared tunnel (Kokoro + server-rs)
+echo "Starting cloudflared tunnel..."
 cloudflared tunnel --config ~/.cloudflared/brivva-kokoro.yml run &
 PIDS+=($!)
 
-# 2. Start cloudflared tunnel for Rust server
-echo "Starting cloudflared tunnel (server-rs on :3000)..."
-cloudflared tunnel --url http://localhost:3000 &
-PIDS+=($!)
-
-# 3. Build and start Rust server
-echo "Building server-rs..."
-cd "$SERVER_DIR"
-cargo build --release 2>&1
-echo "Starting server-rs on :3000..."
-./target/release/server-rs &
+# 2. Start NLLB translation server (port 8000)
+echo "Starting NLLB translation server on :8000..."
+cd "$NLLB_DIR"
+.venv/bin/python server.py &
 PIDS+=($!)
 cd "$SCRIPT_DIR"
 
-# 4. Start Kokoro (foreground — Ctrl+C stops everything)
+# 3. Start WhisperLiveKit STT server (port 8765)
+echo "Starting WhisperLiveKit STT on :8765..."
+cd "$WHISPER_DIR"
+.venv/bin/whisperlivekit-server \
+  --model large-v3-turbo \
+  --lan "" \
+  --port 8765 \
+  --host 0.0.0.0 \
+  --backend mlx-whisper \
+  --pcm-input &
+PIDS+=($!)
+cd "$SCRIPT_DIR"
+
+# 4. Build and start Rust server (port 3000)
+echo "Building server-rs..."
+cargo build --release --manifest-path "$SERVER_DIR/Cargo.toml" 2>&1
+echo "Starting server-rs on :3000..."
+"$SCRIPT_DIR/target/release/server-rs" &
+PIDS+=($!)
+
+# 5. Start Kokoro TTS (port 8880, foreground — Ctrl+C stops everything)
 echo "Starting Kokoro-FastAPI on :8880..."
 cd "$KOKORO_DIR"
 USE_GPU=true USE_ONNX=false \

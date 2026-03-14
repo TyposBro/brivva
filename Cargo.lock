@@ -1332,6 +1332,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "tower-http",
  "uuid",
 ]
 

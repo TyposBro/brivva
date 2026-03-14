@@ -26,6 +26,50 @@ impl std::fmt::Display for Lang {
     }
 }
 
+impl Lang {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "en" => Some(Lang::En),
+            "ja" => Some(Lang::Ja),
+            "zh" => Some(Lang::Zh),
+            "ko" => Some(Lang::Ko),
+            _ => None,
+        }
+    }
+
+    /// Kokoro voice name for this language
+    pub fn voice(&self) -> &'static str {
+        match self {
+            Lang::En => "af_bella",
+            Lang::Ja => "jf_alpha",
+            Lang::Zh => "zf_xiaobei",
+            Lang::Ko => "af_bella", // fallback
+        }
+    }
+
+    /// Kokoro lang code prefix
+    pub fn kokoro_lang_code(&self) -> &'static str {
+        match self {
+            Lang::En => "a",
+            Lang::Ja => "j",
+            Lang::Zh => "z",
+            Lang::Ko => "a", // fallback
+        }
+    }
+}
+
+// ── Query params from frontend ────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RoomQuery {
+    pub role: String,
+    #[serde(rename = "sourceLang")]
+    pub source_lang: Option<String>,
+    #[serde(rename = "roomId")]
+    pub room_id: Option<String>,
+    pub lang: Option<String>,
+}
+
 // ── Guest ─────────────────────────────────────────────────
 
 pub struct Guest {
@@ -96,32 +140,24 @@ impl Room {
 
 // ── Shared State ──────────────────────────────────────────
 
-/// All rooms, shared across all handler tasks via Arc
 pub type Rooms = Arc<DashMap<String, Room>>;
 
-// ── WebSocket Messages (client ↔ server) ──────────────────
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub enum ClientMsg {
-    #[serde(rename = "host:create")]
-    HostCreate { source_lang: Lang },
-
-    #[serde(rename = "guest:join")]
-    GuestJoin { room_id: String, lang: Lang },
-
-    #[serde(rename = "host:end")]
-    HostEnd,
-}
+// ── WebSocket Messages (server → client) ──────────────────
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerMsg {
     #[serde(rename = "room:created")]
-    RoomCreated { room_id: String },
+    RoomCreated {
+        #[serde(rename = "roomId")]
+        room_id: String,
+    },
 
     #[serde(rename = "room:joined")]
-    RoomJoined { room_id: String, lang: Lang },
+    RoomJoined {
+        #[serde(rename = "roomId")]
+        room_id: String,
+    },
 
     #[serde(rename = "room:closed")]
     RoomClosed,
@@ -132,21 +168,36 @@ pub enum ServerMsg {
     },
 
     #[serde(rename = "interim")]
-    Interim {
-        transcript: String,
-    },
+    Interim { transcript: String },
 
     #[serde(rename = "final")]
     Final {
         transcript: String,
+        #[serde(rename = "utteranceId")]
         utterance_id: u64,
     },
 
     #[serde(rename = "translation")]
     Translation {
         text: String,
+        #[serde(rename = "utteranceId")]
         utterance_id: u64,
+        #[serde(rename = "translateMs")]
         translate_ms: u64,
+    },
+
+    #[serde(rename = "tts_start")]
+    TtsStart {
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+    },
+
+    #[serde(rename = "tts_end")]
+    TtsEnd {
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+        #[serde(rename = "ttsMs")]
+        tts_ms: u64,
     },
 
     #[serde(rename = "error")]

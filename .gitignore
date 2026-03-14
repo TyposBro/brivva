@@ -9,3 +9,8 @@ coverage/
 
 # Rust
 target/
+
+# Python ML services
+.venv/
+__pycache__/
+*.pyc

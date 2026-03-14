@@ -261,3 +261,122 @@ cloudflared tunnel --config ~/.cloudflared/brivva-kokoro.yml run
 
 Tunnel config: `~/.cloudflared/brivva-kokoro.yml`
 DNS: `kokoro.milliytechnology.org` → CNAME → `b6e5239e-b304-4087-8879-97fb649e6ba1.cfargotunnel.com` (proxied)
+
+---
+
+## v3 Architecture — Self-Hosted Rust Server (Mar 15 2026)
+
+### Goal
+
+Replace CF Workers with a single Rust (axum) server. Co-locate all ML services on one machine (Mac locally, EC2/ECS for production) to eliminate network round-trips between pipeline stages.
+
+### Architecture
+
+```
+Host Browser (/host)
+  → PCM linear16 @ 16kHz → WebSocket wss://brivva-server.milliytechnology.org/api/room?role=host&sourceLang=ko
+  → server-rs (Rust/axum, port 3000)
+
+server-rs (Rust, axum, DashMap rooms, mpsc channels)
+  → WhisperLiveKit (STT, port 8765, localhost)
+      - faster-whisper (CTranslate2) with streaming WebSocket
+      - Deepgram-compatible API — swappable to real Deepgram later
+      - Supports Korean, English, Japanese, Chinese, all languages
+      - Model: whisper-large-v3-turbo (fast) or whisper-large-v3 (accurate)
+  → NLLB-200 FastAPI (Translation, port 8000, localhost)
+      - Meta's successor to M2M100: 3x faster, better quality, 200 languages
+      - Model: facebook/nllb-200-distilled-600M (fast) or nllb-200-1.3B (accurate)
+      - Single endpoint: POST /translate { text, source_lang, target_lang } → { translated_text }
+      - Swappable: same API, swap model behind it
+  → Kokoro FastAPI (TTS, port 8880, localhost)
+      - Already working, no changes needed
+
+Guest Browser (/room/:id)
+  → WebSocket wss://brivva-server.milliytechnology.org/api/room?role=guest&roomId=ABC123&lang=ja
+  → Receives: interim, final, translation, tts_start, [MP3 chunks], tts_end
+```
+
+### Service Ports (all localhost)
+
+| Service | Port | Model | Purpose |
+|---------|------|-------|---------|
+| server-rs | 3000 | — | WebSocket routing, room state, pipeline orchestration |
+| WhisperLiveKit | 8765 | whisper-large-v3-turbo | Streaming STT (WebSocket) |
+| NLLB FastAPI | 8000 | nllb-200-distilled-600M | Translation (REST) |
+| Kokoro FastAPI | 8880 | kokoro-v1_0 82M | TTS (REST, streaming response) |
+
+### Why Self-Hosted Over API Services
+
+| Component | Before (v2) | After (v3) | Latency saved |
+|-----------|------------|------------|---------------|
+| STT | Deepgram API (Seoul→US→Seoul) | WhisperLiveKit localhost | ~100-200ms network |
+| Translation | CF Workers AI (edge, but still HTTP) | NLLB localhost | ~50-100ms network |
+| TTS | Kokoro via cloudflared tunnel | Kokoro localhost | ~20-50ms tunnel overhead |
+| **Total saved** | | | **~170-350ms per utterance** |
+
+### Pipeline Flow (per utterance)
+
+```
+1. Host audio (PCM) → server-rs via WebSocket
+2. server-rs → WhisperLiveKit WebSocket (localhost:8765)
+   - Interim results → broadcast to host + all guests
+   - Final result → trigger translation pipeline
+3. For each active language (parallel tokio::join!):
+   a. server-rs → NLLB FastAPI POST localhost:8000/translate
+   b. Broadcast translation text to language group
+   c. server-rs → Kokoro FastAPI POST localhost:8880/v1/audio/speech
+   d. Stream MP3 chunks to language group
+4. Send tts_end to language group
+```
+
+### Model Selection Rationale
+
+**STT: WhisperLiveKit (faster-whisper)**
+- Exposes Deepgram-compatible WebSocket API → drop-in replacement
+- faster-whisper uses CTranslate2 (optimized inference, 4x faster than vanilla Whisper)
+- Streaming with interim results (like Nova-3, unlike batch Whisper)
+- whisper-large-v3-turbo: 5.4x speed improvement, 4 decoder layers instead of 32
+- Runs on Apple MPS or CUDA
+
+**Translation: NLLB-200 (distilled-600M)**
+- 3x faster than M2M100-1.2B on same hardware
+- Better translation quality (newer model, more training data)
+- 200 languages vs M2M100's 100
+- distilled-600M is half the size of M2M100-1.2B — fits easily on any GPU
+- CC-BY-NC 4.0 license — fine for demo/interview, discuss with Brivva for production
+
+**TTS: Kokoro 82M (unchanged)**
+- Already working, already fast, already co-located
+
+### AWS Deployment Plan
+
+**Phase 1 — Demo (now):** Everything on MacBook Pro M1 (localhost)
+**Phase 2 — Paid test:** Single EC2 g5.xlarge (1x A10G 24GB VRAM, ~$1/hr)
+**Phase 3 — Production:** ECS with separate GPU tasks per service
+
+```
+# Phase 2: Single EC2
+EC2 g5.xlarge (A10G 24GB VRAM)
+├── server-rs          :3000  (CPU, ~10MB RAM)
+├── WhisperLiveKit     :8765  (GPU, ~2GB VRAM)
+├── NLLB FastAPI       :8000  (GPU, ~2GB VRAM)
+├── Kokoro FastAPI     :8880  (GPU, ~1GB VRAM)
+└── Total VRAM: ~5GB / 24GB available
+```
+
+```
+# Phase 3: ECS (production)
+ALB → ECS Service: server-rs (CPU task, auto-scale)
+        ├→ ECS Service: WhisperLiveKit (GPU task, g5.xlarge)
+        ├→ ECS Service: NLLB (GPU task, g5.xlarge or CPU with quantization)
+        └→ ECS Service: Kokoro (GPU task, g5.xlarge)
+```
+
+**Why not Bedrock:** Bedrock only hosts foundation models (Claude, Llama, etc). Can't deploy Whisper, NLLB, or Kokoro on it.
+
+### Swappability
+
+Each service is behind a standard API (WebSocket or REST). To swap:
+- **STT**: Change WebSocket URL from `localhost:8765` to Deepgram API or any Deepgram-compatible endpoint
+- **Translation**: Change POST URL from `localhost:8000` to any endpoint accepting `{ text, source_lang, target_lang }`
+- **TTS**: Change POST URL from `localhost:8880` to any endpoint returning audio stream
