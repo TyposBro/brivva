@@ -1,3 +1,4 @@
+mod pipeline;
 mod room;
 mod types;
 

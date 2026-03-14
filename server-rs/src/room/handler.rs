@@ -12,6 +12,7 @@ use futures_util::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::pipeline;
 use crate::types::{Guest, Lang, Room, RoomQuery, Rooms, ServerMsg};
 
 /// Helper to serialize a ServerMsg and wrap in a WS text frame
@@ -93,20 +94,25 @@ async fn handle_host(
         }
     });
 
+    // Create audio channel for the pipeline
+    let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    // Spawn the STT → translate → TTS pipeline
+    let source_lang = rooms.get(&room_id).map(|r| r.source_lang.clone()).unwrap_or(Lang::En);
+    let pipeline_rooms = rooms.clone();
+    let pipeline_rid = room_id.clone();
+    tokio::spawn(async move {
+        pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, audio_rx).await;
+    });
+
     // Read loop: host sends binary audio or text commands
-    let rooms_ref = rooms.clone();
-    let rid = room_id.clone();
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(data) => {
-                // Host sent audio — forward to all guests for now
-                // TODO: pipe through STT → translate → TTS pipeline
-                if let Some(room) = rooms_ref.get(&rid) {
-                    room.send_to_all_guests(Message::Binary(data));
-                }
+                // Forward audio to the STT pipeline
+                let _ = audio_tx.send(data.to_vec());
             }
             Message::Text(text) => {
-                // Check for host:end
                 if text.contains("host:end") {
                     break;
                 }

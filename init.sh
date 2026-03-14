@@ -46,12 +46,13 @@ cd "$SCRIPT_DIR"
 echo "Starting WhisperLiveKit STT on :8765..."
 cd "$WHISPER_DIR"
 .venv/bin/whisperlivekit-server \
-  --model large-v3-turbo \
-  --lan "" \
+  --model base.en \
+  --lan en \
   --port 8765 \
   --host 0.0.0.0 \
   --backend mlx-whisper \
-  --pcm-input &
+  --pcm-input \
+  --no-vac &
 PIDS+=($!)
 cd "$SCRIPT_DIR"
 
