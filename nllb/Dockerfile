@@ -10,9 +10,11 @@ RUN pip install --no-cache-dir \
     fastapi==0.135.1 \
     uvicorn==0.34.0 \
     transformers==4.47.0 \
-    torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
     sentencepiece \
     protobuf
+
+RUN pip install --no-cache-dir --default-timeout=600 \
+    torch==2.5.1 --extra-index-url https://download.pytorch.org/whl/cu124
 
 COPY server.py .
 

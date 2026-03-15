@@ -8,9 +8,12 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir \
     whisperlivekit==0.2.19 \
-    faster-whisper==1.2.1 \
-    torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
-    torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+    faster-whisper==1.2.1
+
+RUN pip install --no-cache-dir --default-timeout=600 \
+    torch==2.5.1 \
+    torchaudio==2.5.1 \
+    --extra-index-url https://download.pytorch.org/whl/cu124
 
 # Pre-download whisper model at build time
 RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
