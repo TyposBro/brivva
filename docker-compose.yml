@@ -22,26 +22,18 @@ services:
     build: ./stt-wrapper
     ports:
       - "8766:8766"
+    runtime: nvidia
     environment:
-      - STT_HOST=whisper-stt
-    depends_on:
-      - whisper-stt
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - STT_MODEL=base.en
+      - STT_LANGUAGE=en
     restart: unless-stopped
 
   nllb:
     build: ./nllb
     ports:
       - "8000:8000"
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    restart: unless-stopped
-
-  whisper-stt:
-    build: ./whisper-stt
-    ports:
-      - "8765:8765"
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -61,10 +53,23 @@ services:
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    command: ["bash", "-c", "python -m unidic download && ./entrypoint.sh"]
+    command: >
+      bash -c "
+        DICDIR=/app/.venv/lib/python3.10/site-packages/unidic/dicdir;
+        if [ -f /cache/unidic/matrix.bin ]; then
+          echo 'UniDic: using cached copy';
+          rm -rf $$DICDIR;
+          cp -a /cache/unidic $$DICDIR;
+        else
+          python -m unidic download;
+          mkdir -p /cache;
+          cp -a $$DICDIR /cache/unidic;
+        fi;
+        ./entrypoint.sh
+      "
     volumes:
-      - unidic-data:/app/.venv/lib/python3.10/site-packages/unidic/dicdir
+      - unidic-cache:/cache
     restart: unless-stopped
 
 volumes:
-  unidic-data:
+  unidic-cache:
