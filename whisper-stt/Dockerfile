@@ -15,16 +15,17 @@ RUN pip install --no-cache-dir --default-timeout=600 \
     torchaudio==2.5.1 \
     --extra-index-url https://download.pytorch.org/whl/cu124
 
-# Pre-download whisper model at build time
-RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
+# Pre-download both model formats at build time
+# faster-whisper CTranslate2 format
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
+# OpenAI whisper .pt format (used by WhisperLiveKit's SimulStreaming)
+RUN python3 -c "import whisper; whisper.load_model('large-v3-turbo', download_root='/root/.cache/whisper')"
 
 EXPOSE 8765
 
 CMD ["whisperlivekit-server", \
-     "--model", "base.en", \
-     "--lan", "en", \
+     "--model", "large-v3-turbo", \
      "--port", "8765", \
      "--host", "0.0.0.0", \
      "--backend", "faster-whisper", \
-     "--pcm-input", \
-     "--no-vac"]
+     "--pcm-input"]

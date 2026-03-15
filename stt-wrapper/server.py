@@ -88,15 +88,15 @@ class ParserState:
 
 async def connect_to_stt() -> websockets.WebSocketClientProtocol:
     """Connect to WhisperLiveKit with retries."""
-    for attempt in range(1, 11):
+    for attempt in range(1, 31):
         try:
             ws = await websockets.connect(STT_URL, max_size=10 * 1024 * 1024)
             log.info("Connected to STT (attempt %d)", attempt)
             return ws
         except Exception as e:
-            log.warning("STT connect attempt %d/10 failed: %s", attempt, e)
-            await asyncio.sleep(3)
-    raise ConnectionError("Failed to connect to STT after 10 attempts")
+            log.warning("STT connect attempt %d/30 failed: %s", attempt, e)
+            await asyncio.sleep(5)
+    raise ConnectionError("Failed to connect to STT after 30 attempts")
 
 
 async def forward_audio(client_ws, stt_ws):
