@@ -72,7 +72,7 @@ Render below the mic/transcript area on HostPage. Always visible (not collapsibl
 #### Summary Stats Bar (top)
 
 ```
-⚡ Avg: 400ms  │  Best: 221ms  │  Target: 300ms  │  Gap: 1.3x  │  n=6
+⚡ Avg: 862ms  │  Best: 653ms  │  Target: 300ms  │  Gap: 2.9x  │  n=10
 ```
 
 Single row, monospace numbers. Updates after each utterance.
@@ -120,8 +120,8 @@ Two columns or two stacked cards:
 | Phase | Tech | Measured |
 |-------|------|---------|
 | STT | CF Nova-3 (via stt-wrapper) | streaming ✓ |
-| Translation | NLLB (self-hosted GPU) | 75–337ms |
-| TTS | Kokoro 82M (GPU) | 111–358ms |
+| Translation | NLLB (self-hosted GPU) | 82–164ms |
+| TTS | ElevenLabs flash_v2_5 | 548–1,440ms |
 | Server | Rust axum + DashMap | fan-out per language |
 | Lip-sync | — | not built |
 
@@ -149,27 +149,27 @@ Verdict: "Streaming is non-negotiable for live translation. Self-hosted eliminat
 **Translation — Why NLLB (self-hosted):**
 | Model | Type | Latency |
 |-------|------|---------|
-| ✓ NLLB (self-hosted GPU) | Seq2Seq | 75–337ms |
+| ✓ NLLB (self-hosted GPU) | Seq2Seq | 82–164ms |
 | M2M100-1.2B (CF Workers AI) | Seq2Seq | 394–870ms |
 | Llama 3.2 1B | LLM prompted | ~1,500ms |
 Verdict: "Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no network roundtrip to edge."
 
-**TTS — Why Kokoro (and its limits):**
+**TTS — Why ElevenLabs (and its tradeoffs):**
 | Model | Params | Latency | Expressive |
 |-------|--------|---------|------------|
-| ✓ Kokoro (self-hosted GPU) | 82M | 111–358ms | Limited |
-| Kokoro (Replicate) | 82M | 2,000–14,000ms | Limited |
+| ✓ ElevenLabs flash_v2_5 | API | 548–1,440ms | Yes — 32 langs |
+| Kokoro 82M (self-hosted) | 82M | 111–358ms GPU | Limited |
 | Emotive TTS (Brivva) | 3B | unknown | Yes — emotions |
-Verdict: "Kokoro wins for demo speed. Production needs expressive TTS for live commerce energy."
+Verdict: "ElevenLabs gives 32-language support with natural voices. No GPU needed. Tradeoff: API dependency + per-character cost."
 
 ### Section: Gap to 300ms
 
 ```
-Translation:  ████████░░  172ms → 50ms target (3x)
-TTS:          ██████████░░  202ms → 100ms target (2x)
-Overhead:     ██░░  25ms → 20ms target (1.3x)
+Translation:  ████░░  123ms → 50ms target (2.5x)
+TTS:          ██████████████████████████████░░  728ms → 200ms target (3.6x)
+Overhead:     █░  11ms → 10ms target (1.1x)
 ─────────────────────────────────────────────────────
-Total:        ~400ms → 300ms (1.3x gap)
+Total:        ~862ms → 300ms (2.9x gap)
 ```
 
 ### Section: Optimization Roadmap (table)

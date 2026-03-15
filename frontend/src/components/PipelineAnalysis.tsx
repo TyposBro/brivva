@@ -2,17 +2,17 @@ import { useState } from "react";
 
 // --- static data ---
 
-const MAX_GAP_MS = 600;
+const MAX_GAP_MS = 1500;
 const TARGET_MS = 300;
-const TOTAL_CURRENT_MS = 400;
-const TOTAL_GAP_MULTIPLIER = 1.3;
+const TOTAL_CURRENT_MS = 862;
+const TOTAL_GAP_MULTIPLIER = 2.9;
 
 type Row = string[];
 
 const MY_PIPELINE: Row[] = [
   ["STT", "CF Nova-3 (via stt-wrapper)", "streaming ✓"],
-  ["Translation", "NLLB (self-hosted GPU)", "75–337ms"],
-  ["TTS", "Kokoro 82M (GPU)", "111–358ms"],
+  ["Translation", "NLLB (self-hosted GPU)", "82–164ms"],
+  ["TTS", "ElevenLabs flash_v2_5", "548–1,440ms"],
   ["Server", "Rust axum + DashMap", "fan-out/lang"],
   ["Lip-sync", "—", "not built"],
 ];
@@ -32,21 +32,21 @@ const STT_ROWS: Row[] = [
 ];
 
 const TRANSLATION_ROWS: Row[] = [
-  ["✓ NLLB (self-hosted GPU)", "Seq2Seq", "75–337ms"],
+  ["✓ NLLB (self-hosted GPU)", "Seq2Seq", "82–164ms"],
   ["M2M100-1.2B (CF Workers AI)", "Seq2Seq", "394–870ms"],
   ["Llama 3.2 1B", "LLM prompted", "~1,500ms"],
 ];
 
 const TTS_ROWS: Row[] = [
-  ["✓ Kokoro (self-hosted GPU)", "82M", "111–358ms", "Limited"],
-  ["Kokoro (Replicate)", "82M", "2,000–14,000ms", "Limited"],
+  ["✓ ElevenLabs flash_v2_5", "API", "548–1,440ms", "Yes — 32 langs"],
+  ["Kokoro 82M (self-hosted)", "82M", "111–358ms GPU", "Limited"],
   ["Emotive TTS (Brivva)", "3B", "unknown", "Yes — emotions"],
 ];
 
 const GAP_ITEMS = [
-  { label: "Translate", currentMs: 172, targetMs: 50 },
-  { label: "TTS", currentMs: 202, targetMs: 100 },
-  { label: "Overhead", currentMs: 25, targetMs: 20 },
+  { label: "Translate", currentMs: 123, targetMs: 50 },
+  { label: "TTS", currentMs: 728, targetMs: 200 },
+  { label: "Overhead", currentMs: 11, targetMs: 10 },
 ];
 
 const ROADMAP: Row[] = [
@@ -102,7 +102,7 @@ function DecisionsSection() {
   return (
     <div className="pa-section">
       <h4 className="pa-subtitle">Component Decisions</h4>
-      <Collapsible title="STT — Why WhisperLiveKit (self-hosted)">
+      <Collapsible title="STT — Why CF Nova-3 (stt-wrapper)">
         <Table headers={["Model", "WER", "Streaming", "Price"]} rows={STT_ROWS} winnerIndex={0} />
         <p className="pa-verdict">Streaming is non-negotiable for live translation. Self-hosted eliminates API costs and latency to cloud.</p>
       </Collapsible>
@@ -110,9 +110,9 @@ function DecisionsSection() {
         <Table headers={["Model", "Type", "Latency"]} rows={TRANSLATION_ROWS} winnerIndex={0} />
         <p className="pa-verdict">Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no network roundtrip to edge.</p>
       </Collapsible>
-      <Collapsible title="TTS — Why Kokoro (and its limits)">
+      <Collapsible title="TTS — Why ElevenLabs (and its tradeoffs)">
         <Table headers={["Model", "Params", "Latency", "Expressive"]} rows={TTS_ROWS} winnerIndex={0} />
-        <p className="pa-verdict">Kokoro wins for demo speed. Production needs expressive TTS for live commerce energy.</p>
+        <p className="pa-verdict">ElevenLabs gives 32-language support with natural voices. No GPU needed. Tradeoff: API dependency + per-character cost.</p>
       </Collapsible>
     </div>
   );
