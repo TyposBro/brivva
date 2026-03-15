@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>STT Direct Test</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    #log { white-space: pre-wrap; background: #111; color: #0f0; padding: 20px; height: 400px; overflow-y: auto; border-radius: 8px; }
+    .final { color: #fff; font-weight: bold; }
+    .interim { color: #888; }
+    .system { color: #ff0; }
+    button { font-size: 18px; padding: 12px 24px; margin: 10px 5px; cursor: pointer; }
+    #status { font-size: 14px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h2>STT Direct Test</h2>
+  <p>Connects browser mic → stt-wrapper WebSocket (bypasses Rust server)</p>
+  <div>
+    <label>WebSocket URL: <input id="wsUrl" value="ws://localhost:8766/asr" size="40"></label>
+  </div>
+  <div>
+    <button id="startBtn" onclick="start()">Start</button>
+    <button id="stopBtn" onclick="stop()" disabled>Stop</button>
+  </div>
+  <div id="status">Ready</div>
+  <div id="log"></div>
+
+  <script>
+    let ws, ctx, processor, stream;
+
+    function log(msg, cls = 'system') {
+      const el = document.getElementById('log');
+      const line = document.createElement('div');
+      line.className = cls;
+      line.textContent = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function start() {
+      const url = document.getElementById('wsUrl').value;
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = false;
+      document.getElementById('status').textContent = 'Connecting...';
+
+      // Connect WebSocket
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = async () => {
+        log('WebSocket connected to ' + url);
+        document.getElementById('status').textContent = 'Connected — speak now';
+
+        // Capture mic
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        ctx = new AudioContext({ sampleRate: 16000 });
+        const source = ctx.createMediaStreamSource(stream);
+        processor = ctx.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const float32 = e.inputBuffer.getChannelData(0);
+          const int16 = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+          }
+          ws.send(int16.buffer);
+        };
+
+        source.connect(processor);
+        processor.connect(ctx.destination);
+        log('Mic streaming PCM 16kHz 16-bit mono (4096 samples/chunk)');
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'final') {
+            log(`FINAL: ${data.text}`, 'final');
+          } else if (data.type === 'interim') {
+            log(`interim: ${data.text}`, 'interim');
+          } else if (data.type === 'error') {
+            log(`ERROR: ${data.message}`, 'system');
+          } else {
+            log(`unknown: ${JSON.stringify(data)}`, 'system');
+          }
+        } catch {
+          log(`raw: ${e.data}`, 'system');
+        }
+      };
+
+      ws.onclose = () => {
+        log('WebSocket closed');
+        document.getElementById('status').textContent = 'Disconnected';
+      };
+
+      ws.onerror = (e) => {
+        log('WebSocket error');
+        document.getElementById('status').textContent = 'Error';
+      };
+    }
+
+    function stop() {
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+      document.getElementById('status').textContent = 'Stopped';
+
+      processor?.disconnect();
+      stream?.getTracks().forEach(t => t.stop());
+      ctx?.close();
+      ws?.close();
+      log('Stopped');
+    }
+  </script>
+</body>
+</html>

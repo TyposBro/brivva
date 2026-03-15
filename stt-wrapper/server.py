@@ -4,8 +4,6 @@ Accepts raw PCM audio (16kHz, 16-bit, mono) from the Rust server,
 feeds it to RealtimeSTT which handles VAD, silence detection, and
 transcription internally. Emits clean interim/final events.
 
-Replaces the previous WhisperLiveKit + wrapper architecture.
-
 Protocol (server → client):
   {"type": "interim", "text": "Hello world"}
   {"type": "final",   "text": "Hello world."}
@@ -37,26 +35,36 @@ class STTSession:
         self.loop = loop
         self.events: asyncio.Queue = asyncio.Queue()
         self._running = True
+        self._last_interim = ""
 
         self.recorder = AudioToTextRecorder(
             model=STT_MODEL,
             language=STT_LANGUAGE,
             use_microphone=False,
             spinner=False,
+
             # Realtime transcription for interim results
             enable_realtime_transcription=True,
             realtime_model_type=STT_MODEL,
             on_realtime_transcription_stabilized=self._on_interim,
-            # VAD settings
-            post_speech_silence_duration=0.6,
-            silero_sensitivity=0.5,
+
+            # VAD: use Silero for end-of-speech detection (more robust than WebRTC)
+            silero_sensitivity=0.4,
+            silero_deactivity_detection=True,
+            webrtc_sensitivity=3,
+            post_speech_silence_duration=0.4,
             min_length_of_recording=0.3,
-            pre_recording_buffer_duration=0.3,
+            pre_recording_buffer_duration=0.2,
+
             # Performance
             beam_size=5,
             beam_size_realtime=3,
             no_log_file=True,
-            level=logging.WARNING,
+            level=logging.INFO,
+
+            # Callbacks for debugging
+            on_recording_start=lambda: log.info("VAD: speech started"),
+            on_recording_stop=lambda: log.info("VAD: speech ended"),
         )
 
         self._thread = threading.Thread(target=self._transcription_loop, daemon=True)
@@ -69,13 +77,15 @@ class STTSession:
 
     def _on_interim(self, text: str):
         text = text.strip()
-        if text:
+        if text and text != self._last_interim:
+            self._last_interim = text
             log.info("[INTERIM] %s", text)
             self._emit({"type": "interim", "text": text})
 
     def _on_final(self, text: str):
         text = text.strip()
         if text:
+            self._last_interim = ""  # reset dedup on final
             log.info("[FINAL] %s", text)
             self._emit({"type": "final", "text": text})
 

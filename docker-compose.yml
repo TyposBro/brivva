@@ -26,7 +26,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - STT_MODEL=base.en
+      - STT_MODEL=small.en
       - STT_LANGUAGE=en
     restart: unless-stopped
 

@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir \
     RealtimeSTT==0.3.104
 
 # Pre-download faster-whisper model at build time
-RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')"
 
 EXPOSE 8766
 
