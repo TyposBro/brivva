@@ -2,191 +2,186 @@
 
 ## Purpose
 
-Demo prototype for Brivva interview — showing a real-time voice translation pipeline with rooms.
-I'm the top candidate out of 15 and they want to proceed to a paid technical test.
+Demo prototype for Brivva technical interview. Real-time voice translation for live commerce.
+I'm the top candidate out of 15. Paid technical test coming (1hr with CTO).
 
 ## Current Status (Mar 15 2026)
 
-**v3 — Self-hosted Rust pipeline, WORKING.**
+**v3 — WORKING and deployed.** Fully self-hosted Rust pipeline:
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
-- **Backend:** Rust axum server via cloudflared tunnel at `brivva-server.milliytechnology.org`
+- **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
+- **Tunnel:** brivva-server.milliytechnology.org → localhost:3000
 - **Repo:** https://github.com/TyposBro/brivva (private)
-- Host speaks (EN) → guests pick EN/JA/ZH → each gets translated ElevenLabs audio
-- Docker works on both macOS (CPU) and Linux (GPU override)
-- Measured latency: Avg 862ms, Best 653ms, 2.9x gap to 300ms target
+- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated ElevenLabs audio
+- Rooms backed by DashMap (concurrent hash map, per-shard locking)
+- STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
+- Translation: NLLB-200-distilled-600M (self-hosted, 82-164ms GPU)
+- TTS: ElevenLabs eleven_flash_v2_5 (API, 548-1440ms, 32 languages)
+- Dockerized: 3 containers (server-rs, stt-wrapper, nllb)
 
-**v2** (CF Workers + Durable Objects) still deployed at worker URL but superseded.
-**v1** still deployed at `/api/realtime` (EN→JA, single-user, untouched).
-
----
-
-## v3 Architecture (current)
+## Architecture (v3)
 
 ```
 Host Browser (/host)
-├── Record audio from mic (ScriptProcessorNode, PCM linear16 @ 16kHz)
-├── WebSocket → wss://brivva-server.milliytechnology.org/api/room?role=host&sourceLang=en
-└── See room code + guest counts + live transcript + latency dashboard
-
-server-rs (Rust, axum, DashMap rooms, tokio tasks)
-├── STT Wrapper (stt-wrapper:8766/asr, Python asyncio)
-│   - Proxies audio to CF Nova-3 via CF AI Gateway
-│   - Emits clean { type: "interim"/"final", text } events
-│   - Handles: silence stripping, sentence boundary detection, dedup
-│   - Env: CF_ACCOUNT_ID, CF_API_TOKEN, STT_LANGUAGE
-├── NLLB Translation (nllb:8000/translate, nllb-200-distilled-600M)
-│   - POST /translate { text, source_lang, target_lang }
-│   - 82–164ms on GPU, slower on CPU
-│   - Parallel tokio::spawn per active language
-├── ElevenLabs TTS (API, eleven_flash_v2_5)
-│   - POST /v1/text-to-speech/{voice_id}/stream → streaming MP3
-│   - 548–1,440ms depending on text length
-│   - Voices: Sarah (EN), Lily (JA), Alice (ZH), Jessica (KO)
-│   - Env: ELEVENLABS_API_KEY
-└── Fan-out: translate once per language, broadcast to all guests in group
-
-Guest Browser (/room/:id)
-├── Join room with code, pick language (EN/JA/ZH)
-├── WebSocket → receive translated audio + subtitles
-└── Blob URL playback (FIFO queue, no overlap)
+  → PCM linear16 @ 16kHz → WebSocket → server-rs (Rust/axum :3000)
+  → stt-wrapper (:8766) → CF Nova-3 (streaming transcription)
+  → NLLB (:8000) — per active language, parallel tokio::spawn
+  → ElevenLabs TTS (API) — streaming MP3
+  → WebSocket → Guest Browser (Blob URL playback)
 ```
 
-### WebSocket Protocol (v3)
+| Service     | Port | Tech                             | Latency       |
+| ----------- | ---- | -------------------------------- | ------------- |
+| server-rs   | 3000 | Rust/axum, DashMap, mpsc         | orchestration |
+| stt-wrapper | 8766 | Python asyncio, CF Nova-3 API    | streaming     |
+| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | 82-164ms GPU  |
+| ElevenLabs  | API  | eleven_flash_v2_5                | 548-1440ms    |
+
+## Key Technical Decisions
+
+### Why Rust axum over CF Workers (v2 → v3 migration)
+
+- CF Workers AI M2M100 = 394-870ms + network. NLLB localhost = 82-164ms
+- Durable Objects add complexity (DO pinning, isolate eviction, no GPU)
+- All services co-located eliminates ~170-350ms network overhead per utterance
+- Persistent WebSocket connections (Workers have 30s idle timeout issues)
+- GPU access for NLLB (Workers have no GPU)
+
+### Why DashMap over HashMap+Mutex
+
+- DashMap locks per-shard: concurrent room access without blocking all rooms
+- HashMap+Mutex locks entire map: one slow room blocks all tokio tasks
+- Real-world: 100 rooms = DashMap handles concurrent joins/leaves; Mutex serializes them
+
+### Why CF Nova-3 (via stt-wrapper) over Whisper
+
+- Streaming (interims while speaking) vs batch-only
+- Better accuracy for short phrases (Whisper hallucinates on silence/ambiguous chunks)
+- stt-wrapper proxies audio, returns clean { type: "interim"/"final", text } events
+- No local GPU needed for STT
+
+### Why NLLB over M2M100/LLM
+
+- NLLB = Meta's successor to M2M100: better quality, 200 languages
+- distilled-600M = half the size of M2M100-1.2B, faster inference
+- Self-hosted = no CF Workers AI dependency, no network roundtrip
+- Seq2seq = dedicated translation model, ~3x faster than LLM prompting
+
+### Why ElevenLabs over Kokoro
+
+- 32 languages with natural expressive voices
+- Kokoro (82M params) sounds robotic, lacks emotional range
+- API-based: no local GPU needed, no model download
+- Tradeoff: API dependency + per-character cost
+
+### Fan-out optimization
+
+- Translate ONCE per language group, broadcast to all N guests
+- 50 JA guests = 1 NLLB call + 1 ElevenLabs call, not 50
+- Each language runs in parallel via tokio::spawn + tokio::join!
+
+### Blob URL playback over MSE
+
+- MSE addSourceBuffer("audio/mpeg") throws on Safari
+- Blob URL: buffer all chunks until tts_end, then play via Blob URL
+- Works on every browser
+- Tradeoff: slight delay (must wait for all chunks) vs MSE streaming
+
+## WebSocket Protocol (v3)
 
 Connection via query params (no JSON handshake):
+
 - Host: `ws://host/api/room?role=host&sourceLang=en`
 - Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
 
-**Server → Host:** `room:created`, `room:guest_count`, `interim`, `final`, `translation`, `tts_end`
-**Server → Guest:** `room:joined`, `interim`, `final`, `translation`, `tts_start`, [MP3 chunks], `tts_end`, `room:closed`
+**Host → Server:** `[ArrayBuffer]` (PCM audio frames), `"host:end"` (close room)
+**Server → Host:** room:created, room:guest_count, interim, final, translation, tts_end
+**Server → Guest:** room:joined, interim, final, translation, tts_start, [MP3 chunks], tts_end, room:closed
 
-### Key files
+## Bug Fixes Log
 
-| File | Purpose |
-|------|---------|
-| `server-rs/src/main.rs` | Entry, router, DashMap state |
-| `server-rs/src/types.rs` | Lang, Room, Guest, ServerMsg, voice_id() |
-| `server-rs/src/pipeline.rs` | STT → Translate → TTS pipeline (ElevenLabs) |
-| `server-rs/src/room/handler.rs` | WebSocket host/guest handlers |
-| `stt-wrapper/server.py` | Clean STT proxy (CF Nova-3 → interim/final) |
-| `nllb/server.py` | NLLB FastAPI translation server |
+- **TTS queue freeze** — audio.play() Promise rejection left playing flag stuck true. Without .catch(), queue permanently frozen. Fix: .catch() calls advance() to move to next item.
+- **AudioContext unlock** — Browser autoplay policy blocks audio.play() until user gesture. Guest language picker calls new AudioContext(); ctx.resume() on click.
+- **URL.revokeObjectURL** — Must revoke blob URL after playback to prevent memory leaks. Each blob stays in memory until explicitly revoked.
+- **Whisper hallucination** — Whisper generates random coherent text ("space whale", "sustainable shoe brand") on silence/ambiguous audio. Fix: switched to CF Nova-3 which handles silence correctly.
+- **STT retry loop** — stt-wrapper may still be starting when server-rs boots. Retries connection 10 times, 3 seconds apart.
+- **PCM encoding** — Web Audio captures Float32 [-1,1]. STT expects Int16. Convert: Math.max(-32768, Math.min(32767, float32 \* 32768)).
 
----
+## Measured Latency (v3, self-hosted)
 
-## Tech Stack
+| Phase                              | Typical         | Notes                          |
+| ---------------------------------- | --------------- | ------------------------------ |
+| STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking |
+| Translation (NLLB GPU)             | 82-164ms        | Warm, per language             |
+| TTS (ElevenLabs)                   | 548-1440ms      | Depends on text length         |
+| Overhead (routing)                 | ~11ms           | localhost, no network hops     |
+| **Total from utterance finalized** | **~650-1600ms** |                                |
+| **Target**                         | **<300ms**      | Gap: ~2-5x                     |
 
-- **Frontend:** React + TypeScript + Vite (Cloudflare Pages)
-- **Backend:** Rust axum WebSocket server
-- **STT:** CF Nova-3 via stt-wrapper (CF AI Gateway, streaming)
-- **Translation:** NLLB-200-distilled-600M (self-hosted FastAPI, 82–164ms GPU)
-- **TTS:** ElevenLabs flash_v2_5 (API, 32 languages, streaming MP3)
-- **Rooms:** DashMap + mpsc channels (in-memory, per-process)
-- **Tunnel:** cloudflared (routes brivva-server.milliytechnology.org → localhost:3000)
-- **Docker:** Unified for macOS + Linux (GPU override via docker-compose.gpu.yml)
+## Rust Server Key Concepts
 
-## Running
+- **AppState:** Arc<AppState> holds DashMap<String, Room> (rooms) + reqwest::Client (shared HTTP client)
+- **Room:** host_tx (mpsc sender to host), guests DashMap<String, Guest>, source_lang
+- **Guest:** tx (mpsc sender), lang, id
+- **mpsc channels:** Each WebSocket connection gets a (tx, rx) pair. tx stored in Room, rx drives the WebSocket send loop
+- **tokio::spawn:** Used for parallel per-language translation+TTS. One task per active language group
+- **Pipeline flow:** handle_host_message → pipeline::process_utterance → spawn per-lang → translate → tts → broadcast
 
-### Docker (works on macOS and Linux)
+## Frontend Architecture (refactored, clean)
 
-```bash
-docker compose up --build                    # CPU (works everywhere)
-# OR with NVIDIA GPU:
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+- `src/lib/AudioPipeline.ts` — mic capture, AudioContext, Float32→Int16 conversion
+- `src/lib/RoomSocket.ts` — WebSocket connect, sendAudio, sendJson, routeMessage
+- `src/lib/TtsPlayer.ts` — Blob URL playback queue (startReceiving → addChunk → finishReceiving → advance)
+- `src/hooks/hostReducer.ts` — pure function, all state transitions, zero side effects
+- `src/hooks/useHostRoom.ts` — thin orchestrator: WS messages → dispatch, uses AudioPipeline + RoomSocket
+- `src/hooks/useTimings.ts` — per-utterance stopwatch (startTimer → recordSplit → finalize)
+- `src/components/LatencyDashboard.tsx` — live per-utterance stacked bars
+- `src/components/PipelineAnalysis.tsx` — static pipeline comparison
+
+## Docker Services
+
+```yaml
+# docker-compose.yml — 3 containers
+server-rs: Rust axum, port 3000, no GPU
+stt-wrapper: Python asyncio, port 8766, no GPU (CF Nova-3 API proxy)
+nllb: FastAPI + nllb-200-distilled-600M, port 8000, optional GPU
 ```
-
-### Deploy frontend
-
-```bash
-cd frontend && npm run deploy
-```
-
-### Env vars required (.env file)
-
-```
-CF_ACCOUNT_ID=...        # CF AI Gateway for stt-wrapper
-CF_API_TOKEN=...         # CF AI Gateway auth
-ELEVENLABS_API_KEY=...   # ElevenLabs TTS
-```
-
-See `README.md` for full setup instructions (tunnel credentials, NixOS, AWS).
-
----
-
-## About Brivva (from interview Mar 10)
-
-- Real-time multilingual live commerce platform
-- Voice translation + lip-sync for live streams
-- Distribute to TikTok, Naver, Instagram, Rakuten simultaneously
-- Founders have a previous exit
-- Seed round closing April 2025
-- 10 paying customers ($30-80K contracts each)
-- Stack: Rust backend, React/TS frontend, AWS
-- Target latency: <300ms end-to-end
-- They acknowledged I need ~3 months Rust ramp-up and are fine with it
-
-## Why This Matters for the Interview
-
-Brivva's listed pipeline: Whisper STT → Context NMT → Emotive TTS → Wav2Lip
-My improvements across v1→v3:
-
-1. **Streaming STT** (CF Nova-3 via stt-wrapper) over batch Whisper — real-time interims
-2. **NLLB self-hosted** — no cloud dependency, 200 languages, fast seq2seq
-3. **ElevenLabs TTS** — 32-language support, natural voices, no local GPU needed
-4. **Rust axum server** — matches Brivva's stack, replaces CF Workers
-5. **Rooms + multi-language fan-out** — directly maps to live commerce product
-6. **Dockerized** — unified macOS/Linux, GPU override for production
-7. **API-based STT + TTS** — only NLLB needs local GPU, simplifies deployment
-
-## Key Technical Decisions & Bug Fixes
-
-- **CF Nova-3 over WhisperLiveKit** — API-based, no local GPU needed for STT
-- **ElevenLabs over Kokoro** — 32 languages, no model downloads, no GPU for TTS
-- **stt-wrapper** — clean proxy that handles silence stripping, sentence boundaries, dedup
-- **STT retry loop** — stt-wrapper may still be starting; 10 retries, 3s apart
-- **TTS Blob URL** — MSE addSourceBuffer("audio/mpeg") throws on Safari; Blob URL works everywhere
-- **AudioContext unlock** — call ctx.resume() on user gesture before first audio.play()
-- **Unified Docker** — python:3.10-slim base for NLLB (ARM + x86), GPU override via docker-compose.gpu.yml
 
 ## Project Structure
 
 ```
 brivva/
-├── docker-compose.yml             3 services (server, stt-wrapper, nllb)
-├── docker-compose.gpu.yml         GPU override (NVIDIA runtime + CUDA Dockerfile)
-├── .env                           API keys (CF_ACCOUNT_ID, CF_API_TOKEN, ELEVENLABS_API_KEY)
 ├── server-rs/                     Rust axum WebSocket server
 │   ├── Dockerfile
 │   └── src/
-│       ├── main.rs                Entry, router, state
-│       ├── types.rs               Lang, Room, Guest, ServerMsg, voice_id()
+│       ├── main.rs                Entry, router, AppState
+│       ├── types.rs               Lang, Room, Guest, ServerMsg
 │       ├── pipeline.rs            STT → Translate → TTS pipeline
 │       └── room/handler.rs        WebSocket host/guest handlers
-├── stt-wrapper/                   STT proxy (CF Nova-3 via AI Gateway)
-│   ├── Dockerfile
-│   └── server.py                  asyncio WebSocket, interim/final events
+├── stt-wrapper/                   STT proxy (CF Nova-3)
+│   └── server.py                  asyncio WebSocket proxy
 ├── nllb/                          NLLB translation server
-│   ├── Dockerfile                 CPU (python:3.10-slim, works everywhere)
-│   ├── Dockerfile.gpu             GPU (nvidia/cuda:12.4.1, Linux only)
 │   └── server.py                  FastAPI, POST /translate
-├── frontend/                      React + TypeScript + Vite
+├── frontend/                      React 19 + TypeScript + Vite
 │   └── src/
 │       ├── pages/                 HostPage, GuestPage, HomePage
 │       ├── components/            LatencyDashboard, PipelineAnalysis
-│       ├── hooks/                 useHostRoom, useGuestRoom, useTimings
-│       ├── lib/                   RoomSocket, TtsPlayer
-│       └── state/                 Host/guest reducers + message handlers
-├── worker/                        CF Worker (v1/v2 legacy)
-├── CLAUDE.md                      This file
-├── BENCHMARK.md                   Benchmark dashboard spec
-├── README.md                      Setup + deployment guide
-└── docs.md                        Full technical documentation
+│       ├── hooks/                 useHostRoom, useGuestRoom, useTimings, hostReducer
+│       ├── lib/                   AudioPipeline, RoomSocket, TtsPlayer
+│       └── state/                 host/guest reducers + message handlers
+├── docker-compose.yml             3 services
+├── .env                           API keys
+└── CLAUDE.md                      ← you are here
 ```
 
-## Rules
+## About Brivva
 
-- Ship fast. This is a demo, not production code.
-- Host language: English (testing) or Korean (Brivva's K-Beauty use case)
-- Guest languages: EN, JA, ZH (Brivva's priority markets)
-- No auth, no persistent storage — in-memory rooms are fine
-- Room system should work with at least 3 simultaneous connections for demo
+- Real-time multilingual live commerce platform
+- Voice translation + lip-sync for live streams
+- Distribute to TikTok, Naver, Instagram, Rakuten simultaneously
+- Founders have previous exit, seed round closing April
+- 10 paying customers ($30-80K contracts)
+- Stack: Rust backend, React/TS frontend, AWS
+- Target: <300ms e2e latency
+- Salary discussed: ₩80-100M, remote OK (KST), 3-month Rust ramp-up acknowledged
