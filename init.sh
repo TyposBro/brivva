@@ -6,6 +6,7 @@ KOKORO_DIR="$SCRIPT_DIR/kokoro"
 SERVER_DIR="$SCRIPT_DIR/server-rs"
 NLLB_DIR="$SCRIPT_DIR/nllb"
 WHISPER_DIR="$SCRIPT_DIR/whisper-stt"
+STT_WRAPPER_DIR="$SCRIPT_DIR/stt-wrapper"
 
 # Check UniDic dictionary (required for Japanese TTS)
 if [ ! -f "$KOKORO_DIR/.venv/lib/python3.10/site-packages/unidic/dicdir/mecabrc" ]; then
@@ -15,6 +16,7 @@ fi
 
 # Free ports if already in use
 lsof -ti :8880 | xargs kill -9 2>/dev/null || true
+lsof -ti :8766 | xargs kill -9 2>/dev/null || true
 lsof -ti :8765 | xargs kill -9 2>/dev/null || true
 lsof -ti :8000 | xargs kill -9 2>/dev/null || true
 lsof -ti :3000 | xargs kill -9 2>/dev/null || true
@@ -56,14 +58,21 @@ cd "$WHISPER_DIR"
 PIDS+=($!)
 cd "$SCRIPT_DIR"
 
-# 4. Build and start Rust server (port 3000)
+# 4. Start STT wrapper (port 8766)
+echo "Starting STT wrapper on :8766..."
+cd "$STT_WRAPPER_DIR"
+python server.py &
+PIDS+=($!)
+cd "$SCRIPT_DIR"
+
+# 5. Build and start Rust server (port 3000)
 echo "Building server-rs..."
 cargo build --release --manifest-path "$SERVER_DIR/Cargo.toml" 2>&1
 echo "Starting server-rs on :3000..."
 "$SCRIPT_DIR/target/release/server-rs" &
 PIDS+=($!)
 
-# 5. Start Kokoro TTS (port 8880, foreground — Ctrl+C stops everything)
+# 6. Start Kokoro TTS (port 8880, foreground — Ctrl+C stops everything)
 echo "Starting Kokoro-FastAPI on :8880..."
 cd "$KOKORO_DIR"
 USE_GPU=true USE_ONNX=false \

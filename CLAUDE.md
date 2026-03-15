@@ -30,14 +30,15 @@ Host Browser (/host)
 └── See room code + guest counts + live transcript + latency dashboard
 
 server-rs (Rust, axum, DashMap rooms, tokio tasks)
-├── WhisperLiveKit STT (localhost:8765, mlx-whisper base.en)
-│   - Streaming WebSocket, --no-vac --pcm-input
-│   - Dual detection: buffer_transcription + lines[].text changes
-│   - Strips "(silence)" markers, emits once per line index
-├── NLLB Translation (localhost:8000, nllb-200-distilled-600M)
+├── STT Wrapper (stt-wrapper:8766/asr, Python asyncio)
+│   - Proxies audio to WhisperLiveKit, emits clean interim/final events
+│   - Handles: silence stripping, sentence boundary detection, dedup
+│   └── WhisperLiveKit (whisper-stt:8765, faster-whisper base.en)
+│       - Streaming WebSocket, --no-vac --pcm-input
+├── NLLB Translation (nllb:8000/translate, nllb-200-distilled-600M)
 │   - POST /translate { text, source_lang, target_lang }
 │   - Parallel tokio::spawn per active language
-├── Kokoro TTS (localhost:8880, kokoro-v1_0 82M)
+├── Kokoro TTS (kokoro:8880/v1/audio/speech, kokoro-v1_0 82M)
 │   - POST /v1/audio/speech → streaming MP3 response
 │   - Voices: af_bella (EN), jf_alpha (JA), zf_xiaobei (ZH)
 └── Fan-out: translate once per language, broadcast to all guests in group
@@ -65,6 +66,7 @@ Connection via query params (no JSON handshake):
 | `server-rs/src/types.rs` | Lang, Room, Guest, ServerMsg, Rooms |
 | `server-rs/src/pipeline.rs` | STT → Translate → TTS pipeline |
 | `server-rs/src/room/handler.rs` | WebSocket host/guest handlers |
+| `stt-wrapper/server.py` | Clean STT proxy (WhisperLiveKit → interim/final) |
 | `nllb/server.py` | NLLB FastAPI translation server |
 
 ---
@@ -155,6 +157,9 @@ brivva/
 │       ├── types.rs               Lang, Room, Guest, ServerMsg
 │       ├── pipeline.rs            STT → Translate → TTS pipeline
 │       └── room/handler.rs        WebSocket host/guest handlers
+├── stt-wrapper/                   Clean STT WebSocket proxy
+│   ├── Dockerfile
+│   └── server.py                  asyncio websockets, interim/final events
 ├── nllb/                          NLLB translation server
 │   ├── Dockerfile
 │   └── server.py                  FastAPI, POST /translate

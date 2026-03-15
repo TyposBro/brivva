@@ -1,26 +1,26 @@
 //! Translation pipeline: STT → Translate → TTS
 //!
 //! Host audio flows through:
-//! 1. WhisperLiveKit (localhost:8765/asr) — streaming STT via WebSocket
-//! 2. NLLB (localhost:8000/translate) — REST translation per active language
-//! 3. Kokoro (localhost:8880/v1/audio/speech) — REST TTS, streaming MP3 response
+//! 1. STT Wrapper (stt-wrapper:8766/asr) — clean interim/final events
+//! 2. NLLB (nllb:8000/translate) — REST translation per active language
+//! 3. Kokoro (kokoro:8880/v1/audio/speech) — REST TTS, streaming MP3 response
 
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
 use crate::types::{Lang, Rooms, ServerMsg};
 
-// ── STT (WhisperLiveKit) ──────────────────────────────────
-
-use std::sync::LazyLock;
+// ── Service URLs ──────────────────────────────────────────
 
 static STT_URL: LazyLock<String> = LazyLock::new(|| {
     let host = std::env::var("STT_HOST").unwrap_or_else(|_| "localhost".to_string());
-    format!("ws://{}:8765/asr", host)
+    let port = std::env::var("STT_PORT").unwrap_or_else(|_| "8766".to_string());
+    format!("ws://{}:{}/asr", host, port)
 });
 static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
     let host = std::env::var("NLLB_HOST").unwrap_or_else(|_| "localhost".to_string());
@@ -31,24 +31,19 @@ static KOKORO_URL: LazyLock<String> = LazyLock::new(|| {
     format!("http://{}:8880/v1/audio/speech", host)
 });
 
-/// WhisperLiveKit response format
-#[derive(Debug, Deserialize)]
-struct SttResponse {
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    lines: Vec<SttLine>,
-    #[serde(default)]
-    buffer_transcription: String,
-    #[serde(rename = "type")]
-    #[serde(default)]
-    msg_type: String,
-}
+// ── STT Events (from stt-wrapper) ─────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct SttLine {
+struct SttEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
     text: String,
+    #[serde(default)]
+    message: String,
 }
+
+// ── STT Connection ────────────────────────────────────────
 
 /// Emit a final transcript: broadcast to room and trigger translation pipeline
 fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_lang: &Lang) {
@@ -74,19 +69,19 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
     }
 }
 
-/// Connect to WhisperLiveKit and return a sender for audio + handle responses
+/// Connect to STT wrapper and stream audio / receive clean events
 pub async fn start_stt(
     room_id: String,
     rooms: Rooms,
     source_lang: Lang,
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    // Retry STT connection — WhisperLiveKit may still be loading the model
+    // Connect to STT wrapper with retries
     let mut ws_stream = None;
     for attempt in 1..=10 {
         match tokio_tungstenite::connect_async(&*STT_URL).await {
             Ok((stream, _)) => {
-                println!("Connected to STT (attempt {})", attempt);
+                println!("Connected to STT wrapper (attempt {})", attempt);
                 ws_stream = Some(stream);
                 break;
             }
@@ -99,7 +94,7 @@ pub async fn start_stt(
     let ws_stream = match ws_stream {
         Some(s) => s,
         None => {
-            eprintln!("Failed to connect to STT after 10 attempts");
+            eprintln!("Failed to connect to STT wrapper after 10 attempts");
             return;
         }
     };
@@ -107,12 +102,8 @@ pub async fn start_stt(
     let (mut stt_sink, mut stt_stream) = ws_stream.split();
     let mut audio_rx = audio_rx;
 
-    // Task 1: Forward host audio → STT WebSocket
+    // Task 1: Forward host audio → STT wrapper
     let send_task = tokio::spawn(async move {
-        // Wait for the config message before sending audio
-        // WhisperLiveKit sends { "type": "config", ... } first
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
         while let Some(data) = audio_rx.recv().await {
             if stt_sink
                 .send(tungstenite::Message::Binary(data.into()))
@@ -124,20 +115,10 @@ pub async fn start_stt(
         }
     });
 
-    // Task 2: Read STT responses → broadcast interims/finals, trigger pipeline
-    //
-    // WhisperLiveKit has two modes:
-    // 1. buffer_transcription fills up → committed to lines → buffer clears
-    // 2. Text goes directly into lines (with --no-vac / base models)
-    //
-    // Strategy: track BOTH buffer and lines text. Detect changes in either.
+    // Task 2: Read clean interim/final events from STT wrapper
     let rooms_ref = rooms.clone();
     let rid = room_id.clone();
     let mut utterance_counter: u64 = 0;
-    let mut last_interim = String::new();
-    let mut prev_buffer_was_nonempty = false;
-    let mut seen_line_texts: Vec<String> = Vec::new();
-    let mut emitted_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stt_stream.next().await {
@@ -146,100 +127,44 @@ pub async fn start_stt(
                 _ => continue,
             };
 
-            let resp: SttResponse = match serde_json::from_str(&text) {
-                Ok(r) => r,
+            let event: SttEvent = match serde_json::from_str(&text) {
+                Ok(e) => e,
                 Err(e) => {
-                    eprintln!("[STT PARSE ERROR] {}", e);
+                    eprintln!("[STT] parse error: {}", e);
                     continue;
                 }
             };
-
-            // Skip config messages
-            if resp.msg_type == "config" || resp.msg_type == "ready_to_stop" {
-                continue;
-            }
 
             let room = match rooms_ref.get(&rid) {
                 Some(r) => r,
-                None => break, // room closed
+                None => break,
             };
 
-            // --- Path 1: buffer_transcription (interim text) ---
-            if !resp.buffer_transcription.is_empty() {
-                if resp.buffer_transcription != last_interim {
-                    last_interim = resp.buffer_transcription.clone();
-                    println!("[INTERIM] {}", last_interim);
+            match event.event_type.as_str() {
+                "final" => {
+                    utterance_counter += 1;
+                    let uid = utterance_counter;
+                    println!("[FINAL #{}] {}", uid, event.text);
+                    drop(room);
+                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang);
+                }
+                "interim" => {
+                    println!("[INTERIM] {}", event.text);
                     let msg = to_ws(&ServerMsg::Interim {
-                        transcript: last_interim.clone(),
+                        transcript: event.text,
                     });
                     room.send_to_host(msg.clone());
                     room.send_to_all_guests(msg);
                 }
-                prev_buffer_was_nonempty = true;
-            }
-
-            // Buffer went from non-empty → empty = text was committed (final)
-            if resp.buffer_transcription.is_empty() && prev_buffer_was_nonempty {
-                prev_buffer_was_nonempty = false;
-                let transcript = last_interim.trim().to_string();
-                last_interim.clear();
-
-                if !transcript.is_empty() {
-                    utterance_counter += 1;
-                    let uid = utterance_counter;
-                    println!("[FINAL #{}] {} (from buffer)", uid, transcript);
-                    emit_final(&rooms_ref, &rid, &transcript, uid, &source_lang);
+                "error" => {
+                    eprintln!("[STT] error: {}", event.message);
+                    break;
                 }
-            }
-
-            // --- Path 2: lines text changed (direct-to-lines mode) ---
-            // WhisperLiveKit with --no-vac may keep updating the same line index.
-            // New lines appear at higher indices. We emit once per line when it
-            // first gets content, and also when a previously-emitted line changes
-            // substantially (new words appended).
-            let num_lines = resp.lines.len();
-            for (i, line) in resp.lines.iter().enumerate() {
-                // Strip "(silence)" markers that WhisperLiveKit appends during pauses
-                let line_text = line.text.replace("(silence)", "").trim().to_string();
-                if line_text.is_empty() {
-                    continue;
-                }
-
-                // Extend seen_line_texts if needed
-                while seen_line_texts.len() <= i {
-                    seen_line_texts.push(String::new());
-                }
-
-                let is_new = seen_line_texts[i] != line_text;
-                if !is_new {
-                    continue;
-                }
-
-                // For lines that aren't the last one (i.e., completed lines),
-                // emit if we haven't emitted this exact text before
-                let is_last_line = i == num_lines - 1;
-                if !is_last_line && !emitted_lines.contains(&i) {
-                    seen_line_texts[i] = line_text.clone();
-                    emitted_lines.insert(i);
-                    utterance_counter += 1;
-                    let uid = utterance_counter;
-                    println!("[FINAL #{}] {} (from line {})", uid, line_text, i);
-                    emit_final(&rooms_ref, &rid, &line_text, uid, &source_lang);
-                } else if is_last_line {
-                    // Last line is still being built — send as interim
-                    seen_line_texts[i] = line_text.clone();
-                    println!("[INTERIM] {} (from line {})", line_text, i);
-                    let msg = to_ws(&ServerMsg::Interim {
-                        transcript: line_text,
-                    });
-                    room.send_to_host(msg.clone());
-                    room.send_to_all_guests(msg);
-                }
+                _ => {}
             }
         }
     });
 
-    // Wait for either task to finish (host disconnected or STT closed)
     tokio::select! {
         _ = send_task => {},
         _ = recv_task => {},
@@ -247,7 +172,6 @@ pub async fn start_stt(
 }
 
 // ── Translation Pipeline ──────────────────────────────────
-
 
 #[derive(Serialize)]
 struct NllbRequest {
@@ -280,31 +204,18 @@ async fn run_pipeline(
     room_id: &str,
 ) {
     let client = reqwest::Client::new();
-
-    // Translate to all target languages in parallel (tokio::join! equivalent)
-    let mut translate_handles = Vec::new();
+    let mut handles = Vec::new();
 
     for lang in target_langs {
-        // Don't translate if source == target
         if lang == source_lang {
-            // Still need to do TTS for same-language listeners
             let transcript = transcript.to_string();
             let lang = lang.clone();
             let client = client.clone();
             let rooms = rooms.clone();
             let room_id = room_id.to_string();
 
-            translate_handles.push(tokio::spawn(async move {
-                do_tts_and_broadcast(
-                    &client,
-                    &transcript,
-                    0,
-                    utterance_id,
-                    &lang,
-                    &rooms,
-                    &room_id,
-                )
-                .await;
+            handles.push(tokio::spawn(async move {
+                do_tts_and_broadcast(&client, &transcript, 0, utterance_id, &lang, &rooms, &room_id).await;
             }));
             continue;
         }
@@ -316,7 +227,7 @@ async fn run_pipeline(
         let rooms = rooms.clone();
         let room_id = room_id.to_string();
 
-        translate_handles.push(tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             // 1. Translate
             let start = Instant::now();
             let nllb_resp = client
@@ -329,9 +240,9 @@ async fn run_pipeline(
                 .send()
                 .await;
 
-            let (translated_text, _translate_ms) = match nllb_resp {
+            let translated_text = match nllb_resp {
                 Ok(resp) => match resp.json::<NllbResponse>().await {
-                    Ok(r) => (r.translated_text, r.translate_ms as u64),
+                    Ok(r) => r.translated_text,
                     Err(e) => {
                         eprintln!("NLLB parse error for {}: {}", target, e);
                         return;
@@ -342,36 +253,26 @@ async fn run_pipeline(
                     return;
                 }
             };
-            let translate_ms_actual = start.elapsed().as_millis() as u64;
-            println!("[TRANSLATE] {} → {} = '{}' ({}ms)", source, target, translated_text, translate_ms_actual);
+            let translate_ms = start.elapsed().as_millis() as u64;
+            println!("[TRANSLATE] {} → {} = '{}' ({}ms)", source, target, translated_text, translate_ms);
 
-            // 2. Broadcast translation text to language group
+            // 2. Broadcast translation text
             if let Some(room) = rooms.get(&room_id) {
                 let msg = to_ws(&ServerMsg::Translation {
                     text: translated_text.clone(),
                     utterance_id,
-                    translate_ms: translate_ms_actual,
+                    translate_ms,
                 });
                 room.send_to_lang(&target, msg.clone());
                 room.send_to_host(msg);
             }
 
             // 3. TTS + stream audio
-            do_tts_and_broadcast(
-                &client,
-                &translated_text,
-                translate_ms_actual,
-                utterance_id,
-                &target,
-                &rooms,
-                &room_id,
-            )
-            .await;
+            do_tts_and_broadcast(&client, &translated_text, translate_ms, utterance_id, &target, &rooms, &room_id).await;
         }));
     }
 
-    // Wait for all languages to finish
-    for handle in translate_handles {
+    for handle in handles {
         let _ = handle.await;
     }
 }
@@ -388,12 +289,10 @@ async fn do_tts_and_broadcast(
 ) {
     let tts_start = Instant::now();
 
-    // Send tts_start
     if let Some(room) = rooms.get(room_id) {
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
     }
 
-    // Call Kokoro
     println!("[TTS] requesting voice={} for '{}' ({})", lang.voice(), text, lang);
     let tts_resp = client
         .post(&*KOKORO_URL)
@@ -409,16 +308,12 @@ async fn do_tts_and_broadcast(
     match tts_resp {
         Ok(resp) if resp.status().is_success() => {
             println!("[TTS] streaming MP3 chunks for {}", lang);
-            // Stream MP3 chunks as they arrive
             let mut stream = resp.bytes_stream();
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
                         if let Some(room) = rooms.get(room_id) {
-                            room.send_to_lang(
-                                lang,
-                                Message::Binary(chunk.to_vec().into()),
-                            );
+                            room.send_to_lang(lang, Message::Binary(chunk.to_vec().into()));
                         }
                     }
                     Err(e) => {
@@ -428,21 +323,13 @@ async fn do_tts_and_broadcast(
                 }
             }
         }
-        Ok(resp) => {
-            eprintln!("Kokoro error: {}", resp.status());
-        }
-        Err(e) => {
-            eprintln!("Kokoro request error for {}: {}", lang, e);
-        }
+        Ok(resp) => eprintln!("Kokoro error: {}", resp.status()),
+        Err(e) => eprintln!("Kokoro request error for {}: {}", lang, e),
     }
 
-    // Send tts_end
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     if let Some(room) = rooms.get(room_id) {
-        let msg = to_ws(&ServerMsg::TtsEnd {
-            utterance_id,
-            tts_ms,
-        });
+        let msg = to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms });
         room.send_to_lang(lang, msg.clone());
         room.send_to_host(msg);
     }

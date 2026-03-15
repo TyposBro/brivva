@@ -8,13 +8,24 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - STT_HOST=whisper-stt
+      - STT_HOST=stt-wrapper
+      - STT_PORT=8766
       - NLLB_HOST=nllb
       - KOKORO_HOST=kokoro
     depends_on:
       - nllb
-      - whisper-stt
+      - stt-wrapper
       - kokoro
+    restart: unless-stopped
+
+  stt-wrapper:
+    build: ./stt-wrapper
+    ports:
+      - "8766:8766"
+    environment:
+      - STT_HOST=whisper-stt
+    depends_on:
+      - whisper-stt
     restart: unless-stopped
 
   nllb:
