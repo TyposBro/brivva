@@ -16,7 +16,20 @@ use crate::types::{Lang, Rooms, ServerMsg};
 
 // ── STT (WhisperLiveKit) ──────────────────────────────────
 
-const STT_URL: &str = "ws://localhost:8765/asr";
+use std::sync::LazyLock;
+
+static STT_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = std::env::var("STT_HOST").unwrap_or_else(|_| "localhost".to_string());
+    format!("ws://{}:8765/asr", host)
+});
+static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = std::env::var("NLLB_HOST").unwrap_or_else(|_| "localhost".to_string());
+    format!("http://{}:8000/translate", host)
+});
+static KOKORO_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = std::env::var("KOKORO_HOST").unwrap_or_else(|_| "localhost".to_string());
+    format!("http://{}:8880/v1/audio/speech", host)
+});
 
 /// WhisperLiveKit response format
 #[derive(Debug, Deserialize)]
@@ -71,7 +84,7 @@ pub async fn start_stt(
     // Retry STT connection — WhisperLiveKit may still be loading the model
     let mut ws_stream = None;
     for attempt in 1..=10 {
-        match tokio_tungstenite::connect_async(STT_URL).await {
+        match tokio_tungstenite::connect_async(&*STT_URL).await {
             Ok((stream, _)) => {
                 println!("Connected to STT (attempt {})", attempt);
                 ws_stream = Some(stream);
@@ -180,6 +193,11 @@ pub async fn start_stt(
             }
 
             // --- Path 2: lines text changed (direct-to-lines mode) ---
+            // WhisperLiveKit with --no-vac may keep updating the same line index.
+            // New lines appear at higher indices. We emit once per line when it
+            // first gets content, and also when a previously-emitted line changes
+            // substantially (new words appended).
+            let num_lines = resp.lines.len();
             for (i, line) in resp.lines.iter().enumerate() {
                 // Strip "(silence)" markers that WhisperLiveKit appends during pauses
                 let line_text = line.text.replace("(silence)", "").trim().to_string();
@@ -192,14 +210,30 @@ pub async fn start_stt(
                     seen_line_texts.push(String::new());
                 }
 
-                // Only emit once per line index — ignore subsequent mutations
-                if seen_line_texts[i] != line_text && !emitted_lines.contains(&i) {
+                let is_new = seen_line_texts[i] != line_text;
+                if !is_new {
+                    continue;
+                }
+
+                // For lines that aren't the last one (i.e., completed lines),
+                // emit if we haven't emitted this exact text before
+                let is_last_line = i == num_lines - 1;
+                if !is_last_line && !emitted_lines.contains(&i) {
                     seen_line_texts[i] = line_text.clone();
                     emitted_lines.insert(i);
                     utterance_counter += 1;
                     let uid = utterance_counter;
                     println!("[FINAL #{}] {} (from line {})", uid, line_text, i);
                     emit_final(&rooms_ref, &rid, &line_text, uid, &source_lang);
+                } else if is_last_line {
+                    // Last line is still being built — send as interim
+                    seen_line_texts[i] = line_text.clone();
+                    println!("[INTERIM] {} (from line {})", line_text, i);
+                    let msg = to_ws(&ServerMsg::Interim {
+                        transcript: line_text,
+                    });
+                    room.send_to_host(msg.clone());
+                    room.send_to_all_guests(msg);
                 }
             }
         }
@@ -214,8 +248,6 @@ pub async fn start_stt(
 
 // ── Translation Pipeline ──────────────────────────────────
 
-const NLLB_URL: &str = "http://localhost:8000/translate";
-const KOKORO_URL: &str = "http://localhost:8880/v1/audio/speech";
 
 #[derive(Serialize)]
 struct NllbRequest {
@@ -288,7 +320,7 @@ async fn run_pipeline(
             // 1. Translate
             let start = Instant::now();
             let nllb_resp = client
-                .post(NLLB_URL)
+                .post(&*NLLB_URL)
                 .json(&NllbRequest {
                     text: transcript.clone(),
                     source_lang: source.to_string(),
@@ -364,7 +396,7 @@ async fn do_tts_and_broadcast(
     // Call Kokoro
     println!("[TTS] requesting voice={} for '{}' ({})", lang.voice(), text, lang);
     let tts_resp = client
-        .post(KOKORO_URL)
+        .post(&*KOKORO_URL)
         .json(&KokoroRequest {
             model: "kokoro".to_string(),
             input: text.to_string(),

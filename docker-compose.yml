@@ -7,6 +7,10 @@ services:
       dockerfile: server-rs/Dockerfile
     ports:
       - "3000:3000"
+    environment:
+      - STT_HOST=whisper-stt
+      - NLLB_HOST=nllb
+      - KOKORO_HOST=kokoro
     depends_on:
       - nllb
       - whisper-stt
@@ -17,26 +21,20 @@ services:
     build: ./nllb
     ports:
       - "8000:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
 
   whisper-stt:
     build: ./whisper-stt
     ports:
       - "8765:8765"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
 
   kokoro:
@@ -45,15 +43,12 @@ services:
       dockerfile: docker/gpu/Dockerfile
     ports:
       - "8880:8880"
+    runtime: nvidia
     environment:
       - PYTHONPATH=/app:/app/api
       - USE_GPU=true
       - PYTHONUNBUFFERED=1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command: ["bash", "-c", "python -m unidic download && ./entrypoint.sh"]
     restart: unless-stopped

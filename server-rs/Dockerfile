@@ -11,9 +11,9 @@ COPY server-rs/Cargo.toml server-rs/Cargo.toml
 RUN mkdir -p server-rs/src && echo "fn main() {}" > server-rs/src/main.rs
 RUN cargo build --release --manifest-path server-rs/Cargo.toml || true
 
-# Copy real source and rebuild
+# Copy real source and rebuild (touch to bust cache on dummy main)
 COPY server-rs/src server-rs/src
-RUN cargo build --release --manifest-path server-rs/Cargo.toml
+RUN touch server-rs/src/main.rs && cargo build --release --manifest-path server-rs/Cargo.toml
 
 # Runtime stage
 FROM debian:bookworm-slim
