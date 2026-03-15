@@ -62,4 +62,9 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command: ["bash", "-c", "python -m unidic download && ./entrypoint.sh"]
+    volumes:
+      - unidic-data:/app/.venv/lib/python3.10/site-packages/unidic/dicdir
     restart: unless-stopped
+
+volumes:
+  unidic-data:

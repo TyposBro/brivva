@@ -8,6 +8,7 @@ cd "$SCRIPT_DIR"
 
 .venv/bin/whisperlivekit-server \
   --model large-v3-turbo \
-  --language "" \
+  --language en \
+  --no-vac \
   --port 8765 \
   --host 0.0.0.0
