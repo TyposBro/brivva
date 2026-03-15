@@ -3,7 +3,7 @@
 //! Host audio flows through:
 //! 1. STT Wrapper (stt-wrapper:8766/asr) — clean interim/final events
 //! 2. NLLB (nllb:8000/translate) — REST translation per active language
-//! 3. Kokoro (kokoro:8880/v1/audio/speech) — REST TTS, streaming MP3 response
+//! 3. OpenAI TTS (api.openai.com/v1/audio/speech) — streaming MP3 response
 
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
@@ -26,9 +26,8 @@ static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
     let host = std::env::var("NLLB_HOST").unwrap_or_else(|_| "localhost".to_string());
     format!("http://{}:8000/translate", host)
 });
-static KOKORO_URL: LazyLock<String> = LazyLock::new(|| {
-    let host = std::env::var("KOKORO_HOST").unwrap_or_else(|_| "localhost".to_string());
-    format!("http://{}:8880/v1/audio/speech", host)
+static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
 });
 
 // ── STT Events (from stt-wrapper) ─────────────────────────
@@ -187,11 +186,9 @@ struct NllbResponse {
 }
 
 #[derive(Serialize)]
-struct KokoroRequest {
-    model: String,
-    input: String,
-    voice: String,
-    response_format: String,
+struct ElevenLabsRequest {
+    text: String,
+    model_id: String,
 }
 
 /// Run the full translation + TTS pipeline for one utterance across all active languages
@@ -277,7 +274,7 @@ async fn run_pipeline(
     }
 }
 
-/// Call Kokoro TTS and stream MP3 chunks to all guests in a language group
+/// Call ElevenLabs TTS and stream MP3 chunks to all guests in a language group
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -293,14 +290,20 @@ async fn do_tts_and_broadcast(
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
     }
 
-    println!("[TTS] requesting voice={} for '{}' ({})", lang.voice(), text, lang);
+    let voice_id = lang.voice_id();
+    let url = format!(
+        "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
+        voice_id
+    );
+
+    println!("[TTS] requesting ElevenLabs voice={} for '{}' ({})", voice_id, text, lang);
     let tts_resp = client
-        .post(&*KOKORO_URL)
-        .json(&KokoroRequest {
-            model: "kokoro".to_string(),
-            input: text.to_string(),
-            voice: lang.voice().to_string(),
-            response_format: "mp3".to_string(),
+        .post(&url)
+        .header("xi-api-key", &*ELEVENLABS_API_KEY)
+        .header("Content-Type", "application/json")
+        .json(&ElevenLabsRequest {
+            text: text.to_string(),
+            model_id: "eleven_flash_v2_5".to_string(),
         })
         .send()
         .await;
@@ -323,8 +326,8 @@ async fn do_tts_and_broadcast(
                 }
             }
         }
-        Ok(resp) => eprintln!("Kokoro error: {}", resp.status()),
-        Err(e) => eprintln!("Kokoro request error for {}: {}", lang, e),
+        Ok(resp) => eprintln!("TTS error: {} - {:?}", resp.status(), resp.text().await),
+        Err(e) => eprintln!("TTS request error for {}: {}", lang, e),
     }
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;

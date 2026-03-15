@@ -11,11 +11,10 @@ services:
       - STT_HOST=stt-wrapper
       - STT_PORT=8766
       - NLLB_HOST=nllb
-      - KOKORO_HOST=kokoro
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
     depends_on:
       - nllb
       - stt-wrapper
-      - kokoro
     restart: unless-stopped
 
   stt-wrapper:
@@ -37,37 +36,3 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
-
-  kokoro:
-    build:
-      context: ./kokoro
-      dockerfile: docker/gpu/Dockerfile
-    ports:
-      - "8880:8880"
-    runtime: nvidia
-    environment:
-      - PYTHONPATH=/app:/app/api
-      - USE_GPU=true
-      - PYTHONUNBUFFERED=1
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    command: >
-      bash -c "
-        DICDIR=/app/.venv/lib/python3.10/site-packages/unidic/dicdir;
-        if [ -f /cache/unidic/matrix.bin ]; then
-          echo 'UniDic: using cached copy';
-          rm -rf $$DICDIR;
-          cp -a /cache/unidic $$DICDIR;
-        else
-          python -m unidic download;
-          mkdir -p /cache;
-          cp -a $$DICDIR /cache/unidic;
-        fi;
-        ./entrypoint.sh
-      "
-    volumes:
-      - unidic-cache:/cache
-    restart: unless-stopped
-
-volumes:
-  unidic-cache:

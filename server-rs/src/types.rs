@@ -37,23 +37,14 @@ impl Lang {
         }
     }
 
-    /// Kokoro voice name for this language
-    pub fn voice(&self) -> &'static str {
+    /// ElevenLabs default voice ID for this language
+    /// All premade voices support 32 languages via eleven_flash_v2_5
+    pub fn voice_id(&self) -> &'static str {
         match self {
-            Lang::En => "af_bella",
-            Lang::Ja => "jf_alpha",
-            Lang::Zh => "zf_xiaobei",
-            Lang::Ko => "af_bella", // fallback
-        }
-    }
-
-    /// Kokoro lang code prefix
-    pub fn kokoro_lang_code(&self) -> &'static str {
-        match self {
-            Lang::En => "a",
-            Lang::Ja => "j",
-            Lang::Zh => "z",
-            Lang::Ko => "a", // fallback
+            Lang::En => "EXAVITQu4vr4xnSDxMaL",  // Sarah
+            Lang::Ja => "pFZP5JQG7iQjIQuC4Bku",  // Lily
+            Lang::Zh => "Xb7hH8MSUJpSbSDYk0k2",  // Alice
+            Lang::Ko => "cgSgspJ2msm6clMCkdW9",  // Jessica
         }
     }
 }
