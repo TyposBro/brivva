@@ -72,7 +72,7 @@ Render below the mic/transcript area on HostPage. Always visible (not collapsibl
 #### Summary Stats Bar (top)
 
 ```
-⚡ Avg: 2,100ms  │  Best: 1,066ms  │  Target: 300ms  │  Gap: 7x  │  n=5
+⚡ Avg: 400ms  │  Best: 221ms  │  Target: 300ms  │  Gap: 1.3x  │  n=6
 ```
 
 Single row, monospace numbers. Updates after each utterance.
@@ -119,11 +119,11 @@ Two columns or two stacked cards:
 **My Prototype (v3 — fully self-hosted):**
 | Phase | Tech | Measured |
 |-------|------|---------|
-| STT | WhisperLiveKit (base.en, mlx-whisper) | streaming, real-time interims |
-| Translation | NLLB-200-distilled-600M (localhost) | 200–900ms (warm) |
-| TTS | Kokoro 82M (self-hosted MPS) | 430–2300ms |
-| Server | Rust axum + DashMap (localhost) | fan-out per language |
-| Lip-sync | — | not implemented |
+| STT | CF Nova-3 (via stt-wrapper) | streaming ✓ |
+| Translation | NLLB (self-hosted GPU) | 75–337ms |
+| TTS | Kokoro 82M (GPU) | 111–358ms |
+| Server | Rust axum + DashMap | fan-out per language |
+| Lip-sync | — | not built |
 
 **Brivva's Listed Pipeline:**
 | Phase | Tech | Status |
@@ -138,18 +138,18 @@ Two columns or two stacked cards:
 
 Three expandable sections. Each has a comparison table + one-line verdict.
 
-**STT — Why WhisperLiveKit (self-hosted):**
+**STT — Why CF Nova-3 (via stt-wrapper):**
 | Model | WER | Streaming | Price |
 |-------|-----|-----------|-------|
-| ✓ WhisperLiveKit (base.en) | — | Yes — live interims | Free (self-hosted) |
-| Deepgram Nova-3 | 6.5% | Yes — streaming | $4.30/1000min |
+| ✓ CF Nova-3 (stt-wrapper) | 6.5% | Yes — streaming | CF AI Gateway |
+| WhisperLiveKit (base.en) | — | Yes — live interims | Free (self-hosted) |
 | Whisper v3 Turbo | 4.8% | No — batch only | $0.67/1000min |
 Verdict: "Streaming is non-negotiable for live translation. Self-hosted eliminates API costs and latency to cloud."
 
 **Translation — Why NLLB (self-hosted):**
 | Model | Type | Latency |
 |-------|------|---------|
-| ✓ NLLB-200-distilled-600M | Seq2Seq | 200–900ms (warm) |
+| ✓ NLLB (self-hosted GPU) | Seq2Seq | 75–337ms |
 | M2M100-1.2B (CF Workers AI) | Seq2Seq | 394–870ms |
 | Llama 3.2 1B | LLM prompted | ~1,500ms |
 Verdict: "Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no network roundtrip to edge."
@@ -157,7 +157,7 @@ Verdict: "Self-hosted NLLB removes CF dependency. Same seq2seq architecture, no 
 **TTS — Why Kokoro (and its limits):**
 | Model | Params | Latency | Expressive |
 |-------|--------|---------|------------|
-| ✓ Kokoro 82M (self-hosted) | 82M | 430–2300ms | Limited |
+| ✓ Kokoro (self-hosted GPU) | 82M | 111–358ms | Limited |
 | Kokoro (Replicate) | 82M | 2,000–14,000ms | Limited |
 | Emotive TTS (Brivva) | 3B | unknown | Yes — emotions |
 Verdict: "Kokoro wins for demo speed. Production needs expressive TTS for live commerce energy."
@@ -165,24 +165,23 @@ Verdict: "Kokoro wins for demo speed. Production needs expressive TTS for live c
 ### Section: Gap to 300ms
 
 ```
-STT:          ██░░░░  100ms → 50ms target (2x)
-Translation:  ████████████████░░░░  550ms → 50ms target (11x)
-TTS:          ██████████████████████████████████████░░░░  1,340ms → 100ms target (13x)
-Overhead:     ████░░░░  110ms → 50ms target (2.2x)
+Translation:  ████████░░  172ms → 50ms target (3x)
+TTS:          ██████████░░  202ms → 100ms target (2x)
+Overhead:     ██░░  25ms → 20ms target (1.3x)
 ─────────────────────────────────────────────────────
-Total:        ~2,100ms → 300ms (7x gap)
+Total:        ~400ms → 300ms (1.3x gap)
 ```
 
 ### Section: Optimization Roadmap (table)
 
 | Optimization                    | Savings               | Status            |
 | ------------------------------- | --------------------- | ----------------- |
-| Self-hosted pipeline (Rust)     | −latency to cloud     | Done ✓            |
+| Self-hosted pipeline (Rust)     | −1700ms avg           | Done ✓            |
+| STT wrapper (clean events)      | −complexity           | Done ✓            |
 | Parallel translations           | —                     | Done ✓            |
-| Streaming TTS playback          | −500–1000ms perceived | Medium            |
-| Shorter utterance chunks        | −300–500ms            | Quality tradeoff  |
-| GPU TTS (A100/T4)               | −500–1500ms           | Cost increase     |
-| Co-locate all models on one GPU | −100–300ms            | Brivva infra      |
+| GPU inference (NLLB + Kokoro)   | −5x latency           | Done ✓            |
+| Streaming TTS playback          | −100ms perceived      | Medium            |
+| Co-locate all models on one GPU | −20ms network         | Brivva infra      |
 | End-to-end speech-to-speech     | paradigm shift        | Brivva's R&D goal |
 
 One-line footer: "True 300ms needs co-located models or end-to-end S2S. That's the R&D challenge."

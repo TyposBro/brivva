@@ -2,17 +2,17 @@ import { useState } from "react";
 
 // --- static data ---
 
-const MAX_GAP_MS = 1600;
+const MAX_GAP_MS = 600;
 const TARGET_MS = 300;
-const TOTAL_CURRENT_MS = 2100;
-const TOTAL_GAP_MULTIPLIER = 7; // ~2100ms / 300ms
+const TOTAL_CURRENT_MS = 400;
+const TOTAL_GAP_MULTIPLIER = 1.3;
 
 type Row = string[];
 
 const MY_PIPELINE: Row[] = [
-  ["STT", "WhisperLiveKit (base.en, mlx)", "streaming ✓"],
-  ["Translation", "NLLB (self-hosted)", "200–900ms"],
-  ["TTS", "Kokoro 82M (MPS)", "430–2300ms"],
+  ["STT", "CF Nova-3 (via stt-wrapper)", "streaming ✓"],
+  ["Translation", "NLLB (self-hosted GPU)", "75–337ms"],
+  ["TTS", "Kokoro 82M (GPU)", "111–358ms"],
   ["Server", "Rust axum + DashMap", "fan-out/lang"],
   ["Lip-sync", "—", "not built"],
 ];
@@ -26,37 +26,36 @@ const BRIVVA_PIPELINE: Row[] = [
 ];
 
 const STT_ROWS: Row[] = [
-  ["✓ WhisperLiveKit (base.en)", "—", "Yes — live interims", "Free (self-hosted)"],
-  ["Deepgram Nova-3", "6.5%", "Yes — streaming", "$4.30/1000min"],
+  ["✓ CF Nova-3 (stt-wrapper)", "6.5%", "Yes — streaming", "CF AI Gateway"],
+  ["WhisperLiveKit (base.en)", "—", "Yes — live interims", "Free (self-hosted)"],
   ["Whisper v3 Turbo", "4.8%", "No — batch only", "$0.67/1000min"],
 ];
 
 const TRANSLATION_ROWS: Row[] = [
-  ["✓ NLLB (self-hosted)", "Seq2Seq", "200–900ms"],
+  ["✓ NLLB (self-hosted GPU)", "Seq2Seq", "75–337ms"],
   ["M2M100-1.2B (CF Workers AI)", "Seq2Seq", "394–870ms"],
   ["Llama 3.2 1B", "LLM prompted", "~1,500ms"],
 ];
 
 const TTS_ROWS: Row[] = [
-  ["✓ Kokoro (self-hosted)", "82M", "430–2300ms", "Limited"],
+  ["✓ Kokoro (self-hosted GPU)", "82M", "111–358ms", "Limited"],
   ["Kokoro (Replicate)", "82M", "2,000–14,000ms", "Limited"],
   ["Emotive TTS (Brivva)", "3B", "unknown", "Yes — emotions"],
 ];
 
 const GAP_ITEMS = [
-  { label: "STT", currentMs: 100, targetMs: 50 },
-  { label: "Translate", currentMs: 550, targetMs: 50 },
-  { label: "TTS", currentMs: 1340, targetMs: 100 },
-  { label: "Overhead", currentMs: 110, targetMs: 50 },
+  { label: "Translate", currentMs: 172, targetMs: 50 },
+  { label: "TTS", currentMs: 202, targetMs: 100 },
+  { label: "Overhead", currentMs: 25, targetMs: 20 },
 ];
 
 const ROADMAP: Row[] = [
-  ["Self-hosted pipeline (Rust)", "−latency to cloud", "Done ✓"],
+  ["Self-hosted pipeline (Rust)", "−1700ms avg", "Done ✓"],
+  ["STT wrapper (clean events)", "−complexity", "Done ✓"],
   ["Parallel translations", "—", "Done ✓"],
-  ["Streaming TTS playback", "−500–1000ms perceived", "Medium"],
-  ["Shorter utterance chunks", "−300–500ms", "Quality tradeoff"],
-  ["GPU TTS (A100/T4)", "−500–1500ms", "Cost increase"],
-  ["Co-locate all models on one GPU", "−100–300ms", "Brivva infra"],
+  ["GPU inference (NLLB + Kokoro)", "−5x latency", "Done ✓"],
+  ["Streaming TTS playback", "−100ms perceived", "Medium"],
+  ["Co-locate all models on one GPU", "−20ms network", "Brivva infra"],
   ["End-to-end speech-to-speech", "paradigm shift", "Brivva's R&D goal"],
 ];
 
