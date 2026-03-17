@@ -112,33 +112,51 @@ def encode_frame_jpeg(frame: np.ndarray, quality: int = 85) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def preprocess_face(face_img: np.ndarray):
-    """Detect face, crop to 256x256, encode latent. Returns (bbox, latent) or None."""
-    from musetalk.utils.preprocessing import get_landmark_and_bbox
+def detect_face_bbox(face_img: np.ndarray):
+    """Detect face bbox + landmarks directly from numpy array (no file I/O)."""
+    from musetalk.utils.preprocessing import model as mmpose_model, fa
+    from mmpose.apis import inference_topdown
+    from mmpose.structures import merge_data_samples
 
-    landmarks, bboxes = get_landmark_and_bbox([face_img], upperbondrange=0)
-    if bboxes[0] is None:
+    # mmpose keypoint detection
+    results = inference_topdown(mmpose_model, face_img)
+    results = merge_data_samples(results)
+    keypoints = results.pred_instances.keypoints
+    face_land_mark = keypoints[0][23:91].astype(np.int32)
+
+    # face detection for bbox
+    bbox_det = fa.get_detections_for_batch(np.asarray([face_img]))
+    if bbox_det[0] is None:
         return None
 
-    bbox = bboxes[0]
+    # compute bbox from landmarks (same logic as get_landmark_and_bbox)
+    half_face_coord = face_land_mark[29].copy()
+    half_face_dist = np.max(face_land_mark[:, 1]) - half_face_coord[1]
+    upper_bond = max(0, half_face_coord[1] - half_face_dist)
+
+    x1 = int(np.min(face_land_mark[:, 0]))
+    y1 = int(upper_bond)
+    x2 = int(np.max(face_land_mark[:, 0]))
+    y2 = int(np.max(face_land_mark[:, 1]))
+
+    if y2 - y1 <= 0 or x2 - x1 <= 0 or x1 < 0:
+        return bbox_det[0]  # fallback to raw detection bbox
+
+    return (x1, y1, x2, y2)
+
+
+def preprocess_face(face_img: np.ndarray):
+    """Detect face, crop to 256x256, encode latent. Returns dict or None."""
+    bbox = detect_face_bbox(face_img)
+    if bbox is None:
+        return None
     x1, y1, x2, y2 = bbox
     crop = cv2.resize(face_img[y1:y2, x1:x2], (256, 256))
-    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
 
+    # VAE.get_latents_for_unet expects BGR numpy array — it preprocesses internally
     vae = models["vae"]
-    crop_tensor = (
-        torch.from_numpy(crop_rgb)
-        .permute(2, 0, 1)
-        .unsqueeze(0)
-        .float()
-        .to(device)
-        / 255.0
-    )
-    if use_float16:
-        crop_tensor = crop_tensor.half()
-
     with torch.no_grad():
-        latent = vae.get_latents_for_unet(crop_tensor)
+        latent = vae.get_latents_for_unet(crop)
 
     return {"bbox": bbox, "latent": latent, "face_img": face_img}
 

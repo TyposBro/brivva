@@ -77,7 +77,7 @@ export function useHostRoom() {
 
   const startFrameStreaming = useCallback(() => {
     stopFrameStreaming();
-    frameIntervalRef.current = setInterval(captureAndSendFrame, 200); // ~5fps
+    frameIntervalRef.current = setInterval(captureAndSendFrame, 33); // ~30fps
   }, [captureAndSendFrame]);
 
   const stopFrameStreaming = useCallback(() => {

@@ -300,7 +300,7 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS, stream MP3 chunks to guests, then run lip-sync if face available
+/// Call ElevenLabs TTS, then run lip-sync, then send audio+video together (synced)
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -312,10 +312,6 @@ async fn do_tts_and_broadcast(
     face_base64: Option<&str>,
 ) {
     let tts_start = Instant::now();
-
-    if let Some(room) = rooms.get(room_id) {
-        room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
-    }
 
     let voice_id = lang.voice_id();
     let url = format!(
@@ -338,23 +334,16 @@ async fn do_tts_and_broadcast(
         .send()
         .await;
 
-    // Collect audio chunks while streaming to guests
+    // Buffer ALL audio (don't stream to guests yet — wait for lip-sync)
     let mut audio_buffer: Vec<u8> = Vec::new();
 
     match tts_resp {
         Ok(resp) if resp.status().is_success() => {
-            println!("[TTS] streaming MP3 chunks for {}", lang);
+            println!("[TTS] buffering MP3 for {}", lang);
             let mut stream = resp.bytes_stream();
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
-                    Ok(chunk) => {
-                        // Buffer for lip-sync
-                        audio_buffer.extend_from_slice(&chunk);
-                        // Stream to guests
-                        if let Some(room) = rooms.get(room_id) {
-                            room.send_to_lang(lang, Message::Binary(chunk.to_vec().into()));
-                        }
-                    }
+                    Ok(chunk) => audio_buffer.extend_from_slice(&chunk),
                     Err(e) => {
                         eprintln!("TTS stream error for {}: {}", lang, e);
                         break;
@@ -367,28 +356,35 @@ async fn do_tts_and_broadcast(
     }
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
+    println!("[TTS] buffered {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
+
+    // Report TTS timing to host
     if let Some(room) = rooms.get(room_id) {
-        let msg = to_ws(&ServerMsg::TtsEnd {
-            utterance_id,
-            tts_ms,
-        });
-        room.send_to_lang(lang, msg.clone());
-        room.send_to_host(msg);
+        room.send_to_host(to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
     }
 
-    // Run lip-sync if we have a face frame and audio
+    if audio_buffer.is_empty() {
+        return;
+    }
+
+    // Run lip-sync if we have a face frame, then send audio+video together
     if let Some(face) = face_base64 {
-        if !audio_buffer.is_empty() {
-            do_lipsync_and_broadcast(
-                client,
-                &audio_buffer,
-                face,
-                utterance_id,
-                lang,
-                rooms,
-                room_id,
-            )
-            .await;
+        do_lipsync_and_broadcast(
+            client,
+            &audio_buffer,
+            face,
+            utterance_id,
+            lang,
+            rooms,
+            room_id,
+        )
+        .await;
+    } else {
+        // No face — send audio only (fallback)
+        if let Some(room) = rooms.get(room_id) {
+            room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
+            room.send_to_lang(lang, Message::Binary(audio_buffer.into()));
+            room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
         }
     }
 }
@@ -408,7 +404,7 @@ struct MusetalkLipsyncResponse {
     lipsync_ms: i64,
 }
 
-/// Call MuseTalk lip-sync and stream video frames to guests
+/// Call MuseTalk lip-sync, then send audio + video frames together (synced)
 async fn do_lipsync_and_broadcast(
     client: &reqwest::Client,
     audio_mp3: &[u8],
@@ -432,7 +428,7 @@ async fn do_lipsync_and_broadcast(
             audio_base64,
             face_image_base64: face_base64.to_string(),
         })
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .send()
         .await;
 
@@ -448,17 +444,16 @@ async fn do_lipsync_and_broadcast(
                         lipsync_ms
                     );
 
-                    // Send video_start
+                    // Send audio + video together so guest can play them in sync
                     if let Some(room) = rooms.get(room_id) {
-                        room.send_to_lang(
-                            lang,
-                            to_ws(&ServerMsg::VideoStart { utterance_id }),
-                        );
-                    }
+                        // 1. Audio: tts_start → full MP3 blob → tts_end
+                        room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
+                        room.send_to_lang(lang, Message::Binary(audio_mp3.to_vec().into()));
+                        room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms: lipsync_ms }));
 
-                    // Send each frame as a JSON message
-                    for frame_b64 in &parsed.frames_base64 {
-                        if let Some(room) = rooms.get(room_id) {
+                        // 2. Video: video_start → frames → video_end
+                        room.send_to_lang(lang, to_ws(&ServerMsg::VideoStart { utterance_id }));
+                        for frame_b64 in &parsed.frames_base64 {
                             room.send_to_lang(
                                 lang,
                                 to_ws(&ServerMsg::VideoFrame {
@@ -467,23 +462,37 @@ async fn do_lipsync_and_broadcast(
                                 }),
                             );
                         }
-                    }
+                        room.send_to_lang(lang, to_ws(&ServerMsg::VideoEnd { utterance_id, lipsync_ms }));
 
-                    // Send video_end
-                    if let Some(room) = rooms.get(room_id) {
-                        let msg = to_ws(&ServerMsg::VideoEnd {
-                            utterance_id,
-                            lipsync_ms,
-                        });
-                        room.send_to_lang(lang, msg.clone());
-                        room.send_to_host(msg);
+                        // Report to host
+                        room.send_to_host(to_ws(&ServerMsg::VideoEnd { utterance_id, lipsync_ms }));
                     }
                 }
                 Err(e) => eprintln!("[LIPSYNC] parse error: {}", e),
             }
         }
-        Ok(r) => eprintln!("[LIPSYNC] error: {}", r.status()),
-        Err(e) => eprintln!("[LIPSYNC] request error: {}", e),
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            eprintln!("[LIPSYNC] error {}: {}", status, body);
+            // Fallback: send audio without video
+            if let Some(room) = rooms.get(room_id) {
+                room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
+                room.send_to_lang(lang, Message::Binary(audio_mp3.to_vec().into()));
+                let tts_ms = lipsync_start.elapsed().as_millis() as u64;
+                room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
+            }
+        }
+        Err(e) => {
+            eprintln!("[LIPSYNC] request error: {}", e);
+            // Fallback: send audio without video
+            if let Some(room) = rooms.get(room_id) {
+                room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
+                room.send_to_lang(lang, Message::Binary(audio_mp3.to_vec().into()));
+                let tts_ms = lipsync_start.elapsed().as_millis() as u64;
+                room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
+            }
+        }
     }
 }
 
