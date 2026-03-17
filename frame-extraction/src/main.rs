@@ -24,6 +24,19 @@ enum Commands {
         #[arg(long, default_value = "output")]
         output: String,
     },
+    /// Capture from webcam, crop faces in real-time
+    Webcam {
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
+        #[arg(long, default_value_t = 256)]
+        face_size: u32,
+        #[arg(long, default_value_t = 640)]
+        width: u32,
+        #[arg(long, default_value_t = 480)]
+        height: u32,
+        #[arg(long, default_value = "output")]
+        output: String,
+    },
     /// Process a video as fast as possible, no saving (measure throughput)
     Benchmark {
         input: String,
@@ -41,6 +54,16 @@ fn main() -> anyhow::Result<()> {
             output,
         } => {
             let stats = pipeline::run_extract(&input, fps, face_size, &output)?;
+            println!("\n{stats}");
+        }
+        Commands::Webcam {
+            fps,
+            face_size,
+            width,
+            height,
+            output,
+        } => {
+            let stats = pipeline::run_webcam(fps, face_size, width, height, &output)?;
             println!("\n{stats}");
         }
         Commands::Benchmark { input } => {

@@ -87,7 +87,7 @@ impl FrameReader {
 
     pub fn from_webcam(fps: u32, width: u32, height: u32) -> anyhow::Result<Self> {
         let fps_str = fps.to_string();
-        let scale = format!("scale={}:{}", width, height);
+        let video_size = format!("{}x{}", width, height);
 
         let mut args = if cfg!(target_os = "macos") {
             vec![
@@ -95,8 +95,10 @@ impl FrameReader {
                 "avfoundation".to_string(),
                 "-framerate".to_string(),
                 fps_str.clone(),
+                "-video_size".to_string(),
+                video_size,
                 "-i".to_string(),
-                "0".to_string(),
+                "0:none".to_string(),
             ]
         } else {
             vec![
@@ -104,20 +106,18 @@ impl FrameReader {
                 "v4l2".to_string(),
                 "-framerate".to_string(),
                 fps_str.clone(),
+                "-video_size".to_string(),
+                video_size,
                 "-i".to_string(),
                 "/dev/video0".to_string(),
             ]
         };
 
         args.extend([
-            "-vf".to_string(),
-            scale,
             "-f".to_string(),
             "rawvideo".to_string(),
             "-pix_fmt".to_string(),
             "rgb24".to_string(),
-            "-r".to_string(),
-            fps_str,
             "-v".to_string(),
             "quiet".to_string(),
             "pipe:1".to_string(),

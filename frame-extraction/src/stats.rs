@@ -38,6 +38,13 @@ impl Stats {
         self.frame_times.push(elapsed);
     }
 
+    pub fn last_latency_ms(&self) -> f64 {
+        self.frame_times
+            .last()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
     pub fn finalize(self) -> PipelineStats {
         let total_frames = self.frame_times.len() as u32;
         let total_time = self.start.elapsed();
