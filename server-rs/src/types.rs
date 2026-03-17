@@ -75,6 +75,7 @@ pub struct Room {
     pub source_lang: Lang,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
     pub guests: DashMap<String, Guest>,
+    pub avatar_id: Option<String>,
 }
 
 impl Room {
@@ -84,6 +85,7 @@ impl Room {
             source_lang,
             host_tx: None,
             guests: DashMap::new(),
+            avatar_id: None,
         }
     }
 
@@ -189,6 +191,33 @@ pub enum ServerMsg {
         utterance_id: u64,
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
+    },
+
+    #[serde(rename = "avatar:ready")]
+    AvatarReady {
+        #[serde(rename = "avatarId")]
+        avatar_id: String,
+    },
+
+    #[serde(rename = "video_start")]
+    VideoStart {
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+    },
+
+    #[serde(rename = "video_frame")]
+    VideoFrame {
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+        data: String,
+    },
+
+    #[serde(rename = "video_end")]
+    VideoEnd {
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+        #[serde(rename = "lipsyncMs")]
+        lipsync_ms: u64,
     },
 
     #[serde(rename = "error")]

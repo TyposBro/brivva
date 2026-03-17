@@ -5,3 +5,6 @@ services:
       context: ./nllb
       dockerfile: Dockerfile.gpu
     runtime: nvidia
+
+  musetalk:
+    runtime: nvidia

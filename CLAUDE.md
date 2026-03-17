@@ -7,182 +7,152 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 
 ## Current Status (Mar 17 2026)
 
-**v3 — WORKING and deployed.** Fully self-hosted Rust pipeline:
+**v4 — IN PROGRESS.** Lip-sync integration into fully self-hosted Rust pipeline:
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
 - **Tunnel:** brivva-server.milliytechnology.org → localhost:3000
 - **Repo:** https://github.com/TyposBro/brivva (private)
-- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated ElevenLabs audio
+- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated ElevenLabs audio + lip-synced video
 - Rooms backed by DashMap (concurrent hash map, per-shard locking)
 - STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
 - Translation: NLLB-200-distilled-600M (self-hosted, 82-164ms GPU)
 - TTS: ElevenLabs eleven_flash_v2_5 (API, 548-1440ms, 32 languages)
-- Dockerized: 3 containers (server-rs, stt-wrapper, nllb)
+- Lip-sync: MuseTalk v1.5 (self-hosted, GPU, ~33ms/frame @25fps)
+- Dockerized: 4 containers (server-rs, stt-wrapper, nllb, musetalk)
 
-**Next: Add MuseTalk lip-sync as 4th container (see Lip-Sync Integration section below)**
+### What's Done (v4)
 
-## Architecture (v3)
+- [x] MuseTalk Dockerized — CUDA 11.8 + PyTorch 2.0.1 + mmcv prebuilt wheels + FastAPI wrapper
+- [x] Two-phase API: POST /prepare (avatar setup) + POST /lipsync (frame generation)
+- [x] MP3→WAV conversion via ffmpeg in musetalk/server.py (ElevenLabs outputs MP3, MuseTalk needs WAV)
+- [x] pipeline.rs integrated — buffers TTS audio, calls MuseTalk after TTS, streams video frames as JSON
+- [x] Room.avatar_id stored after /prepare, passed through pipeline for each utterance
+- [x] Host face capture — webcam preview (mirrored), captures 256x256 JPEG on room creation, sends via WS
+- [x] Guest video rendering — VideoPlayer.ts renders JPEG frames on canvas at target FPS
+- [x] WebSocket protocol extended — face:image, avatar:ready, video_start, video_frame, video_end
+- [x] docker-compose.yml updated — 4 services, MUSETALK_HOST env var, GPU override in gpu.yml
+- [ ] Docker build completing (musetalk container building)
+- [ ] End-to-end test
+- [ ] Benchmark lip-sync added latency
+
+## Architecture (v4)
 
 ```
 Host Browser (/host)
+  → Webcam face capture (256x256 JPEG) → face:image → server-rs
+  → server-rs → MuseTalk /prepare → avatar_id stored in Room
   → PCM linear16 @ 16kHz → WebSocket → server-rs (Rust/axum :3000)
   → stt-wrapper (:8766) → CF Nova-3 (streaming transcription)
   → NLLB (:8000) — per active language, parallel tokio::spawn
-  → ElevenLabs TTS (API) — streaming MP3
-  → WebSocket → Guest Browser (Blob URL playback)
+  → ElevenLabs TTS (API) — streaming MP3 (buffered + streamed to guests)
+  → Buffered MP3 → MuseTalk (:8100) /lipsync → JPEG frames
+  → video_start → video_frame[] → video_end → Guest Browser (canvas rendering)
+
+Host sees: mirrored webcam preview (local <video> element)
+Guests see: lip-synced face on <canvas> + translated audio via Blob URL
 ```
 
-### v4 Target Architecture (with lip-sync)
+| Service     | Port | Tech                             | Latency            | GPU  | CUDA |
+| ----------- | ---- | -------------------------------- | ------------------ | ---- | ---- |
+| server-rs   | 3000 | Rust/axum, DashMap, mpsc         | orchestration      | No   | —    |
+| stt-wrapper | 8766 | Python asyncio, CF Nova-3 API    | streaming          | No   | —    |
+| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | 82-164ms           | Yes  | 12.4 |
+| ElevenLabs  | API  | eleven_flash_v2_5                | 548-1440ms         | No   | —    |
+| MuseTalk    | 8100 | MuseTalk v1.5, FastAPI           | ~33ms/frame @25fps | Yes  | 11.8 |
+
+## MuseTalk Integration (Implemented)
+
+### Docker Container
+
+- **Base:** nvidia/cuda:11.8.0-devel-ubuntu22.04 (must match mmcv prebuilt wheels)
+- **PyTorch:** 2.0.1 + cu118 (MuseTalk's tested environment)
+- **mmcv:** 2.0.1 installed via prebuilt wheel index (`-f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html`) — NOT from source (source build fails)
+- **MMLab stack:** mmengine + mmcv 2.0.1 + mmdet 3.1.0 + mmpose 1.1.0
+- **MuseTalk:** cloned from GitHub at build time
+- **Weights:** downloaded at build time via huggingface-cli (musetalkV15, sd-vae-ft-mse, whisper-tiny, dwpose, face-parse-bisent)
+
+### API (musetalk/server.py)
 
 ```
-Host Browser (/host)
-  → PCM audio → server-rs → STT → NLLB → ElevenLabs TTS
-  → TTS audio (MP3) + host face image → MuseTalk (:8100)
-  → MuseTalk returns lip-synced video frames
-  → WebSocket → Guest Browser (video + audio playback)
-```
+POST /prepare
+  Body: { "face_image_base64": "<base64 JPEG>" }
+  Response: { "avatar_id": "abc123", "prepare_ms": 342 }
+  → Detects face, crops 256x256, encodes VAE latent, stores in memory
 
-| Service     | Port | Tech                             | Latency            | GPU |
-| ----------- | ---- | -------------------------------- | ------------------ | --- |
-| server-rs   | 3000 | Rust/axum, DashMap, mpsc         | orchestration      | No  |
-| stt-wrapper | 8766 | Python asyncio, CF Nova-3 API    | streaming          | No  |
-| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | 82-164ms           | Yes |
-| ElevenLabs  | API  | eleven_flash_v2_5                | 548-1440ms         | No  |
-| MuseTalk    | 8100 | MuseTalk v1.5, FastAPI           | ~33ms/frame @30fps | Yes |
-
-## Lip-Sync Integration Plan (MuseTalk v1.5)
-
-### Why MuseTalk
-
-- **Real-time capable:** 30fps+ on V100, MIT license for code, commercial OK for model
-- **Audio-driven:** Takes audio + face image → outputs lip-synced video frames (exactly what we need after TTS)
-- **Multi-language:** Supports EN, JA, ZH audio input
-- **256x256 face region:** Good enough for PIP window in live commerce stream
-- **v1.5 improvements:** GAN + perceptual + sync loss for better quality, training code open-sourced
-
-### Alternatives Considered
-
-| Tool          | Type                | Real-time? | Why Not                               |
-| ------------- | ------------------- | ---------- | ------------------------------------- |
-| Wav2Lip       | Lips only           | Fast       | Uncanny, frozen face                  |
-| LivePortrait  | Expression transfer | ~80ms      | Needs driving video, not audio        |
-| Sync Labs API | Cloud lip-sync      | sub-200ms  | API dependency, expensive at scale    |
-| InfiniteTalk  | Full body + face    | Batch only | Not real-time, can't self-host easily |
-
-### Dockerization Plan
-
-```dockerfile
-# musetalk/Dockerfile
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
-
-# Python 3.10 + PyTorch + CUDA
-# mmcv, mmpose, mmdet (MMLab ecosystem)
-# Model weights downloaded at build time
-# FastAPI wrapper exposing REST API
-
-EXPOSE 8100
-```
-
-### API Design (musetalk/server.py)
-
-```
 POST /lipsync
-  Body: { "audio_base64": "...", "face_image_base64": "..." }
-  Response: { "frames_base64": ["frame1", "frame2", ...], "fps": 25, "lipsync_ms": 342 }
-
-POST /lipsync/stream  (stretch goal)
-  Body: { "audio_base64": "...", "face_image_base64": "..." }
-  Response: streaming MJPEG or raw RGB frames
+  Body: { "avatar_id": "abc123", "audio_base64": "<base64 MP3>" }
+  Response: { "frames_base64": ["<JPEG>", ...], "fps": 25, "lipsync_ms": 1200 }
+  → Converts MP3→WAV via ffmpeg, extracts whisper features, UNet inference per frame, VAE decode, blend
 
 GET /health
-  Response: { "status": "healthy", "model": "musetalk_v1.5", "device": "cuda" }
+  Response: { "status": "healthy", "model": "musetalk_v1.5", "device": "cuda", "avatars_loaded": 1 }
 ```
 
-### Integration into server-rs Pipeline
+### Pipeline Integration (pipeline.rs)
 
 ```
-Current: ... → ElevenLabs TTS (MP3 audio) → stream to guests
-With lip-sync: ... → ElevenLabs TTS (MP3 audio)
-  → server-rs sends audio + host face to MuseTalk :8100
-  → MuseTalk returns lip-synced video frames
-  → server-rs streams video frames + audio to guests
+do_tts_and_broadcast():
+  1. Stream MP3 chunks to guests (existing audio flow, unchanged)
+  2. Buffer all MP3 chunks in Vec<u8>
+  3. After TTS complete, if avatar_id exists:
+     → base64-encode MP3 buffer
+     → POST to MuseTalk /lipsync
+     → Send video_start, video_frame[] (JSON with base64 JPEG), video_end to guests
 ```
 
-### Host Face Capture
+### Host Face Capture Flow
 
-- Host's webcam captures a reference face image on room creation
-- Sent to server-rs as a single frame (not streaming video)
-- Stored in Room state, reused for all lip-sync calls in that room
-- Frontend: capture from `<video>` element using canvas.toDataURL()
+1. HostPage starts webcam on mount (512x512 request, getUserMedia)
+2. Shows mirrored preview via `<video>` element (`transform: scaleX(-1)`)
+3. On `room:created`, captures frame: center-crop to square → scale to 256x256 → JPEG base64
+4. Sends `{ type: "face:image", data: "<base64>" }` via WebSocket
+5. handler.rs parses JSON, spawns `prepare_avatar()` task
+6. pipeline.rs POSTs to MuseTalk /prepare, stores avatar_id in Room
+7. Sends `avatar:ready` back to host
 
-### Guest Playback Changes
+### Guest Video Playback
 
-- Currently: audio only (Blob URL MP3 playback)
-- With lip-sync: video + audio (MJPEG or canvas rendering + audio sync)
-- Stretch: `<video>` element with MediaSource Extensions for synchronized playback
+- `VideoPlayer.ts` — queue-based canvas renderer (mirrors TtsPlayer pattern)
+- `attach(canvas)` → `startReceiving(id)` → `addFrame(id, base64)` → `finishReceiving(id)`
+- Renders JPEG frames via `requestAnimationFrame` at target FPS
+- Audio plays via existing TtsPlayer (Blob URL), video renders on separate `<canvas>`
 
-### GPU Requirements
+### Why Two-Phase API (prepare + lipsync)
 
-- MuseTalk inference: ~2-4GB VRAM (fp16)
-- NLLB: ~2GB VRAM
-- Total: ~4-6GB VRAM — fits on RTX 4060 (8GB) or A10G (24GB)
-- RTX 3050 Ti 4GB can run MuseTalk alone but tight with NLLB
+- Face preprocessing (landmark detection, VAE encoding) runs ONCE per room, not per utterance
+- Saves ~200-500ms per lip-sync call
+- Avatar stays in server memory, reused for all utterances in the room
 
-### Docker Compose (v4 — 4 containers)
+### Key Build Lesson: mmcv
 
-```yaml
-services:
-  server-rs:
-    build: ./server-rs
-    ports: ["3000:3000"]
-    depends_on: [stt-wrapper, nllb, musetalk]
+- mmcv MUST be installed from prebuilt wheels, not pip/mim source install
+- Prebuilt wheels only exist for specific CUDA+PyTorch combos
+- CUDA 11.8 + PyTorch 2.0.1 has prebuilt mmcv 2.0.1 wheels
+- CUDA 12.4 + PyTorch 2.5.1 does NOT — source build fails in Docker
+- Each Docker container has its own CUDA runtime, so NLLB (cu124) and MuseTalk (cu118) don't conflict
 
-  stt-wrapper:
-    build: ./stt-wrapper
-    ports: ["8766:8766"]
+## WebSocket Protocol (v4)
 
-  nllb:
-    build: ./nllb
-    ports: ["8000:8000"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+Connection via query params (no JSON handshake):
 
-  musetalk:
-    build: ./musetalk
-    ports: ["8100:8100"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-```
+- Host: `ws://host/api/room?role=host&sourceLang=en`
+- Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
 
-### Build Order
+**Host → Server:**
+- `[ArrayBuffer]` — PCM audio frames
+- `{ "type": "face:image", "data": "<base64>" }` — face for lip-sync avatar
+- `"host:end"` — close room
 
-1. **Dockerize MuseTalk standalone** — get inference working in container with GPU
-2. **Add FastAPI wrapper** — POST /lipsync endpoint, health check
-3. **Test standalone** — curl with sample audio + face → get frames back
-4. **Add to docker-compose** — 4th container alongside existing 3
-5. **Integrate into pipeline.rs** — after TTS, call MuseTalk, stream frames
-6. **Update frontend** — GuestPage renders video frames + plays audio
-7. **Benchmark** — measure added latency from lip-sync step
+**Server → Host:**
+- room:created, room:guest_count, interim, final, translation, tts_end
+- avatar:ready (after face prepared), video_end (lipsync latency)
 
-### Risks
-
-- **MuseTalk dependency hell:** mmcv/mmpose/mmdet have strict version requirements. Docker isolates this.
-- **GPU memory contention:** NLLB + MuseTalk sharing GPU. May need to sequence, not parallelize.
-- **Latency increase:** MuseTalk adds ~33ms/frame at 30fps. For 2-second audio = ~60 frames = ~2s processing. May need to pipeline (process frames as audio streams in).
-- **Video streaming complexity:** Switching from audio-only to video+audio changes the entire guest playback. May keep audio-only as default, video as opt-in.
-
-### Deadline
-
-- **Thursday 6pm** — stop working on lip-sync regardless of state
-- **If working:** demo with video + audio Friday
-- **If not working:** demo with audio only Friday (still impressive), mention lip-sync as scoped and in progress
+**Server → Guest:**
+- room:joined, interim, final, translation
+- tts_start, [MP3 binary chunks], tts_end (audio)
+- video_start, video_frame (JSON with base64 JPEG data), video_end (video)
+- room:closed
 
 ## Key Technical Decisions
 
@@ -243,22 +213,6 @@ services:
 - Works on every browser
 - Tradeoff: slight delay (must wait for all chunks) vs MSE streaming
 
-## WebSocket Protocol (v3)
-
-Connection via query params (no JSON handshake):
-
-- Host: `ws://host/api/room?role=host&sourceLang=en`
-- Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
-
-**Host → Server:** `[ArrayBuffer]` (PCM audio frames), `"host:end"` (close room)
-**Server → Host:** room:created, room:guest_count, interim, final, translation, tts_end
-**Server → Guest:** room:joined, interim, final, translation, tts_start, [MP3 chunks], tts_end, room:closed
-
-### v4 Protocol Additions (with lip-sync)
-
-**Host → Server:** (new) face image on room creation for lip-sync reference
-**Server → Guest:** (new) video_start, [video frame chunks], video_end alongside tts_start/tts_end
-
 ## Bug Fixes Log
 
 - **TTS queue freeze** — audio.play() Promise rejection left playing flag stuck true. Without .catch(), queue permanently frozen. Fix: .catch() calls advance() to move to next item.
@@ -267,6 +221,7 @@ Connection via query params (no JSON handshake):
 - **Whisper hallucination** — Whisper generates random coherent text ("space whale", "sustainable shoe brand") on silence/ambiguous audio. Fix: switched to CF Nova-3 which handles silence correctly.
 - **STT retry loop** — stt-wrapper may still be starting when server-rs boots. Retries connection 10 times, 3 seconds apart.
 - **PCM encoding** — Web Audio captures Float32 [-1,1]. STT expects Int16. Convert: Math.max(-32768, Math.min(32767, float32 \* 32768)).
+- **mmcv build failure** — mmcv 2.0.1 has no prebuilt wheel for CUDA 12.4 + PyTorch 2.5.1. Fix: use CUDA 11.8 + PyTorch 2.0.1 base image with prebuilt wheel index URL.
 
 ## Measured Latency (v3, self-hosted)
 
@@ -275,39 +230,49 @@ Connection via query params (no JSON handshake):
 | STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking |
 | Translation (NLLB GPU)             | 82-164ms        | Warm, per language             |
 | TTS (ElevenLabs)                   | 548-1440ms      | Depends on text length         |
-| Lip-sync (MuseTalk, planned)       | ~33ms/frame     | 30fps on V100, TBD on RTX 4060 |
+| Lip-sync (MuseTalk)                | ~33ms/frame     | 25fps, TBD on RTX 4060        |
 | Overhead (routing)                 | ~11ms           | localhost, no network hops     |
 | **Total from utterance finalized** | **~650-1600ms** | Without lip-sync               |
-| **Target**                         | **<300ms**      | Gap: ~2-5x                     |
+| **With lip-sync (estimated)**      | **~1.5-3.5s**   | +~1-2s for MuseTalk processing |
+| **Target**                         | **<300ms**      | Gap: ~2-5x (audio), ~5-12x (video) |
 
 ## Rust Server Key Concepts
 
 - **AppState:** Arc<AppState> holds DashMap<String, Room> (rooms) + reqwest::Client (shared HTTP client)
-- **Room:** host_tx (mpsc sender to host), guests DashMap<String, Guest>, source_lang
+- **Room:** host_tx (mpsc sender to host), guests DashMap<String, Guest>, source_lang, avatar_id (Option<String>)
 - **Guest:** tx (mpsc sender), lang, id
 - **mpsc channels:** Each WebSocket connection gets a (tx, rx) pair. tx stored in Room, rx drives the WebSocket send loop
-- **tokio::spawn:** Used for parallel per-language translation+TTS. One task per active language group
-- **Pipeline flow:** handle_host_message → pipeline::process_utterance → spawn per-lang → translate → tts → (lipsync) → broadcast
+- **tokio::spawn:** Used for parallel per-language translation+TTS+lipsync. One task per active language group
+- **Pipeline flow:** handle_host_message → pipeline::process_utterance → spawn per-lang → translate → tts → lipsync → broadcast
+- **prepare_avatar:** Called on face:image from host, POSTs to MuseTalk /prepare, stores avatar_id in Room
 
-## Frontend Architecture (refactored, clean)
+## Frontend Architecture
 
 - `src/lib/AudioPipeline.ts` — mic capture, AudioContext, Float32→Int16 conversion
 - `src/lib/RoomSocket.ts` — WebSocket connect, sendAudio, sendJson, routeMessage
 - `src/lib/TtsPlayer.ts` — Blob URL playback queue (startReceiving → addChunk → finishReceiving → advance)
-- `src/hooks/hostReducer.ts` — pure function, all state transitions, zero side effects
-- `src/hooks/useHostRoom.ts` — thin orchestrator: WS messages → dispatch, uses AudioPipeline + RoomSocket
+- `src/lib/VideoPlayer.ts` — Canvas-based JPEG frame renderer (startReceiving → addFrame → finishReceiving → render at FPS)
+- `src/hooks/useHostRoom.ts` — orchestrator: WS messages → dispatch, AudioPipeline + RoomSocket + webcam capture
+- `src/hooks/useGuestRoom.ts` — guest orchestrator: TtsPlayer + VideoPlayer + RoomSocket
 - `src/hooks/useTimings.ts` — per-utterance stopwatch (startTimer → recordSplit → finalize)
+- `src/state/host/reducer.ts` — pure function, all host state transitions
+- `src/state/host/messageHandler.ts` — routes WS messages to host dispatch + stopwatch
+- `src/state/guest/reducer.ts` — pure function, all guest state transitions
+- `src/state/guest/messageHandler.ts` — routes WS messages to guest dispatch + TtsPlayer + VideoPlayer
 - `src/components/LatencyDashboard.tsx` — live per-utterance stacked bars
 - `src/components/PipelineAnalysis.tsx` — static pipeline comparison
+- `src/pages/HostPage.tsx` — host UI with mirrored webcam preview, room code, audio recorder
+- `src/pages/GuestPage.tsx` — guest UI with lip-synced video canvas, language picker, translations
 
 ## Docker Services
 
 ```yaml
-# docker-compose.yml — 3 containers (current), 4 with lip-sync
-server-rs: Rust axum, port 3000, no GPU
+# docker-compose.yml — 4 containers (v4)
+server-rs: Rust axum, port 3000, no GPU, depends_on: [stt-wrapper, nllb, musetalk]
 stt-wrapper: Python asyncio, port 8766, no GPU (CF Nova-3 API proxy)
-nllb: FastAPI + nllb-200-distilled-600M, port 8000, optional GPU
-musetalk: FastAPI + MuseTalk v1.5, port 8100, GPU required (planned)
+nllb: FastAPI + nllb-200-distilled-600M, port 8000, GPU (CUDA 12.4)
+musetalk: FastAPI + MuseTalk v1.5, port 8100, GPU required (CUDA 11.8)
+# GPU: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
 ## Project Structure
@@ -316,43 +281,48 @@ musetalk: FastAPI + MuseTalk v1.5, port 8100, GPU required (planned)
 brivva/
 ├── server-rs/                     Rust axum WebSocket server
 │   ├── Dockerfile
+│   ├── Cargo.toml                 deps: axum, dashmap, reqwest, tokio, serde, base64
 │   └── src/
 │       ├── main.rs                Entry, router, AppState
-│       ├── types.rs               Lang, Room, Guest, ServerMsg
-│       ├── pipeline.rs            STT → Translate → TTS → (Lip-sync) pipeline
-│       └── room/handler.rs        WebSocket host/guest handlers
+│       ├── types.rs               Lang, Room (+ avatar_id), Guest, ServerMsg (+ Video*)
+│       ├── pipeline.rs            STT → Translate → TTS → Lip-sync pipeline
+│       └── room/handler.rs        WebSocket host/guest handlers (+ face:image parsing)
 ├── stt-wrapper/                   STT proxy (CF Nova-3)
 │   └── server.py                  asyncio WebSocket proxy
 ├── nllb/                          NLLB translation server
+│   ├── Dockerfile / Dockerfile.gpu
 │   └── server.py                  FastAPI, POST /translate
-├── musetalk/                      MuseTalk lip-sync server (planned)
-│   ├── Dockerfile
-│   └── server.py                  FastAPI, POST /lipsync
+├── musetalk/                      MuseTalk lip-sync server
+│   ├── Dockerfile                 CUDA 11.8 + PyTorch 2.0.1 + mmcv prebuilt
+│   ├── requirements.txt           FastAPI, diffusers, transformers, opencv, librosa
+│   ├── download_weights.sh        HuggingFace weight downloader (build-time)
+│   └── server.py                  FastAPI, POST /prepare + POST /lipsync + GET /health
 ├── frontend/                      React 19 + TypeScript + Vite
 │   └── src/
-│       ├── pages/                 HostPage, GuestPage, HomePage
+│       ├── pages/                 HostPage (+ webcam), GuestPage (+ video canvas), HomePage
 │       ├── components/            LatencyDashboard, PipelineAnalysis
-│       ├── hooks/                 useHostRoom, useGuestRoom, useTimings, hostReducer
-│       ├── lib/                   AudioPipeline, RoomSocket, TtsPlayer
-│       └── state/                 host/guest reducers + message handlers
+│       ├── hooks/                 useHostRoom (+ webcam), useGuestRoom (+ VideoPlayer), useTimings
+│       ├── lib/                   AudioPipeline, RoomSocket, TtsPlayer, VideoPlayer
+│       └── state/                 host/guest reducers + message handlers (+ video events)
 ├── brivva-frames/                 Rust frame extraction CLI (built, working)
-├── docker-compose.yml             3 services (4 with lip-sync)
+├── docker-compose.yml             4 services
+├── docker-compose.gpu.yml         GPU override (nvidia runtime for nllb + musetalk)
 ├── .env                           API keys
 └── CLAUDE.md                      ← you are here
 ```
 
-## Other Rust Projects Built
+## Risks & Mitigations
 
-### brivva-frames (completed)
+- **MuseTalk dependency hell:** mmcv/mmpose/mmdet have strict version requirements. Fixed by using CUDA 11.8 + PyTorch 2.0.1 with prebuilt mmcv wheels. Docker isolates from host.
+- **GPU memory contention:** NLLB + MuseTalk sharing GPU. Different CUDA runtimes in separate containers. May need to sequence, not parallelize.
+- **Latency increase:** MuseTalk adds ~1-2s for a typical utterance (25-50 frames). Audio plays immediately, video arrives after. Acceptable for demo.
+- **Video frame bandwidth:** 256x256 JPEG ~10-20KB × 25fps = ~250-500KB/s per language group via JSON base64. Fine for demo, optimize later with binary framing.
 
-Real-time video frame extraction + face cropping pipeline in Rust.
+## Deadline
 
-- Spawns FFmpeg, reads raw RGB frames from stdout pipe
-- Center-crops face region to 256×256 (MuseTalk input size)
-- Parallel batch processing with rayon, streaming with mpsc channels
-- Live preview window with minifb (side-by-side: full frame + cropped face)
-- Performance: 640x480 @28fps, 5.86ms avg crop latency
-- Demonstrates: ownership, borrowing, channels, parallel iterators, process spawning, Drop
+- **Thursday 6pm** — stop working on lip-sync regardless of state
+- **If working:** demo with video + audio Friday
+- **If not working:** demo with audio only Friday (still impressive), mention lip-sync as scoped and in progress
 
 ## About Brivva
 

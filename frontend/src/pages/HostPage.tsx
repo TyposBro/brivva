@@ -9,7 +9,7 @@ export default function HostPage() {
   const navigate = useNavigate();
   const {
     status, roomId, guestCounts, liveTranscript, utterances,
-    analyser, error, timings, createRoom, startRecording, stopRecording, closeRoom,
+    analyser, error, timings, videoRef, createRoom, startRecording, stopRecording, closeRoom,
   } = useHostRoom();
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -68,6 +68,27 @@ export default function HostPage() {
             <button className="copy-link-btn" onClick={copyLink}>
               Copy link
             </button>
+          </div>
+        )}
+
+        {/* Host webcam preview (mirrored) */}
+        {isReady && (
+          <div className="webcam-preview">
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              style={{
+                width: "256px",
+                height: "256px",
+                objectFit: "cover",
+                transform: "scaleX(-1)",
+                borderRadius: "12px",
+                border: "2px solid #333",
+              }}
+            />
+            <span className="webcam-label">Your camera (mirrored)</span>
           </div>
         )}
 

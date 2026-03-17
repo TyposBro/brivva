@@ -47,6 +47,14 @@ export function createMessageHandler(
         stopwatch.finalize(String(msg.utteranceId), msg.ttsMs as number);
         break;
 
+      case "avatar:ready":
+        console.log("[HOST] avatar ready:", msg.avatarId);
+        break;
+
+      case "video_end":
+        console.log("[HOST] lipsync done:", msg.lipsyncMs, "ms");
+        break;
+
       case "error":
         dispatch({ type: "error", message: (msg.message as string) ?? "Unknown error" });
         break;

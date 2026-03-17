@@ -11,7 +11,7 @@ export default function GuestPage() {
 
   const [selectedLang, setSelectedLang] = useState<Lang | null>(validUrlLang);
 
-  const { status, liveTranscript, utterances, error } = useGuestRoom(id, selectedLang);
+  const { status, liveTranscript, utterances, error, attachCanvas } = useGuestRoom(id, selectedLang);
 
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -76,6 +76,23 @@ export default function GuestPage() {
 
         {status === "closed" && (
           <div className="status-bar">The host has ended this session.</div>
+        )}
+
+        {/* Lip-synced video from host */}
+        {status === "listening" && (
+          <div className="lipsync-video">
+            <canvas
+              ref={attachCanvas}
+              style={{
+                width: "256px",
+                height: "256px",
+                borderRadius: "12px",
+                border: "2px solid #333",
+                background: "#1a1a1a",
+              }}
+            />
+            <span className="lipsync-label">Host (lip-synced)</span>
+          </div>
         )}
 
         <div className="utterances" ref={listRef}>

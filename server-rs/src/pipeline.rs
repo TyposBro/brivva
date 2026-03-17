@@ -1,9 +1,10 @@
-//! Translation pipeline: STT → Translate → TTS
+//! Translation pipeline: STT → Translate → TTS → Lip-sync
 //!
 //! Host audio flows through:
 //! 1. STT Wrapper (stt-wrapper:8766/asr) — clean interim/final events
 //! 2. NLLB (nllb:8000/translate) — REST translation per active language
-//! 3. OpenAI TTS (api.openai.com/v1/audio/speech) — streaming MP3 response
+//! 3. ElevenLabs TTS — streaming MP3 response
+//! 4. MuseTalk (musetalk:8100/lipsync) — lip-synced video frames
 
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
@@ -28,6 +29,10 @@ static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
 });
 static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
+});
+static MUSETALK_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = std::env::var("MUSETALK_HOST").unwrap_or_else(|_| "localhost".to_string());
+    format!("http://{}:8100", host)
 });
 
 // ── STT Events (from stt-wrapper) ─────────────────────────
@@ -55,14 +60,15 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
         room.send_to_all_guests(final_msg);
 
         let active = room.active_langs();
-        println!("[PIPELINE] active langs: {:?}", active);
+        let avatar_id = room.avatar_id.clone();
+        println!("[PIPELINE] active langs: {:?}, avatar: {:?}", active, avatar_id.as_deref());
         if !active.is_empty() {
             let rooms_clone = rooms.clone();
             let rid = room_id.to_string();
             let src = source_lang.clone();
             let text = transcript.to_string();
             tokio::spawn(async move {
-                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid).await;
+                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, avatar_id.as_deref()).await;
             });
         }
     }
@@ -170,6 +176,52 @@ pub async fn start_stt(
     }
 }
 
+// ── MuseTalk Avatar Preparation ──────────────────────────
+
+#[derive(Serialize)]
+struct MusetalkPrepareRequest {
+    face_image_base64: String,
+}
+
+#[derive(Deserialize)]
+struct MusetalkPrepareResponse {
+    avatar_id: String,
+    prepare_ms: i64,
+}
+
+/// Prepare a face image for lip-sync (called when host sends face:image)
+pub async fn prepare_avatar(rooms: &Rooms, room_id: &str, face_image_base64: String) {
+    let client = reqwest::Client::new();
+    let url = format!("{}/prepare", *MUSETALK_URL);
+
+    println!("[LIPSYNC] preparing avatar for room {}", room_id);
+    let resp = client
+        .post(&url)
+        .json(&MusetalkPrepareRequest { face_image_base64 })
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => match r.json::<MusetalkPrepareResponse>().await {
+            Ok(parsed) => {
+                println!(
+                    "[LIPSYNC] avatar ready: {} ({}ms)",
+                    parsed.avatar_id, parsed.prepare_ms
+                );
+                if let Some(mut room) = rooms.get_mut(room_id) {
+                    room.avatar_id = Some(parsed.avatar_id.clone());
+                    room.send_to_host(to_ws(&ServerMsg::AvatarReady {
+                        avatar_id: parsed.avatar_id,
+                    }));
+                }
+            }
+            Err(e) => eprintln!("[LIPSYNC] prepare parse error: {}", e),
+        },
+        Ok(r) => eprintln!("[LIPSYNC] prepare error: {}", r.status()),
+        Err(e) => eprintln!("[LIPSYNC] prepare request error: {}", e),
+    }
+}
+
 // ── Translation Pipeline ──────────────────────────────────
 
 #[derive(Serialize)]
@@ -191,7 +243,7 @@ struct ElevenLabsRequest {
     model_id: String,
 }
 
-/// Run the full translation + TTS pipeline for one utterance across all active languages
+/// Run the full translation + TTS + lip-sync pipeline for one utterance
 async fn run_pipeline(
     transcript: &str,
     utterance_id: u64,
@@ -199,6 +251,7 @@ async fn run_pipeline(
     target_langs: &[Lang],
     rooms: &Rooms,
     room_id: &str,
+    avatar_id: Option<&str>,
 ) {
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -210,9 +263,14 @@ async fn run_pipeline(
             let client = client.clone();
             let rooms = rooms.clone();
             let room_id = room_id.to_string();
+            let avatar_id = avatar_id.map(|s| s.to_string());
 
             handles.push(tokio::spawn(async move {
-                do_tts_and_broadcast(&client, &transcript, 0, utterance_id, &lang, &rooms, &room_id).await;
+                do_tts_and_broadcast(
+                    &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
+                    avatar_id.as_deref(),
+                )
+                .await;
             }));
             continue;
         }
@@ -223,6 +281,7 @@ async fn run_pipeline(
         let client = client.clone();
         let rooms = rooms.clone();
         let room_id = room_id.to_string();
+        let avatar_id = avatar_id.map(|s| s.to_string());
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -251,7 +310,10 @@ async fn run_pipeline(
                 }
             };
             let translate_ms = start.elapsed().as_millis() as u64;
-            println!("[TRANSLATE] {} → {} = '{}' ({}ms)", source, target, translated_text, translate_ms);
+            println!(
+                "[TRANSLATE] {} → {} = '{}' ({}ms)",
+                source, target, translated_text, translate_ms
+            );
 
             // 2. Broadcast translation text
             if let Some(room) = rooms.get(&room_id) {
@@ -264,8 +326,18 @@ async fn run_pipeline(
                 room.send_to_host(msg);
             }
 
-            // 3. TTS + stream audio
-            do_tts_and_broadcast(&client, &translated_text, translate_ms, utterance_id, &target, &rooms, &room_id).await;
+            // 3. TTS + stream audio + lip-sync
+            do_tts_and_broadcast(
+                &client,
+                &translated_text,
+                translate_ms,
+                utterance_id,
+                &target,
+                &rooms,
+                &room_id,
+                avatar_id.as_deref(),
+            )
+            .await;
         }));
     }
 
@@ -274,7 +346,7 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS and stream MP3 chunks to all guests in a language group
+/// Call ElevenLabs TTS, stream MP3 chunks to guests, then run lip-sync if avatar is available
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -283,6 +355,7 @@ async fn do_tts_and_broadcast(
     lang: &Lang,
     rooms: &Rooms,
     room_id: &str,
+    avatar_id: Option<&str>,
 ) {
     let tts_start = Instant::now();
 
@@ -296,7 +369,10 @@ async fn do_tts_and_broadcast(
         voice_id
     );
 
-    println!("[TTS] requesting ElevenLabs voice={} for '{}' ({})", voice_id, text, lang);
+    println!(
+        "[TTS] requesting ElevenLabs voice={} for '{}' ({})",
+        voice_id, text, lang
+    );
     let tts_resp = client
         .post(&url)
         .header("xi-api-key", &*ELEVENLABS_API_KEY)
@@ -308,6 +384,9 @@ async fn do_tts_and_broadcast(
         .send()
         .await;
 
+    // Collect audio chunks while streaming to guests
+    let mut audio_buffer: Vec<u8> = Vec::new();
+
     match tts_resp {
         Ok(resp) if resp.status().is_success() => {
             println!("[TTS] streaming MP3 chunks for {}", lang);
@@ -315,6 +394,9 @@ async fn do_tts_and_broadcast(
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
+                        // Buffer for lip-sync
+                        audio_buffer.extend_from_slice(&chunk);
+                        // Stream to guests
                         if let Some(room) = rooms.get(room_id) {
                             room.send_to_lang(lang, Message::Binary(chunk.to_vec().into()));
                         }
@@ -332,9 +414,122 @@ async fn do_tts_and_broadcast(
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     if let Some(room) = rooms.get(room_id) {
-        let msg = to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms });
+        let msg = to_ws(&ServerMsg::TtsEnd {
+            utterance_id,
+            tts_ms,
+        });
         room.send_to_lang(lang, msg.clone());
         room.send_to_host(msg);
+    }
+
+    // Run lip-sync if avatar is prepared and we have audio
+    if let Some(aid) = avatar_id {
+        if !audio_buffer.is_empty() {
+            do_lipsync_and_broadcast(
+                client,
+                &audio_buffer,
+                aid,
+                utterance_id,
+                lang,
+                rooms,
+                room_id,
+            )
+            .await;
+        }
+    }
+}
+
+// ── Lip-sync ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct MusetalkLipsyncRequest {
+    avatar_id: String,
+    audio_base64: String,
+}
+
+#[derive(Deserialize)]
+struct MusetalkLipsyncResponse {
+    frames_base64: Vec<String>,
+    fps: u32,
+    lipsync_ms: i64,
+}
+
+/// Call MuseTalk lip-sync and stream video frames to guests
+async fn do_lipsync_and_broadcast(
+    client: &reqwest::Client,
+    audio_mp3: &[u8],
+    avatar_id: &str,
+    utterance_id: u64,
+    lang: &Lang,
+    rooms: &Rooms,
+    room_id: &str,
+) {
+    use base64::Engine;
+    let audio_base64 = base64::engine::general_purpose::STANDARD.encode(audio_mp3);
+
+    let url = format!("{}/lipsync", *MUSETALK_URL);
+    println!("[LIPSYNC] requesting lip-sync for utterance {}", utterance_id);
+
+    let lipsync_start = Instant::now();
+
+    let resp = client
+        .post(&url)
+        .json(&MusetalkLipsyncRequest {
+            avatar_id: avatar_id.to_string(),
+            audio_base64,
+        })
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<MusetalkLipsyncResponse>().await {
+                Ok(parsed) => {
+                    let lipsync_ms = lipsync_start.elapsed().as_millis() as u64;
+                    println!(
+                        "[LIPSYNC] got {} frames @{}fps ({}ms)",
+                        parsed.frames_base64.len(),
+                        parsed.fps,
+                        lipsync_ms
+                    );
+
+                    // Send video_start
+                    if let Some(room) = rooms.get(room_id) {
+                        room.send_to_lang(
+                            lang,
+                            to_ws(&ServerMsg::VideoStart { utterance_id }),
+                        );
+                    }
+
+                    // Send each frame as a JSON message
+                    for frame_b64 in &parsed.frames_base64 {
+                        if let Some(room) = rooms.get(room_id) {
+                            room.send_to_lang(
+                                lang,
+                                to_ws(&ServerMsg::VideoFrame {
+                                    utterance_id,
+                                    data: frame_b64.clone(),
+                                }),
+                            );
+                        }
+                    }
+
+                    // Send video_end
+                    if let Some(room) = rooms.get(room_id) {
+                        let msg = to_ws(&ServerMsg::VideoEnd {
+                            utterance_id,
+                            lipsync_ms,
+                        });
+                        room.send_to_lang(lang, msg.clone());
+                        room.send_to_host(msg);
+                    }
+                }
+                Err(e) => eprintln!("[LIPSYNC] parse error: {}", e),
+            }
+        }
+        Ok(r) => eprintln!("[LIPSYNC] error: {}", r.status()),
+        Err(e) => eprintln!("[LIPSYNC] request error: {}", e),
     }
 }
 

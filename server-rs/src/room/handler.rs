@@ -116,6 +116,19 @@ async fn handle_host(
                 if text.contains("host:end") {
                     break;
                 }
+                // Handle face image for lip-sync avatar preparation
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
+                    if json.get("type").and_then(|v| v.as_str()) == Some("face:image") {
+                        if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                            let rooms_clone = rooms.clone();
+                            let rid = room_id.clone();
+                            let face_data = data.to_string();
+                            tokio::spawn(async move {
+                                pipeline::prepare_avatar(&rooms_clone, &rid, face_data).await;
+                            });
+                        }
+                    }
+                }
             }
             Message::Close(_) => break,
             _ => {}
