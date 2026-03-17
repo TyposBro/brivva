@@ -1,6 +1,10 @@
 [package]
 name = "frame-extraction"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.0", features = ["derive"] }
+image = "0.25.10"
+rayon = "1.11.0"
