@@ -114,6 +114,14 @@ impl FrameReader {
         };
 
         args.extend([
+            "-fflags".to_string(),
+            "nobuffer".to_string(),
+            "-flags".to_string(),
+            "low_delay".to_string(),
+            "-probesize".to_string(),
+            "32".to_string(),
+            "-analyzeduration".to_string(),
+            "0".to_string(),
             "-f".to_string(),
             "rawvideo".to_string(),
             "-pix_fmt".to_string(),
@@ -153,7 +161,11 @@ impl FrameReader {
             Err(e) => return Err(e.into()),
         }
 
-        let img = image::RgbImage::from_raw(self.width, self.height, self.buffer.clone())
+        // Swap buffer out instead of cloning — zero-copy handoff
+        let mut frame_data = vec![0u8; self.buffer.len()];
+        std::mem::swap(&mut self.buffer, &mut frame_data);
+
+        let img = image::RgbImage::from_raw(self.width, self.height, frame_data)
             .context("failed to create RgbImage from raw buffer")?;
 
         Ok(Some(img))
