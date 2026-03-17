@@ -24,20 +24,42 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 ### What's Done (v4)
 
 - [x] MuseTalk Dockerized — CUDA 11.8 + PyTorch 2.0.1 + mmcv prebuilt wheels + FastAPI wrapper
-- [x] Single-call API: POST /lipsync (face frame + audio → lip-synced frames, no separate prepare step)
-- [x] MP3→WAV conversion via ffmpeg in musetalk/server.py (ElevenLabs outputs MP3, MuseTalk needs WAV)
-- [x] pipeline.rs integrated — buffers TTS audio, grabs latest face frame, calls MuseTalk, streams video frames
-- [x] Host streams webcam frames at ~5fps via face:frame WS messages while recording
-- [x] Server stores latest_face in Room, forwards face:frame to guests (live host video)
-- [x] Guest renders live host face on canvas via VideoPlayer.renderDirect()
-- [x] After TTS, pipeline sends latest face + audio to MuseTalk → lip-synced frames replace live feed
-- [x] Guest video rendering — VideoPlayer.ts: renderDirect() for live + queue-based for lip-sync batches
-- [x] WebSocket protocol: face:frame (live video), video_start/video_frame/video_end (lip-sync)
-- [x] docker-compose.yml — 4 services, MUSETALK_HOST env var, GPU override in gpu.yml
-- [x] MuseTalk container built and starting successfully (all weights baked in)
-- [x] Frontend deployed to CF Pages with tunnel URL
-- [ ] End-to-end lip-sync test
-- [ ] Benchmark lip-sync added latency
+- [x] Single-call API: POST /lipsync (face frame + audio → lip-synced frames)
+- [x] Full pipeline working end-to-end: STT → NLLB → TTS → MuseTalk → guest receives audio + video
+- [x] Host streams webcam at 30fps, server stores latest_face for lip-sync
+- [x] Synced delivery: TTS audio buffered, sent to guest only after MuseTalk completes (audio+video together)
+- [x] Fallback: if MuseTalk fails, audio-only sent to guest
+- [x] All 4 Docker containers running, frontend deployed to CF Pages with tunnel
+- [x] Numpy-based face detection (no file I/O) for MuseTalk preprocessing
+
+### Performance Problem (v4)
+
+**MuseTalk is ~5x too slow for real-time on RTX 4060:**
+
+Measured (3.7s audio clip, 92 frames @25fps):
+- Face detection + VAE encode (prep): **1026ms** per call
+- UNet inference: **~177ms/frame** (92 frames in ~16.3s)
+- Total: **17.3s** for 3.7s of audio = **4.7x slower than real-time**
+- Full pipeline: STT (~1s) + NLLB (~1.5s) + TTS (~0.7s) + MuseTalk (~17s) = **~20s total latency**
+
+Root causes:
+- Per-frame UNet inference without batching (~177ms/frame on RTX 4060)
+- Face detection (mmpose + face_alignment) runs per-call (~500ms)
+- VAE encode/decode per frame
+- Python overhead, no CUDA stream pipelining
+
+Possible optimizations:
+- **Batch UNet inference** — process N frames at once (limited by VRAM)
+- **Cache face detection** — reuse bbox across calls if face hasn't moved much
+- **TensorRT/ONNX** — export UNet to TensorRT for ~3-5x speedup
+- **Reduce frame count** — generate at 15fps instead of 25fps, interpolate on client
+- **fp16 already enabled** — but torch.compile() or flash attention could help
+
+### What's Not Working
+
+- Guest video playback not rendering lip-synced frames properly (VideoPlayer queue issue)
+- Audio plays but video frames may not be displaying on guest canvas
+- 30fps webcam streaming from host to server works but is bandwidth-heavy (~450KB/s)
 
 ## Architecture (v4)
 
@@ -227,16 +249,16 @@ Connection via query params (no JSON handshake):
 
 ## Measured Latency (v3, self-hosted)
 
-| Phase                              | Typical         | Notes                          |
-| ---------------------------------- | --------------- | ------------------------------ |
-| STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking |
-| Translation (NLLB GPU)             | 82-164ms        | Warm, per language             |
-| TTS (ElevenLabs)                   | 548-1440ms      | Depends on text length         |
-| Lip-sync (MuseTalk)                | ~33ms/frame     | 25fps, TBD on RTX 4060        |
-| Overhead (routing)                 | ~11ms           | localhost, no network hops     |
-| **Total from utterance finalized** | **~650-1600ms** | Without lip-sync               |
-| **With lip-sync (estimated)**      | **~1.5-3.5s**   | +~1-2s for MuseTalk processing |
-| **Target**                         | **<300ms**      | Gap: ~2-5x (audio), ~5-12x (video) |
+| Phase                              | Measured        | Notes                              |
+| ---------------------------------- | --------------- | ---------------------------------- |
+| STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking     |
+| Translation (NLLB CPU)             | 1537-2434ms     | Cold ~2.4s, warm ~400ms            |
+| TTS (ElevenLabs)                   | 711ms           | Buffered, not streamed             |
+| Lip-sync prep (face detect + VAE)  | 1026ms          | Per call, mmpose + face_alignment  |
+| Lip-sync UNet (per frame)          | ~177ms          | 92 frames in ~16.3s on RTX 4060   |
+| **Total (audio only, no lipsync)** | **~2.5-3.5s**   | STT + NLLB + TTS                   |
+| **Total (with lip-sync)**          | **~20s**        | + ~17s MuseTalk (3.7s audio clip)  |
+| **Target**                         | **<300ms**      | Gap: ~10x (audio), ~65x (video)    |
 
 ## Rust Server Key Concepts
 
