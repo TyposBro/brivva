@@ -60,15 +60,15 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
         room.send_to_all_guests(final_msg);
 
         let active = room.active_langs();
-        let avatar_id = room.avatar_id.clone();
-        println!("[PIPELINE] active langs: {:?}, avatar: {:?}", active, avatar_id.as_deref());
+        let latest_face = room.latest_face.clone();
+        println!("[PIPELINE] active langs: {:?}, has_face: {}", active, latest_face.is_some());
         if !active.is_empty() {
             let rooms_clone = rooms.clone();
             let rid = room_id.to_string();
             let src = source_lang.clone();
             let text = transcript.to_string();
             tokio::spawn(async move {
-                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, avatar_id.as_deref()).await;
+                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, latest_face.as_deref()).await;
             });
         }
     }
@@ -176,52 +176,6 @@ pub async fn start_stt(
     }
 }
 
-// ── MuseTalk Avatar Preparation ──────────────────────────
-
-#[derive(Serialize)]
-struct MusetalkPrepareRequest {
-    face_image_base64: String,
-}
-
-#[derive(Deserialize)]
-struct MusetalkPrepareResponse {
-    avatar_id: String,
-    prepare_ms: i64,
-}
-
-/// Prepare a face image for lip-sync (called when host sends face:image)
-pub async fn prepare_avatar(rooms: &Rooms, room_id: &str, face_image_base64: String) {
-    let client = reqwest::Client::new();
-    let url = format!("{}/prepare", *MUSETALK_URL);
-
-    println!("[LIPSYNC] preparing avatar for room {}", room_id);
-    let resp = client
-        .post(&url)
-        .json(&MusetalkPrepareRequest { face_image_base64 })
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => match r.json::<MusetalkPrepareResponse>().await {
-            Ok(parsed) => {
-                println!(
-                    "[LIPSYNC] avatar ready: {} ({}ms)",
-                    parsed.avatar_id, parsed.prepare_ms
-                );
-                if let Some(mut room) = rooms.get_mut(room_id) {
-                    room.avatar_id = Some(parsed.avatar_id.clone());
-                    room.send_to_host(to_ws(&ServerMsg::AvatarReady {
-                        avatar_id: parsed.avatar_id,
-                    }));
-                }
-            }
-            Err(e) => eprintln!("[LIPSYNC] prepare parse error: {}", e),
-        },
-        Ok(r) => eprintln!("[LIPSYNC] prepare error: {}", r.status()),
-        Err(e) => eprintln!("[LIPSYNC] prepare request error: {}", e),
-    }
-}
-
 // ── Translation Pipeline ──────────────────────────────────
 
 #[derive(Serialize)]
@@ -251,7 +205,7 @@ async fn run_pipeline(
     target_langs: &[Lang],
     rooms: &Rooms,
     room_id: &str,
-    avatar_id: Option<&str>,
+    latest_face: Option<&str>,
 ) {
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -263,12 +217,12 @@ async fn run_pipeline(
             let client = client.clone();
             let rooms = rooms.clone();
             let room_id = room_id.to_string();
-            let avatar_id = avatar_id.map(|s| s.to_string());
+            let latest_face = latest_face.map(|s| s.to_string());
 
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    avatar_id.as_deref(),
+                    latest_face.as_deref(),
                 )
                 .await;
             }));
@@ -281,7 +235,7 @@ async fn run_pipeline(
         let client = client.clone();
         let rooms = rooms.clone();
         let room_id = room_id.to_string();
-        let avatar_id = avatar_id.map(|s| s.to_string());
+        let latest_face = latest_face.map(|s| s.to_string());
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -335,7 +289,7 @@ async fn run_pipeline(
                 &target,
                 &rooms,
                 &room_id,
-                avatar_id.as_deref(),
+                latest_face.as_deref(),
             )
             .await;
         }));
@@ -346,7 +300,7 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS, stream MP3 chunks to guests, then run lip-sync if avatar is available
+/// Call ElevenLabs TTS, stream MP3 chunks to guests, then run lip-sync if face available
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -355,7 +309,7 @@ async fn do_tts_and_broadcast(
     lang: &Lang,
     rooms: &Rooms,
     room_id: &str,
-    avatar_id: Option<&str>,
+    face_base64: Option<&str>,
 ) {
     let tts_start = Instant::now();
 
@@ -422,13 +376,13 @@ async fn do_tts_and_broadcast(
         room.send_to_host(msg);
     }
 
-    // Run lip-sync if avatar is prepared and we have audio
-    if let Some(aid) = avatar_id {
+    // Run lip-sync if we have a face frame and audio
+    if let Some(face) = face_base64 {
         if !audio_buffer.is_empty() {
             do_lipsync_and_broadcast(
                 client,
                 &audio_buffer,
-                aid,
+                face,
                 utterance_id,
                 lang,
                 rooms,
@@ -443,8 +397,8 @@ async fn do_tts_and_broadcast(
 
 #[derive(Serialize)]
 struct MusetalkLipsyncRequest {
-    avatar_id: String,
     audio_base64: String,
+    face_image_base64: String,
 }
 
 #[derive(Deserialize)]
@@ -458,7 +412,7 @@ struct MusetalkLipsyncResponse {
 async fn do_lipsync_and_broadcast(
     client: &reqwest::Client,
     audio_mp3: &[u8],
-    avatar_id: &str,
+    face_base64: &str,
     utterance_id: u64,
     lang: &Lang,
     rooms: &Rooms,
@@ -475,8 +429,8 @@ async fn do_lipsync_and_broadcast(
     let resp = client
         .post(&url)
         .json(&MusetalkLipsyncRequest {
-            avatar_id: avatar_id.to_string(),
             audio_base64,
+            face_image_base64: face_base64.to_string(),
         })
         .timeout(std::time::Duration::from_secs(30))
         .send()

@@ -36,6 +36,20 @@ export class VideoPlayer {
     }
   }
 
+  /** Immediately draw a single frame on the canvas (for live host video, no queue). */
+  renderDirect(frameBase64: string): void {
+    if (!this.canvas) return;
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return;
+    const img = new Image();
+    img.onload = () => {
+      this.canvas!.width = img.width;
+      this.canvas!.height = img.height;
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = `data:image/jpeg;base64,${frameBase64}`;
+  }
+
   reset(): void {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);

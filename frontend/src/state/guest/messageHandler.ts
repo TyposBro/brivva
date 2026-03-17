@@ -48,6 +48,10 @@ export function createGuestMessageHandler(
         videoPlayer.finishReceiving(msg.utteranceId as number);
         break;
 
+      case "face:frame":
+        videoPlayer.renderDirect(msg.data as string);
+        break;
+
       case "room:closed":
         dispatch({ type: "closed" });
         socket.close();

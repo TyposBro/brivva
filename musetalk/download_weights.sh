@@ -5,42 +5,57 @@ set -e
 MODELS_DIR="/app/models"
 mkdir -p "$MODELS_DIR"
 
-echo "=== Downloading MuseTalk v1.5 weights ==="
-huggingface-cli download TMElyralab/MuseTalk \
-    --local-dir "$MODELS_DIR/musetalk" \
-    --include "musetalkV15/*" "models/dwpose/*" "models/face-parse-bisent/*"
+dl() {
+  local url="$1" dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  echo "  ↓ $(basename "$dest")"
+  wget -q --show-progress --progress=bar:force -O "$dest" "$url"
+}
 
-# Reorganize: HF downloads into flat structure
-if [ -d "$MODELS_DIR/musetalk/models/dwpose" ]; then
-    mv "$MODELS_DIR/musetalk/models/dwpose" "$MODELS_DIR/dwpose"
-fi
-if [ -d "$MODELS_DIR/musetalk/models/face-parse-bisent" ]; then
-    mv "$MODELS_DIR/musetalk/models/face-parse-bisent" "$MODELS_DIR/face-parse-bisent"
-fi
-if [ -d "$MODELS_DIR/musetalk/musetalkV15" ]; then
-    mv "$MODELS_DIR/musetalk/musetalkV15" "$MODELS_DIR/musetalkV15"
-fi
-rm -rf "$MODELS_DIR/musetalk/models" "$MODELS_DIR/musetalk/.huggingface"
+# ── MuseTalk weights (via git-xet clone, only has musetalk/ and musetalkV15/) ──
 
-echo "=== Downloading sd-vae-ft-mse ==="
-huggingface-cli download stabilityai/sd-vae-ft-mse \
-    --local-dir "$MODELS_DIR/sd-vae" \
-    --include "config.json" "diffusion_pytorch_model.bin"
+curl -sSfL https://hf.co/git-xet/install.sh | bash
+git lfs install
+git xet install
 
-echo "=== Downloading whisper-tiny ==="
-huggingface-cli download openai/whisper-tiny \
-    --local-dir "$MODELS_DIR/whisper" \
-    --include "config.json" "pytorch_model.bin" "preprocessor_config.json"
+echo "=== Cloning MuseTalk model repo ==="
+git clone https://huggingface.co/TMElyralab/MuseTalk /tmp/musetalk-weights
 
-echo "=== Downloading resnet18 ==="
-mkdir -p "$MODELS_DIR/face-parse-bisent"
-python3 -c "
-import torch
-from torchvision.models import resnet18, ResNet18_Weights
-model = resnet18(weights=ResNet18_Weights.DEFAULT)
-torch.save(model.state_dict(), '$MODELS_DIR/face-parse-bisent/resnet18-5c106cde.pth')
-print('resnet18 saved')
-"
+cp -r /tmp/musetalk-weights/musetalkV15 "$MODELS_DIR/musetalkV15"
+rm -rf /tmp/musetalk-weights
 
-echo "=== All weights downloaded ==="
+# ── Other weights (not in the HF repo, download directly) ──
+
+echo "=== dwpose ==="
+dl "https://huggingface.co/camenduru/MuseTalk/resolve/main/dwpose/dw-ll_ucoco_384.pth" \
+   "$MODELS_DIR/dwpose/dw-ll_ucoco_384.pth"
+
+echo "=== face-parse-bisent ==="
+dl "https://huggingface.co/camenduru/MuseTalk/resolve/main/face-parse-bisent/79999_iter.pth" \
+   "$MODELS_DIR/face-parse-bisent/79999_iter.pth"
+
+echo "=== resnet18 ==="
+dl "https://download.pytorch.org/models/resnet18-5c106cde.pth" \
+   "$MODELS_DIR/face-parse-bisent/resnet18-5c106cde.pth"
+
+echo "=== sd-vae-ft-mse ==="
+dl "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/config.json" \
+   "$MODELS_DIR/sd-vae/config.json"
+dl "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.bin" \
+   "$MODELS_DIR/sd-vae/diffusion_pytorch_model.bin"
+
+echo "=== whisper-tiny ==="
+dl "https://huggingface.co/openai/whisper-tiny/resolve/main/config.json" \
+   "$MODELS_DIR/whisper/config.json"
+dl "https://huggingface.co/openai/whisper-tiny/resolve/main/pytorch_model.bin" \
+   "$MODELS_DIR/whisper/pytorch_model.bin"
+dl "https://huggingface.co/openai/whisper-tiny/resolve/main/preprocessor_config.json" \
+   "$MODELS_DIR/whisper/preprocessor_config.json"
+
+echo "=== s3fd face detector (runtime download, pre-cache) ==="
+mkdir -p /root/.cache/torch/hub/checkpoints
+dl "https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth" \
+   "/root/.cache/torch/hub/checkpoints/s3fd-619a316812.pth"
+
+echo "=== Verifying ==="
 du -sh "$MODELS_DIR"/*

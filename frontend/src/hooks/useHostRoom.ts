@@ -14,8 +14,17 @@ export function useHostRoom() {
 
   const audio = useRef(new AudioPipeline());
   const socket = useRef(new RoomSocket());
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Callback ref: connects stream to video element whenever either becomes available
+  const videoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoElRef.current = el;
+    if (el && streamRef.current) {
+      el.srcObject = streamRef.current;
+    }
+  }, []);
 
   const handleMessage = createMessageHandler(
     dispatch,
@@ -31,8 +40,8 @@ export function useHostRoom() {
         video: { width: 512, height: 512, facingMode: "user" },
       });
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      if (videoElRef.current) {
+        videoElRef.current.srcObject = stream;
       }
     } catch (err) {
       console.error("Webcam access failed:", err);
@@ -44,8 +53,8 @@ export function useHostRoom() {
     streamRef.current = null;
   }, []);
 
-  const captureFace = useCallback(() => {
-    const video = videoRef.current;
+  const captureAndSendFrame = useCallback(() => {
+    const video = videoElRef.current;
     if (!video || !socket.current.isOpen) return;
 
     const canvas = document.createElement("canvas");
@@ -63,14 +72,26 @@ export function useHostRoom() {
     const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
     const base64 = dataUrl.split(",")[1];
 
-    socket.current.sendJson({ type: "face:image", data: base64 });
-    console.log("[HOST] sent face image for avatar preparation");
+    socket.current.sendJson({ type: "face:frame", data: base64 });
+  }, []);
+
+  const startFrameStreaming = useCallback(() => {
+    stopFrameStreaming();
+    frameIntervalRef.current = setInterval(captureAndSendFrame, 200); // ~5fps
+  }, [captureAndSendFrame]);
+
+  const stopFrameStreaming = useCallback(() => {
+    if (frameIntervalRef.current !== null) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
   }, []);
 
   // --- actions ---
 
   const stopRecording = () => {
     audio.current.stop();
+    stopFrameStreaming();
     dispatch({ type: "recording_stopped" });
   };
 
@@ -83,11 +104,6 @@ export function useHostRoom() {
       {
         onMessage: (msg) => {
           handleMessage(msg);
-          // Capture face when room is created
-          if (msg.type === "room:created") {
-            // Short delay to ensure webcam is streaming
-            setTimeout(captureFace, 500);
-          }
         },
         onClose: () => { stopRecording(); dispatch({ type: "disconnected" }); },
       },
@@ -98,12 +114,14 @@ export function useHostRoom() {
     if (!socket.current.isOpen) return;
     const analyser = await audio.current.start((buf) => socket.current.sendAudio(buf));
     dispatch({ type: "recording_started", analyser });
+    startFrameStreaming();
   };
 
   const closeRoom = () => {
     socket.current.sendJson({ type: "host:end" });
     socket.current.close();
     stopRecording();
+    stopFrameStreaming();
     stopWebcam();
   };
 

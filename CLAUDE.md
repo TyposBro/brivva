@@ -24,33 +24,36 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 ### What's Done (v4)
 
 - [x] MuseTalk Dockerized — CUDA 11.8 + PyTorch 2.0.1 + mmcv prebuilt wheels + FastAPI wrapper
-- [x] Two-phase API: POST /prepare (avatar setup) + POST /lipsync (frame generation)
+- [x] Single-call API: POST /lipsync (face frame + audio → lip-synced frames, no separate prepare step)
 - [x] MP3→WAV conversion via ffmpeg in musetalk/server.py (ElevenLabs outputs MP3, MuseTalk needs WAV)
-- [x] pipeline.rs integrated — buffers TTS audio, calls MuseTalk after TTS, streams video frames as JSON
-- [x] Room.avatar_id stored after /prepare, passed through pipeline for each utterance
-- [x] Host face capture — webcam preview (mirrored), captures 256x256 JPEG on room creation, sends via WS
-- [x] Guest video rendering — VideoPlayer.ts renders JPEG frames on canvas at target FPS
-- [x] WebSocket protocol extended — face:image, avatar:ready, video_start, video_frame, video_end
-- [x] docker-compose.yml updated — 4 services, MUSETALK_HOST env var, GPU override in gpu.yml
-- [ ] Docker build completing (musetalk container building)
-- [ ] End-to-end test
+- [x] pipeline.rs integrated — buffers TTS audio, grabs latest face frame, calls MuseTalk, streams video frames
+- [x] Host streams webcam frames at ~5fps via face:frame WS messages while recording
+- [x] Server stores latest_face in Room, forwards face:frame to guests (live host video)
+- [x] Guest renders live host face on canvas via VideoPlayer.renderDirect()
+- [x] After TTS, pipeline sends latest face + audio to MuseTalk → lip-synced frames replace live feed
+- [x] Guest video rendering — VideoPlayer.ts: renderDirect() for live + queue-based for lip-sync batches
+- [x] WebSocket protocol: face:frame (live video), video_start/video_frame/video_end (lip-sync)
+- [x] docker-compose.yml — 4 services, MUSETALK_HOST env var, GPU override in gpu.yml
+- [x] MuseTalk container built and starting successfully (all weights baked in)
+- [x] Frontend deployed to CF Pages with tunnel URL
+- [ ] End-to-end lip-sync test
 - [ ] Benchmark lip-sync added latency
 
 ## Architecture (v4)
 
 ```
 Host Browser (/host)
-  → Webcam face capture (256x256 JPEG) → face:image → server-rs
-  → server-rs → MuseTalk /prepare → avatar_id stored in Room
+  → Webcam streams face frames (256x256 JPEG, ~5fps) → face:frame → server-rs
+  → server-rs stores latest_face in Room, forwards face:frame to guests (live video)
   → PCM linear16 @ 16kHz → WebSocket → server-rs (Rust/axum :3000)
   → stt-wrapper (:8766) → CF Nova-3 (streaming transcription)
   → NLLB (:8000) — per active language, parallel tokio::spawn
   → ElevenLabs TTS (API) — streaming MP3 (buffered + streamed to guests)
-  → Buffered MP3 → MuseTalk (:8100) /lipsync → JPEG frames
+  → Buffered MP3 + latest face frame → MuseTalk (:8100) /lipsync → JPEG frames
   → video_start → video_frame[] → video_end → Guest Browser (canvas rendering)
 
 Host sees: mirrored webcam preview (local <video> element)
-Guests see: lip-synced face on <canvas> + translated audio via Blob URL
+Guests see: live host face on <canvas> (5fps) + lip-synced face during translations + audio via Blob URL
 ```
 
 | Service     | Port | Tech                             | Latency            | GPU  | CUDA |
@@ -75,54 +78,53 @@ Guests see: lip-synced face on <canvas> + translated audio via Blob URL
 ### API (musetalk/server.py)
 
 ```
-POST /prepare
-  Body: { "face_image_base64": "<base64 JPEG>" }
-  Response: { "avatar_id": "abc123", "prepare_ms": 342 }
-  → Detects face, crops 256x256, encodes VAE latent, stores in memory
-
 POST /lipsync
-  Body: { "avatar_id": "abc123", "audio_base64": "<base64 MP3>" }
+  Body: { "audio_base64": "<base64 MP3>", "face_image_base64": "<base64 JPEG>" }
   Response: { "frames_base64": ["<JPEG>", ...], "fps": 25, "lipsync_ms": 1200 }
-  → Converts MP3→WAV via ffmpeg, extracts whisper features, UNet inference per frame, VAE decode, blend
+  → Detects face in image, crops 256x256, encodes VAE latent
+  → Converts MP3→WAV via ffmpeg, extracts whisper features
+  → UNet inference per audio frame (masked face latent + audio → lip movement)
+  → VAE decode, blend back onto original image
+  → Returns all frames as base64 JPEG array
 
 GET /health
-  Response: { "status": "healthy", "model": "musetalk_v1.5", "device": "cuda", "avatars_loaded": 1 }
+  Response: { "status": "healthy", "model": "musetalk_v1.5", "device": "cuda" }
 ```
+
+No separate /prepare step — face is processed per-call so body movement stays current.
 
 ### Pipeline Integration (pipeline.rs)
 
 ```
+Host streams face:frame at ~5fps → server stores latest_face in Room
+
 do_tts_and_broadcast():
   1. Stream MP3 chunks to guests (existing audio flow, unchanged)
   2. Buffer all MP3 chunks in Vec<u8>
-  3. After TTS complete, if avatar_id exists:
-     → base64-encode MP3 buffer
-     → POST to MuseTalk /lipsync
+  3. After TTS complete, if latest_face exists:
+     → Grab latest face frame from Room
+     → POST { audio_base64, face_image_base64 } to MuseTalk /lipsync
      → Send video_start, video_frame[] (JSON with base64 JPEG), video_end to guests
 ```
 
-### Host Face Capture Flow
+### Host Face Streaming Flow
 
 1. HostPage starts webcam on mount (512x512 request, getUserMedia)
 2. Shows mirrored preview via `<video>` element (`transform: scaleX(-1)`)
-3. On `room:created`, captures frame: center-crop to square → scale to 256x256 → JPEG base64
-4. Sends `{ type: "face:image", data: "<base64>" }` via WebSocket
-5. handler.rs parses JSON, spawns `prepare_avatar()` task
-6. pipeline.rs POSTs to MuseTalk /prepare, stores avatar_id in Room
-7. Sends `avatar:ready` back to host
+3. When recording starts, captures face frames at ~5fps (200ms interval)
+4. Each frame: center-crop to square → scale to 256x256 → JPEG base64
+5. Sends `{ type: "face:frame", data: "<base64>" }` via WebSocket
+6. handler.rs stores latest_face in Room, forwards face:frame to all guests
+7. Guests render live host face on canvas via VideoPlayer.renderDirect()
 
 ### Guest Video Playback
 
-- `VideoPlayer.ts` — queue-based canvas renderer (mirrors TtsPlayer pattern)
-- `attach(canvas)` → `startReceiving(id)` → `addFrame(id, base64)` → `finishReceiving(id)`
-- Renders JPEG frames via `requestAnimationFrame` at target FPS
-- Audio plays via existing TtsPlayer (Blob URL), video renders on separate `<canvas>`
-
-### Why Two-Phase API (prepare + lipsync)
-
-- Face preprocessing (landmark detection, VAE encoding) runs ONCE per room, not per utterance
-- Saves ~200-500ms per lip-sync call
-- Avatar stays in server memory, reused for all utterances in the room
+- `VideoPlayer.ts` — two rendering modes:
+  - `renderDirect(base64)` — immediate draw for live host face frames (~5fps)
+  - Queue-based playback for lip-sync batches (video_start → addFrame → finishReceiving → render at 25fps)
+- Live face frames show the host's actual camera feed (body movement, expressions)
+- During translation, lip-synced frames override the live feed temporarily
+- Audio plays via existing TtsPlayer (Blob URL), video renders on `<canvas>`
 
 ### Key Build Lesson: mmcv
 
@@ -141,17 +143,17 @@ Connection via query params (no JSON handshake):
 
 **Host → Server:**
 - `[ArrayBuffer]` — PCM audio frames
-- `{ "type": "face:image", "data": "<base64>" }` — face for lip-sync avatar
+- `{ "type": "face:frame", "data": "<base64>" }` — live webcam frames (~5fps while recording)
 - `"host:end"` — close room
 
 **Server → Host:**
-- room:created, room:guest_count, interim, final, translation, tts_end
-- avatar:ready (after face prepared), video_end (lipsync latency)
+- room:created, room:guest_count, interim, final, translation, tts_end, video_end
 
 **Server → Guest:**
 - room:joined, interim, final, translation
+- face:frame (live host face, forwarded from host → guests for real-time video)
 - tts_start, [MP3 binary chunks], tts_end (audio)
-- video_start, video_frame (JSON with base64 JPEG data), video_end (video)
+- video_start, video_frame (lip-synced JPEG), video_end (lip-sync batch)
 - room:closed
 
 ## Key Technical Decisions

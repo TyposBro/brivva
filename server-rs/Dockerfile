@@ -3,9 +3,12 @@ FROM rust:1.85-slim AS builder
 
 WORKDIR /app
 
-# Copy workspace root
+# Copy workspace root and stub missing members
 COPY Cargo.toml Cargo.lock ./
 COPY server-rs/Cargo.toml server-rs/Cargo.toml
+RUN mkdir -p frame-extraction/src && \
+    echo '[package]\nname = "frame-extraction"\nversion = "0.1.0"\nedition = "2021"' > frame-extraction/Cargo.toml && \
+    echo "fn main() {}" > frame-extraction/src/main.rs
 
 # Create dummy src to cache deps
 RUN mkdir -p server-rs/src && echo "fn main() {}" > server-rs/src/main.rs

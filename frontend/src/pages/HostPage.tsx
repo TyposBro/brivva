@@ -71,26 +71,24 @@ export default function HostPage() {
           </div>
         )}
 
-        {/* Host webcam preview (mirrored) */}
-        {isReady && (
-          <div className="webcam-preview">
-            <video
-              ref={videoRef}
-              autoPlay
-              muted
-              playsInline
-              style={{
-                width: "256px",
-                height: "256px",
-                objectFit: "cover",
-                transform: "scaleX(-1)",
-                borderRadius: "12px",
-                border: "2px solid #333",
-              }}
-            />
-            <span className="webcam-label">Your camera (mirrored)</span>
-          </div>
-        )}
+        {/* Host webcam preview (mirrored) — always rendered so ref is available */}
+        <div className="webcam-preview" style={{ display: isReady ? "flex" : "none" }}>
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{
+              width: "256px",
+              height: "256px",
+              objectFit: "cover",
+              transform: "scaleX(-1)",
+              borderRadius: "12px",
+              border: "2px solid #333",
+            }}
+          />
+          <span className="webcam-label">Your camera (mirrored)</span>
+        </div>
 
         {isReady && (
           <div className="guest-count-bar">
