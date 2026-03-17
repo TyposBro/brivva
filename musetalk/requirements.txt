@@ -17,4 +17,4 @@ tqdm
 librosa
 soundfile
 ffmpeg-python
-huggingface_hub
+huggingface_hub<0.24
