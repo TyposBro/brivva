@@ -20,5 +20,10 @@ mkdir -p /app/Wav2Lip/face_detection/detection/sfd
 dl "https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth" \
    "/app/Wav2Lip/face_detection/detection/sfd/s3fd.pth"
 
+echo "=== GFPGAN v1.4 (~348MB) ==="
+mkdir -p /app/gfpgan
+dl "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth" \
+   "/app/gfpgan/GFPGANv1.4.pth"
+
 echo "=== Done ==="
-du -sh "$MODELS_DIR"/*
+du -sh "$MODELS_DIR"/* /app/gfpgan/*

@@ -25,6 +25,8 @@ app = FastAPI()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = None
+face_detector = None
+gfpgan_enhancer = None
 
 
 class LipsyncRequest(BaseModel):
@@ -39,9 +41,9 @@ class LipsyncResponse(BaseModel):
 
 
 def load_model():
-    global model
+    global model, face_detector, gfpgan_enhancer
     from models import Wav2Lip as Wav2LipModel
-    import audio
+    from face_detection import FaceAlignment, LandmarksType
 
     print(f"Loading Wav2Lip+GAN on {device}...")
     start = time.time()
@@ -55,7 +57,27 @@ def load_model():
     model.load_state_dict(new_s)
     model = model.to(device).eval()
 
-    print(f"Model loaded in {time.time() - start:.1f}s")
+    # Cache face detector (avoid re-creating per request)
+    face_detector = FaceAlignment(LandmarksType._2D, flip_input=False, device=device)
+
+    # Load GFPGAN for face enhancement
+    print("Loading GFPGAN face enhancer...")
+    try:
+        from gfpgan import GFPGANer
+        gfpgan_enhancer = GFPGANer(
+            model_path="/app/gfpgan/GFPGANv1.4.pth",
+            upscale=1,
+            arch="clean",
+            channel_multiplier=2,
+            bg_upsampler=None,
+            device=device,
+        )
+        print("GFPGAN loaded")
+    except Exception as e:
+        print(f"GFPGAN failed to load: {e} — falling back to raw Wav2Lip output")
+        gfpgan_enhancer = None
+
+    print(f"Models loaded in {time.time() - start:.1f}s")
 
 
 def decode_base64_image(b64: str) -> np.ndarray:
@@ -67,7 +89,7 @@ def decode_base64_image(b64: str) -> np.ndarray:
     return img
 
 
-def encode_frame_jpeg(frame: np.ndarray, quality: int = 85) -> str:
+def encode_frame_jpeg(frame: np.ndarray, quality: int = 90) -> str:
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
@@ -79,21 +101,18 @@ def get_mel_chunks(wav_path: str, fps: int = 25):
     wav = wav2lip_audio.load_wav(wav_path, 16000)
     mel = wav2lip_audio.melspectrogram(wav)
 
-    # Each mel chunk covers one video frame
-    mel_step_size = 16  # from Wav2Lip hparams
+    mel_step_size = 16
     mel_chunks = []
-    i = 0
-    fps_mel_ratio = 80.0 / fps  # 80 mel frames per second at 16kHz
+    fps_mel_ratio = 80.0 / fps
     num_frames = int(len(wav) / 16000 * fps)
 
     for frame_idx in range(num_frames):
         start_idx = int(frame_idx * fps_mel_ratio)
         end_idx = start_idx + mel_step_size
         if end_idx > mel.shape[1]:
-            # Pad with zeros
             chunk = np.zeros((mel.shape[0], mel_step_size))
             remaining = mel[:, start_idx:]
-            chunk[:, :remaining.shape[1]] = remaining
+            chunk[:, : remaining.shape[1]] = remaining
         else:
             chunk = mel[:, start_idx:end_idx]
         mel_chunks.append(chunk)
@@ -102,13 +121,39 @@ def get_mel_chunks(wav_path: str, fps: int = 25):
 
 
 def detect_face(face_img: np.ndarray):
-    """Detect face bbox using Wav2Lip's face detection."""
-    from face_detection import FaceAlignment, LandmarksType
-    detector = FaceAlignment(LandmarksType._2D, flip_input=False, device=device)
-    predictions = detector.get_detections_for_batch(np.array([face_img]))
+    """Detect face bbox using cached face detector."""
+    predictions = face_detector.get_detections_for_batch(np.array([face_img]))
     if predictions[0] is None:
         return None
-    return predictions[0]  # (x1, y1, x2, y2)
+    return predictions[0]
+
+
+def create_feather_mask(h: int, w: int, border: int = 8) -> np.ndarray:
+    """Create a feathered mask for smooth blending at bbox edges."""
+    mask = np.ones((h, w), dtype=np.float32)
+    for i in range(border):
+        alpha = (i + 1) / border
+        mask[i, :] *= alpha
+        mask[h - 1 - i, :] *= alpha
+        mask[:, i] *= alpha
+        mask[:, w - 1 - i] *= alpha
+    return mask[:, :, np.newaxis]
+
+
+def enhance_face(face_region: np.ndarray) -> np.ndarray:
+    """Enhance face using GFPGAN for sharper, more natural output."""
+    if gfpgan_enhancer is None:
+        return face_region
+    try:
+        _, _, output = gfpgan_enhancer.enhance(
+            face_region,
+            has_aligned=False,
+            only_center_face=True,
+            paste_back=True,
+        )
+        return output
+    except Exception:
+        return face_region
 
 
 @app.post("/lipsync")
@@ -123,8 +168,9 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
         raise HTTPException(status_code=400, detail="No face detected")
 
     y1, y2, x1, x2 = int(bbox[1]), int(bbox[3]), int(bbox[0]), int(bbox[2])
-    # Pad bbox slightly
-    pad = 10
+
+    # Larger padding for better blending context
+    pad = 20
     y1 = max(0, y1 - pad)
     x1 = max(0, x1 - pad)
     y2 = min(face_img.shape[0], y2 + pad)
@@ -141,9 +187,14 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
     wav_path = mp3_path.replace(".mp3", ".wav")
     try:
         import subprocess
+
         subprocess.run(
-            ["ffmpeg", "-y", "-i", mp3_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
-            capture_output=True, check=True,
+            [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-ar", "16000", "-ac", "1", "-f", "wav", wav_path,
+            ],
+            capture_output=True,
+            check=True,
         )
         mel_chunks = get_mel_chunks(wav_path, fps=25)
     finally:
@@ -156,6 +207,10 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
     batch_size = 16
     img_batch, mel_batch = [], []
 
+    # Pre-compute feather mask for blending
+    bbox_h, bbox_w = y2 - y1, x2 - x1
+    feather_mask = create_feather_mask(bbox_h, bbox_w, border=12)
+
     for i, mel_chunk in enumerate(mel_chunks):
         img_batch.append(face_crop.copy())
         mel_batch.append(mel_chunk)
@@ -164,19 +219,15 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
             # Prepare image batch: mask lower half
             img_arr = np.array(img_batch)
             img_masked = img_arr.copy()
-            img_masked[:, 96 // 2:, :, :] = 0  # mask lower half
+            img_masked[:, 96 // 2 :, :, :] = 0
             img_masked = img_masked / 255.0
 
             # Stack masked + original as 6-channel input
             img_input = np.concatenate([img_masked, img_arr / 255.0], axis=3)
-            img_input = torch.FloatTensor(
-                img_input.transpose(0, 3, 1, 2)
-            ).to(device)
+            img_input = torch.FloatTensor(img_input.transpose(0, 3, 1, 2)).to(device)
 
             mel_arr = np.array(mel_batch)
-            mel_input = torch.FloatTensor(
-                mel_arr[:, np.newaxis, :, :]
-            ).to(device)
+            mel_input = torch.FloatTensor(mel_arr[:, np.newaxis, :, :]).to(device)
 
             with torch.no_grad():
                 pred = model(mel_input, img_input)
@@ -184,10 +235,19 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
             pred = (pred.cpu().numpy().transpose(0, 2, 3, 1) * 255).astype(np.uint8)
 
             for p in pred:
-                # Resize prediction back to face bbox size and composite
-                pred_resized = cv2.resize(p, (x2 - x1, y2 - y1))
+                # Resize prediction to bbox size
+                pred_resized = cv2.resize(p, (bbox_w, bbox_h))
+
+                # Enhance face with GFPGAN
+                pred_resized = enhance_face(pred_resized)
+
+                # Feathered blend into original frame
                 result = face_img.copy()
-                result[y1:y2, x1:x2] = pred_resized
+                original_region = result[y1:y2, x1:x2].astype(np.float32)
+                pred_float = pred_resized.astype(np.float32)
+                blended = (pred_float * feather_mask + original_region * (1 - feather_mask))
+                result[y1:y2, x1:x2] = blended.astype(np.uint8)
+
                 frames_b64.append(encode_frame_jpeg(result))
 
             img_batch, mel_batch = [], []
@@ -208,6 +268,7 @@ async def health():
         "status": "healthy",
         "model": "wav2lip_gan",
         "device": device,
+        "gfpgan": gfpgan_enhancer is not None,
     }
 
 
