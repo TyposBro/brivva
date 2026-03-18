@@ -210,6 +210,9 @@ async fn run_pipeline(
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
 
+    // Get cloned voice ID if available
+    let voice_clone_id = rooms.get(room_id).and_then(|r| r.voice_clone_id.clone());
+
     for lang in target_langs {
         if lang == source_lang {
             let transcript = transcript.to_string();
@@ -218,11 +221,12 @@ async fn run_pipeline(
             let rooms = rooms.clone();
             let room_id = room_id.to_string();
             let latest_face = latest_face.map(|s| s.to_string());
+            let voice_clone_id = voice_clone_id.clone();
 
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    latest_face.as_deref(),
+                    latest_face.as_deref(), voice_clone_id.as_deref(),
                 )
                 .await;
             }));
@@ -236,6 +240,7 @@ async fn run_pipeline(
         let rooms = rooms.clone();
         let room_id = room_id.to_string();
         let latest_face = latest_face.map(|s| s.to_string());
+        let voice_clone_id = voice_clone_id.clone();
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -290,6 +295,7 @@ async fn run_pipeline(
                 &rooms,
                 &room_id,
                 latest_face.as_deref(),
+                voice_clone_id.as_deref(),
             )
             .await;
         }));
@@ -310,18 +316,24 @@ async fn do_tts_and_broadcast(
     rooms: &Rooms,
     room_id: &str,
     face_base64: Option<&str>,
+    voice_clone_id: Option<&str>,
 ) {
     let tts_start = Instant::now();
 
-    let voice_id = lang.voice_id();
+    // Use cloned voice if available, otherwise fall back to default per-language voice
+    let voice_id = match voice_clone_id {
+        Some(id) => id.to_string(),
+        None => lang.voice_id().to_string(),
+    };
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
-        voice_id
+        &voice_id
     );
 
+    let is_cloned = voice_clone_id.is_some();
     println!(
-        "[TTS] requesting ElevenLabs voice={} for '{}' ({})",
-        voice_id, text, lang
+        "[TTS] requesting ElevenLabs voice={}{} for '{}' ({})",
+        &voice_id, if is_cloned { " (cloned)" } else { "" }, text, lang
     );
     let tts_resp = client
         .post(&url)
@@ -493,6 +505,105 @@ async fn do_lipsync_and_broadcast(
                 room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
             }
         }
+    }
+}
+
+// ── Voice Cloning ────────────────────────────────────────
+
+/// Convert raw PCM (16kHz, 16-bit, mono) to WAV bytes
+fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
+    let sample_rate: u32 = 16000;
+    let bits_per_sample: u16 = 16;
+    let channels: u16 = 1;
+    let byte_rate = sample_rate * (bits_per_sample as u32 / 8) * channels as u32;
+    let block_align = channels * (bits_per_sample / 8);
+    let data_size = pcm.len() as u32;
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
+}
+
+/// Clone the host's voice using ElevenLabs Instant Voice Cloning
+pub async fn clone_voice(pcm: Vec<u8>, rooms: &Rooms, room_id: &str) {
+    let wav = pcm_to_wav(&pcm);
+    let room_id_short = &room_id[..6.min(room_id.len())];
+
+    println!("[VOICE_CLONE] starting clone for room {} ({} bytes PCM)", room_id_short, pcm.len());
+
+    let client = reqwest::Client::new();
+
+    // ElevenLabs Add Voice endpoint (Instant Voice Clone)
+    let form = reqwest::multipart::Form::new()
+        .text("name", format!("brivva-host-{}", room_id_short))
+        .part(
+            "files",
+            reqwest::multipart::Part::bytes(wav)
+                .file_name("host_voice.wav")
+                .mime_str("audio/wav")
+                .unwrap(),
+        );
+
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/voices/add")
+        .header("xi-api-key", &*ELEVENLABS_API_KEY)
+        .multipart(form)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            #[derive(Deserialize)]
+            struct CloneResp {
+                voice_id: String,
+            }
+            match r.json::<CloneResp>().await {
+                Ok(parsed) => {
+                    println!("[VOICE_CLONE] success! voice_id={}", parsed.voice_id);
+                    if let Some(mut room) = rooms.get_mut(room_id) {
+                        room.voice_clone_id = Some(parsed.voice_id);
+                    }
+                }
+                Err(e) => eprintln!("[VOICE_CLONE] parse error: {}", e),
+            }
+        }
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            eprintln!("[VOICE_CLONE] error {}: {}", status, body);
+        }
+        Err(e) => eprintln!("[VOICE_CLONE] request error: {}", e),
+    }
+}
+
+/// Delete a cloned voice from ElevenLabs on room close
+pub async fn delete_cloned_voice(voice_id: &str) {
+    let client = reqwest::Client::new();
+    let url = format!("https://api.elevenlabs.io/v1/voices/{}", voice_id);
+    match client
+        .delete(&url)
+        .header("xi-api-key", &*ELEVENLABS_API_KEY)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            println!("[VOICE_CLONE] deleted cloned voice {}", voice_id);
+        }
+        Ok(r) => eprintln!("[VOICE_CLONE] delete error {}: {:?}", r.status(), r.text().await),
+        Err(e) => eprintln!("[VOICE_CLONE] delete request error: {}", e),
     }
 }
 

@@ -76,6 +76,12 @@ pub struct Room {
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
     pub guests: DashMap<String, Guest>,
     pub latest_face: Option<String>,
+    /// Cloned voice ID from ElevenLabs (None until clone completes)
+    pub voice_clone_id: Option<String>,
+    /// Buffer for first N seconds of host PCM (None after clone is triggered)
+    pub pcm_buffer: Option<Vec<u8>>,
+    /// Total PCM bytes buffered so far
+    pub pcm_bytes: usize,
 }
 
 impl Room {
@@ -86,6 +92,9 @@ impl Room {
             host_tx: None,
             guests: DashMap::new(),
             latest_face: None,
+            voice_clone_id: None,
+            pcm_buffer: Some(Vec::new()),
+            pcm_bytes: 0,
         }
     }
 

@@ -105,12 +105,48 @@ async fn handle_host(
         pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, audio_rx).await;
     });
 
+    // PCM buffering: 16kHz × 16-bit × 1ch = 32,000 bytes/sec. 5 sec = 160,000 bytes.
+    const CLONE_PCM_BYTES: usize = 160_000;
+
     // Read loop: host sends binary audio or text commands
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(data) => {
                 // Forward audio to the STT pipeline
                 let _ = audio_tx.send(data.to_vec());
+
+                // Buffer PCM for voice cloning (first ~5 seconds)
+                let should_clone = {
+                    if let Some(mut room) = rooms.get_mut(&room_id) {
+                        if let Some(ref mut buf) = room.pcm_buffer {
+                            buf.extend_from_slice(&data);
+                            room.pcm_bytes += data.len();
+                            room.pcm_bytes >= CLONE_PCM_BYTES
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if should_clone {
+                    // Take the buffer and trigger clone
+                    let pcm_data = {
+                        if let Some(mut room) = rooms.get_mut(&room_id) {
+                            room.pcm_buffer.take()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(pcm) = pcm_data {
+                        let rooms_clone = rooms.clone();
+                        let rid = room_id.clone();
+                        tokio::spawn(async move {
+                            pipeline::clone_voice(pcm, &rooms_clone, &rid).await;
+                        });
+                    }
+                }
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
@@ -135,6 +171,14 @@ async fn handle_host(
     // Host disconnected — clean up
     if let Some((_, room)) = rooms.remove(&room_id) {
         room.send_to_all_guests(to_ws(&ServerMsg::RoomClosed));
+
+        // Delete cloned voice from ElevenLabs
+        if let Some(voice_id) = &room.voice_clone_id {
+            let voice_id = voice_id.clone();
+            tokio::spawn(async move {
+                pipeline::delete_cloned_voice(&voice_id).await;
+            });
+        }
     }
 
     send_task.abort();
