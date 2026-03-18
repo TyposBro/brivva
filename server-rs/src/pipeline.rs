@@ -37,6 +37,37 @@ static LIPSYNC_URL: LazyLock<String> = LazyLock::new(|| {
 
 // ── STT Events (from stt-wrapper) ─────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleParams {
+    #[serde(default = "default_stability")]
+    pub stability: f64,
+    #[serde(default = "default_similarity")]
+    pub similarity_boost: f64,
+    #[serde(default)]
+    pub style: f64,
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    #[serde(default = "default_true")]
+    pub use_speaker_boost: bool,
+}
+
+fn default_stability() -> f64 { 0.5 }
+fn default_similarity() -> f64 { 0.75 }
+fn default_speed() -> f64 { 1.0 }
+fn default_true() -> bool { true }
+
+impl Default for StyleParams {
+    fn default() -> Self {
+        Self {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+            use_speaker_boost: true,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SttEvent {
     #[serde(rename = "type")]
@@ -45,12 +76,14 @@ struct SttEvent {
     text: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    style_params: Option<StyleParams>,
 }
 
 // ── STT Connection ────────────────────────────────────────
 
 /// Emit a final transcript: broadcast to room and trigger translation pipeline
-fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_lang: &Lang) {
+fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_lang: &Lang, style_params: Option<StyleParams>) {
     if let Some(room) = rooms.get(room_id) {
         let final_msg = to_ws(&ServerMsg::Final {
             transcript: transcript.to_string(),
@@ -61,14 +94,15 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
 
         let active = room.active_langs();
         let latest_face = room.latest_face.clone();
-        println!("[PIPELINE] active langs: {:?}, has_face: {}", active, latest_face.is_some());
+        let sp = style_params.unwrap_or_default();
+        println!("[PIPELINE] active langs: {:?}, has_face: {}, style: {:.2}", active, latest_face.is_some(), sp.style);
         if !active.is_empty() {
             let rooms_clone = rooms.clone();
             let rid = room_id.to_string();
             let src = source_lang.clone();
             let text = transcript.to_string();
             tokio::spawn(async move {
-                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, latest_face.as_deref()).await;
+                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, latest_face.as_deref(), &sp).await;
             });
         }
     }
@@ -150,8 +184,9 @@ pub async fn start_stt(
                     utterance_counter += 1;
                     let uid = utterance_counter;
                     println!("[FINAL #{}] {}", uid, event.text);
+                    let style_params = event.style_params.clone();
                     drop(room);
-                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang);
+                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params);
                 }
                 "interim" => {
                     println!("[INTERIM] {}", event.text);
@@ -191,12 +226,6 @@ struct NllbResponse {
     translate_ms: i64,
 }
 
-#[derive(Serialize)]
-struct ElevenLabsRequest {
-    text: String,
-    model_id: String,
-}
-
 /// Run the full translation + TTS + lip-sync pipeline for one utterance
 async fn run_pipeline(
     transcript: &str,
@@ -206,6 +235,7 @@ async fn run_pipeline(
     rooms: &Rooms,
     room_id: &str,
     latest_face: Option<&str>,
+    style_params: &StyleParams,
 ) {
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -222,11 +252,12 @@ async fn run_pipeline(
             let room_id = room_id.to_string();
             let latest_face = latest_face.map(|s| s.to_string());
             let voice_clone_id = voice_clone_id.clone();
+            let sp = style_params.clone();
 
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    latest_face.as_deref(), voice_clone_id.as_deref(),
+                    latest_face.as_deref(), voice_clone_id.as_deref(), &sp,
                 )
                 .await;
             }));
@@ -241,6 +272,7 @@ async fn run_pipeline(
         let room_id = room_id.to_string();
         let latest_face = latest_face.map(|s| s.to_string());
         let voice_clone_id = voice_clone_id.clone();
+        let sp = style_params.clone();
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -296,6 +328,7 @@ async fn run_pipeline(
                 &room_id,
                 latest_face.as_deref(),
                 voice_clone_id.as_deref(),
+                &sp,
             )
             .await;
         }));
@@ -317,6 +350,7 @@ async fn do_tts_and_broadcast(
     room_id: &str,
     face_base64: Option<&str>,
     voice_clone_id: Option<&str>,
+    style_params: &StyleParams,
 ) {
     let tts_start = Instant::now();
 
@@ -332,17 +366,27 @@ async fn do_tts_and_broadcast(
 
     let is_cloned = voice_clone_id.is_some();
     println!(
-        "[TTS] requesting ElevenLabs voice={}{} for '{}' ({})",
-        &voice_id, if is_cloned { " (cloned)" } else { "" }, text, lang
+        "[TTS] requesting ElevenLabs voice={}{} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}]",
+        &voice_id, if is_cloned { " (cloned)" } else { "" }, text, lang,
+        style_params.style, style_params.stability, style_params.speed
     );
+
+    let tts_body = serde_json::json!({
+        "text": text,
+        "model_id": "eleven_flash_v2_5",
+        "voice_settings": {
+            "stability": style_params.stability,
+            "similarity_boost": style_params.similarity_boost,
+            "style": style_params.style,
+            "use_speaker_boost": style_params.use_speaker_boost
+        }
+    });
+
     let tts_resp = client
         .post(&url)
         .header("xi-api-key", &*ELEVENLABS_API_KEY)
         .header("Content-Type", "application/json")
-        .json(&ElevenLabsRequest {
-            text: text.to_string(),
-            model_id: "eleven_flash_v2_5".to_string(),
-        })
+        .json(&tts_body)
         .send()
         .await;
 
