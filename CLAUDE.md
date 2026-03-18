@@ -63,17 +63,26 @@ brivva 'cd ~/brivva && docker compose -f docker-compose.yml -f docker-compose.gp
 - **Decision for demo:** Show audio-only translation (STT → NLLB → TTS) which works well. Mention lip-sync as scoped R&D — the pipeline works, the quality gap is a known industry problem.
 
 - Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated audio + lip-synced video
-- STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
-- Translation: NLLB-200-distilled-600M (self-hosted, CPU — GPU reserved for lip-sync)
-- TTS: ElevenLabs eleven_flash_v2_5 (API, 548-1440ms, 32 languages)
-- Lip-sync: **Wav2Lip** (default, batched, faster) or **MuseTalk v1.5** (higher quality, slower)
+- STT: CF Nova-3 via stt-wrapper (streaming interims + finals + prosody extraction)
+- Translation: NLLB-200-distilled-600M (self-hosted, CUDA on A10G)
+- TTS: ElevenLabs eleven_flash_v2_5 (API) with **cloned host voice** + **emotion-conditioned style params**
+- Lip-sync: **Wav2Lip** (default, batched, GFPGAN enhanced) or **MuseTalk v1.5** (higher quality, slower)
 - Dockerized: 5 containers (server-rs, stt-wrapper, nllb, wav2lip, musetalk)
 
-### What's Done (v4)
+### What's Done (v5 — Voice Cloning + Emotion-Conditioned TTS)
+
+- [x] **Voice cloning:** First 5s of host PCM → ElevenLabs /v1/voices/add → cloned voice_id stored in Room
+- [x] **Prosody extraction:** stt-wrapper extracts pitch, energy, speaking rate, pause density from buffered PCM per utterance
+- [x] **Style mapping:** Rule-based prosody → ElevenLabs voice_settings (stability, similarity_boost, style, speed)
+- [x] **Emotion-conditioned TTS:** High energy+fast speech → expressive TTS; calm speech → stable TTS
+- [x] **Voice cleanup:** Cloned voice deleted from ElevenLabs on room close
+- [x] **Fallback:** If clone not ready, uses default per-language voice
+
+### What's Done (v4 — Lip-sync Pipeline)
 
 - [x] Unified lip-sync API: both Wav2Lip and MuseTalk expose identical `POST /lipsync` endpoint
 - [x] Feature flag: `LIPSYNC_HOST=wav2lip|musetalk` env var switches backend (default: wav2lip)
-- [x] Wav2Lip container: CUDA 11.8 + PyTorch 2.0.1 + wav2lip_gan.pth, batched inference (16 frames/batch)
+- [x] Wav2Lip container: CUDA 11.8 + PyTorch 2.0.1 + wav2lip_gan.pth + GFPGAN v1.4
 - [x] MuseTalk container: CUDA 11.8 + PyTorch 2.0.1 + mmcv + full MMLab stack
 - [x] Full pipeline: STT → NLLB → TTS (buffered) → Lip-sync → audio+video sent together (synced)
 - [x] Host streams webcam at 30fps, server stores latest_face (not forwarded to guests)
