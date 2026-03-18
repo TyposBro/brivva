@@ -121,6 +121,9 @@ async fn handle_host(
                         if let Some(ref mut buf) = room.pcm_buffer {
                             buf.extend_from_slice(&data);
                             room.pcm_bytes += data.len();
+                            if room.pcm_bytes % 32000 < data.len() {
+                                println!("[VOICE_CLONE] buffering PCM: {} / {} bytes", room.pcm_bytes, CLONE_PCM_BYTES);
+                            }
                             room.pcm_bytes >= CLONE_PCM_BYTES
                         } else {
                             false
@@ -131,7 +134,7 @@ async fn handle_host(
                 };
 
                 if should_clone {
-                    // Take the buffer and trigger clone
+                    println!("[VOICE_CLONE] threshold reached, triggering clone for room {}", room_id);
                     let pcm_data = {
                         if let Some(mut room) = rooms.get_mut(&room_id) {
                             room.pcm_buffer.take()
