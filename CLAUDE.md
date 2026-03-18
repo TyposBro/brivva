@@ -13,6 +13,32 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 - **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
 - **Tunnel:** brivva-server.milliytechnology.org → localhost:3000
 - **Repo:** https://github.com/TyposBro/brivva (private)
+
+### AWS Deployment (In Progress)
+
+- **Instance:** t3.small (i-08fbb51994a0c4217) — temporary CPU-only for server-rs + stt-wrapper
+- **IP:** 3.38.212.103 (ap-northeast-2)
+- **AMI:** Ubuntu 24.04 (ami-084a56dceed3eb9bb), 50GB gp3
+- **SSH:** `ssh -i ~/.ssh/brivva-key.pem ubuntu@3.38.212.103`
+- **Running:** server-rs (:3000) + stt-wrapper (:8766) — no NLLB (needs more RAM)
+- **Pending:** g5.xlarge GPU quota increase (request 7f47991bf5324e67b4fcd16bd312ba60fSNwOIEC) for full deployment
+- **Security Group:** sg-0431248a86ea5644c (ports 22, 3000)
+- **Key Pair:** brivva-key (PEM at ~/.ssh/brivva-key.pem)
+- **IAM Users:** typosbro (personal), azizbek (work) — both AdministratorAccess
+- **AWS Account:** 132593557399
+- **Cost:** t3.small ~$0.023/hr — STOP when not in use
+
+#### AWS CLI Profiles
+```bash
+aws <command> --profile azizbek   # work
+aws <command> --profile typosbro  # personal
+```
+
+#### Manage Instance
+```bash
+aws ec2 start-instances --instance-ids i-08fbb51994a0c4217 --profile azizbek
+aws ec2 stop-instances --instance-ids i-08fbb51994a0c4217 --profile azizbek
+```
 - Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated audio + lip-synced video
 - STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
 - Translation: NLLB-200-distilled-600M (self-hosted, CPU — GPU reserved for lip-sync)
