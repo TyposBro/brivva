@@ -30,7 +30,7 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, rooms: Rooms, query: RoomQuery) {
-    eeprintln!("[WS] handle_socket called, role={}", query.role);
+    eprintln!("[WS] handle_socket called, role={}", query.role);
     let (sender, receiver) = socket.split();
 
     match query.role.as_str() {
