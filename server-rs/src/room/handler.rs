@@ -30,6 +30,7 @@ pub async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, rooms: Rooms, query: RoomQuery) {
+    eeprintln!("[WS] handle_socket called, role={}", query.role);
     let (sender, receiver) = socket.split();
 
     match query.role.as_str() {
@@ -122,7 +123,7 @@ async fn handle_host(
                             buf.extend_from_slice(&data);
                             room.pcm_bytes += data.len();
                             if room.pcm_bytes % 32000 < data.len() {
-                                println!("[VOICE_CLONE] buffering PCM: {} / {} bytes", room.pcm_bytes, CLONE_PCM_BYTES);
+                                eprintln!("[VOICE_CLONE] buffering PCM: {} / {} bytes", room.pcm_bytes, CLONE_PCM_BYTES);
                             }
                             room.pcm_bytes >= CLONE_PCM_BYTES
                         } else {
@@ -134,7 +135,7 @@ async fn handle_host(
                 };
 
                 if should_clone {
-                    println!("[VOICE_CLONE] threshold reached, triggering clone for room {}", room_id);
+                    eprintln!("[VOICE_CLONE] threshold reached, triggering clone for room {}", room_id);
                     let pcm_data = {
                         if let Some(mut room) = rooms.get_mut(&room_id) {
                             room.pcm_buffer.take()
@@ -185,7 +186,7 @@ async fn handle_host(
     }
 
     send_task.abort();
-    println!("Room {} closed", room_id);
+    eprintln!("Room {} closed", room_id);
 }
 
 // ── Guest Flow ────────────────────────────────────────────
@@ -232,7 +233,7 @@ async fn handle_guest(
         }))
         .await;
 
-    println!("Guest {} joined room {} ({})", guest_id, room_id, lang);
+    eprintln!("Guest {} joined room {} ({})", guest_id, room_id, lang);
 
     // Forward channel → guest WebSocket
     let send_task = tokio::spawn(async move {
@@ -258,5 +259,5 @@ async fn handle_guest(
     }
 
     send_task.abort();
-    println!("Guest {} left room {}", guest_id, room_id);
+    eprintln!("Guest {} left room {}", guest_id, room_id);
 }
