@@ -14,19 +14,21 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 - **Tunnel:** brivva-server.milliytechnology.org → localhost:3000
 - **Repo:** https://github.com/TyposBro/brivva (private)
 
-### AWS Deployment (In Progress)
+### AWS Deployment (Live)
 
-- **Instance:** t3.small (i-08fbb51994a0c4217) — temporary CPU-only for server-rs + stt-wrapper
-- **IP:** 3.38.212.103 (ap-northeast-2)
-- **AMI:** Ubuntu 24.04 (ami-084a56dceed3eb9bb), 50GB gp3
-- **SSH:** `ssh -i ~/.ssh/brivva-key.pem ubuntu@3.38.212.103`
-- **Running:** server-rs (:3000) + stt-wrapper (:8766) — no NLLB (needs more RAM)
-- **Pending:** g5.xlarge GPU quota increase (request 7f47991bf5324e67b4fcd16bd312ba60fSNwOIEC) for full deployment
+- **GPU Instance:** g5.xlarge (i-0c0b95e319c20d355) — A10G 24GB, 4 vCPU, 16GB RAM
+- **IP:** 15.165.39.99 (ap-northeast-2)
+- **AMI:** Ubuntu 24.04 (ami-084a56dceed3eb9bb), 100GB gp3
+- **SSH:** `brivva` (alias) or `ssh -i ~/.ssh/brivva-key.pem ubuntu@15.165.39.99`
+- **Tunnel:** cloudflared `brivva-aws` (29f844ea-0954-4c32-8b21-30e1cf2ab580) → localhost:3000
+- **URL:** https://brivva-server.milliytechnology.org → g5.xlarge via cloudflared
+- **Running:** server-rs + stt-wrapper + nllb (CUDA) + wav2lip (CUDA + GFPGAN)
+- **CPU Instance:** t3.small (i-08fbb51994a0c4217) — STOPPED, was temporary
 - **Security Group:** sg-0431248a86ea5644c (ports 22, 3000)
 - **Key Pair:** brivva-key (PEM at ~/.ssh/brivva-key.pem)
 - **IAM Users:** typosbro (personal), azizbek (work) — both AdministratorAccess
 - **AWS Account:** 132593557399
-- **Cost:** t3.small ~$0.023/hr — STOP when not in use
+- **Cost:** g5.xlarge ~$1.006/hr — STOP when not in use
 
 #### AWS CLI Profiles
 ```bash
@@ -34,11 +36,25 @@ aws <command> --profile azizbek   # work
 aws <command> --profile typosbro  # personal
 ```
 
-#### Manage Instance
+#### Manage GPU Instance
 ```bash
-aws ec2 start-instances --instance-ids i-08fbb51994a0c4217 --profile azizbek
-aws ec2 stop-instances --instance-ids i-08fbb51994a0c4217 --profile azizbek
+aws ec2 start-instances --instance-ids i-0c0b95e319c20d355 --profile azizbek
+aws ec2 stop-instances --instance-ids i-0c0b95e319c20d355 --profile azizbek
 ```
+
+#### SSH & Logs
+```bash
+brivva                                # SSH into instance
+brivva 'docker ps'                    # Check containers
+brivva 'cd ~/brivva && docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile wav2lip logs -f --tail 50'
+```
+
+#### Wav2Lip Enhancements (v5)
+- **GFPGAN v1.4** face restoration after Wav2Lip inference (96x96 → sharp upscale)
+- **Feathered blending** instead of hard rectangle paste (smooth edges)
+- **Cached face detector** (was re-creating per request)
+- **Frame interpolation** 25fps → 60fps (configurable via LIPSYNC_FPS env var)
+- JPEG quality 90 (was 85)
 - Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated audio + lip-synced video
 - STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
 - Translation: NLLB-200-distilled-600M (self-hosted, CPU — GPU reserved for lip-sync)

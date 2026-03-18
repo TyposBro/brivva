@@ -140,6 +140,10 @@ def create_feather_mask(h: int, w: int, border: int = 8) -> np.ndarray:
     return mask[:, :, np.newaxis]
 
 
+TARGET_FPS = int(os.environ.get("LIPSYNC_FPS", "60"))
+WAV2LIP_FPS = 25
+
+
 def enhance_face(face_region: np.ndarray) -> np.ndarray:
     """Enhance face using GFPGAN for sharper, more natural output."""
     if gfpgan_enhancer is None:
@@ -154,6 +158,34 @@ def enhance_face(face_region: np.ndarray) -> np.ndarray:
         return output
     except Exception:
         return face_region
+
+
+def interpolate_frames(frames: list[np.ndarray], target_fps: int, source_fps: int = 25) -> list[np.ndarray]:
+    """Interpolate frames from source_fps to target_fps using weighted blending."""
+    if target_fps <= source_fps or len(frames) < 2:
+        return frames
+
+    ratio = target_fps / source_fps
+    total_out = int(len(frames) * ratio)
+    out = []
+
+    for i in range(total_out):
+        src_pos = i / ratio
+        idx = int(src_pos)
+        frac = src_pos - idx
+
+        if idx >= len(frames) - 1:
+            out.append(frames[-1])
+        elif frac < 0.001:
+            out.append(frames[idx])
+        else:
+            # Weighted blend between consecutive frames
+            a = frames[idx].astype(np.float32)
+            b = frames[idx + 1].astype(np.float32)
+            blended = cv2.addWeighted(frames[idx], 1.0 - frac, frames[idx + 1], frac, 0)
+            out.append(blended)
+
+    return out
 
 
 @app.post("/lipsync")
@@ -196,14 +228,14 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
             capture_output=True,
             check=True,
         )
-        mel_chunks = get_mel_chunks(wav_path, fps=25)
+        mel_chunks = get_mel_chunks(wav_path, fps=WAV2LIP_FPS)
     finally:
         for p in [mp3_path, wav_path]:
             if os.path.exists(p):
                 os.unlink(p)
 
-    # Generate lip-synced frames
-    frames_b64 = []
+    # Generate lip-synced frames at 25fps
+    raw_frames = []
     batch_size = 16
     img_batch, mel_batch = [], []
 
@@ -248,16 +280,24 @@ async def lipsync(req: LipsyncRequest) -> LipsyncResponse:
                 blended = (pred_float * feather_mask + original_region * (1 - feather_mask))
                 result[y1:y2, x1:x2] = blended.astype(np.uint8)
 
-                frames_b64.append(encode_frame_jpeg(result))
+                raw_frames.append(result)
 
             img_batch, mel_batch = [], []
 
+    # Interpolate 25fps → target fps
+    if TARGET_FPS > WAV2LIP_FPS:
+        out_frames = interpolate_frames(raw_frames, TARGET_FPS, WAV2LIP_FPS)
+    else:
+        out_frames = raw_frames
+
+    frames_b64 = [encode_frame_jpeg(f) for f in out_frames]
+
     elapsed_ms = int((time.time() - start) * 1000)
-    print(f"[WAV2LIP] {len(frames_b64)} frames ({elapsed_ms}ms)")
+    print(f"[WAV2LIP] {len(raw_frames)}@{WAV2LIP_FPS}fps → {len(frames_b64)}@{TARGET_FPS}fps ({elapsed_ms}ms)")
 
     return LipsyncResponse(
         frames_base64=frames_b64,
-        fps=25,
+        fps=TARGET_FPS,
         lipsync_ms=elapsed_ms,
     )
 
