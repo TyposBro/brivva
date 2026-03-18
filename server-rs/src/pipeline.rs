@@ -30,8 +30,8 @@ static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
 static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
 });
-static MUSETALK_URL: LazyLock<String> = LazyLock::new(|| {
-    let host = std::env::var("MUSETALK_HOST").unwrap_or_else(|_| "localhost".to_string());
+static LIPSYNC_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = std::env::var("LIPSYNC_HOST").unwrap_or_else(|_| "localhost".to_string());
     format!("http://{}:8100", host)
 });
 
@@ -417,7 +417,7 @@ async fn do_lipsync_and_broadcast(
     use base64::Engine;
     let audio_base64 = base64::engine::general_purpose::STANDARD.encode(audio_mp3);
 
-    let url = format!("{}/lipsync", *MUSETALK_URL);
+    let url = format!("{}/lipsync", *LIPSYNC_URL);
     println!("[LIPSYNC] requesting lip-sync for utterance {}", utterance_id);
 
     let lipsync_start = Instant::now();
