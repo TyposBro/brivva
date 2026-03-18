@@ -15,7 +15,7 @@ I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongd
 - **Repo:** https://github.com/TyposBro/brivva (private)
 - Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated audio + lip-synced video
 - STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
-- Translation: NLLB-200-distilled-600M (self-hosted, 82-164ms GPU)
+- Translation: NLLB-200-distilled-600M (self-hosted, CPU — GPU reserved for lip-sync)
 - TTS: ElevenLabs eleven_flash_v2_5 (API, 548-1440ms, 32 languages)
 - Lip-sync: **Wav2Lip** (default, batched, faster) or **MuseTalk v1.5** (higher quality, slower)
 - Dockerized: 5 containers (server-rs, stt-wrapper, nllb, wav2lip, musetalk)
@@ -69,7 +69,7 @@ Guests see: lip-synced translated video + audio (synced delivery)
 | ----------- | ---- | -------------------------------- | ------------------ | ---- | ---- |
 | server-rs   | 3000 | Rust/axum, DashMap, mpsc         | orchestration      | No   | —    |
 | stt-wrapper | 8766 | Python asyncio, CF Nova-3 API    | streaming          | No   | —    |
-| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | 82-164ms           | Yes  | 12.4 |
+| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | ~1.5-2.4s CPU      | No   | —    |
 | ElevenLabs  | API  | eleven_flash_v2_5                | 548-1440ms         | No   | —    |
 | Wav2Lip     | 8100 | Wav2Lip+GAN, FastAPI             | batched, TBD       | Yes  | 11.8 |
 | MuseTalk    | 8101 | MuseTalk v1.5, FastAPI           | ~188ms/frame       | Yes  | 11.8 |
@@ -236,13 +236,15 @@ Connection via query params:
 - **MuseTalk VAE** — get_latents_for_unet expects BGR numpy, not tensor. Fix: pass raw crop
 - **s3fd corrupted download** — Container restart corrupts partial download. Fix: pre-download at build time
 - **Webcam ref race** — Video element renders conditionally but stream set before mount. Fix: callback ref + always-rendered hidden video
+- **MuseTalk CUDA OOM** — NLLB + MuseTalk both on GPU exhausted 7.62 GiB VRAM. Fix: moved NLLB to CPU (removed from docker-compose.gpu.yml), freeing full GPU for lip-sync
+- **MuseTalk brown blob / stale face** — Two bugs: (1) `get_latents_for_unet` already creates [masked, ref] 8-channel latent, but code re-masked spatial lower half → corrupted UNet input. Fix: removed redundant masking. (2) Raw rectangle paste instead of face-parsing blend. Fix: use `get_image()` from musetalk.utils.blending with FaceParsing mask for seamless compositing
 
 ## Measured Latency
 
 | Phase                              | Measured        | Notes                              |
 | ---------------------------------- | --------------- | ---------------------------------- |
 | STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking     |
-| Translation (NLLB CPU)             | 1537-2434ms     | Cold ~2.4s, warm ~400ms            |
+| Translation (NLLB CPU)             | 1537-2434ms     | CPU only — GPU reserved for lip-sync |
 | TTS (ElevenLabs, buffered)         | 711ms           | Buffered, not streamed to guests   |
 | Lip-sync Wav2Lip                   | TBD             | Batched (16/batch), expected fast  |
 | Lip-sync MuseTalk                  | 17.3s (92 fr)   | ~188ms/frame on RTX 4060           |
@@ -276,7 +278,7 @@ Connection via query params:
 # docker-compose.yml — 5 containers
 server-rs: Rust axum, port 3000, LIPSYNC_HOST=${LIPSYNC_HOST:-wav2lip}
 stt-wrapper: Python asyncio, port 8766
-nllb: FastAPI + nllb-200-distilled-600M, port 8000, GPU
+nllb: FastAPI + nllb-200-distilled-600M, port 8000, CPU (GPU reserved for lip-sync)
 wav2lip: FastAPI + wav2lip_gan, port 8100, GPU (default lip-sync)
 musetalk: FastAPI + MuseTalk v1.5, port 8101, GPU (profile: musetalk, opt-in)
 

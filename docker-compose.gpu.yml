@@ -1,10 +1,9 @@
 # GPU override — use with: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# NOTE: NLLB runs on CPU to leave full GPU VRAM for lip-sync (Wav2Lip or MuseTalk).
+# NLLB-600M on CPU is ~1.5-2.4s cold / ~400ms warm — acceptable since lip-sync is the bottleneck.
 services:
-  nllb:
-    build:
-      context: ./nllb
-      dockerfile: Dockerfile.gpu
+  musetalk:
     runtime: nvidia
 
-  musetalk:
+  wav2lip:
     runtime: nvidia

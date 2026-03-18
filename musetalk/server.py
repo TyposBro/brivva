@@ -237,30 +237,26 @@ def generate_lipsync_frames(face_data: dict, wav_path: str) -> list[np.ndarray]:
     # Generate frames — each uses the same face latent (body position from current frame)
     output_frames = []
     num_frames = whisper_chunks.shape[0]
+    fp = models["fp"]
 
     for i in range(num_frames):
         # Audio embedding for this frame
         audio_feat = whisper_chunks[i].unsqueeze(0)
         audio_feat = pe(audio_feat)
 
-        # Mask lower half of face latent (mouth region)
-        masked_latent = face_latent.clone()
-        masked_latent[:, :, masked_latent.shape[2] // 2:, :] = 0
-
-        # UNet forward pass — audio drives the lip movement
+        # UNet forward pass — face_latent already has [masked, ref] from get_latents_for_unet
         pred_latent = unet.model(
-            masked_latent, timesteps, encoder_hidden_states=audio_feat
+            face_latent.to(dtype=unet.model.dtype), timesteps, encoder_hidden_states=audio_feat
         ).sample
 
-        # Decode latent to image
+        # Decode latent to image (returns uint8 BGR numpy)
         pred = vae.decode_latents(pred_latent)
         pred = pred[0]  # H x W x C numpy
 
-        # Blend predicted face back onto original image
+        # Blend predicted face back using face parsing mask (seamless edges)
         x1, y1, x2, y2 = bbox
-        pred_resized = cv2.resize(pred, (x2 - x1, y2 - y1))
-        result = face_img.copy()
-        result[y1:y2, x1:x2] = pred_resized
+        pred_resized = cv2.resize(pred.astype(np.uint8), (x2 - x1, y2 - y1))
+        result = get_image(face_img.copy(), pred_resized, [x1, y1, x2, y2], fp=fp)
 
         output_frames.append(result)
 
