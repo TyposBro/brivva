@@ -55,6 +55,13 @@ brivva 'cd ~/brivva && docker compose -f docker-compose.yml -f docker-compose.gp
 - **Cached face detector** (was re-creating per request)
 - **Frame interpolation** 25fps → 60fps (configurable via LIPSYNC_FPS env var)
 - JPEG quality 90 (was 85)
+
+#### Lip-Sync Limitation (Blocker for Live Commerce)
+- **Problem:** Wav2Lip (and MuseTalk) only modify the mouth region on a **single static frame**. The host's body, gestures, head movement, and background are frozen during the 2-5s processing window. This looks uncanny and is unusable for live commerce where hosts move naturally.
+- **Root cause:** Pipeline grabs one `latest_face` snapshot, sends it to lip-sync. All generated frames share the same frozen body. This is a fundamental limitation of image-driven lip-sync (single reference frame → N output frames).
+- **What would fix it:** Video-driven lip-sync that takes a sequence of host frames and only modifies the mouth in each, preserving natural movement. No open-source solution does this well in real-time yet.
+- **Decision for demo:** Show audio-only translation (STT → NLLB → TTS) which works well. Mention lip-sync as scoped R&D — the pipeline works, the quality gap is a known industry problem.
+
 - Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated audio + lip-synced video
 - STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
 - Translation: NLLB-200-distilled-600M (self-hosted, CPU — GPU reserved for lip-sync)
