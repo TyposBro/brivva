@@ -510,6 +510,7 @@ body {
 .seg-stt       { background: #38bdf8; }
 .seg-translate { background: #8b5cf6; }
 .seg-tts       { background: #f59e0b; }
+.seg-lipsync   { background: #f43f5e; }
 .seg-overhead  { background: #555; }
 .seg-audio     { background: var(--success); }
 

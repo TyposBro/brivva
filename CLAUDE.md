@@ -71,10 +71,11 @@ brivva 'cd ~/brivva && docker compose -f docker-compose.yml -f docker-compose.gp
 
 ### What's Done (v5 — Voice Cloning + Emotion-Conditioned TTS)
 
-- [x] **Voice cloning:** First 5s of host PCM → ElevenLabs /v1/voices/add → cloned voice_id stored in Room
-- [x] **Prosody extraction:** stt-wrapper extracts pitch, energy, speaking rate, pause density from buffered PCM per utterance
-- [x] **Style mapping:** Rule-based prosody → ElevenLabs voice_settings (stability, similarity_boost, style, speed)
-- [x] **Emotion-conditioned TTS:** High energy+fast speech → expressive TTS; calm speech → stable TTS
+- [x] **Voice cloning (code):** First 5s of host PCM → ElevenLabs /v1/voices/add → cloned voice_id stored in Room
+- [ ] **Voice cloning (NOT WORKING):** ElevenLabs /v1/voices/add returns error — likely API key tier limitation or PCM-to-WAV format issue. Falls back to default per-language voices.
+- [x] **Prosody extraction (code):** stt-wrapper extracts pitch, energy, speaking rate, pause density from buffered PCM per utterance
+- [ ] **Emotion-conditioned TTS (NOT WORKING):** style_params from stt-wrapper not reaching ElevenLabs — TTS always uses default voice_settings. Pipeline sends StyleParams but they have no observable effect on output.
+- [x] **Style mapping (code):** Rule-based prosody → ElevenLabs voice_settings (stability, similarity_boost, style, speed)
 - [x] **Voice cleanup:** Cloned voice deleted from ElevenLabs on room close
 - [x] **Fallback:** If clone not ready, uses default per-language voice
 

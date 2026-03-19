@@ -5,8 +5,10 @@ import { LANGS } from "../../types";
 
 type Stopwatch = {
   startTimer: (uid: string, text: string, langs: string[]) => void;
-  recordSplit: (uid: string, ms: number) => void;
-  finalize: (uid: string, ms: number) => void;
+  recordStt: (uid: string, ms: number) => void;
+  recordTranslate: (uid: string, ms: number) => void;
+  recordTts: (uid: string, ms: number) => void;
+  finalize: (uid: string, lipsyncMs: number) => void;
 };
 
 export function createMessageHandler(
@@ -36,23 +38,27 @@ export function createMessageHandler(
         const activeLangs = LANGS.filter((l) => getGuestCounts()[l] > 0);
         dispatch({ type: "final", id: msg.utteranceId as number, transcript: text });
         stopwatch.startTimer(uid, text, activeLangs);
+        // STT timing: if server sends sttMs, record it
+        if (typeof msg.sttMs === "number") {
+          stopwatch.recordStt(uid, msg.sttMs as number);
+        }
         break;
       }
 
       case "translation":
-        stopwatch.recordSplit(String(msg.utteranceId), msg.translateMs as number);
+        stopwatch.recordTranslate(String(msg.utteranceId), msg.translateMs as number);
         break;
 
       case "tts_end":
-        stopwatch.finalize(String(msg.utteranceId), msg.ttsMs as number);
+        stopwatch.recordTts(String(msg.utteranceId), msg.ttsMs as number);
+        break;
+
+      case "video_end":
+        stopwatch.finalize(String(msg.utteranceId), msg.lipsyncMs as number);
         break;
 
       case "avatar:ready":
         console.log("[HOST] avatar ready:", msg.avatarId);
-        break;
-
-      case "video_end":
-        console.log("[HOST] lipsync done:", msg.lipsyncMs, "ms");
         break;
 
       case "error":
