@@ -58,7 +58,7 @@ export const PLATFORMS: Platform[] = [
   { id: "tiktok", label: "TikTok", region: "Global", auto: false, defaultRtmp: "", help: "Download TikTok LIVE Studio desktop app → Go Live → copy Server URL & Stream Key. Requires 1,000+ followers.", settingsUrl: "", keyOnly: false },
   { id: "twitch", label: "Twitch", region: "Global", auto: false, defaultRtmp: "rtmp://live.twitch.tv/app/", help: "Twitch.tv → Creator Dashboard → Settings → Stream → copy Primary Stream Key.", settingsUrl: "https://dashboard.twitch.tv/settings/stream", keyOnly: true },
   // Korea
-  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "쿠팡 Wing → Live & Shorts → 라이브 만들기 → OBS 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "https://wing.coupang.com/vendor/live-commerce/lives", keyOnly: false },
+  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "쿠팡 Wing → Live & Shorts → Self live → 라이브 만들기 → OBS 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "", keyOnly: false },
   { id: "naver", label: "Naver Shopping Live", region: "Korea", auto: false, defaultRtmp: "", help: "네이버 스마트스토어센터 → 쇼핑라이브 → 라이브 예약/시작 → 외부 송출 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "https://sell.smartstore.naver.com/", keyOnly: false },
   // Japan
   { id: "rakuten", label: "Rakuten Live", region: "Japan", auto: false, defaultRtmp: "", help: "Rakuten RMS → ライブコマース → 配信設定 → copy RTMP URL & ストリームキー.", settingsUrl: "https://rms.rakuten.co.jp/", keyOnly: false },

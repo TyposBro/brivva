@@ -100,7 +100,7 @@ pub fn detect_platform(input: &str) -> Option<(&'static str, String, String)> {
 pub fn settings_url(platform: &str) -> Option<&'static str> {
     match platform {
         "twitch" => Some("https://dashboard.twitch.tv/settings/stream"),
-        "coupang" => Some("https://wing.coupang.com/vendor/live-commerce/lives"),
+        // coupang: wing.coupang.com requires seller login, no direct deep link to live settings
         "naver" => Some("https://sell.smartstore.naver.com/"),
         "rakuten" => Some("https://rms.rakuten.co.jp/"),
         "taobao" => Some("https://liveplatform.taobao.com/live/liveList.htm"),
