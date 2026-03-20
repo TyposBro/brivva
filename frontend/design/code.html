@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>Brivva | Real-Time Multilingual Translation</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;800;900&amp;family=Inter:wght@300;400;500;600;700&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap"
+      rel="stylesheet"
+    />
+    <script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              primary: "#b4c5ff",
+              secondary: "#ddb8ff",
+              "secondary-fixed-dim": "#ddb8ff",
+              "secondary-fixed": "#f0dbff",
+              "inverse-on-surface": "#313030",
+              "inverse-primary": "#0053db",
+              "tertiary-fixed-dim": "#c3c7cd",
+              "on-tertiary-fixed-variant": "#43474c",
+              outline: "#8d90a0",
+              "surface-container-lowest": "#0e0e0e",
+              "on-primary": "#002a78",
+              "surface-tint": "#b4c5ff",
+              "on-primary-container": "#eeefff",
+              background: "#131313",
+              "on-error-container": "#ffdad6",
+              tertiary: "#c3c7cd",
+              "on-error": "#690005",
+              "primary-fixed": "#dbe1ff",
+              "on-tertiary": "#2c3136",
+              "secondary-container": "#7c03d3",
+              "primary-fixed-dim": "#b4c5ff",
+              surface: "#131313",
+              "surface-container": "#201f1f",
+              "tertiary-fixed": "#dfe3e9",
+              "on-surface-variant": "#c3c6d7",
+              "on-background": "#e5e2e1",
+              "primary-container": "#2563eb",
+              "on-surface": "#e5e2e1",
+              "surface-container-high": "#2a2a2a",
+              "surface-container-highest": "#353534",
+              "on-tertiary-container": "#edf1f7",
+              "surface-dim": "#131313",
+              "tertiary-container": "#696e73",
+              "on-primary-fixed": "#00174b",
+              "on-secondary-container": "#dfbcff",
+              "surface-variant": "#353534",
+              "inverse-surface": "#e5e2e1",
+              "error-container": "#93000a",
+              "surface-bright": "#3a3939",
+              "on-secondary-fixed-variant": "#6800b4",
+              error: "#ffb4ab",
+              "on-secondary-fixed": "#2c0051",
+              "surface-container-low": "#1c1b1b",
+              "on-tertiary-fixed": "#171c20",
+              "outline-variant": "#434655",
+              "on-secondary": "#490080",
+              "on-primary-fixed-variant": "#003ea8",
+            },
+            fontFamily: {
+              headline: ["Space Grotesk"],
+              body: ["Inter"],
+              label: ["Inter"],
+            },
+            borderRadius: {
+              DEFAULT: "0.125rem",
+              lg: "0.25rem",
+              xl: "0.5rem",
+              full: "0.75rem",
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      .material-symbols-outlined {
+        font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+      }
+      .monolith-gradient {
+        background: linear-gradient(135deg, #2563eb 0%, #7c03d3 100%);
+      }
+    </style>
+  </head>
+  <body
+    class="bg-background text-on-background font-body selection:bg-primary-container selection:text-on-primary-container"
+  >
+    <!-- TopNavBar -->
+    <nav
+      class="fixed top-0 w-full z-50 bg-[#131313]/60 backdrop-blur-xl shadow-[0_40px_40px_-15px_rgba(0,0,0,0.06)]"
+    >
+      <div
+        class="flex justify-between items-center max-w-7xl mx-auto px-8 h-20"
+      >
+        <div
+          class="text-2xl font-black tracking-tighter text-[#E5E2E1] font-headline"
+        >
+          GLOSS.AI
+        </div>
+        <div class="hidden md:flex items-center gap-10">
+          <a
+            class="text-[#C3C6D7] font-medium hover:text-[#B4C5FF] transition-colors duration-300 font-headline"
+            href="#"
+            >Platform</a
+          >
+          <a
+            class="text-[#C3C6D7] font-medium hover:text-[#B4C5FF] transition-colors duration-300 font-headline"
+            href="#"
+            >Solutions</a
+          >
+          <a
+            class="text-[#C3C6D7] font-medium hover:text-[#B4C5FF] transition-colors duration-300 font-headline"
+            href="#"
+            >Developers</a
+          >
+          <a
+            class="text-[#C3C6D7] font-medium hover:text-[#B4C5FF] transition-colors duration-300 font-headline"
+            href="#"
+            >Pricing</a
+          >
+        </div>
+        <div class="flex items-center gap-6">
+          <button
+            class="text-[#C3C6D7] font-medium hover:text-[#B4C5FF] transition-colors duration-300 font-headline"
+          >
+            Sign In
+          </button>
+          <button
+            class="bg-primary-container text-on-primary-container px-6 py-2.5 rounded-lg font-headline font-bold hover:scale-[0.98] transition-all"
+          >
+            Launch App
+          </button>
+        </div>
+      </div>
+    </nav>
+    <main class="pt-20">
+      <!-- Hero / Kinetic Monolith Section -->
+      <section
+        class="relative min-h-[921px] flex flex-col items-center justify-center px-6 overflow-hidden"
+      >
+        <!-- Background Elements -->
+        <div class="absolute inset-0 z-0">
+          <div
+            class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-primary-container/10 rounded-full blur-[120px]"
+          ></div>
+          <div
+            class="absolute top-1/4 right-0 w-[400px] h-[400px] bg-secondary-container/5 rounded-full blur-[100px]"
+          ></div>
+        </div>
+        <div class="relative z-10 max-w-5xl w-full text-center">
+          <h1
+            class="font-headline font-extrabold text-6xl md:text-8xl tracking-tighter mb-8 leading-[0.9] text-on-surface"
+          >
+            BREAK THE <span class="text-primary">LANGUAGE</span> BARRIER IN
+            REAL-TIME.
+          </h1>
+          <p
+            class="max-w-2xl mx-auto text-on-surface-variant text-lg md:text-xl mb-16 leading-relaxed"
+          >
+            Brivva powers global communication with ultra-low latency
+            translation for streams, rooms, and live events. High-performance
+            linguistic infrastructure for the future of work.
+          </p>
+          <!-- Central CTA Hub -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+            <!-- Stream Dashboard Button -->
+            <button
+              class="monolith-gradient group flex flex-col items-center justify-center p-8 rounded-xl hover:scale-[0.98] transition-all duration-300 shadow-xl"
+            >
+              <span
+                class="material-symbols-outlined text-4xl mb-4 text-white"
+                style="font-variation-settings: 'FILL' 1"
+                >dashboard</span
+              >
+              <span class="font-headline font-bold text-lg text-white"
+                >Stream Dashboard</span
+              >
+              <span
+                class="text-white/60 text-xs mt-2 uppercase tracking-widest font-label"
+                >Go Live Now</span
+              >
+            </button>
+            <!-- Quick Room Button -->
+            <button
+              class="bg-surface-container-high group flex flex-col items-center justify-center p-8 rounded-xl hover:bg-surface-bright transition-all duration-300"
+            >
+              <span class="material-symbols-outlined text-4xl mb-4 text-primary"
+                >speed</span
+              >
+              <span class="font-headline font-bold text-lg text-on-surface"
+                >Quick Room</span
+              >
+              <span
+                class="text-on-surface-variant text-xs mt-2 uppercase tracking-widest font-label"
+                >No Youtube required</span
+              >
+            </button>
+            <!-- Join Room Section -->
+            <div
+              class="bg-surface-container-low p-6 rounded-xl flex flex-col justify-between border border-outline-variant/10"
+            >
+              <div class="text-left mb-4">
+                <span
+                  class="font-label text-xs font-semibold text-primary uppercase tracking-widest"
+                  >Access Access</span
+                >
+                <h3 class="font-headline font-bold text-xl text-on-surface">
+                  Join Room
+                </h3>
+              </div>
+              <div class="space-y-3">
+                <input
+                  class="w-full bg-surface-container-highest border-none rounded-lg px-4 py-3 text-on-surface placeholder:text-on-surface-variant focus:ring-2 focus:ring-primary/50 transition-all font-label"
+                  placeholder="Enter Room Code"
+                  type="text"
+                />
+                <button
+                  class="w-full bg-on-surface text-surface py-3 rounded-lg font-headline font-extrabold hover:opacity-90 transition-opacity uppercase tracking-tighter"
+                >
+                  Join
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- Feature Bento Grid -->
+      <section class="max-w-7xl mx-auto px-8 py-24">
+        <div class="grid grid-cols-12 gap-6">
+          <!-- Large Feature Card -->
+          <div
+            class="col-span-12 md:col-span-7 bg-surface-container-low rounded-xl p-12 flex flex-col justify-between relative overflow-hidden group"
+          >
+            <div class="relative z-10">
+              <span
+                class="font-label text-xs font-bold text-primary-container bg-primary/20 px-3 py-1 rounded-full mb-6 inline-block"
+                >ENGINE CAPACITY</span
+              >
+              <h2
+                class="font-headline font-bold text-4xl tracking-tighter mb-4 text-on-surface"
+              >
+                Instantaneous Synced Audio.
+              </h2>
+              <p class="text-on-surface-variant max-w-md leading-relaxed">
+                Our neural engine processes audio in under 200ms, ensuring that
+                your global audience stays in sync with the speaker without
+                awkward pauses.
+              </p>
+            </div>
+            <div class="mt-12 relative z-10 flex gap-4">
+              <div class="bg-surface-container-highest p-4 rounded-lg flex-1">
+                <div class="text-primary font-headline font-bold text-2xl">
+                  99.9%
+                </div>
+                <div class="text-on-surface-variant text-xs font-label">
+                  Uptime SLA
+                </div>
+              </div>
+              <div class="bg-surface-container-highest p-4 rounded-lg flex-1">
+                <div class="text-primary font-headline font-bold text-2xl">
+                  120+
+                </div>
+                <div class="text-on-surface-variant text-xs font-label">
+                  Languages
+                </div>
+              </div>
+            </div>
+            <div
+              class="absolute -bottom-10 -right-10 w-64 h-64 bg-primary/5 rounded-full blur-3xl group-hover:bg-primary/10 transition-colors"
+            ></div>
+          </div>
+          <!-- Small Feature Card 1 -->
+          <div
+            class="col-span-12 md:col-span-5 bg-surface-container-high rounded-xl p-10 flex flex-col justify-end"
+          >
+            <span
+              class="material-symbols-outlined text-primary text-5xl mb-6"
+              style="font-variation-settings: 'FILL' 1"
+              >security</span
+            >
+            <h3
+              class="font-headline font-bold text-2xl tracking-tight mb-2 text-on-surface"
+            >
+              Enterprise Security
+            </h3>
+            <p class="text-on-surface-variant text-sm">
+              SOC2 Type II compliant with end-to-end encryption for every
+              session.
+            </p>
+          </div>
+          <!-- Small Feature Card 2 -->
+          <div
+            class="col-span-12 md:col-span-5 bg-surface-container-highest rounded-xl p-10 flex flex-col justify-end border border-outline-variant/10"
+          >
+            <span
+              class="material-symbols-outlined text-secondary text-5xl mb-6"
+              style="font-variation-settings: 'FILL' 1"
+              >api</span
+            >
+            <h3
+              class="font-headline font-bold text-2xl tracking-tight mb-2 text-on-surface"
+            >
+              API First
+            </h3>
+            <p class="text-on-surface-variant text-sm">
+              Integrate Brivva translation directly into your existing platform
+              with our robust SDK.
+            </p>
+          </div>
+          <!-- Wide Tech Spec Card -->
+          <div
+            class="col-span-12 md:col-span-7 bg-[#0E0E0E] rounded-xl overflow-hidden border border-outline-variant/5"
+          >
+            <div
+              class="p-8 border-b border-outline-variant/10 flex justify-between items-center bg-surface-container-low"
+            >
+              <h3 class="font-headline font-bold text-xl text-on-surface">
+                Engine Performance Matrix
+              </h3>
+              <span
+                class="font-label text-[10px] text-primary bg-primary/10 px-2 py-1"
+                >LIVE DATA</span
+              >
+            </div>
+            <div class="p-0">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr
+                    class="bg-surface-container-low/50 font-label text-[10px] uppercase tracking-widest text-on-surface-variant"
+                  >
+                    <th class="px-8 py-4 font-semibold">Endpoint</th>
+                    <th class="px-8 py-4 font-semibold">Latency</th>
+                    <th class="px-8 py-4 font-semibold">Accuracy</th>
+                  </tr>
+                </thead>
+                <tbody class="font-label text-sm">
+                  <tr
+                    class="border-b border-outline-variant/5 hover:bg-surface-container-high/30 transition-colors"
+                  >
+                    <td class="px-8 py-5 text-on-surface">BRV-North-America</td>
+                    <td class="px-8 py-5 text-primary">142ms</td>
+                    <td class="px-8 py-5 text-on-surface-variant">98.4%</td>
+                  </tr>
+                  <tr
+                    class="border-b border-outline-variant/5 hover:bg-surface-container-high/30 transition-colors"
+                  >
+                    <td class="px-8 py-5 text-on-surface">BRV-Europe-West</td>
+                    <td class="px-8 py-5 text-primary">189ms</td>
+                    <td class="px-8 py-5 text-on-surface-variant">97.9%</td>
+                  </tr>
+                  <tr
+                    class="hover:bg-surface-container-high/30 transition-colors"
+                  >
+                    <td class="px-8 py-5 text-on-surface">BRV-Asia-Pacific</td>
+                    <td class="px-8 py-5 text-primary">215ms</td>
+                    <td class="px-8 py-5 text-on-surface-variant">98.1%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- Final CTA Section -->
+      <section
+        class="py-32 px-8 bg-surface-container-lowest relative overflow-hidden"
+      >
+        <div class="max-w-4xl mx-auto text-center relative z-10">
+          <h2
+            class="font-headline font-black text-5xl md:text-7xl tracking-tighter mb-8 text-on-surface uppercase"
+          >
+            Ready to speak <br />
+            to the world?
+          </h2>
+          <div class="flex flex-col md:flex-row gap-4 justify-center">
+            <button
+              class="bg-primary-container text-on-primary-container px-12 py-5 rounded-lg font-headline font-extrabold text-xl hover:scale-[1.02] active:scale-[0.98] transition-all shadow-2xl"
+            >
+              START FREE TRIAL
+            </button>
+            <button
+              class="bg-surface-container-highest text-on-surface px-12 py-5 rounded-lg font-headline font-extrabold text-xl hover:bg-surface-bright transition-all"
+            >
+              CONTACT SALES
+            </button>
+          </div>
+        </div>
+        <!-- Decorative Background Arc -->
+        <div
+          class="absolute bottom-0 left-1/2 -translate-x-1/2 w-[120%] h-64 bg-primary-container/20 blur-[120px] rounded-[100%] translate-y-32"
+        ></div>
+      </section>
+    </main>
+    <!-- Footer -->
+    <footer class="w-full py-16 px-8 bg-[#0E0E0E] tonal-shift">
+      <div
+        class="flex flex-col md:flex-row justify-between items-center max-w-7xl mx-auto gap-8"
+      >
+        <div class="flex flex-col items-center md:items-start gap-4">
+          <div class="text-lg font-bold text-[#E5E2E1] font-headline">
+            GLOSS.AI
+          </div>
+          <p
+            class="text-[#C3C6D7] font-['Inter'] text-sm leading-relaxed max-w-xs text-center md:text-left"
+          >
+            Building the linguistic infrastructure for a truly connected global
+            economy.
+          </p>
+        </div>
+        <div class="flex flex-wrap justify-center gap-8">
+          <a
+            class="text-[#C3C6D7] font-['Inter'] text-sm hover:text-[#2563EB] transition-opacity duration-200"
+            href="#"
+            >Privacy Policy</a
+          >
+          <a
+            class="text-[#C3C6D7] font-['Inter'] text-sm hover:text-[#2563EB] transition-opacity duration-200"
+            href="#"
+            >Terms of Service</a
+          >
+          <a
+            class="text-[#C3C6D7] font-['Inter'] text-sm hover:text-[#2563EB] transition-opacity duration-200"
+            href="#"
+            >Security</a
+          >
+          <a
+            class="text-[#C3C6D7] font-['Inter'] text-sm hover:text-[#2563EB] transition-opacity duration-200"
+            href="#"
+            >System Status</a
+          >
+        </div>
+        <div class="text-[#C3C6D7] font-['Inter'] text-sm leading-relaxed">
+          © 2024 Kinetic Monolith Systems. All rights reserved.
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
