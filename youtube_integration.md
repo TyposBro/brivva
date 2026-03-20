@@ -1,226 +1,173 @@
-# YouTube Multi-Language Live Stream Integration
+# Multi-Platform Live Stream Integration
 
 ## Overview
 
-Host signs up → connects YouTube account → clones voice (saved permanently) → creates session with title + target languages → Brivva creates N parallel YouTube live streams → host talks → each stream gets real-time translated audio with cloned voice.
+Host signs up → connects YouTube account (optional) → selects voice → creates session with title + target languages + platforms → Brivva creates streams (YouTube auto via API, others use manual RTMP) → host talks → each stream gets real-time translated audio.
 
 ## Architecture
 
 ```
-Host Browser
-  → Webcam (720p/1080p) + Mic audio → WebSocket → Brivva Server
+Host Browser (/dashboard)
+  → Connect YouTube (OAuth2)
+  → Create session: title, source lang, target langs, platforms
+  → YouTube: auto-create broadcast + stream per language via API
+  → Others: user pastes RTMP URL + stream key from platform
 
-Brivva Server:
-  → Original audio → STT (Deepgram Nova-3) → transcript
+Host Browser (/host)
+  → Mic audio → WebSocket → server-rs
+  → STT (Deepgram Nova-3) → transcript
   → Per target language:
-      → NLLB translate → ElevenLabs TTS (cloned voice) → translated audio
-      → FFmpeg: host video + translated audio → RTMP → YouTube
+      → NLLB translate → ElevenLabs TTS → translated audio → guests
 
-YouTube Live Streams:
-  Stream 1 (Korean/source):  host video + original audio    → rtmp://youtube/key1
-  Stream 2 (English):        host video + EN dubbed audio   → rtmp://youtube/key2
-  Stream 3 (Japanese):       host video + JA dubbed audio   → rtmp://youtube/key3
-  Stream 4 (Chinese):        host video + ZH dubbed audio   → rtmp://youtube/key4
+Future (FFmpeg RTMP muxing):
+  → Host video + translated audio → FFmpeg → RTMP → each platform
 ```
 
 ## Implementation Progress
 
-### Phase 1: YouTube OAuth + Broadcast Creation — DONE (backend)
+### Phase 1: YouTube OAuth + Broadcast Creation — DONE
 
 **1.1 Google Cloud Setup** — DONE
+
 - [x] GCP project `brivva-live` created, YouTube Data API v3 enabled
-- [ ] OAuth2 web credentials (must create in GCP Console UI — not available via gcloud CLI)
+- [x] OAuth2 web credentials configured
+- [x] Redirect URI: `https://brivva-server.milliytechnology.org/auth/youtube/callback`
 
 **1.2 Backend: OAuth2 Flow** — DONE (`youtube.rs` + `routes.rs`)
+
 - [x] `GET /auth/youtube?user_id=...` → redirect to Google OAuth consent screen
 - [x] `GET /auth/youtube/callback?code=&state=user_id` → exchange code, store tokens, redirect to dashboard
 - [x] Token refresh with 60s buffer (`ensure_valid_token`)
 - [x] Channel info fetched on OAuth complete
 
 **1.3 Backend: Broadcast Management** — DONE (`routes.rs`)
-- [x] `POST /api/sessions` → create session + N YouTube live broadcasts per language
-  - liveBroadcasts.insert per language (translated titles: "Title [EN]")
-  - liveStreams.insert per language (RTMP ingest)
-  - liveBroadcasts.bind stream to broadcast
-  - Store broadcast IDs + stream keys in DB
+
+- [x] `POST /api/sessions` → create session + streams per platform per language
+  - YouTube: liveBroadcasts.insert, liveStreams.insert, bind (auto)
+  - Others: create_stream_manual with pre-filled RTMP URL + stream key (status "ready")
 - [x] `GET /api/sessions?user_id=...` → list sessions
 - [x] `GET /api/sessions/:id` → session + streams detail
-- [x] `DELETE /api/sessions/:id` → transition all broadcasts to "complete"
+- [x] `DELETE /api/sessions/:id` → transition YouTube broadcasts to "complete", end session
 
-**1.4 Backend: Voice Management** — DONE (`routes.rs`)
+**1.4 Backend: Stream Management** — DONE
+
+- [x] `POST /api/sessions/:id/streams` → add stream to existing session
+- [x] `DELETE /api/sessions/:session_id/streams/:stream_id` → remove stream
+
+**1.5 Backend: Voice Management** — DONE (`routes.rs`)
+
 - [x] `POST /api/voices` → clone via ElevenLabs, save to DB (persistent)
 - [x] `GET /api/voices?user_id=...` → list saved voices
 - [x] `DELETE /api/voices/:id` → delete from DB + ElevenLabs
 
-**1.5 Backend: Database** — DONE (`db.rs`)
+**1.6 Backend: Database** — DONE (`db.rs`)
+
 - [x] SQLite via sqlx: users, voices, sessions, streams tables
 - [x] Full CRUD for all entities
 - [x] Docker volume for persistence
+- [x] Streams table generalized: `platform`, `platform_broadcast_id`, `platform_stream_id`, `rtmp_url`, `stream_key`
 
-**1.6 Frontend: Dashboard + Session UI** — DONE
-- [x] `api.ts` — REST API client (user, sessions, voices, YouTube auth)
-- [x] `DashboardPage.tsx` — YouTube connect, voice selection, session creation form
-- [x] `SessionPage.tsx` — live session with stream cards (RTMP URLs, broadcast IDs, status)
+**1.7 Frontend: Dashboard + Session UI** — DONE
+
+- [x] `api.ts` — REST API client with 13-platform PLATFORMS array (regions, help text, default RTMP URLs)
+- [x] `DashboardPage.tsx` — YouTube connect, voice selection, multi-platform session creation
+  - Platforms grouped by region: Global, Korea, Japan, China, Other
+  - Help text for each platform when enabled
+  - Pre-filled RTMP URLs where known
+  - Stream key input with password type
+- [x] `SessionPage.tsx` — stream cards with platform badges, RTMP URLs, broadcast IDs
 - [x] `App.tsx` — /dashboard, /session/:id routes added
-- [x] `HomePage.tsx` — "Stream Dashboard" button added
-- [x] `App.css` — full dashboard + session page styles
+- [x] `HomePage.tsx` — "Stream Dashboard" button
+- [x] `App.css` — full dashboard + session + platform picker styles
 
-### Phase 2: Video-Audio Sync + FFmpeg RTMP — IN PROGRESS
+### Phase 2: Video-Audio Sync + FFmpeg RTMP — PARTIALLY DONE
 
-**2.1 Synced Video Buffer Architecture** — DONE
-The key insight: video is real-time but translated audio is ~3-5s behind.
-Solution: buffer video frames with timestamps, grab the matching window when TTS completes.
+**2.1 Synced Video Buffer Architecture** — DONE (code)
 
-```
-Host webcam (30fps) → timestamped ring buffer (10s / 300 frames)
-                                    ↓
-STT interim → mark utterance_start (Instant)
-STT final   → mark utterance_end (Instant)
-                                    ↓
-NLLB → TTS → grab frames[utterance_start..utterance_end] from buffer
-                                    ↓
-Send to guests:  audio (tts_start → MP3 → tts_end)
-                 video (video_start → frames[] → video_end)  ← synced!
-                                    ↓
-For YouTube:  FFmpeg mux (frames + MP3 → H.264+AAC → FLV → RTMP)
-```
+- [x] `types.rs`: TimestampedFrame, FrameBuffer (ring buffer, 10s/300 frames)
+- [x] `pipeline.rs`: utterance_start/end tracking, frame extraction
+- [x] Frames grabbed matching utterance window when TTS completes
 
-**Changes made:**
-- `types.rs`: `TimestampedFrame` struct, `FrameBuffer` (Arc<Mutex<VecDeque>>), `Room::push_frame()`, `Room::get_frames_between()`
-- `types.rs`: `VideoStart`, `VideoFrame`, `VideoEnd` message types
-- `handler.rs`: face frames now stored in ring buffer (+ still forwarded to guests for live preview)
-- `pipeline.rs`: `utterance_start` tracked from first interim, frames grabbed on final, passed through run_pipeline → do_tts_and_broadcast
-- `pipeline.rs`: video_start/frame/end sent to guests alongside audio
+**2.2 FFmpeg RTMP Manager** — DONE (code, NOT WIRED)
 
-**2.2 FFmpeg RTMP Manager** — DONE (code, not yet wired)
-- `ffmpeg.rs`: `RtmpManager` with per-language FFmpeg child processes
-- MJPEG frames piped via stdin → libx264 ultrafast → FLV → RTMP
-- `SyncedChunk` struct bundles frames + MP3 per utterance
-- `start_stream()`, `push_chunk()`, `stop_all()`, `stop_stream()`
-- Needs: wire into session creation (start FFmpeg on go-live) and pipeline (push chunks)
+- [x] `ffmpeg.rs`: RtmpManager with per-language FFmpeg child processes
+- [x] MJPEG stdin → libx264 ultrafast → FLV → RTMP
+- [x] SyncedChunk struct bundles frames + MP3 per utterance
+- [ ] **NOT WIRED**: RtmpManager not in AppState, not started on session creation
+- [ ] **NOT WIRED**: SyncedChunks not pushed from do_tts_and_broadcast
+- [ ] Audio muxing not implemented (current FFmpeg uses video-only)
+- [ ] FFmpeg binary not in Docker image
 
-**2.3 Remaining**
+**2.3 Remaining to enable live RTMP push**
+
 - [ ] Wire RtmpManager into AppState and session lifecycle
+- [ ] Start FFmpeg processes when session goes live
 - [ ] Push synced chunks to FFmpeg in do_tts_and_broadcast
-- [ ] Handle audio muxing (current FFmpeg uses video-only; need audio pipe)
+- [ ] Handle audio muxing (dual-input FFmpeg: video + audio → RTMP)
 - [ ] Add ffmpeg binary to Docker image
-- [ ] Test end-to-end RTMP push to YouTube
+- [ ] Test end-to-end RTMP push to YouTube (24hr wait expired ~7:13 PM Mar 21)
 
-### Phase 3: Persistent Data (SQLite)
+### Phase 3: Multi-Platform Support — DONE
 
-**3.1 Schema**
-```sql
-CREATE TABLE users (
-  id TEXT PRIMARY KEY,        -- UUID
-  youtube_channel_id TEXT,
-  youtube_channel_name TEXT,
-  youtube_access_token TEXT,
-  youtube_refresh_token TEXT,
-  youtube_token_expires_at INTEGER,
-  created_at INTEGER
-);
+**13 Platforms Supported:**
 
-CREATE TABLE voices (
-  id TEXT PRIMARY KEY,        -- UUID
-  user_id TEXT REFERENCES users(id),
-  elevenlabs_voice_id TEXT,   -- ElevenLabs voice ID (don't delete)
-  name TEXT,                  -- "My voice", "Host 2", etc.
-  created_at INTEGER
-);
+| Platform               | Region | Auto      | Default RTMP                                |
+| ---------------------- | ------ | --------- | ------------------------------------------- |
+| YouTube                | Global | Yes (API) | Auto-created via YouTube Data API           |
+| Instagram              | Global | No        | rtmps://live-upload.instagram.com:443/rtmp/ |
+| TikTok                 | Global | No        | Dynamic (from TikTok LIVE Studio)           |
+| Twitch                 | Global | No        | rtmp://live.twitch.tv/app/                  |
+| Coupang Live           | Korea  | No        | Dynamic (from Coupang Seller Portal)        |
+| Naver Shopping Live    | Korea  | No        | Dynamic (from Naver Live Studio)            |
+| Rakuten Live           | Japan  | No        | Dynamic (from Rakuten dashboard)            |
+| Douyin (抖音)          | China  | No        | Dynamic (from Douyin Live Companion)        |
+| Taobao Live (淘宝直播) | China  | No        | Dynamic (from Taobao Live Studio)           |
+| Kuaishou (快手)        | China  | No        | rtmp://live.kuaishou.com/live/              |
+| Xiaohongshu (小红书)   | China  | No        | Dynamic (from web after app auth)           |
+| Bilibili (哔哩哔哩)    | China  | No        | rtmp://live-push.bilivideo.com/live-bvc/    |
+| Custom RTMP            | Other  | No        | User-provided                               |
 
-CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,        -- UUID
-  user_id TEXT REFERENCES users(id),
-  voice_id TEXT REFERENCES voices(id),
-  title TEXT,
-  source_lang TEXT,
-  target_langs TEXT,          -- JSON array: ["en","ja","zh"]
-  status TEXT,                -- "setup", "live", "ended"
-  room_id TEXT,               -- Brivva room code
-  created_at INTEGER
-);
+**Implementation:**
 
-CREATE TABLE streams (
-  id TEXT PRIMARY KEY,
-  session_id TEXT REFERENCES sessions(id),
-  lang TEXT,
-  youtube_broadcast_id TEXT,
-  youtube_stream_id TEXT,
-  youtube_stream_key TEXT,
-  rtmp_url TEXT,
-  status TEXT,                -- "created", "live", "ended"
-  created_at INTEGER
-);
-```
-
-**3.2 Voice Persistence**
-- After voice clone: store voice_id in `voices` table
-- Do NOT delete from ElevenLabs on room close
-- Host can manage voices: list, delete, re-record
-- Session creation picks from saved voices
-
-### Phase 4: Multi-Platform (Future)
-
-All major live commerce platforms use RTMP:
-- **YouTube**: `rtmp://a.rtmp.youtube.com/live2/{key}`
-- **Twitch**: `rtmp://live.twitch.tv/app/{key}`
-- **TikTok**: `rtmp://push.tiktok.com/live/{key}`
-- **Instagram**: RTMP via Instagram Live Producer
-- **Coupang Live**: RTMP (enterprise API)
-- **Rakuten**: RTMP (via Rakuten Live Commerce API)
-- **Naver Shopping Live**: RTMP
-
-Same FFmpeg pipeline, just different RTMP endpoints per platform.
+- YouTube: full OAuth2 + broadcast auto-creation via API
+- All others: user copies RTMP URL + stream key from platform, pastes into dashboard
+- Pre-filled RTMP URLs for platforms with known base URLs
+- Step-by-step help text for each platform guides non-technical users
+- Dashboard groups platforms by region for clean UX
 
 ## YouTube API Details
 
 ### Quota Budget (default 10,000 units/day)
-| Operation | Cost | Per Session (4 langs) |
-|-----------|------|-----------------------|
-| liveBroadcasts.insert | 50 | 200 |
-| liveStreams.insert | 50 | 200 |
-| liveBroadcasts.bind | 50 | 200 |
-| liveBroadcasts.transition | 50 | 200 |
-| **Total per session** | | **800** |
+
+| Operation                 | Cost | Per Session (4 langs) |
+| ------------------------- | ---- | --------------------- |
+| liveBroadcasts.insert     | 50   | 200                   |
+| liveStreams.insert        | 50   | 200                   |
+| liveBroadcasts.bind       | 50   | 200                   |
+| liveBroadcasts.transition | 50   | 200                   |
+| **Total per session**     |      | **800**               |
 
 12 sessions/day within default quota. Request increase for production.
 
 ### Required Scopes
+
 - `https://www.googleapis.com/auth/youtube.force-ssl` — manage broadcasts
 - `https://www.googleapis.com/auth/youtube.readonly` — read channel info
 
 ### Broadcast Lifecycle
+
 1. `insert` → status: "complete" (metadata ready)
 2. `bind` stream to broadcast
-3. Start pushing RTMP (FFmpeg)
+3. Start pushing RTMP (FFmpeg) — NOT YET IMPLEMENTED
 4. `transition` → "testing" (preview)
 5. `transition` → "live" (public)
 6. `transition` → "complete" (end stream)
 
-## Latency Analysis
+### Known Issues
 
-| Phase | Latency | Notes |
-|-------|---------|-------|
-| Host → Server (WebSocket) | ~50ms | Cloudflare tunnel |
-| STT (Deepgram Nova-3) | ~500ms | Streaming, includes endpointing |
-| Translation (NLLB) | ~1-2s | CPU inference |
-| TTS (ElevenLabs) | ~500-1000ms | API call |
-| FFmpeg encoding | ~100-500ms | ultrafast preset |
-| RTMP push to YouTube | ~1-2s | Network |
-| YouTube broadcast delay | ~10-30s | YouTube's own buffer |
-| **Total (translation path)** | **~13-36s** | Acceptable for live commerce |
-| **Original language path** | **~11-32s** | Just YouTube's delay |
-
-The ~3-5s translation overhead is hidden within YouTube's own 10-30s broadcast delay.
-
-## Environment Variables (New)
-
-```env
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://brivva.pages.dev/auth/youtube/callback
-DATABASE_URL=sqlite:brivva.db
-```
+- **24hr waiting period**: New YouTube channels must wait 24 hours after enabling live streaming before they can actually go live
+- **Redirect URI**: Must point to backend (`brivva-server.milliytechnology.org`), not frontend
+- **DB schema changes**: Adding `platform` column required deleting old SQLite DB
 
 ## Files Changed
 
@@ -229,23 +176,36 @@ server-rs/
   Cargo.toml          + sqlx, chrono, reqwest/form — DONE
   Dockerfile          + libsqlite3 (builder + runtime) — DONE
   src/
-    main.rs           AppState (rooms + db), all REST routes registered — DONE
+    main.rs           AppState (rooms + db), all REST + WS routes — DONE
     db.rs             NEW: SQLite init + CRUD (users, voices, sessions, streams) — DONE
     youtube.rs        NEW: OAuth2 + broadcast/stream management — DONE
-    routes.rs         NEW: REST API handlers — DONE
-    room/handler.rs   Updated: AppState + frame buffer storage — DONE
+    routes.rs         NEW: REST API handlers (multi-platform) — DONE
     ffmpeg.rs         NEW: RtmpManager, per-lang FFmpeg processes — DONE (not wired)
+    types.rs          + TimestampedFrame, FrameBuffer — DONE
+    pipeline.rs       + utterance tracking, synced frame delivery — DONE
+    room/handler.rs   + AppState, frame buffer — DONE
 
 docker-compose.yml    + Google env vars, DATABASE_URL, db-data volume — DONE
 
 frontend/
   src/
     lib/
-      api.ts              NEW: REST API client — DONE
+      api.ts              NEW: REST API client, 13 platforms — DONE
     pages/
-      DashboardPage.tsx   NEW: YouTube connect, voice mgmt, session form — DONE
-      SessionPage.tsx     NEW: stream cards, RTMP URLs, end session — DONE
+      DashboardPage.tsx   NEW: multi-platform session creation — DONE
+      SessionPage.tsx     NEW: stream cards with platform badges — DONE
       HomePage.tsx        + Dashboard button — DONE
     App.tsx               + /dashboard, /session/:id routes — DONE
-    App.css               + dashboard + session styles — DONE
+    App.css               + dashboard + session + platform styles — DONE
+```
+
+## Environment Variables
+
+```env
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://brivva-server.milliytechnology.org/auth/youtube/callback
+DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
+ELEVENLABS_API_KEY=...
+DEEPGRAM_API_KEY=...
 ```

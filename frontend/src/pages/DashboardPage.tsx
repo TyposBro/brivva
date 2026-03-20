@@ -292,41 +292,53 @@ export default function DashboardPage() {
             <fieldset className="dash-fieldset">
               <legend className="dash-legend">Stream To</legend>
               <div className="dash-platform-list">
-                {api.PLATFORMS.map((p) => {
-                  const enabled = enabledPlatforms.has(p.id);
-                  const needsConfig = !p.auto && enabled;
+                {["Global", "Korea", "Japan", "China", "Other"].map((region) => {
+                  const regionPlatforms = api.PLATFORMS.filter((p) => p.region === region);
+                  if (regionPlatforms.length === 0) return null;
                   return (
-                    <div key={p.id} className="dash-platform-item">
-                      <label className="dash-platform-toggle">
-                        <input
-                          type="checkbox"
-                          checked={enabled}
-                          onChange={() => togglePlatform(p.id)}
-                        />
-                        <span className="dash-platform-label">{p.label}</span>
-                        {p.auto && enabled && (
-                          <span className="dash-badge dash-badge--success" style={{ marginLeft: "0.5rem" }}>
-                            Auto
-                          </span>
-                        )}
-                      </label>
-                      {needsConfig && (
-                        <div className="dash-platform-config">
-                          <input
-                            className="dash-input"
-                            placeholder={`RTMP URL${p.defaultRtmp ? ` (default: ${p.defaultRtmp})` : ""}`}
-                            value={platformConfigs[p.id]?.rtmp_url ?? ""}
-                            onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
-                          />
-                          <input
-                            className="dash-input"
-                            placeholder="Stream Key"
-                            type="password"
-                            value={platformConfigs[p.id]?.stream_key ?? ""}
-                            onChange={(e) => updatePlatformConfig(p.id, "stream_key", e.target.value)}
-                          />
-                        </div>
-                      )}
+                    <div key={region} className="dash-platform-region">
+                      <div className="dash-platform-region-label">{region}</div>
+                      {regionPlatforms.map((p) => {
+                        const enabled = enabledPlatforms.has(p.id);
+                        const needsConfig = !p.auto && enabled;
+                        return (
+                          <div key={p.id} className="dash-platform-item">
+                            <label className="dash-platform-toggle">
+                              <input
+                                type="checkbox"
+                                checked={enabled}
+                                onChange={() => togglePlatform(p.id)}
+                              />
+                              <span className="dash-platform-label">{p.label}</span>
+                              {p.auto && enabled && (
+                                <span className="dash-badge dash-badge--success" style={{ marginLeft: "0.5rem" }}>
+                                  Auto
+                                </span>
+                              )}
+                            </label>
+                            {needsConfig && (
+                              <div className="dash-platform-expand">
+                                <p className="dash-platform-help">{p.help}</p>
+                                <div className="dash-platform-config">
+                                  <input
+                                    className="dash-input"
+                                    placeholder={p.defaultRtmp ? `RTMP URL (pre-filled)` : "RTMP URL (paste from platform)"}
+                                    value={platformConfigs[p.id]?.rtmp_url ?? p.defaultRtmp}
+                                    onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
+                                  />
+                                  <input
+                                    className="dash-input"
+                                    placeholder="Stream Key (paste from platform)"
+                                    type="password"
+                                    value={platformConfigs[p.id]?.stream_key ?? ""}
+                                    onChange={(e) => updatePlatformConfig(p.id, "stream_key", e.target.value)}
+                                  />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   );
                 })}

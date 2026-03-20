@@ -1781,8 +1781,25 @@ body {
 .dash-platform-list {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 1rem;
   margin-top: 0.5rem;
+}
+
+.dash-platform-region {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dash-platform-region-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.2rem;
 }
 
 .dash-platform-item {
@@ -1803,10 +1820,22 @@ body {
   font-weight: 500;
 }
 
+.dash-platform-expand {
+  padding-left: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dash-platform-help {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .dash-platform-config {
   display: flex;
   gap: 0.5rem;
-  padding-left: 1.5rem;
 }
 
 .dash-platform-config .dash-input {
@@ -1826,7 +1855,6 @@ body {
 @media (max-width: 640px) {
   .dash-platform-config {
     flex-direction: column;
-    padding-left: 1.5rem;
   }
 }
 
