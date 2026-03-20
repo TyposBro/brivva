@@ -1,74 +1,70 @@
-//! FFmpeg RTMP muxer: synced video frames + translated audio → YouTube live stream.
+//! FFmpeg RTMP muxer: host video + translated audio → RTMP streams.
 //!
-//! Each language stream gets its own FFmpeg process that:
-//! 1. Receives JPEG frames on stdin (video pipe)
-//! 2. Receives audio via a named pipe or secondary input
-//! 3. Muxes H.264 + AAC → FLV → RTMP push to YouTube
-//!
-//! Architecture:
-//!   Per utterance: buffered video frames + TTS audio arrive together (synced)
-//!   → Write frames to FFmpeg stdin at original FPS
-//!   → Write audio to FFmpeg audio pipe
-//!   → FFmpeg muxes and pushes to RTMP
+//! Each RTMP endpoint gets its own FFmpeg process:
+//! - Video: JPEG frames piped to stdin (image2pipe)
+//! - Audio: PCM s16le written to a named FIFO (silence when idle, TTS audio when available)
 
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::types::TimestampedFrame;
-
-/// A chunk of synced audio + video to push to RTMP
-pub struct SyncedChunk {
-    pub frames: Vec<TimestampedFrame>, // JPEG frames from utterance window
-    pub audio_mp3: Vec<u8>,           // buffered TTS MP3
-}
-
-/// Handle to a running FFmpeg RTMP process for one language stream
-struct FfmpegStream {
+/// Handle for one FFmpeg RTMP process
+struct RtmpStream {
     child: Child,
-    /// Send synced chunks to the writer task
-    chunk_tx: mpsc::UnboundedSender<SyncedChunk>,
+    video_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw JPEG bytes
+    audio_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw PCM s16le bytes
+    audio_fifo: String,                         // FIFO path for cleanup
+    lang: String,                               // language code
 }
 
 /// Manages all FFmpeg RTMP streams for a session
 pub struct RtmpManager {
-    streams: HashMap<String, FfmpegStream>, // lang → process
+    streams: HashMap<String, RtmpStream>,  // stream_id → handle
 }
+
+// 20ms of silence at 44100Hz, 16-bit mono = 1764 bytes
+const SILENCE_CHUNK_SIZE: usize = 1764;
+const SILENCE_INTERVAL_MS: u64 = 20;
 
 impl RtmpManager {
     pub fn new() -> Self {
-        Self {
-            streams: HashMap::new(),
-        }
+        Self { streams: HashMap::new() }
     }
 
-    /// Start an FFmpeg process for a language stream
+    /// Start an FFmpeg RTMP process for a stream
     pub async fn start_stream(
         &mut self,
+        stream_id: &str,
         lang: &str,
         rtmp_url: &str,
-        fps: u32,
-        width: u32,
-        height: u32,
     ) -> Result<(), String> {
-        // FFmpeg command: read JPEG frames from stdin, encode to H.264, mux with audio, push RTMP
-        //
-        // Video: JPEG frames piped via stdin → mjpeg decoder → libx264
-        // Audio: MP3 data piped via a temp file / concat approach
-        //
-        // For simplicity, we use a two-pass approach per utterance:
-        // write frames as MJPEG stream, audio as separate input
+        let audio_fifo = format!("/tmp/brivva_audio_{}", stream_id);
 
+        // Create named FIFO
+        let _ = std::fs::remove_file(&audio_fifo); // clean up stale
+        std::process::Command::new("mkfifo")
+            .arg(&audio_fifo)
+            .output()
+            .map_err(|e| format!("mkfifo failed: {}", e))?;
+
+        // Start FFmpeg: video from stdin, audio from FIFO
         let mut child = Command::new("ffmpeg")
             .args([
                 "-y",
-                // Video input: MJPEG frames from stdin
-                "-f", "mjpeg",
-                "-framerate", &fps.to_string(),
+                "-loglevel", "warning",
+                // Video input: JPEG frames from stdin
+                "-f", "image2pipe",
+                "-framerate", "30",
                 "-i", "pipe:0",
+                // Audio input: raw PCM from FIFO
+                "-f", "s16le",
+                "-ar", "44100",
+                "-ac", "1",
+                "-i", &audio_fifo,
                 // Video encoding
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
@@ -77,10 +73,13 @@ impl RtmpManager {
                 "-maxrate", "2500k",
                 "-bufsize", "5000k",
                 "-pix_fmt", "yuv420p",
-                "-g", &(fps * 2).to_string(), // keyframe every 2s
-                "-s", &format!("{}x{}", width, height),
-                // No audio initially — we'll add it per-utterance
-                "-an",
+                "-g", "60",
+                // Audio encoding
+                "-c:a", "aac",
+                "-b:a", "128k",
+                // Mapping
+                "-map", "0:v",
+                "-map", "1:a",
                 // Output
                 "-f", "flv",
                 rtmp_url,
@@ -93,72 +92,142 @@ impl RtmpManager {
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
 
-        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<SyncedChunk>();
-
-        // Writer task: receives synced chunks and writes JPEG frames to FFmpeg stdin
-        let lang_str = lang.to_string();
+        // Video writer channel
+        let (video_tx, mut video_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let stream_id_v = stream_id.to_string();
         tokio::spawn(async move {
             let mut stdin = stdin;
-            while let Some(chunk) = chunk_rx.recv().await {
-                for frame in &chunk.frames {
-                    // Decode base64 JPEG and write raw bytes to stdin
-                    use base64::Engine;
-                    if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(&frame.data) {
-                        if let Err(e) = stdin.write_all(&jpeg_bytes).await {
-                            eprintln!("[FFMPEG:{}] write error: {}", lang_str, e);
-                            return;
-                        }
-                    }
-                }
-                if let Err(e) = stdin.flush().await {
-                    eprintln!("[FFMPEG:{}] flush error: {}", lang_str, e);
-                    return;
+            while let Some(jpeg_bytes) = video_rx.recv().await {
+                if stdin.write_all(&jpeg_bytes).await.is_err() {
+                    eprintln!("[FFMPEG:{}] video write error", stream_id_v);
+                    break;
                 }
             }
-            // Close stdin to signal EOF
             drop(stdin);
         });
 
-        eprintln!("[FFMPEG] Started RTMP stream for {} → {}", lang, rtmp_url);
+        // Audio writer channel
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let fifo_path = audio_fifo.clone();
+        let stream_id_a = stream_id.to_string();
+        tokio::spawn(async move {
+            // Open FIFO for writing (blocks until FFmpeg opens it for reading)
+            let fifo = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&fifo_path)
+                .await;
+            let mut fifo = match fifo {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("[FFMPEG:{}] failed to open audio FIFO: {}", stream_id_a, e);
+                    return;
+                }
+            };
 
-        self.streams.insert(lang.to_string(), FfmpegStream {
-            child,
-            chunk_tx,
+            let silence = vec![0u8; SILENCE_CHUNK_SIZE];
+
+            loop {
+                // Try to receive audio data with a timeout
+                match tokio::time::timeout(
+                    Duration::from_millis(SILENCE_INTERVAL_MS),
+                    audio_rx.recv(),
+                )
+                .await
+                {
+                    Ok(Some(pcm_data)) => {
+                        // Write real audio
+                        if fifo.write_all(&pcm_data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break, // Channel closed
+                    Err(_) => {
+                        // Timeout — write silence
+                        if fifo.write_all(&silence).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
         });
+
+        eprintln!(
+            "[FFMPEG] Started RTMP stream {} ({}) → {}",
+            stream_id, lang, rtmp_url
+        );
+
+        self.streams.insert(
+            stream_id.to_string(),
+            RtmpStream {
+                child,
+                video_tx,
+                audio_tx,
+                audio_fifo,
+                lang: lang.to_string(),
+            },
+        );
 
         Ok(())
     }
 
-    /// Push a synced audio+video chunk to a language stream
-    pub fn push_chunk(&self, lang: &str, chunk: SyncedChunk) -> Result<(), String> {
-        let stream = self.streams.get(lang).ok_or("Stream not found")?;
-        stream.chunk_tx.send(chunk).map_err(|_| "Stream channel closed".to_string())
+    /// Push a video frame to ALL RTMP streams (all languages get the same video)
+    pub fn push_video_frame(&self, jpeg_bytes: &[u8]) {
+        for stream in self.streams.values() {
+            let _ = stream.video_tx.send(jpeg_bytes.to_vec());
+        }
     }
 
-    /// Stop all FFmpeg processes
-    pub async fn stop_all(&mut self) {
-        for (lang, mut stream) in self.streams.drain() {
-            drop(stream.chunk_tx); // Close channel → writer task exits → stdin closes → FFmpeg finishes
-            match stream.child.wait().await {
-                Ok(status) => eprintln!("[FFMPEG:{}] exited: {}", lang, status),
-                Err(e) => eprintln!("[FFMPEG:{}] wait error: {}", lang, e),
+    /// Push decoded PCM audio to streams matching a specific language
+    pub fn push_audio_pcm(&self, lang: &str, pcm: &[u8]) {
+        for stream in self.streams.values() {
+            if stream.lang == lang {
+                let _ = stream.audio_tx.send(pcm.to_vec());
             }
         }
     }
 
-    /// Stop a specific language stream
-    pub async fn stop_stream(&mut self, lang: &str) {
-        if let Some(mut stream) = self.streams.remove(lang) {
-            drop(stream.chunk_tx);
-            let _ = stream.child.wait().await;
-            eprintln!("[FFMPEG:{}] stopped", lang);
+    /// Stop all FFmpeg processes and clean up FIFOs
+    pub async fn stop_all(&mut self) {
+        for (id, mut stream) in self.streams.drain() {
+            drop(stream.video_tx);
+            drop(stream.audio_tx);
+            match stream.child.kill().await {
+                Ok(_) => eprintln!("[FFMPEG:{}] killed", id),
+                Err(e) => eprintln!("[FFMPEG:{}] kill error: {}", id, e),
+            }
+            let _ = std::fs::remove_file(&stream.audio_fifo);
         }
     }
 }
 
-/// Thread-safe wrapper for RtmpManager
+/// Thread-safe wrapper
 pub type SharedRtmpManager = Arc<Mutex<RtmpManager>>;
 
-pub fn new_rtmp_manager() -> SharedRtmpManager {
-    Arc::new(Mutex::new(RtmpManager::new()))
+/// Decode MP3 bytes to raw PCM s16le 44100Hz mono using FFmpeg subprocess
+pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("FFmpeg decode spawn failed: {}", e))?;
+
+    let mut stdin = child.stdin.take().ok_or("No stdin")?;
+    stdin
+        .write_all(mp3)
+        .await
+        .map_err(|e| format!("FFmpeg stdin write failed: {}", e))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("FFmpeg wait failed: {}", e))?;
+    if output.stdout.is_empty() {
+        return Err("Empty PCM output".to_string());
+    }
+    Ok(output.stdout)
 }

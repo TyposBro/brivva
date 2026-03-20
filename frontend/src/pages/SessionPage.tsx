@@ -152,6 +152,20 @@ export default function SessionPage() {
 
         {/* Actions */}
         <section className="dash-section session-actions">
+          {isLive && !session.room_id && (
+            <button
+              className="record-btn dash-go-live-btn"
+              onClick={() => navigate(`/host?sessionId=${session.id}`)}
+            >
+              Start Broadcasting
+            </button>
+          )}
+          {isLive && session.room_id && (
+            <div className="session-room-info">
+              <span className="session-room-label">Room Code:</span>
+              <code className="session-room-code">{session.room_id}</code>
+            </div>
+          )}
           {isLive && (
             <button
               className="record-btn dash-end-btn"

@@ -61,6 +61,8 @@ pub struct RoomQuery {
     #[serde(rename = "roomId")]
     pub room_id: Option<String>,
     pub lang: Option<String>,
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
 }
 
 // ── Guest ─────────────────────────────────────────────────
@@ -101,10 +103,14 @@ pub struct Room {
     pub frame_buffer: FrameBuffer,
     /// When the room was created (epoch for Instant math)
     pub created_at: Instant,
+    /// Dashboard session ID (links to DB session + streams)
+    pub session_id: Option<String>,
+    /// FFmpeg RTMP manager for streaming to platforms
+    pub rtmp_manager: Option<crate::ffmpeg::SharedRtmpManager>,
 }
 
 impl Room {
-    pub fn new(id: String, source_lang: Lang) -> Self {
+    pub fn new(id: String, source_lang: Lang, session_id: Option<String>) -> Self {
         Self {
             id,
             source_lang,
@@ -113,6 +119,8 @@ impl Room {
             voice_clone_id: None,
             frame_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(FRAME_BUFFER_CAP))),
             created_at: Instant::now(),
+            session_id,
+            rtmp_manager: None,
         }
     }
 

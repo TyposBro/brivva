@@ -457,6 +457,23 @@ async fn do_tts_and_broadcast(
         return;
     }
 
+    // Push to RTMP streams (decode MP3 → PCM, send to FFmpeg)
+    let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
+    if let Some(manager) = rtmp_mgr {
+        match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
+            Ok(pcm) => {
+                let mgr = manager.lock().await;
+                mgr.push_audio_pcm(&lang.to_string(), &pcm);
+                eprintln!(
+                    "[RTMP] Pushed {}KB PCM audio for {}",
+                    pcm.len() / 1024,
+                    lang
+                );
+            }
+            Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
+        }
+    }
+
     // Send synced audio + video to guests
     if let Some(room) = rooms.get(room_id) {
         // Audio

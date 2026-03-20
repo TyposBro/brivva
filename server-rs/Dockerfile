@@ -27,7 +27,7 @@ RUN touch server-rs/src/main.rs && cargo build --release --manifest-path server-
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libsqlite3-0 \
+    ca-certificates libsqlite3-0 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/server-rs /usr/local/bin/server-rs

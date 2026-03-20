@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useHostRoom } from "../hooks/useHostRoom";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { LatencyDashboard } from "../components/LatencyDashboard";
@@ -7,6 +7,8 @@ import { PipelineAnalysis } from "../components/PipelineAnalysis";
 
 export default function HostPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const sessionId = searchParams.get("sessionId") ?? undefined;
   const {
     status, roomId, guestCounts, liveTranscript, utterances,
     analyser, error, timings, videoRef,
@@ -20,8 +22,8 @@ export default function HostPage() {
   useEffect(() => {
     if (createdRef.current) return;
     createdRef.current = true;
-    createRoom();
-  }, [createRoom]);
+    createRoom({ sessionId });
+  }, [createRoom, sessionId]);
 
   useEffect(() => {
     if (listRef.current) {

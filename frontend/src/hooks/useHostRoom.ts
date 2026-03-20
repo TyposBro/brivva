@@ -163,12 +163,14 @@ export function useHostRoom() {
     dispatch({ type: "recording_stopped" });
   };
 
-  const createRoom = () => {
+  const createRoom = (opts?: { sessionId?: string }) => {
     dispatch({ type: "reset" });
     resetTimings();
     startWebcam();
+    const params: Record<string, string> = { role: "host", sourceLang: "en" };
+    if (opts?.sessionId) params.sessionId = opts.sessionId;
     socket.current.connect(
-      { role: "host", sourceLang: "en" },
+      params,
       {
         onMessage: (msg) => {
           handleMessage(msg);
