@@ -1,4 +1,4 @@
-export type HostStatus = "idle" | "creating" | "ready" | "recording" | "disconnected";
+export type HostStatus = "idle" | "creating" | "voice_setup" | "cloning" | "ready" | "recording" | "disconnected";
 export type GuestCounts = { en: number; ja: number; zh: number };
 export type HostUtterance = { id: number; transcript: string };
 
@@ -10,6 +10,7 @@ export interface HostState {
   utterances: HostUtterance[];
   analyser: AnalyserNode | null;
   error: string | null;
+  voiceReady: boolean;
 }
 
 export type HostAction =
@@ -21,7 +22,10 @@ export type HostAction =
   | { type: "error"; message: string }
   | { type: "recording_started"; analyser: AnalyserNode }
   | { type: "recording_stopped" }
-  | { type: "disconnected" };
+  | { type: "disconnected" }
+  | { type: "voice_cloning" }
+  | { type: "voice_ready" }
+  | { type: "skip_voice_setup" };
 
 const EMPTY_COUNTS: GuestCounts = { en: 0, ja: 0, zh: 0 };
 
@@ -33,6 +37,7 @@ export const INITIAL_STATE: HostState = {
   utterances: [],
   analyser: null,
   error: null,
+  voiceReady: false,
 };
 
 export function hostReducer(state: HostState, action: HostAction): HostState {
@@ -41,7 +46,7 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
       return { ...INITIAL_STATE, status: "creating" };
 
     case "room_created":
-      return { ...state, status: "ready", roomId: action.roomId };
+      return { ...state, status: "voice_setup", roomId: action.roomId };
 
     case "guest_count":
       return { ...state, guestCounts: action.counts };
@@ -71,5 +76,14 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
 
     case "disconnected":
       return { ...state, status: "disconnected", analyser: null };
+
+    case "voice_cloning":
+      return { ...state, status: "cloning" };
+
+    case "voice_ready":
+      return { ...state, status: "ready", voiceReady: true };
+
+    case "skip_voice_setup":
+      return { ...state, status: "ready" };
   }
 }

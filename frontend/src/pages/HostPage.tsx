@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useHostRoom } from "../hooks/useHostRoom";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { LatencyDashboard } from "../components/LatencyDashboard";
@@ -7,9 +7,13 @@ import { PipelineAnalysis } from "../components/PipelineAnalysis";
 
 export default function HostPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const sessionId = searchParams.get("sessionId") ?? undefined;
   const {
     status, roomId, guestCounts, liveTranscript, utterances,
-    analyser, error, timings, createRoom, startRecording, stopRecording, closeRoom,
+    analyser, error, timings, videoRef,
+    createRoom, startRecording, stopRecording, closeRoom,
+    startVoiceRecording, skipVoiceSetup,
   } = useHostRoom();
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -18,8 +22,8 @@ export default function HostPage() {
   useEffect(() => {
     if (createdRef.current) return;
     createdRef.current = true;
-    createRoom();
-  }, [createRoom]);
+    createRoom({ sessionId });
+  }, [createRoom, sessionId]);
 
   useEffect(() => {
     if (listRef.current) {
@@ -30,6 +34,27 @@ export default function HostPage() {
   const handleBack = () => {
     closeRoom();
     navigate("/");
+  };
+
+  // Voice recording timer
+  const [voiceTimer, setVoiceTimer] = useState(0);
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleStartVoice = () => {
+    setVoiceTimer(30);
+    setIsVoiceRecording(true);
+    startVoiceRecording();
+    voiceTimerRef.current = setInterval(() => {
+      setVoiceTimer((t) => {
+        if (t <= 1) {
+          clearInterval(voiceTimerRef.current!);
+          setIsVoiceRecording(false);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
   };
 
   const isReady = status === "ready" || status === "recording";
@@ -70,6 +95,69 @@ export default function HostPage() {
             </button>
           </div>
         )}
+
+        {/* Voice Setup Phase */}
+        {status === "voice_setup" && (
+          <div className="voice-setup-panel">
+            <h3>Voice Setup</h3>
+            <p className="voice-setup-desc">
+              Record a 30-second voice sample to clone your voice. Read the text below naturally at your normal pace.
+            </p>
+            {!isVoiceRecording && voiceTimer === 0 && (
+              <button className="voice-record-btn" onClick={handleStartVoice}>
+                Record Voice Sample
+              </button>
+            )}
+            {isVoiceRecording && (
+              <>
+                <div className="voice-recording-indicator">
+                  <span className="dot listening-dot" />
+                  <span>Recording... {voiceTimer}s</span>
+                </div>
+                <div className="voice-script">
+                  Welcome to today's live stream! I'm really excited to show you
+                  some amazing products that I've been using lately. These items
+                  have completely changed my daily routine, and I think you're going
+                  to love them too. The quality is outstanding, and the price is
+                  incredibly reasonable for what you get. I've tried many similar
+                  products before, but nothing comes close to this. If you have any
+                  questions, feel free to drop them in the chat and I'll answer them
+                  right away. Let's get started!
+                </div>
+              </>
+            )}
+            <button className="voice-skip-btn" onClick={skipVoiceSetup}>
+              Skip (use default voice)
+            </button>
+          </div>
+        )}
+
+        {status === "cloning" && (
+          <div className="voice-setup-panel">
+            <div className="status-bar">
+              <span className="spinner" /> Cloning your voice...
+            </div>
+          </div>
+        )}
+
+        {/* Host webcam preview (mirrored) — always rendered so ref is available */}
+        <div className="webcam-preview" style={{ display: isReady ? "flex" : "none" }}>
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{
+              width: "256px",
+              height: "256px",
+              objectFit: "cover",
+              transform: "scaleX(-1)",
+              borderRadius: "12px",
+              border: "2px solid #333",
+            }}
+          />
+          <span className="webcam-label">Your camera (mirrored)</span>
+        </div>
 
         {isReady && (
           <div className="guest-count-bar">

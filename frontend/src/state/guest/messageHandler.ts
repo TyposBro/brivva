@@ -1,11 +1,13 @@
 import { type Dispatch } from "react";
 import { type RoomMessage, type RoomSocket } from "../../lib/RoomSocket";
 import { type TtsPlayer } from "../../lib/TtsPlayer";
+import { type VideoPlayer } from "../../lib/VideoPlayer";
 import { type GuestAction } from "./reducer";
 
 export function createGuestMessageHandler(
   dispatch: Dispatch<GuestAction>,
   player: TtsPlayer,
+  videoPlayer: VideoPlayer,
   socket: RoomSocket,
 ) {
   return (msg: RoomMessage) => {
@@ -32,6 +34,11 @@ export function createGuestMessageHandler(
 
       case "tts_end":
         player.finishReceiving(msg.utteranceId as number);
+        break;
+
+      // Live host video frames
+      case "face:frame":
+        videoPlayer.renderDirect(msg.data as string);
         break;
 
       case "room:closed":

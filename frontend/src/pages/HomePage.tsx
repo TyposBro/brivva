@@ -18,8 +18,12 @@ export default function HomePage() {
       </header>
 
       <main className="main">
-        <button className="record-btn home-create-btn" onClick={() => navigate("/host")}>
-          Create Room
+        <button className="record-btn home-create-btn" onClick={() => navigate("/dashboard")}>
+          Stream Dashboard
+        </button>
+
+        <button className="record-btn home-create-btn" onClick={() => navigate("/host")} style={{ marginTop: "0.75rem", background: "var(--surface2)" }}>
+          Quick Room (no YouTube)
         </button>
 
         <div className="home-divider"><span>or join a room</span></div>

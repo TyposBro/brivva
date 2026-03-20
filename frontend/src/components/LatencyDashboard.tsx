@@ -7,8 +7,10 @@ const MIN_MAX_MS = 1000;
 const MAX_TARGET_PCT = 99;
 
 const COLORS = {
+  stt: "#38bdf8",
   translate: "#8b5cf6",
   tts: "#f59e0b",
+  lipsync: "#f43f5e",
   overhead: "#555",
 };
 
@@ -99,8 +101,10 @@ function TimingRow({ timing: t, index, maxMs, targetPct }: {
   maxMs: number;
   targetPct: number;
 }) {
+  const sttW = (t.sttMs / maxMs) * 100;
   const transW = (t.translateMs / maxMs) * 100;
   const ttsW = (t.ttsMs / maxMs) * 100;
+  const lipsyncW = (t.lipsyncMs / maxMs) * 100;
   const overW = (t.overheadMs / maxMs) * 100;
 
   return (
@@ -109,8 +113,10 @@ function TimingRow({ timing: t, index, maxMs, targetPct }: {
         <span className="lp-row-label">#{index}</span>
         <div className="lp-bar-wrap">
           <div className="lp-bar">
+            {sttW > 0 && <Segment className="seg-stt" width={sttW} />}
             <Segment className="seg-translate" width={transW} />
             <Segment className="seg-tts" width={ttsW} />
+            {lipsyncW > 0 && <Segment className="seg-lipsync" width={lipsyncW} />}
             <Segment className="seg-overhead" width={overW} />
           </div>
           <div className="lp-target-marker" style={{ left: `${targetPct}%` }} />
@@ -118,8 +124,10 @@ function TimingRow({ timing: t, index, maxMs, targetPct }: {
         <span className="lp-row-ms">{t.totalMs.toLocaleString()}ms</span>
       </div>
       <div className="lp-row-detail">
+        {t.sttMs > 0 && <LegendDot color={COLORS.stt} label={`${t.sttMs.toLocaleString()}ms`} />}
         <LegendDot color={COLORS.translate} label={`${t.translateMs.toLocaleString()}ms`} />
         <LegendDot color={COLORS.tts} label={`${t.ttsMs.toLocaleString()}ms`} />
+        {t.lipsyncMs > 0 && <LegendDot color={COLORS.lipsync} label={`${t.lipsyncMs.toLocaleString()}ms`} />}
         <span className="lp-overhead">+{t.overheadMs.toLocaleString()}ms overhead</span>
         <span className="lp-text">"{t.text}"</span>
       </div>
@@ -143,8 +151,9 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 function Legend() {
   return (
     <div className="lp-legend-row">
+      <LegendDot color={COLORS.stt} label=" Nova-3 STT" />
       <LegendDot color={COLORS.translate} label=" Translate" />
-      <LegendDot color={COLORS.tts} label=" TTS (Kokoro)" />
+      <LegendDot color={COLORS.tts} label=" TTS (ElevenLabs)" />
       <LegendDot color={COLORS.overhead} label=" Overhead" />
       <span className="lp-scale-label">┊ = {TARGET_MS}ms target</span>
     </div>

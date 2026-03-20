@@ -1,188 +1,249 @@
 # Brivva Real-Time Translation Prototype
 
-## Purpose
+## Current Status (Mar 20 2026)
 
-Demo prototype for Brivva technical interview. Real-time voice translation + lip-sync for live commerce.
-I'm the top candidate out of 15. In-person meeting Friday Mar 21, 12PM at Yeongdeungpo Times Square coffee shop with Simon and CTO.
-
-## Current Status (Mar 17 2026)
-
-**v3 — WORKING and deployed.** Fully self-hosted Rust pipeline:
+**v7 — Zero-config platform UX.** 13-platform streaming with magic paste, credential vault, key-only mode, deep links. Feature complete for demo.
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
 - **Tunnel:** brivva-server.milliytechnology.org → localhost:3000
 - **Repo:** https://github.com/TyposBro/brivva (private)
-- Host speaks (EN or KO) → guests pick EN/JA/ZH → each gets translated ElevenLabs audio
-- Rooms backed by DashMap (concurrent hash map, per-shard locking)
-- STT: CF Nova-3 via stt-wrapper (streaming interims + finals)
-- Translation: NLLB-200-distilled-600M (self-hosted, 82-164ms GPU)
-- TTS: ElevenLabs eleven_flash_v2_5 (API, 548-1440ms, 32 languages)
+
+### What's Working
+
+- Host speaks (KO/EN) → real-time STT → NLLB translation → ElevenLabs TTS → translated audio to guests
+- YouTube OAuth2 flow → auto-create broadcasts per language via YouTube Data API v3
+- Multi-platform RTMP: 13 platforms (YouTube auto, rest manual RTMP URL + stream key)
+- Zero-config UX: magic paste (auto-detect platform from RTMP URL), credential vault (save once, auto-fill), key-only mode (hide RTMP URL for known platforms), deep links to platform settings
+- Dashboard: session creation with platform picker, voice management, past sessions
+- Session page: stream cards with status, RTMP URLs, broadcast IDs
+- SQLite persistence: users, voices, sessions, streams, platform_credentials
+- Voice cloning: ElevenLabs /v1/voices/add → persistent cloned voices
+- PlatformProvider trait for future OAuth integrations (Twitch, Instagram)
 - Dockerized: 3 containers (server-rs, stt-wrapper, nllb)
 
-**Next: Add MuseTalk lip-sync as 4th container (see Lip-Sync Integration section below)**
+### What's NOT Working / TODO
 
-## Architecture (v3)
+- [ ] FFmpeg RTMP muxing not wired into pipeline (code written in ffmpeg.rs, not connected)
+- [ ] YouTube broadcast transition to "live" (requires RTMP push first)
+- [ ] Emotion-conditioned TTS style_params not reaching ElevenLabs
+
+### Production Hardening (Post-Demo Priority)
+
+- [ ] **Session cleanup:** Ensure DashMap rooms + FFmpeg processes are killed on WebSocket close (prevent memory leaks + zombie processes)
+- [ ] **Network resilience:** Buffer/reconnect on WebSocket drops, handle STT/TTS API 503s with fallback
+- [ ] **Sync drift:** After 45+ min streaming, translated audio drifts from video — needs timestamp-based correction
+- [ ] **Observability:** Grafana/Prometheus metrics for API latency, pipeline errors, active sessions
+- [ ] **Self-healing:** Auto-restart pipeline on crash, resume live streams without host refresh
+- [ ] **Global relay:** CDN for viewers outside ap-northeast-2 (currently ~400ms for non-Korea viewers)
+- [ ] **Stress testing:** Concurrent sessions, FFmpeg process limits, GPU memory under load
+
+### AWS Deployment (Live)
+
+- **GPU Instance:** g5.xlarge (i-0c0b95e319c20d355) — A10G 24GB, 4 vCPU, 16GB RAM
+- **IP:** 15.165.39.99 (ap-northeast-2)
+- **AMI:** Ubuntu 24.04 (ami-084a56dceed3eb9bb), 100GB gp3
+- **SSH:** `brivva` (alias) or `ssh -i ~/.ssh/brivva-key.pem ubuntu@15.165.39.99`
+- **Tunnel:** cloudflared `brivva-aws` (29f844ea-0954-4c32-8b21-30e1cf2ab580) → localhost:3000
+- **URL:** https://brivva-server.milliytechnology.org → g5.xlarge via cloudflared
+- **Running:** server-rs + stt-wrapper + nllb
+- **CPU Instance:** t3.small (i-08fbb51994a0c4217) — STOPPED, was temporary
+- **Security Group:** sg-0431248a86ea5644c (ports 22, 3000)
+- **Key Pair:** brivva-key (PEM at ~/.ssh/brivva-key.pem)
+- **IAM Users:** typosbro (personal), azizbek (work) — both AdministratorAccess
+- **AWS Account:** 132593557399
+- **Cost:** g5.xlarge ~$1.006/hr — STOP when not in use
+
+#### AWS CLI Profiles
+
+```bash
+aws <command> --profile azizbek   # work
+aws <command> --profile typosbro  # personal
+```
+
+#### Manage GPU Instance
+
+```bash
+aws ec2 start-instances --instance-ids i-0c0b95e319c20d355 --profile azizbek
+aws ec2 stop-instances --instance-ids i-0c0b95e319c20d355 --profile azizbek
+```
+
+#### SSH & Logs
+
+```bash
+brivva                                # SSH into instance
+brivva 'docker ps'                    # Check containers
+brivva 'cd ~/brivva && docker compose logs -f --tail 50'
+```
+
+### Lip-Sync (Removed)
+
+Wav2Lip and MuseTalk containers were removed. Lip-sync was a known industry problem — single reference frame → N output frames creates uncanny frozen body. Decision: demo audio-only translation (works well), mention lip-sync as scoped R&D.
+
+## Architecture (v6)
 
 ```
 Host Browser (/host)
   → PCM linear16 @ 16kHz → WebSocket → server-rs (Rust/axum :3000)
-  → stt-wrapper (:8766) → CF Nova-3 (streaming transcription)
+  → stt-wrapper (:8766) → Deepgram Nova-3 (streaming transcription)
   → NLLB (:8000) — per active language, parallel tokio::spawn
-  → ElevenLabs TTS (API) — streaming MP3
-  → WebSocket → Guest Browser (Blob URL playback)
+  → ElevenLabs TTS (API) — MP3 streamed to guests
+  → Guest Browser: TtsPlayer plays translated audio
+
+Dashboard (/dashboard)
+  → YouTube OAuth → connect account
+  → Create session → select platforms + languages
+  → YouTube: auto-create broadcasts via API
+  → Others: user pastes RTMP URL + stream key
+  → Session page shows stream cards with status
+
+Future: FFmpeg muxes host video + translated audio → RTMP push to each platform
 ```
 
-### v4 Target Architecture (with lip-sync)
+| Service     | Port | Tech                          | Latency       | GPU |
+| ----------- | ---- | ----------------------------- | ------------- | --- |
+| server-rs   | 3000 | Rust/axum, DashMap, sqlx      | orchestration | No  |
+| stt-wrapper | 8766 | Python asyncio, Deepgram API  | streaming     | No  |
+| NLLB        | 8000 | nllb-200-distilled-600M       | ~1.5-2.4s     | No  |
+| ElevenLabs  | API  | eleven_flash_v2_5             | 548-1440ms    | No  |
 
+## Multi-Platform Streaming
+
+### Supported Platforms (13)
+
+| Platform | Region | Auto | Default RTMP |
+|----------|--------|------|-------------|
+| YouTube | Global | Yes (API) | Auto-created |
+| Instagram | Global | No | rtmps://live-upload.instagram.com:443/rtmp/ |
+| TikTok | Global | No | Dynamic (user pastes) |
+| Twitch | Global | No | rtmp://live.twitch.tv/app/ |
+| Coupang Live | Korea | No | Dynamic |
+| Naver Shopping Live | Korea | No | Dynamic |
+| Rakuten Live | Japan | No | Dynamic |
+| Douyin (抖音) | China | No | Dynamic |
+| Taobao Live (淘宝直播) | China | No | Dynamic |
+| Kuaishou (快手) | China | No | rtmp://live.kuaishou.com/live/ |
+| Xiaohongshu (小红书) | China | No | Dynamic |
+| Bilibili (哔哩哔哩) | China | No | rtmp://live-push.bilivideo.com/live-bvc/ |
+| Custom RTMP | Other | No | User-provided |
+
+### How It Works
+
+- **YouTube**: OAuth2 → auto-create broadcast + stream per language → bind → get RTMP key
+- **All others**: User copies stream key from platform, pastes into Brivva
+- **Zero-config UX features:**
+  - Magic Paste: paste any RTMP URL → auto-detect platform + split into URL/key
+  - Key-Only Mode: Instagram, Twitch, Kuaishou, Bilibili hide RTMP URL (known base URLs)
+  - Credential Vault: saved per-user in `platform_credentials` table, auto-fills next session
+  - Deep Links: "Open Settings →" buttons link directly to each platform's streaming config
+  - Region Grouping: Global, Korea, Japan, China, Other — with step-by-step help text
+
+## REST API
+
+### YouTube OAuth
+- `GET /auth/youtube?user_id=...` → redirect to Google consent
+- `GET /auth/youtube/callback?code=&state=` → exchange token, store in DB, redirect to dashboard
+
+### User
+- `GET /api/user?user_id=...` → user info + YouTube connection status
+
+### Sessions
+- `POST /api/sessions` → create session + streams (YouTube auto, others manual)
+- `GET /api/sessions?user_id=...` → list sessions
+- `GET /api/sessions/:id` → session detail + streams
+- `DELETE /api/sessions/:id` → end session (transition YouTube broadcasts to complete)
+
+### Streams
+- `POST /api/sessions/:id/streams` → add stream to existing session
+- `DELETE /api/sessions/:session_id/streams/:stream_id` → remove stream
+
+### Voices
+- `POST /api/voices` → clone via ElevenLabs, save to DB
+- `GET /api/voices?user_id=...` → list saved voices
+- `DELETE /api/voices/:id` → delete from DB + ElevenLabs
+
+### Platform Credentials (Vault)
+- `GET /api/credentials?user_id=...` → list saved platform credentials
+- `POST /api/credentials` → upsert credential (auto-saved on session creation too)
+- `DELETE /api/credentials?user_id=&platform=` → remove saved credential
+
+## WebSocket Protocol
+
+Connection via query params:
+
+- Host: `ws://host/api/room?role=host&sourceLang=en`
+- Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
+
+**Host → Server:**
+- `[ArrayBuffer]` — PCM audio frames
+- `"host:end"` — close room
+
+**Server → Host:**
+- room:created, room:guest_count, interim, final, translation, tts_end
+
+**Server → Guest:**
+- room:joined, interim, final, translation
+- tts_start → [MP3 binary blob] → tts_end (audio)
+- room:closed
+
+## Database Schema (SQLite)
+
+```sql
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  youtube_channel_id TEXT,
+  youtube_channel_name TEXT,
+  youtube_access_token TEXT,
+  youtube_refresh_token TEXT,
+  youtube_token_expires_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE voices (
+  id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id),
+  elevenlabs_voice_id TEXT,
+  name TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id),
+  voice_id TEXT REFERENCES voices(id),
+  title TEXT,
+  source_lang TEXT,
+  target_langs TEXT,          -- JSON array: ["en","ja","zh"]
+  status TEXT,                -- "setup" | "live" | "ended"
+  room_id TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE streams (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES sessions(id),
+  lang TEXT,
+  platform TEXT,              -- "youtube", "instagram", "coupang", etc.
+  platform_broadcast_id TEXT,
+  platform_stream_id TEXT,
+  stream_key TEXT,
+  rtmp_url TEXT,
+  status TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE platform_credentials (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  rtmp_url TEXT,
+  stream_key TEXT,
+  display_name TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(user_id, platform)
+);
 ```
-Host Browser (/host)
-  → PCM audio → server-rs → STT → NLLB → ElevenLabs TTS
-  → TTS audio (MP3) + host face image → MuseTalk (:8100)
-  → MuseTalk returns lip-synced video frames
-  → WebSocket → Guest Browser (video + audio playback)
-```
-
-| Service     | Port | Tech                             | Latency            | GPU |
-| ----------- | ---- | -------------------------------- | ------------------ | --- |
-| server-rs   | 3000 | Rust/axum, DashMap, mpsc         | orchestration      | No  |
-| stt-wrapper | 8766 | Python asyncio, CF Nova-3 API    | streaming          | No  |
-| NLLB        | 8000 | nllb-200-distilled-600M, FastAPI | 82-164ms           | Yes |
-| ElevenLabs  | API  | eleven_flash_v2_5                | 548-1440ms         | No  |
-| MuseTalk    | 8100 | MuseTalk v1.5, FastAPI           | ~33ms/frame @30fps | Yes |
-
-## Lip-Sync Integration Plan (MuseTalk v1.5)
-
-### Why MuseTalk
-
-- **Real-time capable:** 30fps+ on V100, MIT license for code, commercial OK for model
-- **Audio-driven:** Takes audio + face image → outputs lip-synced video frames (exactly what we need after TTS)
-- **Multi-language:** Supports EN, JA, ZH audio input
-- **256x256 face region:** Good enough for PIP window in live commerce stream
-- **v1.5 improvements:** GAN + perceptual + sync loss for better quality, training code open-sourced
-
-### Alternatives Considered
-
-| Tool          | Type                | Real-time? | Why Not                               |
-| ------------- | ------------------- | ---------- | ------------------------------------- |
-| Wav2Lip       | Lips only           | Fast       | Uncanny, frozen face                  |
-| LivePortrait  | Expression transfer | ~80ms      | Needs driving video, not audio        |
-| Sync Labs API | Cloud lip-sync      | sub-200ms  | API dependency, expensive at scale    |
-| InfiniteTalk  | Full body + face    | Batch only | Not real-time, can't self-host easily |
-
-### Dockerization Plan
-
-```dockerfile
-# musetalk/Dockerfile
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
-
-# Python 3.10 + PyTorch + CUDA
-# mmcv, mmpose, mmdet (MMLab ecosystem)
-# Model weights downloaded at build time
-# FastAPI wrapper exposing REST API
-
-EXPOSE 8100
-```
-
-### API Design (musetalk/server.py)
-
-```
-POST /lipsync
-  Body: { "audio_base64": "...", "face_image_base64": "..." }
-  Response: { "frames_base64": ["frame1", "frame2", ...], "fps": 25, "lipsync_ms": 342 }
-
-POST /lipsync/stream  (stretch goal)
-  Body: { "audio_base64": "...", "face_image_base64": "..." }
-  Response: streaming MJPEG or raw RGB frames
-
-GET /health
-  Response: { "status": "healthy", "model": "musetalk_v1.5", "device": "cuda" }
-```
-
-### Integration into server-rs Pipeline
-
-```
-Current: ... → ElevenLabs TTS (MP3 audio) → stream to guests
-With lip-sync: ... → ElevenLabs TTS (MP3 audio)
-  → server-rs sends audio + host face to MuseTalk :8100
-  → MuseTalk returns lip-synced video frames
-  → server-rs streams video frames + audio to guests
-```
-
-### Host Face Capture
-
-- Host's webcam captures a reference face image on room creation
-- Sent to server-rs as a single frame (not streaming video)
-- Stored in Room state, reused for all lip-sync calls in that room
-- Frontend: capture from `<video>` element using canvas.toDataURL()
-
-### Guest Playback Changes
-
-- Currently: audio only (Blob URL MP3 playback)
-- With lip-sync: video + audio (MJPEG or canvas rendering + audio sync)
-- Stretch: `<video>` element with MediaSource Extensions for synchronized playback
-
-### GPU Requirements
-
-- MuseTalk inference: ~2-4GB VRAM (fp16)
-- NLLB: ~2GB VRAM
-- Total: ~4-6GB VRAM — fits on RTX 4060 (8GB) or A10G (24GB)
-- RTX 3050 Ti 4GB can run MuseTalk alone but tight with NLLB
-
-### Docker Compose (v4 — 4 containers)
-
-```yaml
-services:
-  server-rs:
-    build: ./server-rs
-    ports: ["3000:3000"]
-    depends_on: [stt-wrapper, nllb, musetalk]
-
-  stt-wrapper:
-    build: ./stt-wrapper
-    ports: ["8766:8766"]
-
-  nllb:
-    build: ./nllb
-    ports: ["8000:8000"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-
-  musetalk:
-    build: ./musetalk
-    ports: ["8100:8100"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-```
-
-### Build Order
-
-1. **Dockerize MuseTalk standalone** — get inference working in container with GPU
-2. **Add FastAPI wrapper** — POST /lipsync endpoint, health check
-3. **Test standalone** — curl with sample audio + face → get frames back
-4. **Add to docker-compose** — 4th container alongside existing 3
-5. **Integrate into pipeline.rs** — after TTS, call MuseTalk, stream frames
-6. **Update frontend** — GuestPage renders video frames + plays audio
-7. **Benchmark** — measure added latency from lip-sync step
-
-### Risks
-
-- **MuseTalk dependency hell:** mmcv/mmpose/mmdet have strict version requirements. Docker isolates this.
-- **GPU memory contention:** NLLB + MuseTalk sharing GPU. May need to sequence, not parallelize.
-- **Latency increase:** MuseTalk adds ~33ms/frame at 30fps. For 2-second audio = ~60 frames = ~2s processing. May need to pipeline (process frames as audio streams in).
-- **Video streaming complexity:** Switching from audio-only to video+audio changes the entire guest playback. May keep audio-only as default, video as opt-in.
-
-### Deadline
-
-- **Thursday 6pm** — stop working on lip-sync regardless of state
-- **If working:** demo with video + audio Friday
-- **If not working:** demo with audio only Friday (still impressive), mention lip-sync as scoped and in progress
 
 ## Key Technical Decisions
 
@@ -192,173 +253,127 @@ services:
 - Durable Objects add complexity (DO pinning, isolate eviction, no GPU)
 - All services co-located eliminates ~170-350ms network overhead per utterance
 - Persistent WebSocket connections (Workers have 30s idle timeout issues)
-- GPU access for NLLB (Workers have no GPU)
 
 ### Why DashMap over HashMap+Mutex
 
 - DashMap locks per-shard: concurrent room access without blocking all rooms
 - HashMap+Mutex locks entire map: one slow room blocks all tokio tasks
-- Real-world: 100 rooms = DashMap handles concurrent joins/leaves; Mutex serializes them
-
-### Why CF Nova-3 (via stt-wrapper) over Whisper
-
-- Streaming (interims while speaking) vs batch-only
-- Better accuracy for short phrases (Whisper hallucinates on silence/ambiguous chunks)
-- stt-wrapper proxies audio, returns clean { type: "interim"/"final", text } events
-- No local GPU needed for STT
 
 ### Why NLLB over M2M100/LLM
 
 - NLLB = Meta's successor to M2M100: better quality, 200 languages
 - distilled-600M = half the size of M2M100-1.2B, faster inference
-- Self-hosted = no CF Workers AI dependency, no network roundtrip
-- Seq2seq = dedicated translation model, ~3x faster than LLM prompting
-
-### Why ElevenLabs over Kokoro
-
-- 32 languages with natural expressive voices
-- Kokoro (82M params) sounds robotic, lacks emotional range
-- API-based: no local GPU needed, no model download
-- Tradeoff: API dependency + per-character cost
-
-### Why MuseTalk over alternatives
-
-- Audio-driven lip-sync (not expression transfer like LivePortrait)
-- 30fps+ real-time inference on V100
-- MIT license for code, commercial OK for model
-- Multi-language audio support (EN, JA, ZH)
-- v1.5 with improved quality (GAN + sync loss)
-- Self-hostable: fits in Docker container with GPU
+- Self-hosted = no network roundtrip, ~3x faster than LLM prompting
 
 ### Fan-out optimization
 
 - Translate ONCE per language group, broadcast to all N guests
-- 50 JA guests = 1 NLLB call + 1 ElevenLabs call + 1 MuseTalk call, not 50
-- Each language runs in parallel via tokio::spawn + tokio::join!
+- 50 JA guests = 1 NLLB + 1 TTS call, not 50
 
-### Blob URL playback over MSE
+## Measured Latency
 
-- MSE addSourceBuffer("audio/mpeg") throws on Safari
-- Blob URL: buffer all chunks until tts_end, then play via Blob URL
-- Works on every browser
-- Tradeoff: slight delay (must wait for all chunks) vs MSE streaming
-
-## WebSocket Protocol (v3)
-
-Connection via query params (no JSON handshake):
-
-- Host: `ws://host/api/room?role=host&sourceLang=en`
-- Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
-
-**Host → Server:** `[ArrayBuffer]` (PCM audio frames), `"host:end"` (close room)
-**Server → Host:** room:created, room:guest_count, interim, final, translation, tts_end
-**Server → Guest:** room:joined, interim, final, translation, tts_start, [MP3 chunks], tts_end, room:closed
-
-### v4 Protocol Additions (with lip-sync)
-
-**Host → Server:** (new) face image on room creation for lip-sync reference
-**Server → Guest:** (new) video_start, [video frame chunks], video_end alongside tts_start/tts_end
-
-## Bug Fixes Log
-
-- **TTS queue freeze** — audio.play() Promise rejection left playing flag stuck true. Without .catch(), queue permanently frozen. Fix: .catch() calls advance() to move to next item.
-- **AudioContext unlock** — Browser autoplay policy blocks audio.play() until user gesture. Guest language picker calls new AudioContext(); ctx.resume() on click.
-- **URL.revokeObjectURL** — Must revoke blob URL after playback to prevent memory leaks. Each blob stays in memory until explicitly revoked.
-- **Whisper hallucination** — Whisper generates random coherent text ("space whale", "sustainable shoe brand") on silence/ambiguous audio. Fix: switched to CF Nova-3 which handles silence correctly.
-- **STT retry loop** — stt-wrapper may still be starting when server-rs boots. Retries connection 10 times, 3 seconds apart.
-- **PCM encoding** — Web Audio captures Float32 [-1,1]. STT expects Int16. Convert: Math.max(-32768, Math.min(32767, float32 \* 32768)).
-
-## Measured Latency (v3, self-hosted)
-
-| Phase                              | Typical         | Notes                          |
-| ---------------------------------- | --------------- | ------------------------------ |
-| STT (Nova-3 via stt-wrapper)       | streaming       | Interims arrive while speaking |
-| Translation (NLLB GPU)             | 82-164ms        | Warm, per language             |
-| TTS (ElevenLabs)                   | 548-1440ms      | Depends on text length         |
-| Lip-sync (MuseTalk, planned)       | ~33ms/frame     | 30fps on V100, TBD on RTX 4060 |
-| Overhead (routing)                 | ~11ms           | localhost, no network hops     |
-| **Total from utterance finalized** | **~650-1600ms** | Without lip-sync               |
-| **Target**                         | **<300ms**      | Gap: ~2-5x                     |
+| Phase                        | Measured      | Notes                    |
+| ---------------------------- | ------------- | ------------------------ |
+| STT (Deepgram Nova-3)       | streaming     | Interims while speaking  |
+| Translation (NLLB)          | 1537-2434ms   | CPU inference            |
+| TTS (ElevenLabs, buffered)  | 711ms         | API call                 |
+| **Total (audio only)**      | **~2.5-3.5s** | STT + NLLB + TTS        |
+| **Target**                  | **<300ms**    | Gap: ~10x                |
 
 ## Rust Server Key Concepts
 
-- **AppState:** Arc<AppState> holds DashMap<String, Room> (rooms) + reqwest::Client (shared HTTP client)
-- **Room:** host_tx (mpsc sender to host), guests DashMap<String, Guest>, source_lang
-- **Guest:** tx (mpsc sender), lang, id
-- **mpsc channels:** Each WebSocket connection gets a (tx, rx) pair. tx stored in Room, rx drives the WebSocket send loop
-- **tokio::spawn:** Used for parallel per-language translation+TTS. One task per active language group
-- **Pipeline flow:** handle_host_message → pipeline::process_utterance → spawn per-lang → translate → tts → (lipsync) → broadcast
+- **AppState:** `rooms: Arc<DashMap<String, Room>>` + `db: SqlitePool`
+- **Room:** host_tx, guests DashMap, source_lang, frame_buffer
+- **Pipeline flow:** host audio → STT → final → spawn per-lang → translate → TTS → broadcast audio
+- **Routes:** REST API for OAuth, sessions, streams, voices (routes.rs)
 
-## Frontend Architecture (refactored, clean)
+## Frontend Architecture
 
-- `src/lib/AudioPipeline.ts` — mic capture, AudioContext, Float32→Int16 conversion
-- `src/lib/RoomSocket.ts` — WebSocket connect, sendAudio, sendJson, routeMessage
-- `src/lib/TtsPlayer.ts` — Blob URL playback queue (startReceiving → addChunk → finishReceiving → advance)
-- `src/hooks/hostReducer.ts` — pure function, all state transitions, zero side effects
-- `src/hooks/useHostRoom.ts` — thin orchestrator: WS messages → dispatch, uses AudioPipeline + RoomSocket
-- `src/hooks/useTimings.ts` — per-utterance stopwatch (startTimer → recordSplit → finalize)
-- `src/components/LatencyDashboard.tsx` — live per-utterance stacked bars
-- `src/components/PipelineAnalysis.tsx` — static pipeline comparison
-
-## Docker Services
-
-```yaml
-# docker-compose.yml — 3 containers (current), 4 with lip-sync
-server-rs: Rust axum, port 3000, no GPU
-stt-wrapper: Python asyncio, port 8766, no GPU (CF Nova-3 API proxy)
-nllb: FastAPI + nllb-200-distilled-600M, port 8000, optional GPU
-musetalk: FastAPI + MuseTalk v1.5, port 8100, GPU required (planned)
-```
+- `src/lib/api.ts` — REST API client, PLATFORMS array (13 platforms), detectPlatform(), credential vault API
+- `src/lib/AudioPipeline.ts` — mic capture, Float32→Int16 conversion
+- `src/lib/RoomSocket.ts` — WebSocket connect, sendAudio, sendJson
+- `src/lib/TtsPlayer.ts` — Blob URL audio playback queue
+- `src/hooks/useHostRoom.ts` — orchestrator: WebSocket + AudioPipeline
+- `src/hooks/useGuestRoom.ts` — guest: TtsPlayer + RoomSocket
+- `src/state/host/` — reducer + message handler
+- `src/state/guest/` — reducer + message handler
+- `src/pages/DashboardPage.tsx` — YouTube connect, voice mgmt, magic paste, credential vault, key-only platforms
+- `src/pages/SessionPage.tsx` — stream cards with platform badges, RTMP URLs, end session
+- `src/pages/HostPage.tsx` — webcam preview, room code, audio recorder
+- `src/pages/GuestPage.tsx` — language picker, translations, audio playback
 
 ## Project Structure
 
 ```
 brivva/
-├── server-rs/                     Rust axum WebSocket server
-│   ├── Dockerfile
+├── server-rs/                     Rust axum WebSocket + REST server
+│   ├── Dockerfile                 Multi-stage: rust:1.85 builder + debian slim runtime
+│   ├── Cargo.toml                 axum, dashmap, reqwest, tokio, serde, sqlx, chrono
 │   └── src/
-│       ├── main.rs                Entry, router, AppState
-│       ├── types.rs               Lang, Room, Guest, ServerMsg
-│       ├── pipeline.rs            STT → Translate → TTS → (Lip-sync) pipeline
-│       └── room/handler.rs        WebSocket host/guest handlers
-├── stt-wrapper/                   STT proxy (CF Nova-3)
-│   └── server.py                  asyncio WebSocket proxy
+│       ├── main.rs                Entry, AppState (rooms + db), router
+│       ├── types.rs               Lang, Room (frame_buffer), Guest, ServerMsg
+│       ├── db.rs                  SQLite init + CRUD (users, voices, sessions, streams)
+│       ├── youtube.rs             OAuth2 + broadcast/stream management
+│       ├── routes.rs              REST API handlers (OAuth, sessions, voices, streams, credentials)
+│       ├── platform.rs            PlatformProvider trait, detect_platform(), settings_url()
+│       ├── pipeline.rs            STT → NLLB → TTS pipeline
+│       ├── ffmpeg.rs              RtmpManager (written, not yet wired)
+│       └── room/handler.rs        WS host/guest handlers
+├── stt-wrapper/                   STT proxy (Deepgram Nova-3)
+│   └── server.py
 ├── nllb/                          NLLB translation server
-│   └── server.py                  FastAPI, POST /translate
-├── musetalk/                      MuseTalk lip-sync server (planned)
 │   ├── Dockerfile
-│   └── server.py                  FastAPI, POST /lipsync
+│   └── server.py                  POST /translate
 ├── frontend/                      React 19 + TypeScript + Vite
 │   └── src/
-│       ├── pages/                 HostPage, GuestPage, HomePage
-│       ├── components/            LatencyDashboard, PipelineAnalysis
-│       ├── hooks/                 useHostRoom, useGuestRoom, useTimings, hostReducer
-│       ├── lib/                   AudioPipeline, RoomSocket, TtsPlayer
+│       ├── pages/                 HomePage, DashboardPage, SessionPage, HostPage, GuestPage
+│       ├── hooks/                 useHostRoom, useGuestRoom
+│       ├── lib/                   api, AudioPipeline, RoomSocket, TtsPlayer
 │       └── state/                 host/guest reducers + message handlers
-├── brivva-frames/                 Rust frame extraction CLI (built, working)
-├── docker-compose.yml             3 services (4 with lip-sync)
-├── .env                           API keys
+├── docker-compose.yml             3 services (server-rs, stt-wrapper, nllb)
+├── docker-compose.gpu.yml         GPU override (nvidia runtime)
+├── .env                           API keys (Deepgram, ElevenLabs, Google OAuth)
 └── CLAUDE.md                      ← you are here
 ```
 
-## Other Rust Projects Built
+## Docker Services
 
-### brivva-frames (completed)
+```yaml
+# docker-compose.yml — 3 containers
+server-rs: Rust axum, port 3000, REST + WebSocket
+stt-wrapper: Python asyncio, port 8766, Deepgram Nova-3
+nllb: FastAPI + nllb-200-distilled-600M, port 8000
 
-Real-time video frame extraction + face cropping pipeline in Rust.
+docker compose up
+```
 
-- Spawns FFmpeg, reads raw RGB frames from stdout pipe
-- Center-crops face region to 256×256 (MuseTalk input size)
-- Parallel batch processing with rayon, streaming with mpsc channels
-- Live preview window with minifb (side-by-side: full frame + cropped face)
-- Performance: 640x480 @28fps, 5.86ms avg crop latency
-- Demonstrates: ownership, borrowing, channels, parallel iterators, process spawning, Drop
+## Environment Variables
+
+```env
+ELEVENLABS_API_KEY=...
+DEEPGRAM_API_KEY=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://brivva-server.milliytechnology.org/auth/youtube/callback
+DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
+```
+
+## Bug Fixes Log
+
+- **TTS queue freeze** — audio.play() Promise rejection left playing flag stuck. Fix: .catch() calls advance()
+- **AudioContext unlock** — Browser autoplay policy. Fix: guest language picker calls AudioContext.resume() on click
+- **URL.revokeObjectURL** — Must revoke blob URL after playback to prevent memory leaks
+- **Whisper hallucination** — Random text on silence. Fix: switched to Deepgram Nova-3
+- **STT retry loop** — stt-wrapper may still be starting. Retries 10x, 3s apart
+- **PCM encoding** — Float32→Int16: Math.max(-32768, Math.min(32767, float32 * 32768))
+- **Redirect URI mismatch** — Must point to backend server, not frontend (Google OAuth requires exact match)
+- **Old DB incompatible** — Adding platform column broke existing SQLite. Fix: delete DB file before restart
 
 ## About Brivva
 
 - Real-time multilingual live commerce platform
-- Voice translation + lip-sync for live streams
-- Distribute to TikTok, Naver, Instagram, Rakuten simultaneously
+- Voice translation for live streams
+- Distribute to YouTube, TikTok, Naver, Instagram, Coupang, Rakuten, Chinese platforms simultaneously
 - Founders have previous exit, seed round closing April
 - 10 paying customers ($30-80K contracts)
 - Stack: Rust backend, React/TS frontend, AWS
