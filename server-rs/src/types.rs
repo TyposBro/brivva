@@ -77,10 +77,6 @@ pub struct Room {
     pub guests: DashMap<String, Guest>,
     /// Cloned voice ID from ElevenLabs (None until clone completes)
     pub voice_clone_id: Option<String>,
-    /// Buffer for first N seconds of host PCM (None after clone is triggered)
-    pub pcm_buffer: Option<Vec<u8>>,
-    /// Total PCM bytes buffered so far
-    pub pcm_bytes: usize,
 }
 
 impl Room {
@@ -91,8 +87,6 @@ impl Room {
             host_tx: None,
             guests: DashMap::new(),
             voice_clone_id: None,
-            pcm_buffer: Some(Vec::new()),
-            pcm_bytes: 0,
         }
     }
 
@@ -198,6 +192,12 @@ pub enum ServerMsg {
         utterance_id: u64,
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
+    },
+
+    #[serde(rename = "voice:ready")]
+    VoiceReady {
+        #[serde(rename = "voiceId")]
+        voice_id: String,
     },
 
     #[serde(rename = "face:frame")]

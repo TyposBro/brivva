@@ -106,66 +106,45 @@ async fn handle_host(
         pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, audio_rx).await;
     });
 
-    // PCM buffering: 16kHz × 16-bit × 1ch = 32,000 bytes/sec. 5 sec = 160,000 bytes.
-    const CLONE_PCM_BYTES: usize = 160_000;
-
     // Read loop: host sends binary audio or text commands
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(data) => {
                 // Forward audio to the STT pipeline
                 let _ = audio_tx.send(data.to_vec());
-
-                // Buffer PCM for voice cloning (first ~5 seconds)
-                let should_clone = {
-                    if let Some(mut room) = rooms.get_mut(&room_id) {
-                        if let Some(ref mut buf) = room.pcm_buffer {
-                            buf.extend_from_slice(&data);
-                            room.pcm_bytes += data.len();
-                            if room.pcm_bytes % 32000 < data.len() {
-                                eprintln!("[VOICE_CLONE] buffering PCM: {} / {} bytes", room.pcm_bytes, CLONE_PCM_BYTES);
-                            }
-                            room.pcm_bytes >= CLONE_PCM_BYTES
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                if should_clone {
-                    eprintln!("[VOICE_CLONE] threshold reached, triggering clone for room {}", room_id);
-                    let pcm_data = {
-                        if let Some(mut room) = rooms.get_mut(&room_id) {
-                            room.pcm_buffer.take()
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(pcm) = pcm_data {
-                        let rooms_clone = rooms.clone();
-                        let rid = room_id.clone();
-                        tokio::spawn(async move {
-                            pipeline::clone_voice(pcm, &rooms_clone, &rid).await;
-                        });
-                    }
-                }
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
                     break;
                 }
-                // Forward face frames to all guests (live video)
+
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
-                    if json.get("type").and_then(|v| v.as_str()) == Some("face:frame") {
-                        if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
-                            if let Some(room) = rooms.get(&room_id) {
-                                room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
-                                    data: data.to_string(),
-                                }));
+                    match json.get("type").and_then(|v| v.as_str()) {
+                        // Forward face frames to all guests (live video)
+                        Some("face:frame") => {
+                            if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                                if let Some(room) = rooms.get(&room_id) {
+                                    room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
+                                        data: data.to_string(),
+                                    }));
+                                }
                             }
                         }
+                        // Voice sample for cloning (base64 PCM from dedicated recording)
+                        Some("voice:sample") => {
+                            if let Some(pcm_b64) = json.get("data").and_then(|v| v.as_str()) {
+                                use base64::Engine;
+                                if let Ok(pcm) = base64::engine::general_purpose::STANDARD.decode(pcm_b64) {
+                                    eprintln!("[VOICE_CLONE] received voice sample: {} bytes PCM", pcm.len());
+                                    let rooms_clone = rooms.clone();
+                                    let rid = room_id.clone();
+                                    tokio::spawn(async move {
+                                        pipeline::clone_voice(pcm, &rooms_clone, &rid).await;
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

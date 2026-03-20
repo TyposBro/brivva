@@ -1,11 +1,11 @@
-"""STT Service: Cloudflare Workers AI (Deepgram Nova-3) WebSocket proxy.
+"""STT Service: Deepgram Nova-3 WebSocket proxy.
 
 Accepts raw PCM audio (16kHz, 16-bit, mono) from the Rust server,
-streams it to CF Workers AI Deepgram Nova-3 via WebSocket, and emits
+streams it to Deepgram Nova-3 via WebSocket, and emits
 clean interim/final events back.
 
-Extracts prosody features from buffered PCM and sentiment from Deepgram,
-classifies emotion, and maps to ElevenLabs voice_settings style params.
+Extracts prosody features from buffered PCM, classifies emotion via
+prosody analysis, and maps to ElevenLabs voice_settings style params.
 
 Protocol (server → client):
   {"type": "interim", "text": "Hello world"}
@@ -25,16 +25,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("stt")
 
 STT_PORT = int(os.environ.get("STT_PORT", "8766"))
-CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
-CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "en")
 SAMPLE_RATE = 16000
 
-# Build Deepgram Nova-3 WebSocket URL via CF Workers AI
+# Direct Deepgram Nova-3 WebSocket URL
 DG_WS_URL = (
-    f"wss://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
-    f"/ai/run/@cf/deepgram/nova-3"
-    f"?encoding=linear16"
+    f"wss://api.deepgram.com/v1/listen"
+    f"?model=nova-3"
+    f"&encoding=linear16"
     f"&sample_rate={SAMPLE_RATE}"
     f"&channels=1"
     f"&language={STT_LANGUAGE}"
@@ -44,7 +43,6 @@ DG_WS_URL = (
     f"&endpointing=400"
     f"&vad_events=true"
     f"&utterance_end_ms=1500"
-    f"&sentiment=true"
 )
 
 
@@ -131,41 +129,61 @@ def compute_speaking_rate(prosody: dict, word_count: int) -> dict:
 # ── Emotion Classification ──────────────────────────────
 
 def classify_emotion(prosody: dict, sentiment: str, sentiment_score: float) -> str:
-    """Classify emotion from prosody features + Deepgram sentiment.
+    """Classify emotion from prosody features (prosody-first, sentiment optional).
+
+    Calibrated for web mic at arm's length (energy 0.01-0.05 RMS range).
+    Speaking rate is unreliable (PCM buffer includes silence), so it's used
+    only as a secondary signal.
 
     Returns one of: excited, happy, angry, sad, serious, neutral
     """
-    energy = prosody.get("energy_rms", 0.05)
-    rate = prosody.get("speaking_rate_wpm", 150)
-    pitch_std = prosody.get("pitch_std", 20)
+    energy = prosody.get("energy_rms", 0.025)
+    pitch_std = prosody.get("pitch_std", 50)
+    pitch_mean = prosody.get("pitch_mean", 150)
     pause_density = prosody.get("pause_density", 0.3)
 
-    # Normalize features to 0-1
-    energy_n = min(1.0, max(0.0, (energy - 0.01) / 0.14))
-    rate_n = min(1.0, max(0.0, (rate - 80) / 140))
-    pitch_var_n = min(1.0, max(0.0, (pitch_std - 5) / 50))
+    # Calibrated for actual web mic range
+    # Observed: quiet=0.01, normal=0.02-0.03, loud=0.04+
+    is_loud = energy > 0.035
+    is_quiet = energy < 0.018
+    is_normal_energy = not is_loud and not is_quiet
 
+    # Pitch variation: observed range 50-120 std
+    # Monotone < 55, normal 55-85, expressive > 85
+    is_expressive = pitch_std > 85
+    is_monotone = pitch_std < 55
+
+    # High pitch suggests excitement/stress (relative)
+    is_high_pitch = pitch_mean > 200
+
+    # Pause density > 0.4 = lots of hesitation/sadness
+    is_hesitant = pause_density > 0.4
+
+    # Sentiment (may be neutral/0.0 if CF Workers AI doesn't pass it)
+    has_sentiment = sentiment != "neutral" or abs(sentiment_score) > 0.1
     is_positive = sentiment == "positive" or sentiment_score > 0.3
     is_negative = sentiment == "negative" or sentiment_score < -0.3
-    is_high_energy = energy_n > 0.6
-    is_low_energy = energy_n < 0.3
-    is_fast = rate_n > 0.6
-    is_slow = rate_n < 0.3
-    is_varied_pitch = pitch_var_n > 0.5
-    is_many_pauses = pause_density > 0.4
 
-    # Classification rules
-    if is_high_energy and is_fast and is_varied_pitch and is_positive:
+    # Classification rules (prosody-first, sentiment boosts)
+    if is_loud and is_expressive and (is_high_pitch or is_positive):
         return "excited"
-    if is_high_energy and is_positive:
+    if is_loud and is_expressive:
+        return "angry"  # loud + varied but not high pitch
+    if is_loud and (is_positive or not is_monotone):
         return "happy"
-    if is_high_energy and is_negative:
-        return "angry"
-    if is_low_energy and is_slow and (is_negative or is_many_pauses):
+    if is_quiet and is_monotone and is_hesitant:
         return "sad"
-    if not is_high_energy and not is_varied_pitch and not is_positive:
+    if is_quiet and (is_hesitant or is_monotone):
+        return "sad"
+    if is_normal_energy and is_monotone:
         return "serious"
-    if is_positive:
+    if is_loud:
+        return "happy"
+    if is_expressive:
+        return "happy"
+    if has_sentiment and is_negative:
+        return "sad"
+    if has_sentiment and is_positive:
         return "happy"
 
     return "neutral"
@@ -242,8 +260,8 @@ def extract_sentiment(data: dict) -> tuple[str, float]:
 # ── WebSocket Handling ────────────────────────────────────
 
 async def connect_to_deepgram():
-    """Connect to CF Workers AI Deepgram Nova-3 WebSocket."""
-    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
+    """Connect to Deepgram Nova-3 WebSocket directly."""
+    headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
     for attempt in range(1, 11):
         try:
             ws = await websockets.connect(
@@ -263,11 +281,11 @@ async def handle_client(client_ws):
     """Handle one client: proxy audio to Deepgram, emit STT events with emotion."""
     log.info("Client connected")
 
-    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
-        log.error("CF_ACCOUNT_ID and CF_API_TOKEN must be set")
+    if not DEEPGRAM_API_KEY:
+        log.error("DEEPGRAM_API_KEY must be set")
         await client_ws.send(json.dumps({
             "type": "error",
-            "message": "STT not configured: missing CF credentials"
+            "message": "STT not configured: missing DEEPGRAM_API_KEY"
         }))
         await client_ws.close()
         return
@@ -409,7 +427,7 @@ async def handle_client(client_ws):
 
 async def main():
     log.info("STT server listening on ws://0.0.0.0:%d/asr", STT_PORT)
-    log.info("Using CF Workers AI Deepgram Nova-3 (lang=%s, sentiment=true)", STT_LANGUAGE)
+    log.info("Using Deepgram Nova-3 direct (lang=%s)", STT_LANGUAGE)
     async with websockets.serve(handle_client, "0.0.0.0", STT_PORT):
         await asyncio.Future()
 

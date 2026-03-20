@@ -22,8 +22,7 @@ services:
     ports:
       - "8766:8766"
     environment:
-      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
-      - CF_API_TOKEN=${CF_API_TOKEN}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - STT_LANGUAGE=en
     restart: unless-stopped
 

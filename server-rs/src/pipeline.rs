@@ -482,7 +482,11 @@ pub async fn clone_voice(pcm: Vec<u8>, rooms: &Rooms, room_id: &str) {
                 Ok(parsed) => {
                     println!("[VOICE_CLONE] success! voice_id={}", parsed.voice_id);
                     if let Some(mut room) = rooms.get_mut(room_id) {
-                        room.voice_clone_id = Some(parsed.voice_id);
+                        room.voice_clone_id = Some(parsed.voice_id.clone());
+                        // Notify host that voice is ready
+                        room.send_to_host(to_ws(&ServerMsg::VoiceReady {
+                            voice_id: parsed.voice_id,
+                        }));
                     }
                 }
                 Err(e) => eprintln!("[VOICE_CLONE] parse error: {}", e),
@@ -492,8 +496,21 @@ pub async fn clone_voice(pcm: Vec<u8>, rooms: &Rooms, room_id: &str) {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             eprintln!("[VOICE_CLONE] error {}: {}", status, body);
+            // Notify host of failure
+            if let Some(room) = rooms.get(room_id) {
+                room.send_to_host(to_ws(&ServerMsg::Error {
+                    message: format!("Voice clone failed: {}", status),
+                }));
+            }
         }
-        Err(e) => eprintln!("[VOICE_CLONE] request error: {}", e),
+        Err(e) => {
+            eprintln!("[VOICE_CLONE] request error: {}", e);
+            if let Some(room) = rooms.get(room_id) {
+                room.send_to_host(to_ws(&ServerMsg::Error {
+                    message: format!("Voice clone error: {}", e),
+                }));
+            }
+        }
     }
 }
 

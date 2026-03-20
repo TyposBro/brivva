@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useHostRoom } from "../hooks/useHostRoom";
 import { AudioRecorder } from "../components/AudioRecorder";
@@ -9,7 +9,9 @@ export default function HostPage() {
   const navigate = useNavigate();
   const {
     status, roomId, guestCounts, liveTranscript, utterances,
-    analyser, error, timings, videoRef, createRoom, startRecording, stopRecording, closeRoom,
+    analyser, error, timings, videoRef,
+    createRoom, startRecording, stopRecording, closeRoom,
+    startVoiceRecording, skipVoiceSetup,
   } = useHostRoom();
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -30,6 +32,27 @@ export default function HostPage() {
   const handleBack = () => {
     closeRoom();
     navigate("/");
+  };
+
+  // Voice recording timer
+  const [voiceTimer, setVoiceTimer] = useState(0);
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleStartVoice = () => {
+    setVoiceTimer(10);
+    setIsVoiceRecording(true);
+    startVoiceRecording();
+    voiceTimerRef.current = setInterval(() => {
+      setVoiceTimer((t) => {
+        if (t <= 1) {
+          clearInterval(voiceTimerRef.current!);
+          setIsVoiceRecording(false);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
   };
 
   const isReady = status === "ready" || status === "recording";
@@ -68,6 +91,38 @@ export default function HostPage() {
             <button className="copy-link-btn" onClick={copyLink}>
               Copy link
             </button>
+          </div>
+        )}
+
+        {/* Voice Setup Phase */}
+        {status === "voice_setup" && (
+          <div className="voice-setup-panel">
+            <h3>Voice Setup</h3>
+            <p className="voice-setup-desc">
+              Record a 10-second voice sample to clone your voice for translations.
+            </p>
+            {!isVoiceRecording && voiceTimer === 0 && (
+              <button className="voice-record-btn" onClick={handleStartVoice}>
+                Record Voice Sample
+              </button>
+            )}
+            {isVoiceRecording && (
+              <div className="voice-recording-indicator">
+                <span className="dot listening-dot" />
+                <span>Recording... {voiceTimer}s</span>
+              </div>
+            )}
+            <button className="voice-skip-btn" onClick={skipVoiceSetup}>
+              Skip (use default voice)
+            </button>
+          </div>
+        )}
+
+        {status === "cloning" && (
+          <div className="voice-setup-panel">
+            <div className="status-bar">
+              <span className="spinner" /> Cloning your voice...
+            </div>
           </div>
         )}
 
