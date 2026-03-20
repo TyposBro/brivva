@@ -31,6 +31,23 @@ pub struct CreateSessionBody {
     pub source_lang: String,
     pub target_langs: Vec<String>, // ["en","ja","zh"]
     pub voice_id: Option<String>,
+    #[serde(default)]
+    pub platforms: Vec<PlatformConfig>, // which platforms to stream to
+}
+
+#[derive(Deserialize, Clone)]
+pub struct PlatformConfig {
+    pub platform: String,    // "youtube", "instagram", "coupang", "custom"
+    pub rtmp_url: Option<String>,    // required for non-YouTube
+    pub stream_key: Option<String>,  // required for non-YouTube
+}
+
+#[derive(Deserialize)]
+pub struct AddStreamBody {
+    pub lang: String,
+    pub platform: String,
+    pub rtmp_url: String,
+    pub stream_key: String,
 }
 
 #[derive(Deserialize)]
@@ -119,14 +136,13 @@ pub async fn get_user(
 
 // ── Sessions ────────────────────────────────────────────
 
-/// POST /api/sessions → create session + YouTube broadcasts
+/// POST /api/sessions → create session + streams per platform
 pub async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
 ) -> impl IntoResponse {
     let target_langs_json = serde_json::to_string(&body.target_langs).unwrap_or_default();
 
-    // Create session in DB
     let session = db::create_session(
         &state.db,
         &body.user_id,
@@ -137,20 +153,6 @@ pub async fn create_session(
     )
     .await;
 
-    // Get valid YouTube token
-    let access_token = match youtube::ensure_valid_token(&state.db, &body.user_id).await {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("[SESSION] No YouTube token: {}", e);
-            // Return session without YouTube streams
-            return Json(serde_json::json!({
-                "session": session,
-                "streams": [],
-                "error": format!("YouTube not connected: {}", e),
-            }));
-        }
-    };
-
     // All languages: source + targets
     let mut all_langs = vec![body.source_lang.clone()];
     for lang in &body.target_langs {
@@ -159,79 +161,162 @@ pub async fn create_session(
         }
     }
 
-    // Create YouTube broadcasts + streams for each language
+    // Default to YouTube if no platforms specified
+    let platforms = if body.platforms.is_empty() {
+        vec![PlatformConfig {
+            platform: "youtube".to_string(),
+            rtmp_url: None,
+            stream_key: None,
+        }]
+    } else {
+        body.platforms.clone()
+    };
+
     let mut streams = Vec::new();
-    let scheduled_start = chrono::Utc::now().to_rfc3339();
+    let mut errors = Vec::new();
 
-    for lang in &all_langs {
-        // Create DB stream record
-        let stream_record = db::create_stream(&state.db, &session.id, lang).await;
+    for platform_config in &platforms {
+        let platform = &platform_config.platform;
 
-        // Create YouTube broadcast with translated title
-        let broadcast_title = format!("{} [{}]", body.title, lang.to_uppercase());
-        let broadcast = match youtube::create_broadcast(&access_token, &broadcast_title, &scheduled_start).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[SESSION] Failed to create broadcast for {}: {}", lang, e);
-                streams.push(serde_json::json!({
-                    "id": stream_record.id,
-                    "lang": lang,
-                    "error": e,
-                }));
-                continue;
+        match platform.as_str() {
+            "youtube" => {
+                // Auto-create YouTube broadcasts via API
+                let access_token = match youtube::ensure_valid_token(&state.db, &body.user_id).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[SESSION] No YouTube token: {}", e);
+                        errors.push(format!("YouTube: {}", e));
+                        continue;
+                    }
+                };
+
+                let scheduled_start = chrono::Utc::now().to_rfc3339();
+
+                for lang in &all_langs {
+                    let stream_record = db::create_stream(&state.db, &session.id, lang, "youtube").await;
+                    let broadcast_title = format!("{} [{}]", body.title, lang.to_uppercase());
+
+                    let broadcast = match youtube::create_broadcast(&access_token, &broadcast_title, &scheduled_start).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[SESSION] YouTube broadcast failed for {}: {}", lang, e);
+                            errors.push(format!("YouTube {}: {}", lang, e));
+                            continue;
+                        }
+                    };
+
+                    let yt_stream = match youtube::create_live_stream(&access_token, &broadcast_title).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[SESSION] YouTube stream failed for {}: {}", lang, e);
+                            errors.push(format!("YouTube stream {}: {}", lang, e));
+                            continue;
+                        }
+                    };
+
+                    let _ = youtube::bind_broadcast(&access_token, &broadcast.broadcast_id, &yt_stream.stream_id).await;
+
+                    db::update_stream_platform(
+                        &state.db,
+                        &stream_record.id,
+                        &broadcast.broadcast_id,
+                        &yt_stream.stream_id,
+                        &yt_stream.stream_key,
+                        &yt_stream.rtmp_url,
+                    )
+                    .await;
+
+                    streams.push(serde_json::json!({
+                        "id": stream_record.id,
+                        "lang": lang,
+                        "platform": "youtube",
+                        "broadcast_id": broadcast.broadcast_id,
+                        "rtmp_url": format!("{}/{}", yt_stream.rtmp_url, yt_stream.stream_key),
+                        "status": "ready",
+                    }));
+                }
             }
-        };
+            // Manual RTMP platforms: Instagram, Coupang, TikTok, custom, etc.
+            _ => {
+                let rtmp_url = match &platform_config.rtmp_url {
+                    Some(u) => u.clone(),
+                    None => {
+                        errors.push(format!("{}: RTMP URL required", platform));
+                        continue;
+                    }
+                };
+                let stream_key = platform_config.stream_key.as_deref().unwrap_or("");
 
-        // Create YouTube live stream (RTMP ingest)
-        let yt_stream = match youtube::create_live_stream(&access_token, &broadcast_title).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[SESSION] Failed to create stream for {}: {}", lang, e);
-                streams.push(serde_json::json!({
-                    "id": stream_record.id,
-                    "lang": lang,
-                    "broadcast_id": broadcast.broadcast_id,
-                    "error": e,
-                }));
-                continue;
+                // For manual platforms, create one stream per language
+                for lang in &all_langs {
+                    let record = db::create_stream_manual(
+                        &state.db,
+                        &session.id,
+                        lang,
+                        platform,
+                        &rtmp_url,
+                        stream_key,
+                    )
+                    .await;
+
+                    streams.push(serde_json::json!({
+                        "id": record.id,
+                        "lang": lang,
+                        "platform": platform,
+                        "rtmp_url": if stream_key.is_empty() {
+                            rtmp_url.clone()
+                        } else {
+                            format!("{}/{}", rtmp_url, stream_key)
+                        },
+                        "status": "ready",
+                    }));
+                }
             }
-        };
-
-        // Bind broadcast to stream
-        if let Err(e) =
-            youtube::bind_broadcast(&access_token, &broadcast.broadcast_id, &yt_stream.stream_id).await
-        {
-            eprintln!("[SESSION] Failed to bind {}: {}", lang, e);
         }
-
-        // Update DB with YouTube info
-        db::update_stream_youtube(
-            &state.db,
-            &stream_record.id,
-            &broadcast.broadcast_id,
-            &yt_stream.stream_id,
-            &yt_stream.stream_key,
-            &yt_stream.rtmp_url,
-        )
-        .await;
-
-        streams.push(serde_json::json!({
-            "id": stream_record.id,
-            "lang": lang,
-            "broadcast_id": broadcast.broadcast_id,
-            "stream_id": yt_stream.stream_id,
-            "rtmp_url": format!("{}/{}", yt_stream.rtmp_url, yt_stream.stream_key),
-            "status": "ready",
-        }));
     }
 
-    // Update session status
     db::update_session_status(&state.db, &session.id, "live", None).await;
 
-    Json(serde_json::json!({
+    let mut result = serde_json::json!({
         "session": session,
         "streams": streams,
-    }))
+    });
+    if !errors.is_empty() {
+        result["errors"] = serde_json::json!(errors);
+    }
+    Json(result)
+}
+
+/// POST /api/sessions/:id/streams → add a manual RTMP stream to existing session
+pub async fn add_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AddStreamBody>,
+) -> impl IntoResponse {
+    if db::get_session(&state.db, &id).await.is_none() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"}))).into_response();
+    }
+
+    let record = db::create_stream_manual(
+        &state.db,
+        &id,
+        &body.lang,
+        &body.platform,
+        &body.rtmp_url,
+        &body.stream_key,
+    )
+    .await;
+
+    Json(serde_json::json!(record)).into_response()
+}
+
+/// DELETE /api/sessions/:session_id/streams/:stream_id → remove a stream
+pub async fn remove_stream(
+    State(state): State<AppState>,
+    Path((_, stream_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    db::delete_stream(&state.db, &stream_id).await;
+    Json(serde_json::json!({"status": "deleted"}))
 }
 
 /// GET /api/sessions?user_id=... → list user's sessions
@@ -266,13 +351,16 @@ pub async fn delete_session(
         None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"}))),
     };
 
-    // End YouTube broadcasts
+    // End YouTube broadcasts (only for YouTube platform streams)
     let streams = db::list_streams(&state.db, &id).await;
-    if let Ok(access_token) = youtube::ensure_valid_token(&state.db, &session.user_id).await {
-        for stream in &streams {
-            if let Some(broadcast_id) = &stream.youtube_broadcast_id {
-                if let Err(e) = youtube::transition_broadcast(&access_token, broadcast_id, "complete").await {
-                    eprintln!("[SESSION] Failed to end broadcast {}: {}", broadcast_id, e);
+    let yt_streams: Vec<_> = streams.iter().filter(|s| s.platform == "youtube").collect();
+    if !yt_streams.is_empty() {
+        if let Ok(access_token) = youtube::ensure_valid_token(&state.db, &session.user_id).await {
+            for stream in &yt_streams {
+                if let Some(broadcast_id) = &stream.platform_broadcast_id {
+                    if let Err(e) = youtube::transition_broadcast(&access_token, broadcast_id, "complete").await {
+                        eprintln!("[SESSION] Failed to end broadcast {}: {}", broadcast_id, e);
+                    }
                 }
             }
         }

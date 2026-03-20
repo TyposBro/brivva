@@ -14,7 +14,7 @@ static GOOGLE_CLIENT_SECRET: LazyLock<String> =
     LazyLock::new(|| std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default());
 static GOOGLE_REDIRECT_URI: LazyLock<String> = LazyLock::new(|| {
     std::env::var("GOOGLE_REDIRECT_URI")
-        .unwrap_or_else(|_| "https://brivva.pages.dev/auth/youtube/callback".into())
+        .unwrap_or_else(|_| "https://brivva-server.milliytechnology.org/auth/youtube/callback".into())
 });
 
 const SCOPES: &str = "https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube.readonly";

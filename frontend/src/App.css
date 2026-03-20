@@ -1777,6 +1777,59 @@ body {
   font-size: 0.7rem;
 }
 
+/* Platform picker */
+.dash-platform-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.dash-platform-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dash-platform-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.dash-platform-label {
+  font-weight: 500;
+}
+
+.dash-platform-config {
+  display: flex;
+  gap: 0.5rem;
+  padding-left: 1.5rem;
+}
+
+.dash-platform-config .dash-input {
+  flex: 1;
+  font-size: 0.85rem;
+  padding: 0.5rem 0.6rem;
+}
+
+.stream-platform {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--accent2);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+@media (max-width: 640px) {
+  .dash-platform-config {
+    flex-direction: column;
+    padding-left: 1.5rem;
+  }
+}
+
 @media (min-width: 640px) {
   .stream-grid {
     grid-template-columns: 1fr 1fr;

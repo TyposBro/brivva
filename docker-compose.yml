@@ -14,7 +14,7 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva.pages.dev/auth/youtube/callback}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva-server.milliytechnology.org/auth/youtube/callback}
       - DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
     volumes:
       - db-data:/data

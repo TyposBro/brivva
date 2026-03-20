@@ -106,12 +106,17 @@ export default function SessionPage() {
 
         {/* Stream Cards */}
         <section className="dash-section">
-          <h2 className="dash-section-title">YouTube Streams</h2>
+          <h2 className="dash-section-title">Live Streams</h2>
           <div className="stream-grid">
             {streams.map((s) => (
               <div key={s.id} className="stream-card">
                 <div className="stream-card-header">
-                  <span className="stream-lang">{s.lang.toUpperCase()}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span className="stream-lang">{s.lang?.toUpperCase()}</span>
+                    {s.platform && (
+                      <span className="stream-platform">{s.platform}</span>
+                    )}
+                  </div>
                   <span
                     className={`dash-badge ${
                       s.error

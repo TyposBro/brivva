@@ -51,6 +51,8 @@ async fn main() {
         .route("/api/sessions", get(routes::list_sessions))
         .route("/api/sessions/{id}", get(routes::get_session))
         .route("/api/sessions/{id}", delete(routes::delete_session))
+        .route("/api/sessions/{id}/streams", post(routes::add_stream))
+        .route("/api/sessions/{session_id}/streams/{stream_id}", delete(routes::remove_stream))
         // Voices
         .route("/api/voices", post(routes::create_voice))
         .route("/api/voices", get(routes::list_voices))

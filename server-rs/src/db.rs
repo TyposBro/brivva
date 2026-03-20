@@ -40,13 +40,14 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YtStream {
+pub struct StreamRecord {
     pub id: String,
     pub session_id: String,
     pub lang: String,
-    pub youtube_broadcast_id: Option<String>,
-    pub youtube_stream_id: Option<String>,
-    pub youtube_stream_key: Option<String>,
+    pub platform: String, // "youtube", "instagram", "coupang", "custom"
+    pub platform_broadcast_id: Option<String>,
+    pub platform_stream_id: Option<String>,
+    pub stream_key: Option<String>,
     pub rtmp_url: Option<String>,
     pub status: String,
     pub created_at: i64,
@@ -113,9 +114,10 @@ pub async fn init_db() -> SqlitePool {
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL REFERENCES sessions(id),
             lang TEXT NOT NULL,
-            youtube_broadcast_id TEXT,
-            youtube_stream_id TEXT,
-            youtube_stream_key TEXT,
+            platform TEXT NOT NULL DEFAULT 'youtube',
+            platform_broadcast_id TEXT,
+            platform_stream_id TEXT,
+            stream_key TEXT,
             rtmp_url TEXT,
             status TEXT NOT NULL DEFAULT 'created',
             created_at INTEGER NOT NULL
@@ -348,47 +350,91 @@ pub async fn update_session_status(pool: &SqlitePool, id: &str, status: &str, ro
 
 // ── Stream CRUD ────────────────────────────────────────
 
-pub async fn create_stream(pool: &SqlitePool, session_id: &str, lang: &str) -> YtStream {
+pub async fn create_stream(pool: &SqlitePool, session_id: &str, lang: &str, platform: &str) -> StreamRecord {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
 
-    sqlx::query("INSERT INTO streams (id, session_id, lang, status, created_at) VALUES (?,?,?,?,?)")
+    sqlx::query("INSERT INTO streams (id, session_id, lang, platform, status, created_at) VALUES (?,?,?,?,?,?)")
         .bind(&id)
         .bind(session_id)
         .bind(lang)
+        .bind(platform)
         .bind("created")
         .bind(now)
         .execute(pool)
         .await
         .expect("Failed to insert stream");
 
-    YtStream {
+    StreamRecord {
         id,
         session_id: session_id.to_string(),
         lang: lang.to_string(),
-        youtube_broadcast_id: None,
-        youtube_stream_id: None,
-        youtube_stream_key: None,
+        platform: platform.to_string(),
+        platform_broadcast_id: None,
+        platform_stream_id: None,
+        stream_key: None,
         rtmp_url: None,
         status: "created".to_string(),
         created_at: now,
     }
 }
 
-pub async fn update_stream_youtube(
+/// Create a stream with manual RTMP URL + key (for non-YouTube platforms)
+pub async fn create_stream_manual(
+    pool: &SqlitePool,
+    session_id: &str,
+    lang: &str,
+    platform: &str,
+    rtmp_url: &str,
+    stream_key: &str,
+) -> StreamRecord {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    sqlx::query(
+        "INSERT INTO streams (id, session_id, lang, platform, rtmp_url, stream_key, status, created_at)
+         VALUES (?,?,?,?,?,?,?,?)"
+    )
+        .bind(&id)
+        .bind(session_id)
+        .bind(lang)
+        .bind(platform)
+        .bind(rtmp_url)
+        .bind(stream_key)
+        .bind("ready")
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("Failed to insert stream");
+
+    StreamRecord {
+        id,
+        session_id: session_id.to_string(),
+        lang: lang.to_string(),
+        platform: platform.to_string(),
+        platform_broadcast_id: None,
+        platform_stream_id: None,
+        stream_key: Some(stream_key.to_string()),
+        rtmp_url: Some(rtmp_url.to_string()),
+        status: "ready".to_string(),
+        created_at: now,
+    }
+}
+
+pub async fn update_stream_platform(
     pool: &SqlitePool,
     stream_id: &str,
     broadcast_id: &str,
-    yt_stream_id: &str,
+    platform_stream_id: &str,
     stream_key: &str,
     rtmp_url: &str,
 ) {
     sqlx::query(
-        "UPDATE streams SET youtube_broadcast_id=?, youtube_stream_id=?, youtube_stream_key=?, rtmp_url=?, status='ready'
+        "UPDATE streams SET platform_broadcast_id=?, platform_stream_id=?, stream_key=?, rtmp_url=?, status='ready'
          WHERE id=?",
     )
     .bind(broadcast_id)
-    .bind(yt_stream_id)
+    .bind(platform_stream_id)
     .bind(stream_key)
     .bind(rtmp_url)
     .bind(stream_id)
@@ -397,20 +443,29 @@ pub async fn update_stream_youtube(
     .ok();
 }
 
-pub async fn list_streams(pool: &SqlitePool, session_id: &str) -> Vec<YtStream> {
-    sqlx::query("SELECT * FROM streams WHERE session_id=? ORDER BY lang")
+pub async fn delete_stream(pool: &SqlitePool, stream_id: &str) {
+    sqlx::query("DELETE FROM streams WHERE id=?")
+        .bind(stream_id)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+pub async fn list_streams(pool: &SqlitePool, session_id: &str) -> Vec<StreamRecord> {
+    sqlx::query("SELECT * FROM streams WHERE session_id=? ORDER BY platform, lang")
         .bind(session_id)
         .fetch_all(pool)
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|r| YtStream {
+        .map(|r| StreamRecord {
             id: r.get("id"),
             session_id: r.get("session_id"),
             lang: r.get("lang"),
-            youtube_broadcast_id: r.get("youtube_broadcast_id"),
-            youtube_stream_id: r.get("youtube_stream_id"),
-            youtube_stream_key: r.get("youtube_stream_key"),
+            platform: r.get("platform"),
+            platform_broadcast_id: r.get("platform_broadcast_id"),
+            platform_stream_id: r.get("platform_stream_id"),
+            stream_key: r.get("stream_key"),
             rtmp_url: r.get("rtmp_url"),
             status: r.get("status"),
             created_at: r.get("created_at"),

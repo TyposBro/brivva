@@ -9,6 +9,12 @@ const LANGS = [
   { code: "zh", label: "Chinese" },
 ];
 
+type PlatformEntry = {
+  platform: string;
+  rtmp_url: string;
+  stream_key: string;
+};
+
 function getUserId(): string {
   let id = localStorage.getItem("brivva_user_id");
   if (!id) {
@@ -36,6 +42,10 @@ export default function DashboardPage() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
 
+  // Platforms
+  const [enabledPlatforms, setEnabledPlatforms] = useState<Set<string>>(new Set(["youtube"]));
+  const [platformConfigs, setPlatformConfigs] = useState<Record<string, PlatformEntry>>({});
+
   const loadData = useCallback(async () => {
     try {
       const [u, v, s] = await Promise.all([
@@ -57,15 +67,33 @@ export default function DashboardPage() {
     loadData();
   }, [loadData]);
 
-  // Show success banner if redirected from YouTube OAuth
   const youtubeJustConnected = searchParams.get("youtube") === "connected";
 
   const toggleLang = (code: string) => {
     setTargetLangs((prev) =>
-      prev.includes(code)
-        ? prev.filter((l) => l !== code)
-        : [...prev, code]
+      prev.includes(code) ? prev.filter((l) => l !== code) : [...prev, code]
     );
+  };
+
+  const togglePlatform = (id: string) => {
+    setEnabledPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const updatePlatformConfig = (platform: string, field: "rtmp_url" | "stream_key", value: string) => {
+    setPlatformConfigs((prev) => ({
+      ...prev,
+      [platform]: {
+        platform,
+        rtmp_url: prev[platform]?.rtmp_url ?? "",
+        stream_key: prev[platform]?.stream_key ?? "",
+        [field]: value,
+      },
+    }));
   };
 
   const handleCreateSession = async () => {
@@ -77,25 +105,54 @@ export default function DashboardPage() {
       setError("Select at least one target language");
       return;
     }
-    if (!user?.youtube_connected) {
-      setError("Connect your YouTube account first");
+    if (enabledPlatforms.size === 0) {
+      setError("Select at least one platform");
       return;
+    }
+    if (enabledPlatforms.has("youtube") && !user?.youtube_connected) {
+      setError("Connect your YouTube account first, or uncheck YouTube");
+      return;
+    }
+
+    // Validate manual platforms have RTMP URLs
+    for (const pid of enabledPlatforms) {
+      const p = api.PLATFORMS.find((x) => x.id === pid);
+      if (p && !p.auto) {
+        const config = platformConfigs[pid];
+        if (!config?.rtmp_url && !p.defaultRtmp) {
+          setError(`Enter RTMP URL for ${p.label}`);
+          return;
+        }
+      }
     }
 
     setCreating(true);
     setError("");
 
     try {
+      const platforms: api.PlatformConfig[] = Array.from(enabledPlatforms).map((pid) => {
+        const p = api.PLATFORMS.find((x) => x.id === pid);
+        if (p?.auto) return { platform: pid };
+        const config = platformConfigs[pid];
+        const defaultRtmp = p?.defaultRtmp ?? "";
+        return {
+          platform: pid,
+          rtmp_url: config?.rtmp_url || defaultRtmp,
+          stream_key: config?.stream_key ?? "",
+        };
+      });
+
       const result = await api.createSession({
         user_id: userId,
         title: title.trim(),
         source_lang: sourceLang,
         target_langs: targetLangs.filter((l) => l !== sourceLang),
         voice_id: selectedVoice || undefined,
+        platforms,
       });
 
-      if (result.error) {
-        setError(result.error);
+      if (result.errors?.length) {
+        setError(result.errors.join("; "));
       }
 
       navigate(`/session/${result.session.id}`);
@@ -150,10 +207,7 @@ export default function DashboardPage() {
               <span className="dash-badge dash-badge--success">Connected</span>
             </div>
           ) : (
-            <a
-              href={api.youtubeAuthUrl(userId)}
-              className="record-btn dash-yt-connect-btn"
-            >
+            <a href={api.youtubeAuthUrl(userId)} className="record-btn dash-yt-connect-btn">
               Connect YouTube Account
             </a>
           )}
@@ -165,10 +219,7 @@ export default function DashboardPage() {
           {voices.length === 0 ? (
             <p className="dash-empty">
               No saved voices yet. Record one by creating a room from the{" "}
-              <span onClick={() => navigate("/host")} className="dash-link">
-                host page
-              </span>
-              .
+              <span onClick={() => navigate("/host")} className="dash-link">host page</span>.
             </p>
           ) : (
             <div className="dash-voice-list">
@@ -184,10 +235,7 @@ export default function DashboardPage() {
                   <span className="dash-voice-date">
                     {new Date(v.created_at * 1000).toLocaleDateString()}
                   </span>
-                  <button
-                    className="dash-voice-delete"
-                    onClick={() => handleDeleteVoice(v.id)}
-                  >
+                  <button className="dash-voice-delete" onClick={() => handleDeleteVoice(v.id)}>
                     &#10005;
                   </button>
                 </div>
@@ -219,9 +267,7 @@ export default function DashboardPage() {
                 onChange={(e) => setSourceLang(e.target.value)}
               >
                 {LANGS.map((l) => (
-                  <option key={l.code} value={l.code}>
-                    {l.label}
-                  </option>
+                  <option key={l.code} value={l.code}>{l.label}</option>
                 ))}
               </select>
             </label>
@@ -239,6 +285,51 @@ export default function DashboardPage() {
                     <span>{l.label}</span>
                   </label>
                 ))}
+              </div>
+            </fieldset>
+
+            {/* Platform Selection */}
+            <fieldset className="dash-fieldset">
+              <legend className="dash-legend">Stream To</legend>
+              <div className="dash-platform-list">
+                {api.PLATFORMS.map((p) => {
+                  const enabled = enabledPlatforms.has(p.id);
+                  const needsConfig = !p.auto && enabled;
+                  return (
+                    <div key={p.id} className="dash-platform-item">
+                      <label className="dash-platform-toggle">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={() => togglePlatform(p.id)}
+                        />
+                        <span className="dash-platform-label">{p.label}</span>
+                        {p.auto && enabled && (
+                          <span className="dash-badge dash-badge--success" style={{ marginLeft: "0.5rem" }}>
+                            Auto
+                          </span>
+                        )}
+                      </label>
+                      {needsConfig && (
+                        <div className="dash-platform-config">
+                          <input
+                            className="dash-input"
+                            placeholder={`RTMP URL${p.defaultRtmp ? ` (default: ${p.defaultRtmp})` : ""}`}
+                            value={platformConfigs[p.id]?.rtmp_url ?? ""}
+                            onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
+                          />
+                          <input
+                            className="dash-input"
+                            placeholder="Stream Key"
+                            type="password"
+                            value={platformConfigs[p.id]?.stream_key ?? ""}
+                            onChange={(e) => updatePlatformConfig(p.id, "stream_key", e.target.value)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </fieldset>
 
@@ -266,9 +357,7 @@ export default function DashboardPage() {
                   onClick={() => navigate(`/session/${s.id}`)}
                 >
                   <span className="dash-session-title">{s.title}</span>
-                  <span className={`dash-badge dash-badge--${s.status}`}>
-                    {s.status}
-                  </span>
+                  <span className={`dash-badge dash-badge--${s.status}`}>{s.status}</span>
                   <span className="dash-session-date">
                     {new Date(s.created_at * 1000).toLocaleDateString()}
                   </span>
