@@ -1431,3 +1431,354 @@ body {
     word-break: break-word;
   }
 }
+
+/* ── Dashboard ──────────────────────────────────────────── */
+
+.dash-banner {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.dash-banner--success {
+  background: rgba(52, 211, 153, 0.15);
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.dash-section {
+  margin-bottom: 2rem;
+}
+
+.dash-section-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: var(--text);
+}
+
+.dash-youtube-connected {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.dash-yt-icon {
+  color: #f00;
+  font-size: 1.2rem;
+}
+
+.dash-yt-connect-btn {
+  width: 100%;
+  text-align: center;
+  text-decoration: none;
+  display: block;
+}
+
+.dash-badge {
+  font-size: 0.7rem;
+  padding: 0.2em 0.6em;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.dash-badge--success,
+.dash-badge--ready {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+
+.dash-badge--live {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error);
+}
+
+.dash-badge--ended,
+.dash-badge--setup {
+  background: rgba(107, 107, 138, 0.15);
+  color: var(--text-muted);
+}
+
+.dash-badge--error {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error);
+}
+
+.dash-empty {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.dash-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* Voices */
+.dash-voice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dash-voice-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.dash-voice-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.dash-voice-date {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.dash-voice-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+}
+
+.dash-voice-delete:hover {
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+/* Form */
+.dash-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.dash-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.dash-input,
+.dash-select {
+  padding: 0.65rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: var(--font);
+}
+
+.dash-input:focus,
+.dash-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dash-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b6b8a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1rem;
+  padding-right: 2.5rem;
+}
+
+.dash-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.dash-legend {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 0 0.4rem;
+}
+
+.dash-lang-grid {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.dash-lang-option {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.dash-error {
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+.dash-go-live-btn {
+  width: 100%;
+  font-size: 1.1rem;
+  padding: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.dash-end-btn {
+  width: 100%;
+  background: var(--error) !important;
+}
+
+.dash-back-btn {
+  width: 100%;
+  background: var(--surface2) !important;
+  margin-top: 0.5rem;
+}
+
+/* Sessions list */
+.dash-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dash-session-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.dash-session-item:hover {
+  border-color: var(--accent);
+}
+
+.dash-session-title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.dash-session-date {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* ── Session Detail Page ────────────────────────────────── */
+
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.session-title {
+  font-size: 1.3rem;
+  font-weight: 700;
+  flex: 1;
+}
+
+.session-meta {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.session-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Stream cards */
+.stream-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+.stream-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.stream-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.stream-lang {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.stream-error {
+  color: var(--error);
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.stream-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.4rem;
+}
+
+.stream-detail-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.stream-detail-value {
+  font-size: 0.8rem;
+  background: var(--surface2);
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.stream-rtmp {
+  font-size: 0.7rem;
+}
+
+@media (min-width: 640px) {
+  .stream-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

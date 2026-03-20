@@ -57,11 +57,13 @@ YouTube Live Streams:
 - [x] Full CRUD for all entities
 - [x] Docker volume for persistence
 
-**1.6 Frontend: Dashboard + Session UI** — IN PROGRESS
-- [ ] `DashboardPage.tsx` — YouTube connect, voice management, session creation
-- [ ] `SessionPage.tsx` — live session with multi-stream status
-- [ ] `api.ts` — REST API client
-- [ ] Router updates in App.tsx
+**1.6 Frontend: Dashboard + Session UI** — DONE
+- [x] `api.ts` — REST API client (user, sessions, voices, YouTube auth)
+- [x] `DashboardPage.tsx` — YouTube connect, voice selection, session creation form
+- [x] `SessionPage.tsx` — live session with stream cards (RTMP URLs, broadcast IDs, status)
+- [x] `App.tsx` — /dashboard, /session/:id routes added
+- [x] `HomePage.tsx` — "Stream Dashboard" button added
+- [x] `App.css` — full dashboard + session page styles
 
 ### Phase 2: FFmpeg RTMP Streaming
 
@@ -225,9 +227,11 @@ docker-compose.yml    + Google env vars, DATABASE_URL, db-data volume — DONE
 frontend/
   src/
     lib/
-      api.ts              NEW: REST API client — IN PROGRESS
+      api.ts              NEW: REST API client — DONE
     pages/
-      DashboardPage.tsx   NEW: session management, YouTube connect — IN PROGRESS
-      SessionPage.tsx     NEW: live session with multi-stream status — IN PROGRESS
-    App.tsx               + /dashboard, /session/:id routes — IN PROGRESS
+      DashboardPage.tsx   NEW: YouTube connect, voice mgmt, session form — DONE
+      SessionPage.tsx     NEW: stream cards, RTMP URLs, end session — DONE
+      HomePage.tsx        + Dashboard button — DONE
+    App.tsx               + /dashboard, /session/:id routes — DONE
+    App.css               + dashboard + session styles — DONE
 ```
