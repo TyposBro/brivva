@@ -200,6 +200,9 @@ pub enum ServerMsg {
         tts_ms: u64,
     },
 
+    #[serde(rename = "face:frame")]
+    FaceFrame { data: String },
+
     #[serde(rename = "error")]
     Error { message: String },
 }

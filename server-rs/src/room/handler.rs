@@ -156,6 +156,18 @@ async fn handle_host(
                 if text.contains("host:end") {
                     break;
                 }
+                // Forward face frames to all guests (live video)
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
+                    if json.get("type").and_then(|v| v.as_str()) == Some("face:frame") {
+                        if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                            if let Some(room) = rooms.get(&room_id) {
+                                room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
+                                    data: data.to_string(),
+                                }));
+                            }
+                        }
+                    }
+                }
             }
             Message::Close(_) => break,
             _ => {}

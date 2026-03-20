@@ -36,16 +36,9 @@ export function createGuestMessageHandler(
         player.finishReceiving(msg.utteranceId as number);
         break;
 
-      case "video_start":
-        videoPlayer.startReceiving(msg.utteranceId as number);
-        break;
-
-      case "video_frame":
-        videoPlayer.addFrame(msg.utteranceId as number, msg.data as string);
-        break;
-
-      case "video_end":
-        videoPlayer.finishReceiving(msg.utteranceId as number);
+      // Live host video frames
+      case "face:frame":
+        videoPlayer.renderDirect(msg.data as string);
         break;
 
       case "room:closed":

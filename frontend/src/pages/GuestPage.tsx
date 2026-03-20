@@ -78,11 +78,13 @@ export default function GuestPage() {
           <div className="status-bar">The host has ended this session.</div>
         )}
 
-        {/* Lip-synced video from host */}
+        {/* Live host video */}
         {status === "listening" && (
-          <div className="lipsync-video">
+          <div className="host-video">
             <canvas
               ref={attachCanvas}
+              width={256}
+              height={256}
               style={{
                 width: "256px",
                 height: "256px",
@@ -91,7 +93,7 @@ export default function GuestPage() {
                 background: "#1a1a1a",
               }}
             />
-            <span className="lipsync-label">Host (lip-synced)</span>
+            <span className="host-video-label">Host (live)</span>
           </div>
         )}
 
