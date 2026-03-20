@@ -87,6 +87,7 @@ async fn handle_host(
         let streams = crate::db::list_streams(&state.db, sid).await;
         if !streams.is_empty() {
             let mut manager = crate::ffmpeg::RtmpManager::new();
+            let mut rtmp_langs = Vec::new();
             for s in &streams {
                 if let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) {
                     let full_url = if stream_key.is_empty() {
@@ -96,15 +97,19 @@ async fn handle_host(
                     };
                     if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url).await {
                         eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
+                    } else if let Some(lang) = Lang::from_str(&s.lang) {
+                        rtmp_langs.push(lang);
                     }
                 }
             }
             room.rtmp_manager =
                 Some(Arc::new(tokio::sync::Mutex::new(manager)));
+            room.rtmp_langs = rtmp_langs;
             eprintln!(
-                "[RTMP] Started {} FFmpeg streams for session {}",
+                "[RTMP] Started {} FFmpeg streams for session {}, langs: {:?}",
                 streams.len(),
-                sid
+                sid,
+                room.rtmp_langs
             );
         }
 

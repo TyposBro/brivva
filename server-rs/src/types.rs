@@ -107,6 +107,8 @@ pub struct Room {
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
     pub rtmp_manager: Option<crate::ffmpeg::SharedRtmpManager>,
+    /// Languages being streamed via RTMP (so pipeline translates even without WS guests)
+    pub rtmp_langs: Vec<Lang>,
 }
 
 impl Room {
@@ -121,6 +123,7 @@ impl Room {
             created_at: Instant::now(),
             session_id,
             rtmp_manager: None,
+            rtmp_langs: Vec::new(),
         }
     }
 
@@ -150,11 +153,14 @@ impl Room {
         }
     }
 
-    /// Which languages have at least one guest?
+    /// Which languages have at least one guest or RTMP stream?
     pub fn active_langs(&self) -> Vec<Lang> {
         let mut langs = std::collections::HashSet::new();
         for entry in self.guests.iter() {
             langs.insert(entry.value().lang.clone());
+        }
+        for lang in &self.rtmp_langs {
+            langs.insert(lang.clone());
         }
         langs.into_iter().collect()
     }
