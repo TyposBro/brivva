@@ -38,14 +38,14 @@ export default function DashboardPage() {
   // Session form
   const [title, setTitle] = useState("");
   const [sourceLang, setSourceLang] = useState("ko");
-  const [targetLangs, setTargetLangs] = useState<string[]>(["en", "ja", "zh"]);
+  const [targetLang, setTargetLang] = useState("en");
   const [selectedVoice, setSelectedVoice] = useState<string>("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
 
-  // Platforms
-  const [enabledPlatforms, setEnabledPlatforms] = useState<Set<string>>(new Set(["youtube"]));
-  const [platformConfigs, setPlatformConfigs] = useState<Record<string, PlatformEntry>>({});
+  // Platform — single selection
+  const [selectedPlatform, setSelectedPlatform] = useState<string>("");
+  const [platformConfig, setPlatformConfig] = useState<PlatformEntry>({ platform: "", rtmp_url: "", stream_key: "" });
   const [magicPaste, setMagicPaste] = useState("");
 
   const loadData = useCallback(async () => {
@@ -64,16 +64,6 @@ export default function DashboardPage() {
         credMap[cred.platform] = cred;
       }
       setSavedCreds(credMap);
-      // Pre-fill platform configs from saved credentials
-      const prefilled: Record<string, PlatformEntry> = {};
-      for (const cred of c.credentials) {
-        prefilled[cred.platform] = {
-          platform: cred.platform,
-          rtmp_url: cred.rtmp_url ?? "",
-          stream_key: cred.stream_key ?? "",
-        };
-      }
-      setPlatformConfigs(prefilled);
     } catch (e) {
       console.error("Failed to load data:", e);
     } finally {
@@ -87,83 +77,51 @@ export default function DashboardPage() {
 
   const youtubeJustConnected = searchParams.get("youtube") === "connected";
 
-  const toggleLang = (code: string) => {
-    setTargetLangs((prev) =>
-      prev.includes(code) ? prev.filter((l) => l !== code) : [...prev, code]
-    );
-  };
-
-  const togglePlatform = (id: string) => {
-    setEnabledPlatforms((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+  const selectPlatform = (id: string) => {
+    setSelectedPlatform(id);
+    // Pre-fill from saved credentials
+    const cred = savedCreds[id];
+    const p = api.PLATFORMS.find((x) => x.id === id);
+    setPlatformConfig({
+      platform: id,
+      rtmp_url: cred?.rtmp_url ?? p?.defaultRtmp ?? "",
+      stream_key: cred?.stream_key ?? "",
     });
-  };
-
-  const updatePlatformConfig = (platform: string, field: "rtmp_url" | "stream_key", value: string) => {
-    setPlatformConfigs((prev) => ({
-      ...prev,
-      [platform]: {
-        platform,
-        rtmp_url: prev[platform]?.rtmp_url ?? "",
-        stream_key: prev[platform]?.stream_key ?? "",
-        [field]: value,
-      },
-    }));
   };
 
   const handleMagicPaste = (value: string) => {
     setMagicPaste(value);
     const detected = api.detectPlatform(value);
     if (detected) {
-      // Auto-enable the platform
-      setEnabledPlatforms((prev) => new Set([...prev, detected.platform]));
-      // Auto-fill the config
-      setPlatformConfigs((prev) => ({
-        ...prev,
-        [detected.platform]: {
-          platform: detected.platform,
-          rtmp_url: detected.rtmpUrl,
-          stream_key: detected.streamKey,
-        },
-      }));
-      setMagicPaste(""); // Clear after successful detection
+      setSelectedPlatform(detected.platform);
+      setPlatformConfig({
+        platform: detected.platform,
+        rtmp_url: detected.rtmpUrl,
+        stream_key: detected.streamKey,
+      });
+      setMagicPaste("");
     }
   };
 
   const handleCreateSession = async () => {
-    if (!title.trim()) {
-      setError("Please enter a session title");
-      return;
-    }
-    if (targetLangs.length === 0) {
-      setError("Select at least one target language");
-      return;
-    }
-    if (enabledPlatforms.size === 0) {
-      setError("Select at least one platform");
-      return;
-    }
-    if (enabledPlatforms.has("youtube") && !user?.youtube_connected) {
-      setError("Connect your YouTube account first, or uncheck YouTube");
+    if (!title.trim()) { setError("Please enter a session title"); return; }
+    if (!selectedPlatform) { setError("Select a platform"); return; }
+
+    const p = api.PLATFORMS.find((x) => x.id === selectedPlatform);
+
+    if (selectedPlatform === "youtube" && !user?.youtube_connected) {
+      setError("Connect your YouTube account first");
       return;
     }
 
-    // Validate manual platforms have required fields
-    for (const pid of enabledPlatforms) {
-      const p = api.PLATFORMS.find((x) => x.id === pid);
-      if (p && !p.auto) {
-        const config = platformConfigs[pid];
-        if (!p.keyOnly && !config?.rtmp_url && !p.defaultRtmp) {
-          setError(`Enter server URL for ${p.label}`);
-          return;
-        }
-        if (!config?.stream_key) {
-          setError(`Enter stream key for ${p.label}`);
-          return;
-        }
+    if (p && !p.auto) {
+      if (!p.keyOnly && !platformConfig.rtmp_url && !p.defaultRtmp) {
+        setError(`Enter server URL for ${p.label}`);
+        return;
+      }
+      if (!platformConfig.stream_key) {
+        setError(`Enter stream key for ${p.label}`);
+        return;
       }
     }
 
@@ -171,23 +129,23 @@ export default function DashboardPage() {
     setError("");
 
     try {
-      const platforms: api.PlatformConfig[] = Array.from(enabledPlatforms).map((pid) => {
-        const p = api.PLATFORMS.find((x) => x.id === pid);
-        if (p?.auto) return { platform: pid };
-        const config = platformConfigs[pid];
-        const rtmpUrl = p?.keyOnly ? p.defaultRtmp : (config?.rtmp_url || p?.defaultRtmp || "");
-        return {
-          platform: pid,
+      const platforms: api.PlatformConfig[] = [];
+      if (p?.auto) {
+        platforms.push({ platform: selectedPlatform });
+      } else {
+        const rtmpUrl = p?.keyOnly ? p.defaultRtmp : (platformConfig.rtmp_url || p?.defaultRtmp || "");
+        platforms.push({
+          platform: selectedPlatform,
           rtmp_url: rtmpUrl,
-          stream_key: config?.stream_key ?? "",
-        };
-      });
+          stream_key: platformConfig.stream_key,
+        });
+      }
 
       const result = await api.createSession({
         user_id: userId,
         title: title.trim(),
         source_lang: sourceLang,
-        target_langs: targetLangs.filter((l) => l !== sourceLang),
+        target_langs: [targetLang],
         voice_id: selectedVoice || undefined,
         platforms,
       });
@@ -212,15 +170,15 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="app">
-        <header className="header">
-          <h1 className="logo">brivva</h1>
-        </header>
+        <header className="header"><h1 className="logo">brivva</h1></header>
         <main className="main">
           <p style={{ textAlign: "center", color: "var(--text-muted)" }}>Loading...</p>
         </main>
       </div>
     );
   }
+
+  const activePlatform = api.PLATFORMS.find((x) => x.id === selectedPlatform);
 
   return (
     <div className="app">
@@ -258,10 +216,7 @@ export default function DashboardPage() {
         <section className="dash-section">
           <h2 className="dash-section-title">Saved Voices</h2>
           {voices.length === 0 ? (
-            <p className="dash-empty">
-              No saved voices yet. Record one by creating a room from the{" "}
-              <span onClick={() => navigate("/host")} className="dash-link">host page</span>.
-            </p>
+            <p className="dash-empty">No saved voices yet. You can record one when starting a broadcast.</p>
           ) : (
             <div className="dash-voice-list">
               {voices.map((v) => (
@@ -300,42 +255,47 @@ export default function DashboardPage() {
               />
             </label>
 
-            <label className="dash-label">
-              Source Language (your language)
-              <select
-                className="dash-select"
-                value={sourceLang}
-                onChange={(e) => setSourceLang(e.target.value)}
-              >
-                {LANGS.map((l) => (
-                  <option key={l.code} value={l.code}>{l.label}</option>
-                ))}
-              </select>
-            </label>
+            <div style={{ display: "flex", gap: "0.75rem" }}>
+              <label className="dash-label" style={{ flex: 1 }}>
+                You speak
+                <select
+                  className="dash-select"
+                  value={sourceLang}
+                  onChange={(e) => {
+                    setSourceLang(e.target.value);
+                    if (e.target.value === targetLang) {
+                      const other = LANGS.find((l) => l.code !== e.target.value);
+                      if (other) setTargetLang(other.code);
+                    }
+                  }}
+                >
+                  {LANGS.map((l) => (
+                    <option key={l.code} value={l.code}>{l.label}</option>
+                  ))}
+                </select>
+              </label>
 
-            <fieldset className="dash-fieldset">
-              <legend className="dash-legend">Target Languages</legend>
-              <div className="dash-lang-grid">
-                {LANGS.filter((l) => l.code !== sourceLang).map((l) => (
-                  <label key={l.code} className="dash-lang-option">
-                    <input
-                      type="checkbox"
-                      checked={targetLangs.includes(l.code)}
-                      onChange={() => toggleLang(l.code)}
-                    />
-                    <span>{l.label}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
+              <label className="dash-label" style={{ flex: 1 }}>
+                Translate to
+                <select
+                  className="dash-select"
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                >
+                  {LANGS.filter((l) => l.code !== sourceLang).map((l) => (
+                    <option key={l.code} value={l.code}>{l.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
 
-            {/* Platform Selection */}
+            {/* Platform Selection — single */}
             <fieldset className="dash-fieldset">
               <legend className="dash-legend">Stream To</legend>
               <div className="dash-magic-paste">
                 <input
                   className="dash-input"
-                  placeholder="Quick add: paste any RTMP URL here to auto-detect platform..."
+                  placeholder="Paste any RTMP URL to auto-detect platform..."
                   value={magicPaste}
                   onChange={(e) => handleMagicPaste(e.target.value)}
                 />
@@ -348,60 +308,23 @@ export default function DashboardPage() {
                     <div key={region} className="dash-platform-region">
                       <div className="dash-platform-region-label">{region}</div>
                       {regionPlatforms.map((p) => {
-                        const enabled = enabledPlatforms.has(p.id);
-                        const needsConfig = !p.auto && enabled;
+                        const selected = selectedPlatform === p.id;
                         return (
                           <div key={p.id} className="dash-platform-item">
                             <label className="dash-platform-toggle">
                               <input
-                                type="checkbox"
-                                checked={enabled}
-                                onChange={() => togglePlatform(p.id)}
+                                type="radio"
+                                name="platform"
+                                checked={selected}
+                                onChange={() => selectPlatform(p.id)}
                               />
                               <span className="dash-platform-label">{p.label}</span>
-                              {p.auto && enabled && (
+                              {p.auto && selected && (
                                 <span className="dash-badge dash-badge--success" style={{ marginLeft: "0.5rem" }}>
                                   Auto
                                 </span>
                               )}
                             </label>
-                            {needsConfig && (
-                              <div className="dash-platform-expand">
-                                {savedCreds[p.id] && (
-                                  <div className="dash-platform-saved">
-                                    Saved from last session
-                                  </div>
-                                )}
-                                {p.settingsUrl && (
-                                  <a
-                                    href={p.settingsUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="dash-platform-deeplink"
-                                  >
-                                    Open {p.label} Settings →
-                                  </a>
-                                )}
-                                <p className="dash-platform-help">{p.help}</p>
-                                <div className="dash-platform-config">
-                                  {!p.keyOnly && (
-                                    <input
-                                      className="dash-input"
-                                      placeholder="Server URL"
-                                      value={platformConfigs[p.id]?.rtmp_url ?? p.defaultRtmp}
-                                      onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
-                                    />
-                                  )}
-                                  <input
-                                    className="dash-input"
-                                    placeholder="Stream Key (paste from platform)"
-                                    type="password"
-                                    value={platformConfigs[p.id]?.stream_key ?? ""}
-                                    onChange={(e) => updatePlatformConfig(p.id, "stream_key", e.target.value)}
-                                  />
-                                </div>
-                              </div>
-                            )}
                           </div>
                         );
                       })}
@@ -409,6 +332,43 @@ export default function DashboardPage() {
                   );
                 })}
               </div>
+
+              {/* Config for selected platform */}
+              {activePlatform && !activePlatform.auto && (
+                <div className="dash-platform-expand" style={{ marginTop: "0.75rem" }}>
+                  {savedCreds[selectedPlatform] && (
+                    <div className="dash-platform-saved">Saved from last session</div>
+                  )}
+                  {activePlatform.settingsUrl && (
+                    <a
+                      href={activePlatform.settingsUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="dash-platform-deeplink"
+                    >
+                      Open {activePlatform.label} Settings &rarr;
+                    </a>
+                  )}
+                  <p className="dash-platform-help">{activePlatform.help}</p>
+                  <div className="dash-platform-config">
+                    {!activePlatform.keyOnly && (
+                      <input
+                        className="dash-input"
+                        placeholder="Server URL"
+                        value={platformConfig.rtmp_url}
+                        onChange={(e) => setPlatformConfig((prev) => ({ ...prev, rtmp_url: e.target.value }))}
+                      />
+                    )}
+                    <input
+                      className="dash-input"
+                      placeholder="Stream Key (paste from platform)"
+                      type="password"
+                      value={platformConfig.stream_key}
+                      onChange={(e) => setPlatformConfig((prev) => ({ ...prev, stream_key: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              )}
             </fieldset>
 
             {error && <p className="dash-error">{error}</p>}
@@ -418,7 +378,7 @@ export default function DashboardPage() {
               onClick={handleCreateSession}
               disabled={creating}
             >
-              {creating ? "Creating streams..." : "Go Live"}
+              {creating ? "Creating stream..." : "Go Live"}
             </button>
           </div>
         </section>
