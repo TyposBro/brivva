@@ -2,7 +2,7 @@
 
 ## Current Status (Mar 20 2026)
 
-**v6 — Multi-platform streaming dashboard.** YouTube OAuth + 13 platform RTMP streaming. Lip-sync removed (audio-only translation). Production-ready dashboard UI.
+**v7 — Zero-config platform UX.** 13-platform streaming with magic paste, credential vault, key-only mode, deep links. Feature complete for demo.
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
@@ -14,10 +14,12 @@
 - Host speaks (KO/EN) → real-time STT → NLLB translation → ElevenLabs TTS → translated audio to guests
 - YouTube OAuth2 flow → auto-create broadcasts per language via YouTube Data API v3
 - Multi-platform RTMP: 13 platforms (YouTube auto, rest manual RTMP URL + stream key)
+- Zero-config UX: magic paste (auto-detect platform from RTMP URL), credential vault (save once, auto-fill), key-only mode (hide RTMP URL for known platforms), deep links to platform settings
 - Dashboard: session creation with platform picker, voice management, past sessions
 - Session page: stream cards with status, RTMP URLs, broadcast IDs
-- SQLite persistence: users, voices, sessions, streams
+- SQLite persistence: users, voices, sessions, streams, platform_credentials
 - Voice cloning: ElevenLabs /v1/voices/add → persistent cloned voices
+- PlatformProvider trait for future OAuth integrations (Twitch, Instagram)
 - Dockerized: 3 containers (server-rs, stt-wrapper, nllb)
 
 ### What's NOT Working / TODO
@@ -25,6 +27,16 @@
 - [ ] FFmpeg RTMP muxing not wired into pipeline (code written in ffmpeg.rs, not connected)
 - [ ] YouTube broadcast transition to "live" (requires RTMP push first)
 - [ ] Emotion-conditioned TTS style_params not reaching ElevenLabs
+
+### Production Hardening (Post-Demo Priority)
+
+- [ ] **Session cleanup:** Ensure DashMap rooms + FFmpeg processes are killed on WebSocket close (prevent memory leaks + zombie processes)
+- [ ] **Network resilience:** Buffer/reconnect on WebSocket drops, handle STT/TTS API 503s with fallback
+- [ ] **Sync drift:** After 45+ min streaming, translated audio drifts from video — needs timestamp-based correction
+- [ ] **Observability:** Grafana/Prometheus metrics for API latency, pipeline errors, active sessions
+- [ ] **Self-healing:** Auto-restart pipeline on crash, resume live streams without host refresh
+- [ ] **Global relay:** CDN for viewers outside ap-northeast-2 (currently ~400ms for non-Korea viewers)
+- [ ] **Stress testing:** Concurrent sessions, FFmpeg process limits, GPU memory under load
 
 ### AWS Deployment (Live)
 
@@ -118,9 +130,13 @@ Future: FFmpeg muxes host video + translated audio → RTMP push to each platfor
 ### How It Works
 
 - **YouTube**: OAuth2 → auto-create broadcast + stream per language → bind → get RTMP key
-- **All others**: User copies RTMP URL + stream key from platform dashboard, pastes into Brivva
-- **Dashboard UI**: Platforms grouped by region, help text guides users step-by-step
-- **Pre-filled RTMP URLs**: Instagram, Twitch, Kuaishou, Bilibili have known base URLs
+- **All others**: User copies stream key from platform, pastes into Brivva
+- **Zero-config UX features:**
+  - Magic Paste: paste any RTMP URL → auto-detect platform + split into URL/key
+  - Key-Only Mode: Instagram, Twitch, Kuaishou, Bilibili hide RTMP URL (known base URLs)
+  - Credential Vault: saved per-user in `platform_credentials` table, auto-fills next session
+  - Deep Links: "Open Settings →" buttons link directly to each platform's streaming config
+  - Region Grouping: Global, Korea, Japan, China, Other — with step-by-step help text
 
 ## REST API
 
@@ -145,6 +161,11 @@ Future: FFmpeg muxes host video + translated audio → RTMP push to each platfor
 - `POST /api/voices` → clone via ElevenLabs, save to DB
 - `GET /api/voices?user_id=...` → list saved voices
 - `DELETE /api/voices/:id` → delete from DB + ElevenLabs
+
+### Platform Credentials (Vault)
+- `GET /api/credentials?user_id=...` → list saved platform credentials
+- `POST /api/credentials` → upsert credential (auto-saved on session creation too)
+- `DELETE /api/credentials?user_id=&platform=` → remove saved credential
 
 ## WebSocket Protocol
 
@@ -210,6 +231,18 @@ CREATE TABLE streams (
   status TEXT,
   created_at INTEGER
 );
+
+CREATE TABLE platform_credentials (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  rtmp_url TEXT,
+  stream_key TEXT,
+  display_name TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(user_id, platform)
+);
 ```
 
 ## Key Technical Decisions
@@ -256,7 +289,7 @@ CREATE TABLE streams (
 
 ## Frontend Architecture
 
-- `src/lib/api.ts` — REST API client, PLATFORMS array (13 platforms with regions/help)
+- `src/lib/api.ts` — REST API client, PLATFORMS array (13 platforms), detectPlatform(), credential vault API
 - `src/lib/AudioPipeline.ts` — mic capture, Float32→Int16 conversion
 - `src/lib/RoomSocket.ts` — WebSocket connect, sendAudio, sendJson
 - `src/lib/TtsPlayer.ts` — Blob URL audio playback queue
@@ -264,7 +297,7 @@ CREATE TABLE streams (
 - `src/hooks/useGuestRoom.ts` — guest: TtsPlayer + RoomSocket
 - `src/state/host/` — reducer + message handler
 - `src/state/guest/` — reducer + message handler
-- `src/pages/DashboardPage.tsx` — YouTube connect, voice mgmt, multi-platform session creation
+- `src/pages/DashboardPage.tsx` — YouTube connect, voice mgmt, magic paste, credential vault, key-only platforms
 - `src/pages/SessionPage.tsx` — stream cards with platform badges, RTMP URLs, end session
 - `src/pages/HostPage.tsx` — webcam preview, room code, audio recorder
 - `src/pages/GuestPage.tsx` — language picker, translations, audio playback
@@ -281,7 +314,8 @@ brivva/
 │       ├── types.rs               Lang, Room (frame_buffer), Guest, ServerMsg
 │       ├── db.rs                  SQLite init + CRUD (users, voices, sessions, streams)
 │       ├── youtube.rs             OAuth2 + broadcast/stream management
-│       ├── routes.rs              REST API handlers (OAuth, sessions, voices, streams)
+│       ├── routes.rs              REST API handlers (OAuth, sessions, voices, streams, credentials)
+│       ├── platform.rs            PlatformProvider trait, detect_platform(), settings_url()
 │       ├── pipeline.rs            STT → NLLB → TTS pipeline
 │       ├── ffmpeg.rs              RtmpManager (written, not yet wired)
 │       └── room/handler.rs        WS host/guest handlers

@@ -54,20 +54,20 @@ export type Platform = {
 export const PLATFORMS: Platform[] = [
   // Global
   { id: "youtube", label: "YouTube", region: "Global", auto: true, defaultRtmp: "", help: "Auto-creates broadcasts via API. Connect your account above.", settingsUrl: "", keyOnly: false },
-  { id: "instagram", label: "Instagram", region: "Global", auto: false, defaultRtmp: "rtmps://live-upload.instagram.com:443/rtmp/", help: "Instagram.com → Create → Live → copy URL & Stream Key. Requires Professional account.", settingsUrl: "https://www.instagram.com/live/producer/", keyOnly: true },
-  { id: "tiktok", label: "TikTok", region: "Global", auto: false, defaultRtmp: "", help: "TikTok LIVE Studio → copy Server URL & Stream Key. Requires 1,000+ followers.", settingsUrl: "https://www.tiktok.com/studio/live", keyOnly: false },
-  { id: "twitch", label: "Twitch", region: "Global", auto: false, defaultRtmp: "rtmp://live.twitch.tv/app/", help: "Twitch Dashboard → Settings → Stream → copy Stream Key.", settingsUrl: "https://dashboard.twitch.tv/u/_/settings/stream", keyOnly: true },
+  { id: "instagram", label: "Instagram", region: "Global", auto: false, defaultRtmp: "rtmps://live-upload.instagram.com:443/rtmp/", help: "Open Instagram app → tap + → Live → tap ⚙️ → 'Stream with external device' → copy Stream Key.", settingsUrl: "", keyOnly: true },
+  { id: "tiktok", label: "TikTok", region: "Global", auto: false, defaultRtmp: "", help: "Download TikTok LIVE Studio desktop app → Go Live → copy Server URL & Stream Key. Requires 1,000+ followers.", settingsUrl: "", keyOnly: false },
+  { id: "twitch", label: "Twitch", region: "Global", auto: false, defaultRtmp: "rtmp://live.twitch.tv/app/", help: "Twitch.tv → Creator Dashboard → Settings → Stream → copy Primary Stream Key.", settingsUrl: "https://dashboard.twitch.tv/settings/stream", keyOnly: true },
   // Korea
-  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "Coupang Seller Portal → Live → copy RTMP URL & Key.", settingsUrl: "https://wing.coupang.com/", keyOnly: false },
-  { id: "naver", label: "Naver Shopping Live", region: "Korea", auto: false, defaultRtmp: "", help: "Naver Shopping Live Studio → copy RTMP URL & Stream Key.", settingsUrl: "https://shoppinglive.naver.com/studio", keyOnly: false },
+  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "쿠팡 Wing → Live & Shorts → 라이브 만들기 → OBS 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "https://wing.coupang.com/vendor/live-commerce/lives", keyOnly: false },
+  { id: "naver", label: "Naver Shopping Live", region: "Korea", auto: false, defaultRtmp: "", help: "네이버 스마트스토어센터 → 쇼핑라이브 → 라이브 예약/시작 → 외부 송출 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "https://sell.smartstore.naver.com/", keyOnly: false },
   // Japan
-  { id: "rakuten", label: "Rakuten Live", region: "Japan", auto: false, defaultRtmp: "", help: "Rakuten Live Commerce dashboard → copy RTMP URL & Key.", settingsUrl: "https://live.rakuten.co.jp/", keyOnly: false },
+  { id: "rakuten", label: "Rakuten Live", region: "Japan", auto: false, defaultRtmp: "", help: "Rakuten RMS → ライブコマース → 配信設定 → copy RTMP URL & ストリームキー.", settingsUrl: "https://rms.rakuten.co.jp/", keyOnly: false },
   // China
-  { id: "douyin", label: "Douyin (抖音)", region: "China", auto: false, defaultRtmp: "", help: "Douyin Live Companion → 推流地址 will appear. Copy Server URL & Stream Key.", settingsUrl: "https://live.douyin.com/", keyOnly: false },
-  { id: "taobao", label: "Taobao Live (淘宝直播)", region: "China", auto: false, defaultRtmp: "", help: "Taobao Live Studio → OBS推流 → copy RTMP URL & 推流码.", settingsUrl: "https://liveplatform.taobao.com/", keyOnly: false },
-  { id: "kuaishou", label: "Kuaishou (快手)", region: "China", auto: false, defaultRtmp: "rtmp://live.kuaishou.com/live/", help: "Kuaishou Live Center → 直播设置 → copy 推流码 (Stream Key).", settingsUrl: "https://studio.kuaishou.com/", keyOnly: true },
-  { id: "xiaohongshu", label: "Xiaohongshu (小红书)", region: "China", auto: false, defaultRtmp: "", help: "小红书 App → + → Live → Settings → Computer mode → copy auth code → get URL & Key from web.", settingsUrl: "https://www.xiaohongshu.com/", keyOnly: false },
-  { id: "bilibili", label: "Bilibili (哔哩哔哩)", region: "China", auto: false, defaultRtmp: "rtmp://live-push.bilivideo.com/live-bvc/", help: "Bilibili Live Center → 开始直播 → copy 推流地址 & 推流码.", settingsUrl: "https://link.bilibili.com/p/center/index", keyOnly: true },
+  { id: "douyin", label: "Douyin (抖音)", region: "China", auto: false, defaultRtmp: "", help: "Download 抖音直播伴侣 desktop app → login → 开始直播 → 推流地址 will appear. Copy 服务器地址 & 推流码.", settingsUrl: "", keyOnly: false },
+  { id: "taobao", label: "Taobao Live (淘宝直播)", region: "China", auto: false, defaultRtmp: "", help: "淘宝直播中控台 → 创建直播 → OBS推流 → copy RTMP URL & 推流码.", settingsUrl: "https://liveplatform.taobao.com/live/liveList.htm", keyOnly: false },
+  { id: "kuaishou", label: "Kuaishou (快手)", region: "China", auto: false, defaultRtmp: "rtmp://live.kuaishou.com/live/", help: "快手直播伴侣 desktop app → login → 开播设置 → copy 推流码 (Stream Key).", settingsUrl: "", keyOnly: true },
+  { id: "xiaohongshu", label: "Xiaohongshu (小红书)", region: "China", auto: false, defaultRtmp: "", help: "小红书 App → + → 直播 → 设置 → 电脑模式 → copy 授权码 → 小红书直播助手 desktop app → paste auth code → copy 推流地址 & 推流码.", settingsUrl: "", keyOnly: false },
+  { id: "bilibili", label: "Bilibili (哔哩哔哩)", region: "China", auto: false, defaultRtmp: "rtmp://live-push.bilivideo.com/live-bvc/", help: "Bilibili → 直播中心 → 我的直播间 → 开始直播 → copy 推流码 (Stream Key).", settingsUrl: "https://link.bilibili.com/p/center/index#/my-room/start-live", keyOnly: true },
   // Custom
   { id: "custom", label: "Custom RTMP", region: "Other", auto: false, defaultRtmp: "", help: "Enter any RTMP/RTMPS endpoint URL and stream key.", settingsUrl: "", keyOnly: false },
 ];

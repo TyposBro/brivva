@@ -96,19 +96,16 @@ pub fn detect_platform(input: &str) -> Option<(&'static str, String, String)> {
 }
 
 /// Deep link URLs for platform streaming settings pages.
+/// Only includes URLs that actually work (require login but land on the right page).
 pub fn settings_url(platform: &str) -> Option<&'static str> {
     match platform {
-        "instagram" => Some("https://www.instagram.com/live/producer/"),
-        "twitch" => Some("https://dashboard.twitch.tv/u/_/settings/stream"),
-        "tiktok" => Some("https://www.tiktok.com/studio/live"),
-        "coupang" => Some("https://wing.coupang.com/"),
-        "naver" => Some("https://shoppinglive.naver.com/studio"),
-        "rakuten" => Some("https://live.rakuten.co.jp/"),
-        "douyin" => Some("https://live.douyin.com/"),
-        "taobao" => Some("https://liveplatform.taobao.com/"),
-        "kuaishou" => Some("https://studio.kuaishou.com/"),
-        "xiaohongshu" => Some("https://www.xiaohongshu.com/"),
-        "bilibili" => Some("https://link.bilibili.com/p/center/index"),
+        "twitch" => Some("https://dashboard.twitch.tv/settings/stream"),
+        "coupang" => Some("https://wing.coupang.com/vendor/live-commerce/lives"),
+        "naver" => Some("https://sell.smartstore.naver.com/"),
+        "rakuten" => Some("https://rms.rakuten.co.jp/"),
+        "taobao" => Some("https://liveplatform.taobao.com/live/liveList.htm"),
+        "bilibili" => Some("https://link.bilibili.com/p/center/index#/my-room/start-live"),
+        // instagram, tiktok, douyin, kuaishou, xiaohongshu — app-only or no web deep link
         _ => None,
     }
 }
