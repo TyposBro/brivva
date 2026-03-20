@@ -127,10 +127,13 @@ async fn handle_host(
 
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
                     match json.get("type").and_then(|v| v.as_str()) {
-                        // Forward face frames to all guests (live video)
+                        // Store face frames in ring buffer + forward to guests
                         Some("face:frame") => {
                             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
                                 if let Some(room) = rooms.get(&room_id) {
+                                    // Store in timestamped ring buffer for synced playback
+                                    room.push_frame(data.to_string());
+                                    // Also forward live to guests for preview
                                     room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
                                         data: data.to_string(),
                                     }));

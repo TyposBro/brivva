@@ -65,32 +65,46 @@ YouTube Live Streams:
 - [x] `HomePage.tsx` — "Stream Dashboard" button added
 - [x] `App.css` — full dashboard + session page styles
 
-### Phase 2: FFmpeg RTMP Streaming
+### Phase 2: Video-Audio Sync + FFmpeg RTMP — IN PROGRESS
 
-**2.1 Video Pipeline**
-- Host sends webcam frames via WebSocket (already implemented)
-- Server accumulates frames into raw video pipe for FFmpeg
-- Alternative: host sends MediaRecorder chunks (WebM/H264) → more efficient
+**2.1 Synced Video Buffer Architecture** — DONE
+The key insight: video is real-time but translated audio is ~3-5s behind.
+Solution: buffer video frames with timestamps, grab the matching window when TTS completes.
 
-**2.2 Per-Language FFmpeg Process**
-```bash
-# For each target language:
-ffmpeg \
-  -f rawvideo -pix_fmt yuv420p -s 1280x720 -r 30 -i pipe:0 \
-  -f mp3 -i pipe:1 \
-  -c:v libx264 -preset ultrafast -tune zerolatency -b:v 2500k \
-  -c:a aac -b:a 128k -ar 44100 \
-  -f flv "rtmp://a.rtmp.youtube.com/live2/{STREAM_KEY}"
+```
+Host webcam (30fps) → timestamped ring buffer (10s / 300 frames)
+                                    ↓
+STT interim → mark utterance_start (Instant)
+STT final   → mark utterance_end (Instant)
+                                    ↓
+NLLB → TTS → grab frames[utterance_start..utterance_end] from buffer
+                                    ↓
+Send to guests:  audio (tts_start → MP3 → tts_end)
+                 video (video_start → frames[] → video_end)  ← synced!
+                                    ↓
+For YouTube:  FFmpeg mux (frames + MP3 → H.264+AAC → FLV → RTMP)
 ```
 
-**2.3 Original Language Stream**
-- Forward host video + original audio directly (no TTS)
-- Uses same FFmpeg pattern but with original audio pipe
+**Changes made:**
+- `types.rs`: `TimestampedFrame` struct, `FrameBuffer` (Arc<Mutex<VecDeque>>), `Room::push_frame()`, `Room::get_frames_between()`
+- `types.rs`: `VideoStart`, `VideoFrame`, `VideoEnd` message types
+- `handler.rs`: face frames now stored in ring buffer (+ still forwarded to guests for live preview)
+- `pipeline.rs`: `utterance_start` tracked from first interim, frames grabbed on final, passed through run_pipeline → do_tts_and_broadcast
+- `pipeline.rs`: video_start/frame/end sent to guests alongside audio
 
-**2.4 Audio Synchronization**
-- TTS audio arrives in chunks per utterance (~2-4s behind real-time)
-- Need silence padding between utterances to keep audio timeline aligned
-- FFmpeg `-async 1` or custom audio timeline management
+**2.2 FFmpeg RTMP Manager** — DONE (code, not yet wired)
+- `ffmpeg.rs`: `RtmpManager` with per-language FFmpeg child processes
+- MJPEG frames piped via stdin → libx264 ultrafast → FLV → RTMP
+- `SyncedChunk` struct bundles frames + MP3 per utterance
+- `start_stream()`, `push_chunk()`, `stop_all()`, `stop_stream()`
+- Needs: wire into session creation (start FFmpeg on go-live) and pipeline (push chunks)
+
+**2.3 Remaining**
+- [ ] Wire RtmpManager into AppState and session lifecycle
+- [ ] Push synced chunks to FFmpeg in do_tts_and_broadcast
+- [ ] Handle audio muxing (current FFmpeg uses video-only; need audio pipe)
+- [ ] Add ffmpeg binary to Docker image
+- [ ] Test end-to-end RTMP push to YouTube
 
 ### Phase 3: Persistent Data (SQLite)
 
@@ -219,8 +233,8 @@ server-rs/
     db.rs             NEW: SQLite init + CRUD (users, voices, sessions, streams) — DONE
     youtube.rs        NEW: OAuth2 + broadcast/stream management — DONE
     routes.rs         NEW: REST API handlers — DONE
-    room/handler.rs   Updated to use AppState — DONE
-    ffmpeg.rs         Phase 2 (not started)
+    room/handler.rs   Updated: AppState + frame buffer storage — DONE
+    ffmpeg.rs         NEW: RtmpManager, per-lang FFmpeg processes — DONE (not wired)
 
 docker-compose.yml    + Google env vars, DATABASE_URL, db-data volume — DONE
 

@@ -1,4 +1,5 @@
 mod db;
+mod ffmpeg;
 mod pipeline;
 mod room;
 mod routes;

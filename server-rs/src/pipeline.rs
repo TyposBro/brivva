@@ -8,12 +8,12 @@
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
-use crate::types::{Lang, Rooms, ServerMsg};
+use crate::types::{FrameBuffer, Lang, Rooms, ServerMsg, TimestampedFrame};
 
 // ── Service URLs ──────────────────────────────────────────
 
@@ -78,7 +78,17 @@ struct SttEvent {
 // ── STT Connection ────────────────────────────────────────
 
 /// Emit a final transcript: broadcast to room and trigger translation pipeline
-fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_lang: &Lang, style_params: Option<StyleParams>) {
+fn emit_final(
+    rooms: &Rooms,
+    room_id: &str,
+    transcript: &str,
+    uid: u64,
+    source_lang: &Lang,
+    style_params: Option<StyleParams>,
+    utterance_start: Instant,
+) {
+    let utterance_end = Instant::now();
+
     if let Some(room) = rooms.get(room_id) {
         let final_msg = to_ws(&ServerMsg::Final {
             transcript: transcript.to_string(),
@@ -89,6 +99,7 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
 
         let active = room.active_langs();
         let sp = style_params.unwrap_or_default();
+        let frame_buffer = room.frame_buffer.clone();
         println!("[PIPELINE] active langs: {:?}, style: {:.2}", active, sp.style);
         if !active.is_empty() {
             let rooms_clone = rooms.clone();
@@ -96,7 +107,10 @@ fn emit_final(rooms: &Rooms, room_id: &str, transcript: &str, uid: u64, source_l
             let src = source_lang.clone();
             let text = transcript.to_string();
             tokio::spawn(async move {
-                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid, &sp).await;
+                run_pipeline(
+                    &text, uid, &src, &active, &rooms_clone, &rid, &sp,
+                    utterance_start, utterance_end, &frame_buffer,
+                ).await;
             });
         }
     }
@@ -152,6 +166,8 @@ pub async fn start_stt(
     let rooms_ref = rooms.clone();
     let rid = room_id.clone();
     let mut utterance_counter: u64 = 0;
+    // Track when the current utterance started (first interim after silence)
+    let mut utterance_start: Option<Instant> = None;
 
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stt_stream.next().await {
@@ -179,10 +195,16 @@ pub async fn start_stt(
                     let uid = utterance_counter;
                     println!("[FINAL #{}] {}", uid, event.text);
                     let style_params = event.style_params.clone();
+                    // Use the tracked start time, or fallback to now
+                    let start = utterance_start.take().unwrap_or_else(Instant::now);
                     drop(room);
-                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params);
+                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params, start);
                 }
                 "interim" => {
+                    // Mark utterance start on first interim
+                    if utterance_start.is_none() {
+                        utterance_start = Some(Instant::now());
+                    }
                     println!("[INTERIM] {}", event.text);
                     let msg = to_ws(&ServerMsg::Interim {
                         transcript: event.text,
@@ -229,12 +251,34 @@ async fn run_pipeline(
     rooms: &Rooms,
     room_id: &str,
     style_params: &StyleParams,
+    utterance_start: Instant,
+    utterance_end: Instant,
+    frame_buffer: &FrameBuffer,
 ) {
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
 
     // Get cloned voice ID if available
     let voice_clone_id = rooms.get(room_id).and_then(|r| r.voice_clone_id.clone());
+
+    // Grab the video frames for this utterance ONCE (shared across all languages)
+    let frames = {
+        if let Ok(buf) = frame_buffer.lock() {
+            buf.iter()
+                .filter(|f| f.timestamp >= utterance_start && f.timestamp <= utterance_end)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    };
+    let frames = Arc::new(frames);
+    eprintln!(
+        "[PIPELINE] utterance {} captured {} video frames ({:.0}ms window)",
+        utterance_id,
+        frames.len(),
+        utterance_end.duration_since(utterance_start).as_millis()
+    );
 
     for lang in target_langs {
         if lang == source_lang {
@@ -245,11 +289,12 @@ async fn run_pipeline(
             let room_id = room_id.to_string();
             let voice_clone_id = voice_clone_id.clone();
             let sp = style_params.clone();
+            let frames = frames.clone();
 
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    voice_clone_id.as_deref(), &sp,
+                    voice_clone_id.as_deref(), &sp, &frames,
                 )
                 .await;
             }));
@@ -264,6 +309,7 @@ async fn run_pipeline(
         let room_id = room_id.to_string();
         let voice_clone_id = voice_clone_id.clone();
         let sp = style_params.clone();
+        let frames = frames.clone();
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -308,7 +354,7 @@ async fn run_pipeline(
                 room.send_to_host(msg);
             }
 
-            // 3. TTS + send audio
+            // 3. TTS + send synced audio+video
             do_tts_and_broadcast(
                 &client,
                 &translated_text,
@@ -319,6 +365,7 @@ async fn run_pipeline(
                 &room_id,
                 voice_clone_id.as_deref(),
                 &sp,
+                &frames,
             )
             .await;
         }));
@@ -329,7 +376,7 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS and send audio to guests
+/// Call ElevenLabs TTS and send synced audio + video to guests
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -340,6 +387,7 @@ async fn do_tts_and_broadcast(
     room_id: &str,
     voice_clone_id: Option<&str>,
     style_params: &StyleParams,
+    utterance_frames: &[TimestampedFrame],
 ) {
     let tts_start = Instant::now();
 
@@ -409,12 +457,31 @@ async fn do_tts_and_broadcast(
         return;
     }
 
-    // Send audio to guests
+    // Send synced audio + video to guests
     if let Some(room) = rooms.get(room_id) {
+        // Audio
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
         room.send_to_lang(lang, Message::Binary(audio_buffer.into()));
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
         room.send_to_host(to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
+
+        // Synced video frames (captured during the utterance)
+        if !utterance_frames.is_empty() {
+            room.send_to_lang(lang, to_ws(&ServerMsg::VideoStart {
+                utterance_id,
+                frame_count: utterance_frames.len() as u32,
+            }));
+            for frame in utterance_frames {
+                room.send_to_lang(lang, to_ws(&ServerMsg::VideoFrame {
+                    data: frame.data.clone(),
+                }));
+            }
+            room.send_to_lang(lang, to_ws(&ServerMsg::VideoEnd { utterance_id }));
+            eprintln!(
+                "[TTS] sent {} synced video frames for utterance {} ({})",
+                utterance_frames.len(), utterance_id, lang
+            );
+        }
     }
 }
 
