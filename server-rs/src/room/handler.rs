@@ -156,16 +156,6 @@ async fn handle_host(
                 if text.contains("host:end") {
                     break;
                 }
-                // Handle face frame — store for lip-sync (don't forward to guests)
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
-                    if json.get("type").and_then(|v| v.as_str()) == Some("face:frame") {
-                        if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
-                            if let Some(mut room) = rooms.get_mut(&room_id) {
-                                room.latest_face = Some(data.to_string());
-                            }
-                        }
-                    }
-                }
             }
             Message::Close(_) => break,
             _ => {}

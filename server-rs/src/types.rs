@@ -75,7 +75,6 @@ pub struct Room {
     pub source_lang: Lang,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
     pub guests: DashMap<String, Guest>,
-    pub latest_face: Option<String>,
     /// Cloned voice ID from ElevenLabs (None until clone completes)
     pub voice_clone_id: Option<String>,
     /// Buffer for first N seconds of host PCM (None after clone is triggered)
@@ -91,7 +90,6 @@ impl Room {
             source_lang,
             host_tx: None,
             guests: DashMap::new(),
-            latest_face: None,
             voice_clone_id: None,
             pcm_buffer: Some(Vec::new()),
             pcm_bytes: 0,
@@ -201,30 +199,6 @@ pub enum ServerMsg {
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
     },
-
-    #[serde(rename = "video_start")]
-    VideoStart {
-        #[serde(rename = "utteranceId")]
-        utterance_id: u64,
-    },
-
-    #[serde(rename = "video_frame")]
-    VideoFrame {
-        #[serde(rename = "utteranceId")]
-        utterance_id: u64,
-        data: String,
-    },
-
-    #[serde(rename = "video_end")]
-    VideoEnd {
-        #[serde(rename = "utteranceId")]
-        utterance_id: u64,
-        #[serde(rename = "lipsyncMs")]
-        lipsync_ms: u64,
-    },
-
-    #[serde(rename = "face:frame")]
-    FaceFrame { data: String },
 
     #[serde(rename = "error")]
     Error { message: String },

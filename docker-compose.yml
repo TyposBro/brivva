@@ -11,7 +11,6 @@ services:
       - STT_HOST=stt-wrapper
       - STT_PORT=8766
       - NLLB_HOST=nllb
-      - LIPSYNC_HOST=${LIPSYNC_HOST:-wav2lip}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
     depends_on:
       - nllb
@@ -36,23 +35,3 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
-
-  musetalk:
-    build: ./musetalk
-    ports:
-      - "8101:8100"
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    restart: unless-stopped
-    profiles: ["musetalk"]
-
-  wav2lip:
-    build: ./wav2lip
-    ports:
-      - "8100:8100"
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    restart: unless-stopped
-    profiles: ["wav2lip"]
