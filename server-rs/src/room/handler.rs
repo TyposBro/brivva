@@ -95,23 +95,29 @@ async fn handle_host(
         }
     });
 
-    // Create audio channel for the pipeline
-    let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-    // Spawn the STT → translate → TTS pipeline
-    let source_lang = rooms.get(&room_id).map(|r| r.source_lang.clone()).unwrap_or(Lang::En);
-    let pipeline_rooms = rooms.clone();
-    let pipeline_rid = room_id.clone();
-    tokio::spawn(async move {
-        pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, audio_rx).await;
-    });
+    // Audio channel + STT pipeline (lazy-started on first audio)
+    let mut audio_tx: Option<mpsc::UnboundedSender<Vec<u8>>> = None;
 
     // Read loop: host sends binary audio or text commands
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(data) => {
+                // Lazy-start STT pipeline on first audio (avoids Deepgram timeout during voice setup)
+                if audio_tx.is_none() {
+                    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                    audio_tx = Some(tx);
+                    let source_lang = rooms.get(&room_id).map(|r| r.source_lang.clone()).unwrap_or(Lang::En);
+                    let pipeline_rooms = rooms.clone();
+                    let pipeline_rid = room_id.clone();
+                    tokio::spawn(async move {
+                        pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, rx).await;
+                    });
+                    eprintln!("[HOST] First audio received, STT pipeline started for room {}", room_id);
+                }
                 // Forward audio to the STT pipeline
-                let _ = audio_tx.send(data.to_vec());
+                if let Some(ref tx) = audio_tx {
+                    let _ = tx.send(data.to_vec());
+                }
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
