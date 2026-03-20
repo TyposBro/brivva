@@ -2,7 +2,7 @@
 
 ## Current Status (Mar 20 2026)
 
-**v7 — Zero-config platform UX.** 13-platform streaming with magic paste, credential vault, key-only mode, deep links. Feature complete for demo.
+**v8 — FFmpeg RTMP streaming wired.** Host webcam + translated TTS audio → FFmpeg → RTMP push to Twitch/YouTube/etc. 13-platform dashboard with zero-config UX.
 
 - **Frontend:** https://brivva.pages.dev (Cloudflare Pages)
 - **Backend:** Rust axum server (server-rs :3000) via cloudflared tunnel
@@ -12,31 +12,65 @@
 ### What's Working
 
 - Host speaks (KO/EN) → real-time STT → NLLB translation → ElevenLabs TTS → translated audio to guests
+- FFmpeg RTMP streaming: host webcam (video) + TTS audio → H.264+AAC → FLV → RTMP push to platforms
+- Session-room linking: sessionId query param connects REST sessions to WebSocket rooms
 - YouTube OAuth2 flow → auto-create broadcasts per language via YouTube Data API v3
+- Twitch RTMP streaming → tested and working (stream key + auto RTMP URL)
 - Multi-platform RTMP: 13 platforms (YouTube auto, rest manual RTMP URL + stream key)
-- Zero-config UX: magic paste (auto-detect platform from RTMP URL), credential vault (save once, auto-fill), key-only mode (hide RTMP URL for known platforms), deep links to platform settings
+- Zero-config UX: magic paste, credential vault, key-only mode, deep links
 - Dashboard: session creation with platform picker, voice management, past sessions
-- Session page: stream cards with status, RTMP URLs, broadcast IDs
+- Session page: stream cards + "Start Broadcasting" button → links to host page
 - SQLite persistence: users, voices, sessions, streams, platform_credentials
-- Voice cloning: ElevenLabs /v1/voices/add → persistent cloned voices
-- PlatformProvider trait for future OAuth integrations (Twitch, Instagram)
-- Dockerized: 3 containers (server-rs, stt-wrapper, nllb)
+- Voice cloning: ElevenLabs /v1/voices/add → persistent cloned voices (working)
+- Dockerized: 3 containers (server-rs + ffmpeg, stt-wrapper, nllb)
+
+### Platform Integration Status
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| YouTube | OAuth ready, 24hr review pending | Auto-creates broadcasts via API |
+| Twitch | Working | Stream key + known RTMP URL |
+| Instagram | Manual RTMP | Key-only mode (known base URL) |
+| TikTok | Manual RTMP | Requires 1000+ followers |
+| Coupang Live | Needs partnership | Korean business registration + seller API partnership |
+| Naver Shopping Live | Needs partnership | Korean business registration + partner agreement |
+| Rakuten Live | Needs partnership | Japanese business registration |
+| Douyin/Taobao/Kuaishou/Xiaohongshu/Bilibili | Needs partnership | Chinese business registration + platform APIs |
+| Custom RTMP | Working | Any RTMP/RTMPS endpoint |
+
+### Fundamental Architecture: 1 Stream = 1 Account = 1 Language
+
+**RTMP platforms (Twitch, Instagram, etc.) only allow ONE ingest stream per account.** You cannot push 3 languages to the same Twitch stream key — the 2nd and 3rd connections will be rejected.
+
+This means multi-language distribution requires:
+- **1 platform account per language per platform** (e.g., twitch.tv/brivva_en, twitch.tv/brivva_ja, twitch.tv/brivva_zh)
+- **YouTube is the exception** — OAuth API can auto-create multiple broadcasts on one account
+- The dashboard must model this as **per-language stream destinations**, not "enable Twitch for all languages"
+
+**Current focus:** Get 1 stream → 1 account → 1 language working correctly end-to-end. Then expand to per-language assignment UI.
+
+**Phase 1 (now):** Dashboard creates 1 stream per session (1 platform, 1 language, 1 stream key). Prove FFmpeg RTMP works.
+**Phase 2:** Dashboard allows assigning different platforms/accounts per language.
+**Phase 3:** YouTube auto-creates N broadcasts per language via API on a single account.
 
 ### What's NOT Working / TODO
 
-- [ ] FFmpeg RTMP muxing not wired into pipeline (code written in ffmpeg.rs, not connected)
-- [ ] YouTube broadcast transition to "live" (requires RTMP push first)
+- [ ] **1:1 stream model:** Dashboard currently duplicates the same stream key across all languages (broken). Need to create exactly 1 FFmpeg stream per unique RTMP endpoint.
+- [ ] **Audio-video sync timestamps:** TTS audio arrives in bursts (every 3-5s) but video is continuous 30fps. Each utterance needs a timestamp so FFmpeg knows exactly where to place translated audio in the video timeline.
+- [ ] YouTube broadcast transition to "live" (24hr review pending)
 - [ ] Emotion-conditioned TTS style_params not reaching ElevenLabs
+- [ ] **Per-language platform assignment UI** (Phase 2)
 
 ### Production Hardening (Post-Demo Priority)
 
-- [ ] **Session cleanup:** Ensure DashMap rooms + FFmpeg processes are killed on WebSocket close (prevent memory leaks + zombie processes)
-- [ ] **Network resilience:** Buffer/reconnect on WebSocket drops, handle STT/TTS API 503s with fallback
-- [ ] **Sync drift:** After 45+ min streaming, translated audio drifts from video — needs timestamp-based correction
-- [ ] **Observability:** Grafana/Prometheus metrics for API latency, pipeline errors, active sessions
-- [ ] **Self-healing:** Auto-restart pipeline on crash, resume live streams without host refresh
-- [ ] **Global relay:** CDN for viewers outside ap-northeast-2 (currently ~400ms for non-Korea viewers)
-- [ ] **Stress testing:** Concurrent sessions, FFmpeg process limits, GPU memory under load
+- [ ] **Timestamp-based audio sync:** Each TTS utterance needs `utterance_start`/`utterance_end` timestamps relative to the video stream. FFmpeg must place audio at the correct position, not just append.
+- [ ] **Session cleanup:** DashMap rooms + FFmpeg processes killed on WebSocket close
+- [ ] **Network resilience:** Buffer/reconnect on WS drops, handle API 503s with fallback
+- [ ] **Sync drift:** After 45+ min, translated audio drifts — needs correction
+- [ ] **Observability:** Grafana/Prometheus metrics for API latency, pipeline errors
+- [ ] **Self-healing:** Auto-restart pipeline on crash, resume live streams
+- [ ] **Global relay:** CDN for non-Korea viewers (~400ms latency currently)
+- [ ] **Stress testing:** Concurrent sessions, FFmpeg process limits
 
 ### AWS Deployment (Live)
 
@@ -80,24 +114,27 @@ brivva 'cd ~/brivva && docker compose logs -f --tail 50'
 
 Wav2Lip and MuseTalk containers were removed. Lip-sync was a known industry problem — single reference frame → N output frames creates uncanny frozen body. Decision: demo audio-only translation (works well), mention lip-sync as scoped R&D.
 
-## Architecture (v6)
+## Architecture (v8)
 
 ```
-Host Browser (/host)
+Host Browser (/host?sessionId=xxx)
   → PCM linear16 @ 16kHz → WebSocket → server-rs (Rust/axum :3000)
+  → Webcam 30fps JPEG → face:frame → server-rs stores latest_face
   → stt-wrapper (:8766) → Deepgram Nova-3 (streaming transcription)
   → NLLB (:8000) — per active language, parallel tokio::spawn
-  → ElevenLabs TTS (API) — MP3 streamed to guests
-  → Guest Browser: TtsPlayer plays translated audio
+  → ElevenLabs TTS (API) — MP3 buffered
+  → MP3 → Guest Browser: TtsPlayer plays translated audio
+  → MP3 → decode to PCM → FFmpeg audio FIFO (per-language stream)
+  → Webcam frames → FFmpeg video stdin (all streams)
+  → FFmpeg per stream: H.264 + AAC → FLV → RTMP push to platform
 
 Dashboard (/dashboard)
   → YouTube OAuth → connect account
   → Create session → select platforms + languages
   → YouTube: auto-create broadcasts via API
-  → Others: user pastes RTMP URL + stream key
-  → Session page shows stream cards with status
-
-Future: FFmpeg muxes host video + translated audio → RTMP push to each platform
+  → Others: user pastes RTMP URL + stream key (magic paste / vault)
+  → Session page → "Start Broadcasting" → HostPage with sessionId
+  → Host WS connect reads session streams from DB → starts FFmpeg per stream
 ```
 
 | Service     | Port | Tech                          | Latency       | GPU |
@@ -176,6 +213,7 @@ Connection via query params:
 
 **Host → Server:**
 - `[ArrayBuffer]` — PCM audio frames
+- `{ "type": "face:frame", "data": "<base64 JPEG>" }` — webcam frames (30fps while recording)
 - `"host:end"` — close room
 
 **Server → Host:**
@@ -185,6 +223,11 @@ Connection via query params:
 - room:joined, interim, final, translation
 - tts_start → [MP3 binary blob] → tts_end (audio)
 - room:closed
+
+**FFmpeg RTMP (server-side, per stream):**
+- Host face:frame → decode JPEG → push to all FFmpeg video stdin
+- TTS MP3 → decode to PCM s16le → push to language-matched FFmpeg audio FIFO
+- Audio FIFO writer pads silence (20ms zero chunks) between utterances
 
 ## Database Schema (SQLite)
 
@@ -283,9 +326,11 @@ CREATE TABLE platform_credentials (
 ## Rust Server Key Concepts
 
 - **AppState:** `rooms: Arc<DashMap<String, Room>>` + `db: SqlitePool`
-- **Room:** host_tx, guests DashMap, source_lang, frame_buffer
-- **Pipeline flow:** host audio → STT → final → spawn per-lang → translate → TTS → broadcast audio
-- **Routes:** REST API for OAuth, sessions, streams, voices (routes.rs)
+- **Room:** host_tx, guests DashMap, source_lang, latest_face, session_id, rtmp_manager
+- **Pipeline flow:** host audio → STT → final → spawn per-lang → translate → TTS → broadcast audio + push PCM to FFmpeg
+- **FFmpeg RTMP:** RtmpManager spawns one FFmpeg per stream. Video via stdin (image2pipe JPEG 30fps), audio via named FIFO (s16le 44100Hz). Silence padding fills gaps between TTS utterances.
+- **Session-Room link:** Host connects with `?sessionId=xxx` → handler reads streams from DB → starts FFmpeg per stream → updates session status to "live" with room_id
+- **Routes:** REST API for OAuth, sessions, streams, voices, credentials (routes.rs)
 
 ## Frontend Architecture
 
@@ -317,7 +362,7 @@ brivva/
 │       ├── routes.rs              REST API handlers (OAuth, sessions, voices, streams, credentials)
 │       ├── platform.rs            PlatformProvider trait, detect_platform(), settings_url()
 │       ├── pipeline.rs            STT → NLLB → TTS pipeline
-│       ├── ffmpeg.rs              RtmpManager (written, not yet wired)
+│       ├── ffmpeg.rs              RtmpManager: FFmpeg spawn, video stdin, audio FIFO, MP3→PCM decode
 │       └── room/handler.rs        WS host/guest handlers
 ├── stt-wrapper/                   STT proxy (Deepgram Nova-3)
 │   └── server.py

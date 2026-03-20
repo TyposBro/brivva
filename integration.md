@@ -2,25 +2,76 @@
 
 ## Overview
 
-Host signs up → connects YouTube account (optional) → selects voice → creates session with title + target languages + platforms → Brivva creates streams (YouTube auto via API, others use manual RTMP) → host talks → each stream gets real-time translated audio.
+Host signs up → connects YouTube account (optional) → selects voice → creates session with title + target language + platform + stream key → Brivva creates 1 FFmpeg RTMP stream → host talks → that stream gets real-time translated audio + host video pushed to the platform.
 
-## Architecture
+## Fundamental Challenge: 1 Stream = 1 Account = 1 Language
+
+**RTMP platforms only allow ONE ingest stream per account.** Twitch, Instagram, TikTok, etc. all enforce this. You cannot push 3 languages to the same stream key — the 2nd and 3rd connections will be rejected.
+
+### What This Means for Multi-Language Distribution
+
+To stream Korean host → English + Japanese + Chinese simultaneously:
+- **3 Twitch accounts** (twitch.tv/brand_en, twitch.tv/brand_ja, twitch.tv/brand_zh), each with its own stream key
+- **OR 3 different platforms** (EN → Twitch, JA → YouTube, ZH → Bilibili)
+- **YouTube is the exception** — OAuth API can auto-create multiple broadcasts on one account
+
+### How Competitors Solve This
+
+- **Firework, Bambuser, etc.**: Single embedded player on brand's website, language switcher in player UI. No RTMP distribution — they host the player.
+- **Restream, Castr**: Multi-platform RTMP relay — still 1 language per account, user provides N stream keys
+- **No one** does real-time multi-language RTMP distribution to native platform players yet. This is Brivva's unique value prop.
+
+### Implementation Phases
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **Phase 1** | 1 session → 1 stream → 1 platform account → 1 language | **In progress** |
+| **Phase 2** | 1 session → N streams, each with own platform/account/language | Next |
+| **Phase 3** | YouTube auto-creates N broadcasts per language on 1 account via API | YouTube API approved |
+
+### Phase 1 Model (Current Focus)
+
+```
+Dashboard: Pick 1 platform, 1 language, paste 1 stream key
+  → Session has 1 stream record in DB
+  → Host clicks "Start Broadcasting" → /host?sessionId=xxx
+  → Server reads stream from DB → starts 1 FFmpeg process
+  → FFmpeg: host video (stdin) + translated TTS audio (FIFO) → RTMP push
+  → Platform shows live stream with translated audio
+```
+
+### Phase 2 Model (Next)
+
+```
+Dashboard: For each target language, assign a platform + stream key
+  EN → Twitch (stream key A)
+  JA → YouTube (auto-created)
+  ZH → Bilibili (stream key B)
+  → Session has N stream records in DB
+  → Server starts N FFmpeg processes, each with different RTMP URL
+  → Each FFmpeg gets same video but different TTS audio (per language)
+```
+
+## Architecture (v9)
 
 ```
 Host Browser (/dashboard)
   → Connect YouTube (OAuth2)
-  → Create session: title, source lang, target langs, platforms
-  → YouTube: auto-create broadcast + stream per language via API
-  → Others: user pastes RTMP URL + stream key from platform
+  → Create session: title, source lang, target lang, platform, stream key
+  → Session page shows stream card
 
-Host Browser (/host)
+Host Browser (/host?sessionId=xxx)
+  → Webcam 30fps JPEG → face:frame → server-rs → FFmpeg stdin (all streams)
   → Mic audio → WebSocket → server-rs
   → STT (Deepgram Nova-3) → transcript
-  → Per target language:
-      → NLLB translate → ElevenLabs TTS → translated audio → guests
+  → NLLB translate → ElevenLabs TTS → MP3
+  → MP3 → decode to PCM → FFmpeg audio FIFO (per-language stream)
+  → FFmpeg: H.264 + AAC → FLV → RTMP push to platform
 
-Future (FFmpeg RTMP muxing):
-  → Host video + translated audio → FFmpeg → RTMP → each platform
+FFmpeg per stream:
+  Video: -f image2pipe -framerate 30 -i pipe:0
+  Audio: -f s16le -ar 44100 -ac 1 -i /tmp/brivva_audio_{stream_id}
+  Output: -c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -f flv rtmp://...
 ```
 
 ## Implementation Progress
@@ -42,7 +93,7 @@ Future (FFmpeg RTMP muxing):
 
 **1.3 Backend: Broadcast Management** — DONE (`routes.rs`)
 
-- [x] `POST /api/sessions` → create session + streams per platform per language
+- [x] `POST /api/sessions` → create session + stream per platform
   - YouTube: liveBroadcasts.insert, liveStreams.insert, bind (auto)
   - Others: create_stream_manual with pre-filled RTMP URL + stream key (status "ready")
 - [x] `GET /api/sessions?user_id=...` → list sessions
@@ -62,54 +113,46 @@ Future (FFmpeg RTMP muxing):
 
 **1.6 Backend: Database** — DONE (`db.rs`)
 
-- [x] SQLite via sqlx: users, voices, sessions, streams tables
+- [x] SQLite via sqlx: users, voices, sessions, streams, platform_credentials tables
 - [x] Full CRUD for all entities
 - [x] Docker volume for persistence
-- [x] Streams table generalized: `platform`, `platform_broadcast_id`, `platform_stream_id`, `rtmp_url`, `stream_key`
 
 **1.7 Frontend: Dashboard + Session UI** — DONE
 
-- [x] `api.ts` — REST API client with 13-platform PLATFORMS array (regions, help text, default RTMP URLs)
-- [x] `DashboardPage.tsx` — YouTube connect, voice selection, multi-platform session creation
-  - Platforms grouped by region: Global, Korea, Japan, China, Other
-  - Help text for each platform when enabled
-  - Pre-filled RTMP URLs where known
-  - Stream key input with password type
-- [x] `SessionPage.tsx` — stream cards with platform badges, RTMP URLs, broadcast IDs
-- [x] `App.tsx` — /dashboard, /session/:id routes added
-- [x] `HomePage.tsx` — "Stream Dashboard" button
-- [x] `App.css` — full dashboard + session + platform picker styles
+- [x] `DashboardPage.tsx` — YouTube connect, voice selection, platform picker
+- [x] `SessionPage.tsx` — stream cards with platform badges, RTMP URLs
+- [x] `HostPage.tsx` — stream status cards, webcam, audio recorder (redesigned v9)
+- [x] Zero-config UX: magic paste, credential vault, key-only mode, deep links
 
-### Phase 2: Video-Audio Sync + FFmpeg RTMP — PARTIALLY DONE
+### Phase 2: FFmpeg RTMP Streaming — DONE (code wired, needs 1:1 fix)
 
-**2.1 Synced Video Buffer Architecture** — DONE (code)
+**2.1 FFmpeg Manager** — DONE (`ffmpeg.rs`)
 
-- [x] `types.rs`: TimestampedFrame, FrameBuffer (ring buffer, 10s/300 frames)
-- [x] `pipeline.rs`: utterance_start/end tracking, frame extraction
-- [x] Frames grabbed matching utterance window when TTS completes
+- [x] RtmpManager with per-stream FFmpeg child processes
+- [x] Dual-input: video via stdin (image2pipe JPEG 30fps), audio via named FIFO (s16le 44100Hz)
+- [x] Silence padding fills gaps between TTS utterances (20ms zero chunks)
+- [x] decode_mp3_to_pcm() for TTS MP3 → raw PCM conversion
+- [x] FFmpeg binary in Docker image
 
-**2.2 FFmpeg RTMP Manager** — DONE (code, NOT WIRED)
+**2.2 Session-Room Linking** — DONE (`handler.rs`)
 
-- [x] `ffmpeg.rs`: RtmpManager with per-language FFmpeg child processes
-- [x] MJPEG stdin → libx264 ultrafast → FLV → RTMP
-- [x] SyncedChunk struct bundles frames + MP3 per utterance
-- [ ] **NOT WIRED**: RtmpManager not in AppState, not started on session creation
-- [ ] **NOT WIRED**: SyncedChunks not pushed from do_tts_and_broadcast
-- [ ] Audio muxing not implemented (current FFmpeg uses video-only)
-- [ ] FFmpeg binary not in Docker image
+- [x] Host connects with `?sessionId=xxx` → handler reads streams from DB
+- [x] Starts FFmpeg per stream, stores RtmpManager in Room
+- [x] Updates session status to "live" with room_id
+- [x] On disconnect: stops all FFmpeg, updates session to "ended"
 
-**2.3 Remaining to enable live RTMP push**
+**2.3 Pipeline Integration** — DONE (`pipeline.rs` + `handler.rs`)
 
-- [ ] Wire RtmpManager into AppState and session lifecycle
-- [ ] Start FFmpeg processes when session goes live
-- [ ] Push synced chunks to FFmpeg in do_tts_and_broadcast
-- [ ] Handle audio muxing (dual-input FFmpeg: video + audio → RTMP)
-- [ ] Add ffmpeg binary to Docker image
-- [ ] Test end-to-end RTMP push to YouTube (24hr wait expired ~7:13 PM Mar 21)
+- [x] face:frame → decoded JPEG → push to all FFmpeg video stdin
+- [x] TTS MP3 → decode to PCM → push to language-matched FFmpeg audio FIFO
+- [x] DashMap borrow safety: clone Arc before await
 
-### Phase 3: Multi-Platform Support — DONE
+**2.4 Remaining Issues**
 
-**13 Platforms Supported:**
+- [ ] **1:1 stream model**: Dashboard creates duplicate streams (same key, all languages). Must create exactly 1 stream per unique RTMP endpoint.
+- [ ] **Audio-video sync**: TTS audio arrives in bursts (3-5s) but video is continuous 30fps. Utterances need timestamps for correct placement.
+
+### Phase 3: Multi-Platform Support — DONE (13 platforms configured)
 
 | Platform               | Region | Auto      | Default RTMP                                |
 | ---------------------- | ------ | --------- | ------------------------------------------- |
@@ -127,38 +170,34 @@ Future (FFmpeg RTMP muxing):
 | Bilibili (哔哩哔哩)    | China  | No        | rtmp://live-push.bilivideo.com/live-bvc/    |
 | Custom RTMP            | Other  | No        | User-provided                               |
 
-**Implementation:**
+### Platform Partnership Requirements
 
-- YouTube: full OAuth2 + broadcast auto-creation via API
-- All others: user copies RTMP URL + stream key from platform, pastes into dashboard
-- Pre-filled RTMP URLs for platforms with known base URLs
-- Step-by-step help text for each platform guides non-technical users
-- Dashboard groups platforms by region for clean UX
+| Platform | Requirement | Why |
+|----------|-------------|-----|
+| Coupang Live | Korean business registration + Coupang Wing seller account + partnership | No open API, seller-only access |
+| Naver Shopping Live | Korean business registration + Naver Smart Store seller account | No open API |
+| Rakuten Live | Japanese business registration + Rakuten seller account | No open API |
+| Douyin, Taobao, Kuaishou, Xiaohongshu, Bilibili | Chinese business registration + individual platform partnerships | Each requires separate approval |
 
 ## YouTube API Details
 
 ### Quota Budget (default 10,000 units/day)
 
-| Operation                 | Cost | Per Session (4 langs) |
-| ------------------------- | ---- | --------------------- |
-| liveBroadcasts.insert     | 50   | 200                   |
-| liveStreams.insert        | 50   | 200                   |
-| liveBroadcasts.bind       | 50   | 200                   |
-| liveBroadcasts.transition | 50   | 200                   |
-| **Total per session**     |      | **800**               |
+| Operation                 | Cost | Per Session |
+| ------------------------- | ---- | ----------- |
+| liveBroadcasts.insert     | 50   | 50          |
+| liveStreams.insert         | 50   | 50          |
+| liveBroadcasts.bind       | 50   | 50          |
+| liveBroadcasts.transition | 50   | 50          |
+| **Total per session**     |      | **200**     |
 
-12 sessions/day within default quota. Request increase for production.
-
-### Required Scopes
-
-- `https://www.googleapis.com/auth/youtube.force-ssl` — manage broadcasts
-- `https://www.googleapis.com/auth/youtube.readonly` — read channel info
+50 sessions/day within default quota. Request increase for production.
 
 ### Broadcast Lifecycle
 
 1. `insert` → status: "complete" (metadata ready)
 2. `bind` stream to broadcast
-3. Start pushing RTMP (FFmpeg) — NOT YET IMPLEMENTED
+3. Start pushing RTMP (FFmpeg)
 4. `transition` → "testing" (preview)
 5. `transition` → "live" (public)
 6. `transition` → "complete" (end stream)
@@ -167,37 +206,6 @@ Future (FFmpeg RTMP muxing):
 
 - **24hr waiting period**: New YouTube channels must wait 24 hours after enabling live streaming before they can actually go live
 - **Redirect URI**: Must point to backend (`brivva-server.milliytechnology.org`), not frontend
-- **DB schema changes**: Adding `platform` column required deleting old SQLite DB
-
-## Files Changed
-
-```
-server-rs/
-  Cargo.toml          + sqlx, chrono, reqwest/form — DONE
-  Dockerfile          + libsqlite3 (builder + runtime) — DONE
-  src/
-    main.rs           AppState (rooms + db), all REST + WS routes — DONE
-    db.rs             NEW: SQLite init + CRUD (users, voices, sessions, streams) — DONE
-    youtube.rs        NEW: OAuth2 + broadcast/stream management — DONE
-    routes.rs         NEW: REST API handlers (multi-platform) — DONE
-    ffmpeg.rs         NEW: RtmpManager, per-lang FFmpeg processes — DONE (not wired)
-    types.rs          + TimestampedFrame, FrameBuffer — DONE
-    pipeline.rs       + utterance tracking, synced frame delivery — DONE
-    room/handler.rs   + AppState, frame buffer — DONE
-
-docker-compose.yml    + Google env vars, DATABASE_URL, db-data volume — DONE
-
-frontend/
-  src/
-    lib/
-      api.ts              NEW: REST API client, 13 platforms — DONE
-    pages/
-      DashboardPage.tsx   NEW: multi-platform session creation — DONE
-      SessionPage.tsx     NEW: stream cards with platform badges — DONE
-      HomePage.tsx        + Dashboard button — DONE
-    App.tsx               + /dashboard, /session/:id routes — DONE
-    App.css               + dashboard + session + platform styles — DONE
-```
 
 ## Environment Variables
 

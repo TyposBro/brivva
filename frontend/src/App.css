@@ -1914,3 +1914,94 @@ body {
   color: var(--accent);
   letter-spacing: 0.1em;
 }
+
+/* ── Host Streams Panel ───────────────────────────────── */
+
+.host-streams-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+}
+
+.host-streams-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.host-streams-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.host-streams-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.host-streams-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.host-stream-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  min-width: 120px;
+  flex: 1;
+}
+
+.host-stream-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.host-stream-lang {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.host-stream-platform {
+  font-size: 0.68rem;
+  color: var(--accent2);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.host-stream-status {
+  margin-left: auto;
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 0.1em 0.45em;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.host-stream-live {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+
+.host-stream-error {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error);
+}
+
+.host-stream-err-msg {
+  font-size: 0.7rem;
+  color: var(--error);
+}

@@ -1,16 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useHostRoom } from "../hooks/useHostRoom";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { LatencyDashboard } from "../components/LatencyDashboard";
-import { PipelineAnalysis } from "../components/PipelineAnalysis";
+import * as api from "../lib/api";
 
 export default function HostPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sessionId = searchParams.get("sessionId") ?? undefined;
   const {
-    status, roomId, guestCounts, liveTranscript, utterances,
+    status, liveTranscript, utterances,
     analyser, error, timings, videoRef,
     createRoom, startRecording, stopRecording, closeRoom,
     startVoiceRecording, skipVoiceSetup,
@@ -18,6 +18,26 @@ export default function HostPage() {
 
   const listRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(false);
+
+  // Session + streams info
+  const [session, setSession] = useState<api.Session | null>(null);
+  const [streams, setStreams] = useState<api.StreamInfo[]>([]);
+
+  // Load session info if sessionId provided
+  const loadSession = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const data = await api.getSession(sessionId);
+      setSession(data.session);
+      setStreams(data.streams);
+    } catch (e) {
+      console.error("Failed to load session:", e);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    loadSession();
+  }, [loadSession]);
 
   useEffect(() => {
     if (createdRef.current) return;
@@ -33,7 +53,7 @@ export default function HostPage() {
 
   const handleBack = () => {
     closeRoom();
-    navigate("/");
+    navigate(sessionId ? `/session/${sessionId}` : "/dashboard");
   };
 
   // Voice recording timer
@@ -59,10 +79,11 @@ export default function HostPage() {
 
   const isReady = status === "ready" || status === "recording";
   const isRecording = status === "recording";
-  const shareUrl = roomId ? `${window.location.origin}/room/${roomId}` : "";
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(shareUrl).catch(() => {});
+  // Find platform label from PLATFORMS array
+  const getPlatformLabel = (platformId: string) => {
+    const p = api.PLATFORMS.find((pl) => pl.id === platformId);
+    return p?.label ?? platformId;
   };
 
   return (
@@ -70,7 +91,9 @@ export default function HostPage() {
       <header className="header">
         <button className="back-btn" onClick={handleBack}>← Back</button>
         <h1 className="logo">brivva</h1>
-        <p className="tagline">Host · English</p>
+        <p className="tagline">
+          {session ? session.title : "Host · English"}
+        </p>
       </header>
 
       <main className="main">
@@ -86,13 +109,27 @@ export default function HostPage() {
           <div className="status-bar">Disconnected.</div>
         )}
 
-        {roomId && (
-          <div className="room-code-panel">
-            <span className="room-code-label">Room Code</span>
-            <span className="room-code">{roomId}</span>
-            <button className="copy-link-btn" onClick={copyLink}>
-              Copy link
-            </button>
+        {/* Stream Status Cards */}
+        {isReady && streams.length > 0 && (
+          <div className="host-streams-panel">
+            <div className="host-streams-header">
+              <span className="host-streams-title">Live Streams</span>
+              <span className="host-streams-count">{streams.length} platform{streams.length !== 1 ? "s" : ""}</span>
+            </div>
+            <div className="host-streams-grid">
+              {streams.map((s) => (
+                <div key={s.id} className="host-stream-card">
+                  <div className="host-stream-top">
+                    <span className="host-stream-lang">{s.lang?.toUpperCase()}</span>
+                    <span className="host-stream-platform">{getPlatformLabel(s.platform ?? "custom")}</span>
+                    <span className={`host-stream-status ${s.error ? "host-stream-error" : "host-stream-live"}`}>
+                      {s.error ? "ERR" : isRecording ? "LIVE" : "READY"}
+                    </span>
+                  </div>
+                  {s.error && <span className="host-stream-err-msg">{s.error}</span>}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -160,33 +197,6 @@ export default function HostPage() {
         </div>
 
         {isReady && (
-          <div className="guest-count-bar">
-            <span className="gc-item">
-              <span className="gc-flag">EN</span>
-              <span className="gc-num">{guestCounts.en}</span>
-            </span>
-            <span className="gc-sep" />
-            <span className="gc-item">
-              <span className="gc-flag">JA</span>
-              <span className="gc-num">{guestCounts.ja}</span>
-            </span>
-            <span className="gc-sep" />
-            <span className="gc-item">
-              <span className="gc-flag">ZH</span>
-              <span className="gc-num">{guestCounts.zh}</span>
-            </span>
-          </div>
-        )}
-
-        {isReady && (
-          <div className="lang-badge">
-            <span>English</span>
-            <span className="arrow">→</span>
-            <span>日本語 / 中文</span>
-          </div>
-        )}
-
-        {isReady && (
           <AudioRecorder
             isRecording={isRecording}
             analyser={analyser}
@@ -199,7 +209,9 @@ export default function HostPage() {
           {utterances.map((u) => (
             <div key={u.id} className="utterance">
               <div className="result-card">
-                <span className="result-label">English</span>
+                <span className="result-label">
+                  {session?.source_lang?.toUpperCase() ?? "EN"}
+                </span>
                 <p className="result-text">{u.transcript}</p>
               </div>
             </div>
@@ -218,8 +230,6 @@ export default function HostPage() {
         </div>
 
         <LatencyDashboard timings={timings} />
-
-        <PipelineAnalysis />
       </main>
     </div>
   );

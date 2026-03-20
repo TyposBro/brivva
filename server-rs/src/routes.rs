@@ -251,7 +251,7 @@ pub async fn create_session(
                     }));
                 }
             }
-            // Manual RTMP platforms: Instagram, Coupang, TikTok, custom, etc.
+            // Manual RTMP platforms: 1 stream per platform account (1 RTMP key = 1 stream)
             _ => {
                 let rtmp_url = match &platform_config.rtmp_url {
                     Some(u) => u.clone(),
@@ -262,41 +262,42 @@ pub async fn create_session(
                 };
                 let stream_key = platform_config.stream_key.as_deref().unwrap_or("");
 
-                // For manual platforms, create one stream per language
-                for lang in &all_langs {
-                    let record = db::create_stream_manual(
-                        &state.db,
-                        &session.id,
-                        lang,
-                        platform,
-                        &rtmp_url,
-                        stream_key,
-                    )
-                    .await;
+                // Use the first target language for this stream
+                // (Phase 2 will allow per-language platform assignment)
+                let lang = body.target_langs.first().map(|s| s.as_str()).unwrap_or(&body.source_lang);
 
-                    // Auto-save credential for next time
-                    let _ = db::upsert_platform_credential(
-                        &state.db,
-                        &body.user_id,
-                        platform,
-                        platform_config.rtmp_url.as_deref(),
-                        platform_config.stream_key.as_deref(),
-                        None,
-                    )
-                    .await;
+                let record = db::create_stream_manual(
+                    &state.db,
+                    &session.id,
+                    lang,
+                    platform,
+                    &rtmp_url,
+                    stream_key,
+                )
+                .await;
 
-                    streams.push(serde_json::json!({
-                        "id": record.id,
-                        "lang": lang,
-                        "platform": platform,
-                        "rtmp_url": if stream_key.is_empty() {
-                            rtmp_url.clone()
-                        } else {
-                            format!("{}/{}", rtmp_url, stream_key)
-                        },
-                        "status": "ready",
-                    }));
-                }
+                // Auto-save credential for next time
+                let _ = db::upsert_platform_credential(
+                    &state.db,
+                    &body.user_id,
+                    platform,
+                    platform_config.rtmp_url.as_deref(),
+                    platform_config.stream_key.as_deref(),
+                    None,
+                )
+                .await;
+
+                streams.push(serde_json::json!({
+                    "id": record.id,
+                    "lang": lang,
+                    "platform": platform,
+                    "rtmp_url": if stream_key.is_empty() {
+                        rtmp_url.clone()
+                    } else {
+                        format!("{}/{}", rtmp_url, stream_key)
+                    },
+                    "status": "ready",
+                }));
             }
         }
     }
