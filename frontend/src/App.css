@@ -1141,3 +1141,281 @@ body {
   color: var(--text);
   border-color: var(--text-muted);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   RESPONSIVE / MOBILE-FRIENDLY OVERRIDES
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Tablet (max-width: 1024px) ──────────────────────────────────────────── */
+
+@media (max-width: 1024px) {
+  .app {
+    max-width: 100%;
+    padding: 1.5rem 1.25rem;
+  }
+}
+
+/* ── Mobile (max-width: 640px) ───────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  /* Base layout */
+  .app {
+    max-width: 100%;
+    padding: 1rem 0.75rem;
+  }
+
+  /* Header */
+  .header {
+    margin-bottom: 1.5rem;
+  }
+
+  .logo {
+    font-size: 2rem;
+  }
+
+  .tagline {
+    font-size: 0.85rem;
+  }
+
+  .back-btn {
+    left: 0.75rem;
+    top: 1rem;
+    font-size: 0.85rem;
+    min-height: 44px;
+    min-width: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Room code — large and easy to read */
+  .room-code-panel {
+    flex-direction: column;
+    text-align: center;
+    gap: 0.5rem;
+    padding: 1rem;
+  }
+
+  .room-code {
+    font-size: 2.5rem;
+    letter-spacing: 0.25em;
+  }
+
+  .copy-link-btn {
+    min-height: 44px;
+    padding: 0.6rem 1.25rem;
+    font-size: 0.9rem;
+  }
+
+  /* Guest count bar */
+  .guest-count-bar {
+    flex-wrap: wrap;
+    padding: 0.6rem 1rem;
+  }
+
+  /* Lang badge */
+  .lang-badge {
+    font-size: 0.9rem;
+    padding: 0.75rem 1rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  /* Record button — touch-friendly */
+  .record-btn {
+    min-height: 48px;
+    padding: 0.9rem 2rem;
+    font-size: 1rem;
+  }
+
+  /* Waveform */
+  .waveform {
+    height: 64px;
+  }
+
+  /* Webcam preview — scale to container */
+  .webcam-preview video {
+    width: 100% !important;
+    max-width: 300px !important;
+    height: auto !important;
+    aspect-ratio: 1;
+  }
+
+  /* Guest host video — scale to container */
+  .host-video {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .host-video canvas {
+    width: 100% !important;
+    max-width: 300px !important;
+    height: auto !important;
+    aspect-ratio: 1;
+  }
+
+  /* Utterances */
+  .utterances {
+    max-height: 50vh;
+  }
+
+  .result-card {
+    padding: 0.85rem 1rem;
+  }
+
+  .result-text {
+    font-size: 1rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  /* Language picker — large touch targets */
+  .lang-pick-label {
+    font-size: 1rem;
+  }
+
+  .lang-pick-btn {
+    min-height: 56px;
+    font-size: 1.15rem;
+    padding: 1.1rem;
+  }
+
+  /* Home page */
+  .home-create-btn {
+    min-height: 56px;
+    font-size: 1.15rem;
+  }
+
+  .home-join {
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .room-input {
+    font-size: 1.4rem;
+    padding: 0.85rem 1rem;
+    min-height: 56px;
+  }
+
+  .home-join-btn {
+    width: 100%;
+    min-height: 48px;
+    justify-content: center;
+  }
+
+  /* Voice setup */
+  .voice-setup-panel {
+    padding: 1.5rem 1rem;
+  }
+
+  .voice-record-btn {
+    min-height: 48px;
+    padding: 0.85rem 2rem;
+    font-size: 1rem;
+  }
+
+  .voice-skip-btn {
+    min-height: 44px;
+    padding: 0.6rem 1.25rem;
+    font-size: 0.85rem;
+  }
+
+  /* Latency dashboard — horizontal scroll */
+  .latency-panel {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .lp-row {
+    min-width: 0;
+  }
+
+  .lp-row-label {
+    font-size: 0.6rem;
+    width: 20px;
+  }
+
+  .lp-row-ms {
+    font-size: 0.62rem;
+    width: 44px;
+  }
+
+  .lp-row-detail {
+    padding-left: 24px;
+    gap: 0.5rem;
+  }
+
+  .lp-row-detail span {
+    font-size: 0.6rem;
+  }
+
+  .lp-text {
+    max-width: 140px;
+    font-size: 0.62rem;
+  }
+
+  .lp-legend-row {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .latency-legend {
+    gap: 0.5rem;
+  }
+
+  /* Pipeline analysis */
+  .pa-body {
+    padding: 1rem 0.75rem;
+  }
+
+  .pa-compare {
+    grid-template-columns: 1fr;
+  }
+
+  .pa-table {
+    font-size: 0.7rem;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .pa-table th,
+  .pa-table td {
+    padding: 0.3rem 0.35rem;
+    white-space: nowrap;
+  }
+
+  .pa-gap-label {
+    width: 52px;
+    font-size: 0.62rem;
+  }
+
+  .pa-gap-stats {
+    font-size: 0.6rem;
+  }
+
+  .pa-main-toggle {
+    padding: 0.8rem 1rem;
+    font-size: 0.8rem;
+  }
+
+  .pa-verdict {
+    font-size: 0.7rem;
+  }
+
+  /* Error */
+  .error {
+    font-size: 0.85rem;
+    padding: 0.75rem 1rem;
+    word-break: break-word;
+  }
+
+  /* Prevent text overflow globally on mobile */
+  .result-label,
+  .lp-title,
+  .pa-subtitle,
+  .pa-col-header {
+    word-break: break-word;
+  }
+}

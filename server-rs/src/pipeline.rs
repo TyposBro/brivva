@@ -354,15 +354,17 @@ async fn do_tts_and_broadcast(
     );
 
     let is_cloned = voice_clone_id.is_some();
+    // Use higher-quality model for cloned voices, flash for defaults
+    let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
     println!(
-        "[TTS] requesting ElevenLabs voice={}{} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}]",
-        &voice_id, if is_cloned { " (cloned)" } else { "" }, text, lang,
+        "[TTS] requesting ElevenLabs voice={}{} model={} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}]",
+        &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, text, lang,
         style_params.style, style_params.stability, style_params.speed
     );
 
     let tts_body = serde_json::json!({
         "text": text,
-        "model_id": "eleven_flash_v2_5",
+        "model_id": model_id,
         "voice_settings": {
             "stability": style_params.stability,
             "similarity_boost": style_params.similarity_boost,
@@ -418,9 +420,9 @@ async fn do_tts_and_broadcast(
 
 // ── Voice Cloning ────────────────────────────────────────
 
-/// Convert raw PCM (16kHz, 16-bit, mono) to WAV bytes
+/// Convert raw PCM (44.1kHz, 16-bit, mono) to WAV bytes
 fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
-    let sample_rate: u32 = 16000;
+    let sample_rate: u32 = 44100;
     let bits_per_sample: u16 = 16;
     let channels: u16 = 1;
     let byte_rate = sample_rate * (bits_per_sample as u32 / 8) * channels as u32;

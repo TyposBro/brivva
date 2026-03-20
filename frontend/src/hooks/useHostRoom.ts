@@ -8,8 +8,8 @@ import { createMessageHandler } from "../state/host/messageHandler";
 export type { UtteranceTiming };
 export type { HostStatus, GuestCounts, HostUtterance } from "../state/host/reducer";
 
-const VOICE_SAMPLE_SECONDS = 10;
-const VOICE_SAMPLE_RATE = 16000;
+const VOICE_SAMPLE_SECONDS = 30;
+const VOICE_SAMPLE_RATE = 44100;
 
 export function useHostRoom() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);

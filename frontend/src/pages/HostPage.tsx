@@ -40,7 +40,7 @@ export default function HostPage() {
   const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const handleStartVoice = () => {
-    setVoiceTimer(10);
+    setVoiceTimer(30);
     setIsVoiceRecording(true);
     startVoiceRecording();
     voiceTimerRef.current = setInterval(() => {
@@ -99,7 +99,7 @@ export default function HostPage() {
           <div className="voice-setup-panel">
             <h3>Voice Setup</h3>
             <p className="voice-setup-desc">
-              Record a 10-second voice sample to clone your voice for translations.
+              Record a 30-second voice sample to clone your voice. Speak naturally and continuously — read anything aloud.
             </p>
             {!isVoiceRecording && voiceTimer === 0 && (
               <button className="voice-record-btn" onClick={handleStartVoice}>
