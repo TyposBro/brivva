@@ -154,7 +154,6 @@ function Legend() {
       <LegendDot color={COLORS.stt} label=" Nova-3 STT" />
       <LegendDot color={COLORS.translate} label=" Translate" />
       <LegendDot color={COLORS.tts} label=" TTS (ElevenLabs)" />
-      <LegendDot color={COLORS.lipsync} label=" Lip-sync" />
       <LegendDot color={COLORS.overhead} label=" Overhead" />
       <span className="lp-scale-label">┊ = {TARGET_MS}ms target</span>
     </div>

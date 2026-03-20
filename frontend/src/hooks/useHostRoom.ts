@@ -10,7 +10,7 @@ export type { HostStatus, GuestCounts, HostUtterance } from "../state/host/reduc
 
 export function useHostRoom() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);
-  const { timings, startTimer, recordStt, recordTranslate, recordTts, finalize, reset: resetTimings } = useTimings();
+  const { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize, reset: resetTimings } = useTimings();
 
   const audio = useRef(new AudioPipeline());
   const socket = useRef(new RoomSocket());
@@ -29,7 +29,7 @@ export function useHostRoom() {
   const handleMessage = createMessageHandler(
     dispatch,
     () => state.guestCounts,
-    { startTimer, recordStt, recordTranslate, recordTts, finalize },
+    { startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize },
   );
 
   // --- webcam ---

@@ -5,6 +5,7 @@ import { LANGS } from "../../types";
 
 type Stopwatch = {
   startTimer: (uid: string, text: string, langs: string[]) => void;
+  markInterim: () => void;
   recordStt: (uid: string, ms: number) => void;
   recordTranslate: (uid: string, ms: number) => void;
   recordTts: (uid: string, ms: number) => void;
@@ -30,6 +31,7 @@ export function createMessageHandler(
 
       case "interim":
         dispatch({ type: "interim", transcript: (msg.transcript as string) ?? "" });
+        stopwatch.markInterim();
         break;
 
       case "final": {
