@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::pipeline;
 use crate::types::{Guest, Lang, Room, RoomQuery, Rooms, ServerMsg};
+use crate::AppState;
 
 /// Helper to serialize a ServerMsg and wrap in a WS text frame
 fn to_ws(msg: &ServerMsg) -> Message {
@@ -24,9 +25,9 @@ fn to_ws(msg: &ServerMsg) -> Message {
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<RoomQuery>,
-    State(rooms): State<Rooms>,
+    State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, rooms, query))
+    ws.on_upgrade(move |socket| handle_socket(socket, state.rooms, query))
 }
 
 async fn handle_socket(socket: WebSocket, rooms: Rooms, query: RoomQuery) {

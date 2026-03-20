@@ -12,6 +12,12 @@ services:
       - STT_PORT=8766
       - NLLB_HOST=nllb
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva.pages.dev/auth/youtube/callback}
+      - DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
+    volumes:
+      - db-data:/data
     depends_on:
       - nllb
       - stt-wrapper
@@ -34,3 +40,6 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
+
+volumes:
+  db-data:
