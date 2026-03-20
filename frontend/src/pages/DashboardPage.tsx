@@ -33,6 +33,7 @@ export default function DashboardPage() {
   const [voices, setVoices] = useState<api.Voice[]>([]);
   const [sessions, setSessions] = useState<api.Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [savedCreds, setSavedCreds] = useState<Record<string, api.PlatformCredential>>({});
 
   // Session form
   const [title, setTitle] = useState("");
@@ -45,17 +46,34 @@ export default function DashboardPage() {
   // Platforms
   const [enabledPlatforms, setEnabledPlatforms] = useState<Set<string>>(new Set(["youtube"]));
   const [platformConfigs, setPlatformConfigs] = useState<Record<string, PlatformEntry>>({});
+  const [magicPaste, setMagicPaste] = useState("");
 
   const loadData = useCallback(async () => {
     try {
-      const [u, v, s] = await Promise.all([
+      const [u, v, s, c] = await Promise.all([
         api.getUser(userId),
         api.listVoices(userId),
         api.listSessions(userId),
+        api.listCredentials(userId),
       ]);
       setUser(u);
       setVoices(v.voices);
       setSessions(s.sessions);
+      const credMap: Record<string, api.PlatformCredential> = {};
+      for (const cred of c.credentials) {
+        credMap[cred.platform] = cred;
+      }
+      setSavedCreds(credMap);
+      // Pre-fill platform configs from saved credentials
+      const prefilled: Record<string, PlatformEntry> = {};
+      for (const cred of c.credentials) {
+        prefilled[cred.platform] = {
+          platform: cred.platform,
+          rtmp_url: cred.rtmp_url ?? "",
+          stream_key: cred.stream_key ?? "",
+        };
+      }
+      setPlatformConfigs(prefilled);
     } catch (e) {
       console.error("Failed to load data:", e);
     } finally {
@@ -96,6 +114,25 @@ export default function DashboardPage() {
     }));
   };
 
+  const handleMagicPaste = (value: string) => {
+    setMagicPaste(value);
+    const detected = api.detectPlatform(value);
+    if (detected) {
+      // Auto-enable the platform
+      setEnabledPlatforms((prev) => new Set([...prev, detected.platform]));
+      // Auto-fill the config
+      setPlatformConfigs((prev) => ({
+        ...prev,
+        [detected.platform]: {
+          platform: detected.platform,
+          rtmp_url: detected.rtmpUrl,
+          stream_key: detected.streamKey,
+        },
+      }));
+      setMagicPaste(""); // Clear after successful detection
+    }
+  };
+
   const handleCreateSession = async () => {
     if (!title.trim()) {
       setError("Please enter a session title");
@@ -114,13 +151,17 @@ export default function DashboardPage() {
       return;
     }
 
-    // Validate manual platforms have RTMP URLs
+    // Validate manual platforms have required fields
     for (const pid of enabledPlatforms) {
       const p = api.PLATFORMS.find((x) => x.id === pid);
       if (p && !p.auto) {
         const config = platformConfigs[pid];
-        if (!config?.rtmp_url && !p.defaultRtmp) {
-          setError(`Enter RTMP URL for ${p.label}`);
+        if (!p.keyOnly && !config?.rtmp_url && !p.defaultRtmp) {
+          setError(`Enter server URL for ${p.label}`);
+          return;
+        }
+        if (!config?.stream_key) {
+          setError(`Enter stream key for ${p.label}`);
           return;
         }
       }
@@ -134,10 +175,10 @@ export default function DashboardPage() {
         const p = api.PLATFORMS.find((x) => x.id === pid);
         if (p?.auto) return { platform: pid };
         const config = platformConfigs[pid];
-        const defaultRtmp = p?.defaultRtmp ?? "";
+        const rtmpUrl = p?.keyOnly ? p.defaultRtmp : (config?.rtmp_url || p?.defaultRtmp || "");
         return {
           platform: pid,
-          rtmp_url: config?.rtmp_url || defaultRtmp,
+          rtmp_url: rtmpUrl,
           stream_key: config?.stream_key ?? "",
         };
       });
@@ -291,6 +332,14 @@ export default function DashboardPage() {
             {/* Platform Selection */}
             <fieldset className="dash-fieldset">
               <legend className="dash-legend">Stream To</legend>
+              <div className="dash-magic-paste">
+                <input
+                  className="dash-input"
+                  placeholder="Quick add: paste any RTMP URL here to auto-detect platform..."
+                  value={magicPaste}
+                  onChange={(e) => handleMagicPaste(e.target.value)}
+                />
+              </div>
               <div className="dash-platform-list">
                 {["Global", "Korea", "Japan", "China", "Other"].map((region) => {
                   const regionPlatforms = api.PLATFORMS.filter((p) => p.region === region);
@@ -318,14 +367,31 @@ export default function DashboardPage() {
                             </label>
                             {needsConfig && (
                               <div className="dash-platform-expand">
+                                {savedCreds[p.id] && (
+                                  <div className="dash-platform-saved">
+                                    Saved from last session
+                                  </div>
+                                )}
+                                {p.settingsUrl && (
+                                  <a
+                                    href={p.settingsUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="dash-platform-deeplink"
+                                  >
+                                    Open {p.label} Settings →
+                                  </a>
+                                )}
                                 <p className="dash-platform-help">{p.help}</p>
                                 <div className="dash-platform-config">
-                                  <input
-                                    className="dash-input"
-                                    placeholder={p.defaultRtmp ? `RTMP URL (pre-filled)` : "RTMP URL (paste from platform)"}
-                                    value={platformConfigs[p.id]?.rtmp_url ?? p.defaultRtmp}
-                                    onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
-                                  />
+                                  {!p.keyOnly && (
+                                    <input
+                                      className="dash-input"
+                                      placeholder="Server URL"
+                                      value={platformConfigs[p.id]?.rtmp_url ?? p.defaultRtmp}
+                                      onChange={(e) => updatePlatformConfig(p.id, "rtmp_url", e.target.value)}
+                                    />
+                                  )}
                                   <input
                                     className="dash-input"
                                     placeholder="Stream Key (paste from platform)"

@@ -1,6 +1,7 @@
 mod db;
 mod ffmpeg;
 mod pipeline;
+mod platform;
 mod room;
 mod routes;
 mod types;
@@ -57,6 +58,10 @@ async fn main() {
         .route("/api/voices", post(routes::create_voice))
         .route("/api/voices", get(routes::list_voices))
         .route("/api/voices/{id}", delete(routes::delete_voice))
+        // Platform Credentials
+        .route("/api/credentials", get(routes::list_credentials))
+        .route("/api/credentials", post(routes::save_credential))
+        .route("/api/credentials", delete(routes::delete_credential))
         .layer(cors)
         .with_state(state);
 

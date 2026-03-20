@@ -127,6 +127,23 @@ pub async fn init_db() -> SqlitePool {
     .await
     .expect("Failed to create streams table");
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS platform_credentials (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            rtmp_url TEXT,
+            stream_key TEXT,
+            display_name TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(user_id, platform)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create platform_credentials table");
+
     println!("[DB] SQLite initialized");
     pool
 }
@@ -451,6 +468,18 @@ pub async fn delete_stream(pool: &SqlitePool, stream_id: &str) {
         .ok();
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformCredential {
+    pub id: String,
+    pub user_id: String,
+    pub platform: String,
+    pub rtmp_url: Option<String>,
+    pub stream_key: Option<String>,
+    pub display_name: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 pub async fn list_streams(pool: &SqlitePool, session_id: &str) -> Vec<StreamRecord> {
     sqlx::query("SELECT * FROM streams WHERE session_id=? ORDER BY platform, lang")
         .bind(session_id)
@@ -471,4 +500,106 @@ pub async fn list_streams(pool: &SqlitePool, session_id: &str) -> Vec<StreamReco
             created_at: r.get("created_at"),
         })
         .collect()
+}
+
+// ── Platform Credentials CRUD ─────────────────────────
+
+pub async fn upsert_platform_credential(
+    pool: &SqlitePool,
+    user_id: &str,
+    platform: &str,
+    rtmp_url: Option<&str>,
+    stream_key: Option<&str>,
+    display_name: Option<&str>,
+) -> Result<PlatformCredential, sqlx::Error> {
+    let now = chrono::Utc::now().timestamp();
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO platform_credentials (id, user_id, platform, rtmp_url, stream_key, display_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, platform) DO UPDATE SET
+           rtmp_url = excluded.rtmp_url,
+           stream_key = excluded.stream_key,
+           display_name = COALESCE(excluded.display_name, platform_credentials.display_name),
+           updated_at = excluded.updated_at",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .bind(platform)
+    .bind(rtmp_url)
+    .bind(stream_key)
+    .bind(display_name)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    // Fetch the actual record (might have existing id if it was an update)
+    get_platform_credential(pool, user_id, platform)
+        .await
+        .map(|opt| opt.unwrap())
+}
+
+pub async fn get_platform_credential(
+    pool: &SqlitePool,
+    user_id: &str,
+    platform: &str,
+) -> Result<Option<PlatformCredential>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, user_id, platform, rtmp_url, stream_key, display_name, created_at, updated_at
+         FROM platform_credentials WHERE user_id = ? AND platform = ?",
+    )
+    .bind(user_id)
+    .bind(platform)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| PlatformCredential {
+        id: r.get("id"),
+        user_id: r.get("user_id"),
+        platform: r.get("platform"),
+        rtmp_url: r.get("rtmp_url"),
+        stream_key: r.get("stream_key"),
+        display_name: r.get("display_name"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }))
+}
+
+pub async fn list_platform_credentials(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<Vec<PlatformCredential>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, user_id, platform, rtmp_url, stream_key, display_name, created_at, updated_at
+         FROM platform_credentials WHERE user_id = ? ORDER BY platform",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| PlatformCredential {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            platform: r.get("platform"),
+            rtmp_url: r.get("rtmp_url"),
+            stream_key: r.get("stream_key"),
+            display_name: r.get("display_name"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        })
+        .collect())
+}
+
+pub async fn delete_platform_credential(
+    pool: &SqlitePool,
+    user_id: &str,
+    platform: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM platform_credentials WHERE user_id = ? AND platform = ?")
+        .bind(user_id)
+        .bind(platform)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

@@ -51,6 +51,21 @@ pub struct AddStreamBody {
 }
 
 #[derive(Deserialize)]
+pub struct PlatformCredentialBody {
+    pub user_id: String,
+    pub platform: String,
+    pub rtmp_url: Option<String>,
+    pub stream_key: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteCredentialQuery {
+    pub user_id: String,
+    pub platform: String,
+}
+
+#[derive(Deserialize)]
 pub struct CreateVoiceBody {
     pub user_id: String,
     pub name: String,
@@ -259,6 +274,17 @@ pub async fn create_session(
                     )
                     .await;
 
+                    // Auto-save credential for next time
+                    let _ = db::upsert_platform_credential(
+                        &state.db,
+                        &body.user_id,
+                        platform,
+                        platform_config.rtmp_url.as_deref(),
+                        platform_config.stream_key.as_deref(),
+                        None,
+                    )
+                    .await;
+
                     streams.push(serde_json::json!({
                         "id": record.id,
                         "lang": lang,
@@ -431,6 +457,50 @@ pub async fn delete_voice(
 
     db::delete_voice_db(&state.db, &id).await;
     Json(serde_json::json!({"status": "deleted"}))
+}
+
+// ── Platform Credentials ────────────────────────────────
+
+/// GET /api/credentials?user_id=... → list saved platform credentials
+pub async fn list_credentials(
+    State(state): State<AppState>,
+    Query(q): Query<UserIdQuery>,
+) -> impl IntoResponse {
+    match db::list_platform_credentials(&state.db, &q.user_id).await {
+        Ok(creds) => Json(serde_json::json!({ "credentials": creds })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// POST /api/credentials → save/update a platform credential
+pub async fn save_credential(
+    State(state): State<AppState>,
+    Json(body): Json<PlatformCredentialBody>,
+) -> impl IntoResponse {
+    match db::upsert_platform_credential(
+        &state.db,
+        &body.user_id,
+        &body.platform,
+        body.rtmp_url.as_deref(),
+        body.stream_key.as_deref(),
+        body.display_name.as_deref(),
+    )
+    .await
+    {
+        Ok(cred) => Json(cred).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// DELETE /api/credentials?user_id=...&platform=... → delete a platform credential
+pub async fn delete_credential(
+    State(state): State<AppState>,
+    Query(q): Query<DeleteCredentialQuery>,
+) -> impl IntoResponse {
+    match db::delete_platform_credential(&state.db, &q.user_id, &q.platform).await {
+        Ok(_) => Json(serde_json::json!({ "status": "deleted" })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────

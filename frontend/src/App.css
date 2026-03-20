@@ -1844,6 +1844,36 @@ body {
   padding: 0.5rem 0.6rem;
 }
 
+.dash-magic-paste {
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.dash-magic-paste .dash-input {
+  font-size: 0.85rem;
+  padding: 0.6rem 0.8rem;
+  font-style: italic;
+}
+
+.dash-platform-saved {
+  font-size: 0.75rem;
+  color: var(--success);
+  font-weight: 500;
+}
+
+.dash-platform-deeplink {
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.dash-platform-deeplink:hover {
+  color: var(--accent2);
+  text-decoration: underline;
+}
+
 .stream-platform {
   font-size: 0.7rem;
   text-transform: uppercase;
