@@ -99,7 +99,7 @@ export default function HostPage() {
           <div className="voice-setup-panel">
             <h3>Voice Setup</h3>
             <p className="voice-setup-desc">
-              Record a 30-second voice sample to clone your voice. Speak naturally and continuously — read anything aloud.
+              Record a 30-second voice sample to clone your voice. Read the text below naturally at your normal pace.
             </p>
             {!isVoiceRecording && voiceTimer === 0 && (
               <button className="voice-record-btn" onClick={handleStartVoice}>
@@ -107,10 +107,22 @@ export default function HostPage() {
               </button>
             )}
             {isVoiceRecording && (
-              <div className="voice-recording-indicator">
-                <span className="dot listening-dot" />
-                <span>Recording... {voiceTimer}s</span>
-              </div>
+              <>
+                <div className="voice-recording-indicator">
+                  <span className="dot listening-dot" />
+                  <span>Recording... {voiceTimer}s</span>
+                </div>
+                <div className="voice-script">
+                  Welcome to today's live stream! I'm really excited to show you
+                  some amazing products that I've been using lately. These items
+                  have completely changed my daily routine, and I think you're going
+                  to love them too. The quality is outstanding, and the price is
+                  incredibly reasonable for what you get. I've tried many similar
+                  products before, but nothing comes close to this. If you have any
+                  questions, feel free to drop them in the chat and I'll answer them
+                  right away. Let's get started!
+                </div>
+              </>
             )}
             <button className="voice-skip-btn" onClick={skipVoiceSetup}>
               Skip (use default voice)
