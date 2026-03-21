@@ -281,7 +281,7 @@ pub async fn create_session(
     title: &str,
     source_lang: &str,
     target_langs: &str,
-) -> Session {
+) -> Result<Session, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
 
@@ -299,9 +299,9 @@ pub async fn create_session(
     .bind(now)
     .execute(pool)
     .await
-    .expect("Failed to insert session");
+    .map_err(|e| format!("Failed to create session: {}", e))?;
 
-    Session {
+    Ok(Session {
         id,
         user_id: user_id.to_string(),
         voice_id: voice_id.map(String::from),
@@ -311,7 +311,7 @@ pub async fn create_session(
         status: "setup".to_string(),
         room_id: None,
         created_at: now,
-    }
+    })
 }
 
 pub async fn list_sessions(pool: &SqlitePool, user_id: &str) -> Vec<Session> {

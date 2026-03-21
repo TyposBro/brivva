@@ -38,7 +38,7 @@ export default function DashboardPage() {
   // Session form
   const [title, setTitle] = useState("");
   const [sourceLang, setSourceLang] = useState("ko");
-  const [targetLang, setTargetLang] = useState("en");
+  const [targetLangs, setTargetLangs] = useState<string[]>(["en"]);
   const [selectedVoice, setSelectedVoice] = useState<string>("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
@@ -105,6 +105,7 @@ export default function DashboardPage() {
 
   const handleCreateSession = async () => {
     if (!title.trim()) { setError("Please enter a session title"); return; }
+    if (targetLangs.length === 0) { setError("Select at least one target language"); return; }
     if (!selectedPlatform) { setError("Select a platform"); return; }
 
     const p = api.PLATFORMS.find((x) => x.id === selectedPlatform);
@@ -145,7 +146,7 @@ export default function DashboardPage() {
         user_id: userId,
         title: title.trim(),
         source_lang: sourceLang,
-        target_langs: [targetLang],
+        target_langs: targetLangs,
         voice_id: selectedVoice || undefined,
         platforms,
       });
@@ -263,10 +264,8 @@ export default function DashboardPage() {
                   value={sourceLang}
                   onChange={(e) => {
                     setSourceLang(e.target.value);
-                    if (e.target.value === targetLang) {
-                      const other = LANGS.find((l) => l.code !== e.target.value);
-                      if (other) setTargetLang(other.code);
-                    }
+                    // Remove new source from targets if selected
+                    setTargetLangs((prev) => prev.filter((l) => l !== e.target.value));
                   }}
                 >
                   {LANGS.map((l) => (
@@ -275,18 +274,27 @@ export default function DashboardPage() {
                 </select>
               </label>
 
-              <label className="dash-label" style={{ flex: 1 }}>
-                Translate to
-                <select
-                  className="dash-select"
-                  value={targetLang}
-                  onChange={(e) => setTargetLang(e.target.value)}
-                >
+              <fieldset className="dash-label" style={{ flex: 1 }}>
+                <legend style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "0.25rem" }}>Translate to</legend>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
                   {LANGS.filter((l) => l.code !== sourceLang).map((l) => (
-                    <option key={l.code} value={l.code}>{l.label}</option>
+                    <label key={l.code} style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={targetLangs.includes(l.code)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setTargetLangs((prev) => [...prev, l.code]);
+                          } else {
+                            setTargetLangs((prev) => prev.filter((c) => c !== l.code));
+                          }
+                        }}
+                      />
+                      {l.label}
+                    </label>
                   ))}
-                </select>
-              </label>
+                </div>
+              </fieldset>
             </div>
 
             {/* Platform Selection — single */}

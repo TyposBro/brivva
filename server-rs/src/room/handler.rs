@@ -93,7 +93,8 @@ async fn handle_host(
                     let full_url = if stream_key.is_empty() {
                         rtmp_url.clone()
                     } else {
-                        format!("{}{}", rtmp_url, stream_key)
+                        let base = rtmp_url.trim_end_matches('/');
+                        format!("{}/{}", base, stream_key)
                     };
                     if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url).await {
                         eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);

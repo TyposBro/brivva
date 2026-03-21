@@ -134,16 +134,55 @@ export default function SessionPage() {
 
                 {s.broadcast_id && (
                   <div className="stream-detail">
-                    <span className="stream-detail-label">Broadcast</span>
-                    <code className="stream-detail-value">{s.broadcast_id}</code>
+                    <span className="stream-detail-label">YouTube</span>
+                    <a
+                      href={`https://youtube.com/watch?v=${s.broadcast_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="stream-detail-value"
+                      style={{ color: "var(--accent)", textDecoration: "underline" }}
+                    >
+                      youtube.com/watch?v={s.broadcast_id}
+                    </a>
                   </div>
                 )}
 
                 {s.rtmp_url && (
                   <div className="stream-detail">
                     <span className="stream-detail-label">RTMP</span>
-                    <code className="stream-detail-value stream-rtmp">{s.rtmp_url}</code>
+                    <code className="stream-detail-value stream-rtmp">
+                      {s.rtmp_url.replace("rtmp://rtmp:", "rtmp://localhost:")}
+                    </code>
                   </div>
+                )}
+
+                {s.platform === "local-test" && s.rtmp_url && (
+                  <>
+                    <div className="stream-detail">
+                      <span className="stream-detail-label">WebRTC</span>
+                      <a
+                        href={`http://localhost:8889${s.rtmp_url.replace(/^rtmps?:\/\/[^/]+/, "")}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="stream-detail-value"
+                        style={{ color: "var(--accent)", textDecoration: "underline" }}
+                      >
+                        localhost:8889{s.rtmp_url.replace(/^rtmps?:\/\/[^/]+/, "")}/
+                      </a>
+                    </div>
+                    <div className="stream-detail">
+                      <span className="stream-detail-label">HLS</span>
+                      <a
+                        href={`http://localhost:8888${s.rtmp_url.replace(/^rtmps?:\/\/[^/]+/, "")}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="stream-detail-value"
+                        style={{ color: "var(--accent)", textDecoration: "underline" }}
+                      >
+                        localhost:8888{s.rtmp_url.replace(/^rtmps?:\/\/[^/]+/, "")}/
+                      </a>
+                    </div>
+                  </>
                 )}
               </div>
             ))}
@@ -155,7 +194,7 @@ export default function SessionPage() {
           {isLive && !session.room_id && (
             <button
               className="record-btn dash-go-live-btn"
-              onClick={() => navigate(`/host?sessionId=${session.id}`)}
+              onClick={() => navigate(`/host?sessionId=${session.id}&sourceLang=${session.source_lang}`)}
             >
               Start Broadcasting
             </button>

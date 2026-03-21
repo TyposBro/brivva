@@ -60,7 +60,7 @@ impl RtmpManager {
                 "-f", "image2pipe",
                 "-framerate", "30",
                 "-i", "pipe:0",
-                // Audio input: raw PCM from FIFO
+                // Audio input: raw PCM from FIFO (mono input)
                 "-f", "s16le",
                 "-ar", "44100",
                 "-ac", "1",
@@ -74,8 +74,9 @@ impl RtmpManager {
                 "-bufsize", "5000k",
                 "-pix_fmt", "yuv420p",
                 "-g", "60",
-                // Audio encoding
+                // Audio encoding (stereo AAC for WebRTC compatibility)
                 "-c:a", "aac",
+                "-ac:a", "2",
                 "-b:a", "128k",
                 // Mapping
                 "-map", "0:v",

@@ -17,6 +17,12 @@ export class RoomSocket {
     params: Record<string, string>,
     callbacks: RoomSocketCallbacks
   ): void {
+    // Close any existing connection to prevent duplicate pipelines
+    if (this.ws) {
+      this.ws.onclose = null; // prevent onClose callback from firing
+      this.ws.close();
+      this.ws = null;
+    }
     const url = this.buildUrl(params);
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";

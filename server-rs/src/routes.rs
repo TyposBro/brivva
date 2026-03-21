@@ -156,9 +156,12 @@ pub async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
 ) -> impl IntoResponse {
+    // Ensure user exists before creating session (FK constraint)
+    db::get_or_create_user(&state.db, &body.user_id).await;
+
     let target_langs_json = serde_json::to_string(&body.target_langs).unwrap_or_default();
 
-    let session = db::create_session(
+    let session = match db::create_session(
         &state.db,
         &body.user_id,
         body.voice_id.as_deref(),
@@ -166,7 +169,18 @@ pub async fn create_session(
         &body.source_lang,
         &target_langs_json,
     )
-    .await;
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[SESSION] {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
 
     // All languages: source + targets
     let mut all_langs = vec![body.source_lang.clone()];
@@ -251,6 +265,32 @@ pub async fn create_session(
                     }));
                 }
             }
+            // Local test: auto-create per-language streams on local MediaMTX
+            "local-test" => {
+                let rtmp_base = std::env::var("LOCAL_RTMP_URL")
+                    .unwrap_or_else(|_| "rtmp://rtmp:1935/live".to_string());
+
+                for lang in &all_langs {
+                    let rtmp_url = format!("{}/{}", rtmp_base.trim_end_matches('/'), lang);
+                    let record = db::create_stream_manual(
+                        &state.db,
+                        &session.id,
+                        lang,
+                        "local-test",
+                        &rtmp_url,
+                        "",
+                    )
+                    .await;
+
+                    streams.push(serde_json::json!({
+                        "id": record.id,
+                        "lang": lang,
+                        "platform": "local-test",
+                        "rtmp_url": rtmp_url,
+                        "status": "ready",
+                    }));
+                }
+            }
             // Manual RTMP platforms: 1 stream per platform account (1 RTMP key = 1 stream)
             _ => {
                 let rtmp_url = match &platform_config.rtmp_url {
@@ -311,7 +351,7 @@ pub async fn create_session(
     if !errors.is_empty() {
         result["errors"] = serde_json::json!(errors);
     }
-    Json(result)
+    Json(result).into_response()
 }
 
 /// POST /api/sessions/:id/streams → add a manual RTMP stream to existing session

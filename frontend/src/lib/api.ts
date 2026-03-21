@@ -68,8 +68,9 @@ export const PLATFORMS: Platform[] = [
   { id: "kuaishou", label: "Kuaishou (快手)", region: "China", auto: false, defaultRtmp: "rtmp://live.kuaishou.com/live/", help: "快手直播伴侣 desktop app → login → 开播设置 → copy 推流码 (Stream Key).", settingsUrl: "", keyOnly: true },
   { id: "xiaohongshu", label: "Xiaohongshu (小红书)", region: "China", auto: false, defaultRtmp: "", help: "小红书 App → + → 直播 → 设置 → 电脑模式 → copy 授权码 → 小红书直播助手 desktop app → paste auth code → copy 推流地址 & 推流码.", settingsUrl: "", keyOnly: false },
   { id: "bilibili", label: "Bilibili (哔哩哔哩)", region: "China", auto: false, defaultRtmp: "rtmp://live-push.bilivideo.com/live-bvc/", help: "Bilibili → 直播中心 → 我的直播间 → 开始直播 → copy 推流码 (Stream Key).", settingsUrl: "https://link.bilibili.com/p/center/index#/my-room/start-live", keyOnly: true },
-  // Custom
+  // Custom / Testing
   { id: "custom", label: "Custom RTMP", region: "Other", auto: false, defaultRtmp: "", help: "Enter any RTMP/RTMPS endpoint URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "local-test", label: "Local Test (MediaMTX)", region: "Other", auto: true, defaultRtmp: "rtmp://rtmp:1935/live/", help: "Auto-creates one stream per language on local MediaMTX. View with: ffplay rtmp://localhost:1935/live/{lang}", settingsUrl: "", keyOnly: false },
 ];
 
 // ── Sessions ────────────────────────────────────────────

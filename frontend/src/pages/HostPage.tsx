@@ -9,6 +9,7 @@ export default function HostPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sessionId = searchParams.get("sessionId") ?? undefined;
+  const sourceLang = searchParams.get("sourceLang") ?? "en";
   const {
     status, liveTranscript, utterances,
     analyser, error, timings, videoRef,
@@ -42,8 +43,9 @@ export default function HostPage() {
   useEffect(() => {
     if (createdRef.current) return;
     createdRef.current = true;
-    createRoom({ sessionId });
-  }, [createRoom, sessionId]);
+    createRoom({ sessionId, sourceLang });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (listRef.current) {
@@ -86,6 +88,13 @@ export default function HostPage() {
     return p?.label ?? platformId;
   };
 
+  /** Convert Docker-internal URLs to host-accessible URLs for display */
+  const displayUrl = (url: string) =>
+    url.replace("rtmp://rtmp:", "rtmp://localhost:").replace("rtmp://server:", "rtmp://localhost:");
+
+  /** Get playback URLs from RTMP URL for local-test streams */
+  const streamPath = (rtmpUrl: string) => rtmpUrl.replace(/^rtmps?:\/\/[^/]+/, "");
+
   return (
     <div className="app">
       <header className="header">
@@ -127,6 +136,41 @@ export default function HostPage() {
                     </span>
                   </div>
                   {s.error && <span className="host-stream-err-msg">{s.error}</span>}
+                  {s.rtmp_url && (
+                    <div className="host-stream-urls">
+                      <code className="host-stream-url">{displayUrl(s.rtmp_url)}</code>
+                      {s.platform === "local-test" && (
+                        <>
+                          <a
+                            href={`http://localhost:8889${streamPath(s.rtmp_url)}/`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="host-stream-url host-stream-hls"
+                          >
+                            WebRTC: localhost:8889{streamPath(s.rtmp_url)}/
+                          </a>
+                          <a
+                            href={`http://localhost:8888${streamPath(s.rtmp_url)}/`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="host-stream-url host-stream-hls"
+                          >
+                            HLS: localhost:8888{streamPath(s.rtmp_url)}/
+                          </a>
+                        </>
+                      )}
+                      {s.broadcast_id && (
+                        <a
+                          href={`https://youtube.com/watch?v=${s.broadcast_id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="host-stream-url host-stream-yt"
+                        >
+                          youtube.com/watch?v={s.broadcast_id}
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

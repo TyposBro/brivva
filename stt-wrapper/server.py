@@ -24,26 +24,34 @@ import websockets
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("stt")
 
+from urllib.parse import urlparse, parse_qs
+
 STT_PORT = int(os.environ.get("STT_PORT", "8766"))
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "en")
 SAMPLE_RATE = 16000
 
-# Direct Deepgram Nova-3 WebSocket URL
-DG_WS_URL = (
-    f"wss://api.deepgram.com/v1/listen"
-    f"?model=nova-3"
-    f"&encoding=linear16"
-    f"&sample_rate={SAMPLE_RATE}"
-    f"&channels=1"
-    f"&language={STT_LANGUAGE}"
-    f"&punctuate=true"
-    f"&smart_format=true"
-    f"&interim_results=true"
-    f"&endpointing=400"
-    f"&vad_events=true"
-    f"&utterance_end_ms=1500"
-)
+
+def build_dg_url(language: str) -> str:
+    """Build Deepgram WebSocket URL for a given language."""
+    return (
+        f"wss://api.deepgram.com/v1/listen"
+        f"?model=nova-3"
+        f"&encoding=linear16"
+        f"&sample_rate={SAMPLE_RATE}"
+        f"&channels=1"
+        f"&language={language}"
+        f"&punctuate=true"
+        f"&smart_format=true"
+        f"&interim_results=true"
+        f"&endpointing=400"
+        f"&vad_events=true"
+        f"&utterance_end_ms=1500"
+    )
+
+
+# Default URL for backwards compatibility
+DG_WS_URL = build_dg_url(STT_LANGUAGE)
 
 
 # ── Prosody Extraction ────────────────────────────────────
@@ -259,17 +267,18 @@ def extract_sentiment(data: dict) -> tuple[str, float]:
 
 # ── WebSocket Handling ────────────────────────────────────
 
-async def connect_to_deepgram():
+async def connect_to_deepgram(language: str = None):
     """Connect to Deepgram Nova-3 WebSocket directly."""
+    url = build_dg_url(language) if language else DG_WS_URL
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
     for attempt in range(1, 11):
         try:
             ws = await websockets.connect(
-                DG_WS_URL,
+                url,
                 additional_headers=headers,
                 max_size=10 * 1024 * 1024,
             )
-            log.info("Connected to Deepgram Nova-3 (attempt %d)", attempt)
+            log.info("Connected to Deepgram Nova-3 lang=%s (attempt %d)", language or STT_LANGUAGE, attempt)
             return ws
         except Exception as e:
             log.warning("Deepgram connect attempt %d/10 failed: %s", attempt, e)
@@ -279,7 +288,12 @@ async def connect_to_deepgram():
 
 async def handle_client(client_ws):
     """Handle one client: proxy audio to Deepgram, emit STT events with emotion."""
-    log.info("Client connected")
+    # Extract language from query params: /asr?lang=ko
+    path = client_ws.request.path if hasattr(client_ws, 'request') else "/asr"
+    parsed = urlparse(path)
+    params = parse_qs(parsed.query)
+    language = params.get("lang", [None])[0]
+    log.info("Client connected (lang=%s)", language or STT_LANGUAGE)
 
     if not DEEPGRAM_API_KEY:
         log.error("DEEPGRAM_API_KEY must be set")
@@ -291,7 +305,7 @@ async def handle_client(client_ws):
         return
 
     try:
-        dg_ws = await connect_to_deepgram()
+        dg_ws = await connect_to_deepgram(language)
     except ConnectionError as e:
         log.error("%s", e)
         await client_ws.send(json.dumps({"type": "error", "message": str(e)}))
