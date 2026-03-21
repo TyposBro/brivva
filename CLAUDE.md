@@ -26,23 +26,24 @@
 
 ### Platform Integration Status
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| YouTube | OAuth ready, 24hr review pending | Auto-creates broadcasts via API |
-| Twitch | Working | Stream key + known RTMP URL |
-| Instagram | Manual RTMP | Key-only mode (known base URL) |
-| TikTok | Manual RTMP | Requires 1000+ followers |
-| Coupang Live | Needs partnership | Korean business registration + seller API partnership |
-| Naver Shopping Live | Needs partnership | Korean business registration + partner agreement |
-| Rakuten Live | Needs partnership | Japanese business registration |
-| Douyin/Taobao/Kuaishou/Xiaohongshu/Bilibili | Needs partnership | Chinese business registration + platform APIs |
-| Custom RTMP | Working | Any RTMP/RTMPS endpoint |
+| Platform                                    | Status                           | Notes                                                 |
+| ------------------------------------------- | -------------------------------- | ----------------------------------------------------- |
+| YouTube                                     | OAuth ready, 24hr review pending | Auto-creates broadcasts via API                       |
+| Twitch                                      | Working                          | Stream key + known RTMP URL                           |
+| Instagram                                   | Manual RTMP                      | Key-only mode (known base URL)                        |
+| TikTok                                      | Manual RTMP                      | Requires 1000+ followers                              |
+| Coupang Live                                | Needs partnership                | Korean business registration + seller API partnership |
+| Naver Shopping Live                         | Needs partnership                | Korean business registration + partner agreement      |
+| Rakuten Live                                | Needs partnership                | Japanese business registration                        |
+| Douyin/Taobao/Kuaishou/Xiaohongshu/Bilibili | Needs partnership                | Chinese business registration + platform APIs         |
+| Custom RTMP                                 | Working                          | Any RTMP/RTMPS endpoint                               |
 
 ### Fundamental Architecture: 1 Stream = 1 Account = 1 Language
 
 **RTMP platforms (Twitch, Instagram, etc.) only allow ONE ingest stream per account.** You cannot push 3 languages to the same Twitch stream key — the 2nd and 3rd connections will be rejected.
 
 This means multi-language distribution requires:
+
 - **1 platform account per language per platform** (e.g., twitch.tv/brivva_en, twitch.tv/brivva_ja, twitch.tv/brivva_zh)
 - **YouTube is the exception** — OAuth API can auto-create multiple broadcasts on one account
 - The dashboard must model this as **per-language stream destinations**, not "enable Twitch for all languages"
@@ -137,32 +138,32 @@ Dashboard (/dashboard)
   → Host WS connect reads session streams from DB → starts FFmpeg per stream
 ```
 
-| Service     | Port | Tech                          | Latency       | GPU |
-| ----------- | ---- | ----------------------------- | ------------- | --- |
-| server-rs   | 3000 | Rust/axum, DashMap, sqlx      | orchestration | No  |
-| stt-wrapper | 8766 | Python asyncio, Deepgram API  | streaming     | No  |
-| NLLB        | 8000 | nllb-200-distilled-600M       | ~1.5-2.4s     | No  |
-| ElevenLabs  | API  | eleven_flash_v2_5             | 548-1440ms    | No  |
+| Service     | Port | Tech                         | Latency       | GPU |
+| ----------- | ---- | ---------------------------- | ------------- | --- |
+| server-rs   | 3000 | Rust/axum, DashMap, sqlx     | orchestration | No  |
+| stt-wrapper | 8766 | Python asyncio, Deepgram API | streaming     | No  |
+| NLLB        | 8000 | nllb-200-distilled-600M      | ~1.5-2.4s     | No  |
+| ElevenLabs  | API  | eleven_flash_v2_5            | 548-1440ms    | No  |
 
 ## Multi-Platform Streaming
 
 ### Supported Platforms (13)
 
-| Platform | Region | Auto | Default RTMP |
-|----------|--------|------|-------------|
-| YouTube | Global | Yes (API) | Auto-created |
-| Instagram | Global | No | rtmps://live-upload.instagram.com:443/rtmp/ |
-| TikTok | Global | No | Dynamic (user pastes) |
-| Twitch | Global | No | rtmp://live.twitch.tv/app/ |
-| Coupang Live | Korea | No | Dynamic |
-| Naver Shopping Live | Korea | No | Dynamic |
-| Rakuten Live | Japan | No | Dynamic |
-| Douyin (抖音) | China | No | Dynamic |
-| Taobao Live (淘宝直播) | China | No | Dynamic |
-| Kuaishou (快手) | China | No | rtmp://live.kuaishou.com/live/ |
-| Xiaohongshu (小红书) | China | No | Dynamic |
-| Bilibili (哔哩哔哩) | China | No | rtmp://live-push.bilivideo.com/live-bvc/ |
-| Custom RTMP | Other | No | User-provided |
+| Platform               | Region | Auto      | Default RTMP                                |
+| ---------------------- | ------ | --------- | ------------------------------------------- |
+| YouTube                | Global | Yes (API) | Auto-created                                |
+| Instagram              | Global | No        | rtmps://live-upload.instagram.com:443/rtmp/ |
+| TikTok                 | Global | No        | Dynamic (user pastes)                       |
+| Twitch                 | Global | No        | rtmp://live.twitch.tv/app/                  |
+| Coupang Live           | Korea  | No        | Dynamic                                     |
+| Naver Shopping Live    | Korea  | No        | Dynamic                                     |
+| Rakuten Live           | Japan  | No        | Dynamic                                     |
+| Douyin (抖音)          | China  | No        | Dynamic                                     |
+| Taobao Live (淘宝直播) | China  | No        | Dynamic                                     |
+| Kuaishou (快手)        | China  | No        | rtmp://live.kuaishou.com/live/              |
+| Xiaohongshu (小红书)   | China  | No        | Dynamic                                     |
+| Bilibili (哔哩哔哩)    | China  | No        | rtmp://live-push.bilivideo.com/live-bvc/    |
+| Custom RTMP            | Other  | No        | User-provided                               |
 
 ### How It Works
 
@@ -178,28 +179,34 @@ Dashboard (/dashboard)
 ## REST API
 
 ### YouTube OAuth
+
 - `GET /auth/youtube?user_id=...` → redirect to Google consent
 - `GET /auth/youtube/callback?code=&state=` → exchange token, store in DB, redirect to dashboard
 
 ### User
+
 - `GET /api/user?user_id=...` → user info + YouTube connection status
 
 ### Sessions
+
 - `POST /api/sessions` → create session + streams (YouTube auto, others manual)
 - `GET /api/sessions?user_id=...` → list sessions
 - `GET /api/sessions/:id` → session detail + streams
 - `DELETE /api/sessions/:id` → end session (transition YouTube broadcasts to complete)
 
 ### Streams
+
 - `POST /api/sessions/:id/streams` → add stream to existing session
 - `DELETE /api/sessions/:session_id/streams/:stream_id` → remove stream
 
 ### Voices
+
 - `POST /api/voices` → clone via ElevenLabs, save to DB
 - `GET /api/voices?user_id=...` → list saved voices
 - `DELETE /api/voices/:id` → delete from DB + ElevenLabs
 
 ### Platform Credentials (Vault)
+
 - `GET /api/credentials?user_id=...` → list saved platform credentials
 - `POST /api/credentials` → upsert credential (auto-saved on session creation too)
 - `DELETE /api/credentials?user_id=&platform=` → remove saved credential
@@ -212,19 +219,23 @@ Connection via query params:
 - Guest: `ws://host/api/room?role=guest&roomId=ABC123&lang=ja`
 
 **Host → Server:**
+
 - `[ArrayBuffer]` — PCM audio frames
 - `{ "type": "face:frame", "data": "<base64 JPEG>" }` — webcam frames (30fps while recording)
 - `"host:end"` — close room
 
 **Server → Host:**
+
 - room:created, room:guest_count, interim, final, translation, tts_end
 
 **Server → Guest:**
+
 - room:joined, interim, final, translation
 - tts_start → [MP3 binary blob] → tts_end (audio)
 - room:closed
 
 **FFmpeg RTMP (server-side, per stream):**
+
 - Host face:frame → decode JPEG → push to all FFmpeg video stdin
 - TTS MP3 → decode to PCM s16le → push to language-matched FFmpeg audio FIFO
 - Audio FIFO writer pads silence (20ms zero chunks) between utterances
@@ -315,13 +326,13 @@ CREATE TABLE platform_credentials (
 
 ## Measured Latency
 
-| Phase                        | Measured      | Notes                    |
-| ---------------------------- | ------------- | ------------------------ |
-| STT (Deepgram Nova-3)       | streaming     | Interims while speaking  |
-| Translation (NLLB)          | 1537-2434ms   | CPU inference            |
-| TTS (ElevenLabs, buffered)  | 711ms         | API call                 |
-| **Total (audio only)**      | **~2.5-3.5s** | STT + NLLB + TTS        |
-| **Target**                  | **<300ms**    | Gap: ~10x                |
+| Phase                      | Measured      | Notes                   |
+| -------------------------- | ------------- | ----------------------- |
+| STT (Deepgram Nova-3)      | streaming     | Interims while speaking |
+| Translation (NLLB)         | 1537-2434ms   | CPU inference           |
+| TTS (ElevenLabs, buffered) | 711ms         | API call                |
+| **Total (audio only)**     | **~2.5-3.5s** | STT + NLLB + TTS        |
+| **Target**                 | **<300ms**    | Gap: ~10x               |
 
 ## Rust Server Key Concepts
 
@@ -410,7 +421,7 @@ DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
 - **URL.revokeObjectURL** — Must revoke blob URL after playback to prevent memory leaks
 - **Whisper hallucination** — Random text on silence. Fix: switched to Deepgram Nova-3
 - **STT retry loop** — stt-wrapper may still be starting. Retries 10x, 3s apart
-- **PCM encoding** — Float32→Int16: Math.max(-32768, Math.min(32767, float32 * 32768))
+- **PCM encoding** — Float32→Int16: Math.max(-32768, Math.min(32767, float32 \* 32768))
 - **Redirect URI mismatch** — Must point to backend server, not frontend (Google OAuth requires exact match)
 - **Old DB incompatible** — Adding platform column broke existing SQLite. Fix: delete DB file before restart
 
@@ -423,5 +434,3 @@ DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
 - 10 paying customers ($30-80K contracts)
 - Stack: Rust backend, React/TS frontend, AWS
 - Target: <300ms e2e latency
-- Salary discussed: ₩80-100M + equity, remote OK (KST)
-- Meeting: Friday Mar 21 12PM, Yeongdeungpo Times Square coffee shop
