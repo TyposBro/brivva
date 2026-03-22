@@ -2,7 +2,7 @@
 //!
 //! Host audio flows through:
 //! 1. STT Wrapper (stt-wrapper:8766/asr) — clean interim/final events
-//! 2. NLLB (nllb:8000/translate) — REST translation per active language
+//! 2. Google Cloud Translation API v2 — per active language, parallel
 //! 3. ElevenLabs TTS — streaming MP3 response (with optional cloned voice)
 
 use axum::extract::ws::Message;
@@ -22,9 +22,8 @@ static STT_URL: LazyLock<String> = LazyLock::new(|| {
     let port = std::env::var("STT_PORT").unwrap_or_else(|_| "8766".to_string());
     format!("ws://{}:{}/asr", host, port)
 });
-static NLLB_URL: LazyLock<String> = LazyLock::new(|| {
-    let host = std::env::var("NLLB_HOST").unwrap_or_else(|_| "localhost".to_string());
-    format!("http://{}:8000/translate", host)
+static GOOGLE_TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default()
 });
 static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
@@ -78,7 +77,7 @@ struct SttEvent {
 // ── STT Connection ────────────────────────────────────────
 
 /// Emit a final transcript: broadcast to room and trigger translation pipeline.
-/// `host_audio` is the raw 16kHz PCM captured during this utterance, used for
+/// `host_audio` is the raw 44.1kHz PCM captured during this utterance, used for
 /// source-language passthrough (skip TTS for RTMP streams in the host's language).
 fn emit_final(
     rooms: &Rooms,
@@ -248,23 +247,26 @@ pub async fn start_stt(
     }
 }
 
-// ── Translation Pipeline ──────────────────────────────────
+// ── Translation Pipeline (Google Cloud Translation API v2) ──
 
-#[derive(Serialize)]
-struct NllbRequest {
-    text: String,
-    source_lang: String,
-    target_lang: String,
+#[derive(Deserialize)]
+struct GoogleTranslateResponse {
+    data: GoogleTranslateData,
 }
 
 #[derive(Deserialize)]
-struct NllbResponse {
+struct GoogleTranslateData {
+    translations: Vec<GoogleTranslation>,
+}
+
+#[derive(Deserialize)]
+struct GoogleTranslation {
+    #[serde(rename = "translatedText")]
     translated_text: String,
-    translate_ms: i64,
 }
 
 /// Run the full translation + TTS pipeline for one utterance.
-/// `host_audio` is raw 16kHz PCM of the host's voice during this utterance,
+/// `host_audio` is raw 44.1kHz PCM of the host's voice during this utterance,
 /// used for source-language passthrough on RTMP streams.
 async fn run_pipeline(
     transcript: &str,
@@ -349,28 +351,43 @@ async fn run_pipeline(
         let frames = frames.clone();
 
         handles.push(tokio::spawn(async move {
-            // 1. Translate
+            // 1. Translate via Google Cloud Translation API v2
             let start = Instant::now();
-            let nllb_resp = client
-                .post(&*NLLB_URL)
-                .json(&NllbRequest {
-                    text: transcript.clone(),
-                    source_lang: source.to_string(),
-                    target_lang: target.to_string(),
-                })
+            let url = format!(
+                "https://translation.googleapis.com/language/translate/v2?key={}",
+                &*GOOGLE_TRANSLATE_API_KEY
+            );
+            let translate_resp = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "q": transcript,
+                    "source": source.to_string(),
+                    "target": target.to_string(),
+                    "format": "text",
+                }))
                 .send()
                 .await;
 
-            let translated_text = match nllb_resp {
-                Ok(resp) => match resp.json::<NllbResponse>().await {
-                    Ok(r) => r.translated_text,
-                    Err(e) => {
-                        eprintln!("NLLB parse error for {}: {}", target, e);
-                        return;
+            let translated_text = match translate_resp {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<GoogleTranslateResponse>().await {
+                        Ok(r) => r.data.translations.into_iter().next()
+                            .map(|t| t.translated_text)
+                            .unwrap_or_default(),
+                        Err(e) => {
+                            eprintln!("Google Translate parse error for {}: {}", target, e);
+                            return;
+                        }
                     }
-                },
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    eprintln!("Google Translate error for {}: {} - {}", target, status, body);
+                    return;
+                }
                 Err(e) => {
-                    eprintln!("NLLB request error for {}: {}", target, e);
+                    eprintln!("Google Translate request error for {}: {}", target, e);
                     return;
                 }
             };

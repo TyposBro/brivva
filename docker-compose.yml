@@ -10,8 +10,8 @@ services:
     environment:
       - STT_HOST=stt-wrapper
       - STT_PORT=8766
-      - NLLB_HOST=nllb
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - GOOGLE_TRANSLATE_API_KEY=${GOOGLE_TRANSLATE_API_KEY}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva-server.milliytechnology.org/auth/youtube/callback}
@@ -20,7 +20,6 @@ services:
     volumes:
       - db-data:/data
     depends_on:
-      - nllb
       - stt-wrapper
     restart: unless-stopped
 
@@ -30,15 +29,6 @@ services:
       - "8766:8766"
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-    restart: unless-stopped
-
-  nllb:
-    build: ./nllb
-    ports:
-      - "8000:8000"
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
 
   # Local RTMP server for testing (no YouTube needed)
