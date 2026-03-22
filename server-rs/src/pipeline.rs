@@ -295,7 +295,7 @@ async fn run_pipeline(
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    voice_clone_id.as_deref(), &sp, &frames,
+                    voice_clone_id.as_deref(), &sp, &frames, utterance_end,
                 )
                 .await;
             }));
@@ -367,6 +367,7 @@ async fn run_pipeline(
                 voice_clone_id.as_deref(),
                 &sp,
                 &frames,
+                utterance_end,
             )
             .await;
         }));
@@ -389,6 +390,7 @@ async fn do_tts_and_broadcast(
     voice_clone_id: Option<&str>,
     style_params: &StyleParams,
     utterance_frames: &[TimestampedFrame],
+    utterance_end: Instant,
 ) {
     let tts_start = Instant::now();
 
@@ -458,17 +460,15 @@ async fn do_tts_and_broadcast(
         return;
     }
 
-    // Push to RTMP streams (decode MP3 → PCM, send to FFmpeg)
+    // Push to RTMP streams (decode MP3 → PCM, flush synced frames + audio)
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
             Ok(pcm) => {
-                let mgr = manager.lock().await;
-                mgr.push_audio_pcm(&lang.to_string(), &pcm);
-                // Update adaptive video delay based on total pipeline latency
-                mgr.update_pipeline_delay(tts_ms);
+                let mut mgr = manager.lock().await;
+                mgr.flush_and_push_audio(&lang.to_string(), &pcm, utterance_end);
                 eprintln!(
-                    "[RTMP] Pushed {}KB PCM audio for {} (pipeline: {}ms)",
+                    "[RTMP] Synced {}KB PCM audio for {} (pipeline: {}ms)",
                     pcm.len() / 1024,
                     lang,
                     tts_ms

@@ -196,7 +196,7 @@ async fn handle_host(
                                     if let Ok(jpeg_bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(data)
                                     {
-                                        let locked = mgr.lock().await;
+                                        let mut locked = mgr.lock().await;
                                         locked.push_video_frame(&jpeg_bytes);
                                     }
                                 }
