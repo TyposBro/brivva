@@ -96,7 +96,7 @@ async fn handle_host(
                         let base = rtmp_url.trim_end_matches('/');
                         format!("{}/{}", base, stream_key)
                     };
-                    if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url).await {
+                    if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url) {
                         eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
                     } else if let Some(lang) = Lang::from_str(&s.lang) {
                         rtmp_langs.push(lang);

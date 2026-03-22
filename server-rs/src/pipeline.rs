@@ -9,7 +9,7 @@ use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
@@ -295,7 +295,7 @@ async fn run_pipeline(
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    voice_clone_id.as_deref(), &sp, &frames, utterance_start,
+                    voice_clone_id.as_deref(), &sp, &frames, utterance_start, utterance_end,
                 )
                 .await;
             }));
@@ -368,6 +368,7 @@ async fn run_pipeline(
                 &sp,
                 &frames,
                 utterance_start,
+                utterance_end,
             )
             .await;
         }));
@@ -378,7 +379,8 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS and send synced audio + video to guests
+/// Call ElevenLabs TTS and send synced audio + video to guests.
+/// Has a hard timeout at broadcast_delay - 500ms to prevent sync slips.
 async fn do_tts_and_broadcast(
     client: &reqwest::Client,
     text: &str,
@@ -391,8 +393,18 @@ async fn do_tts_and_broadcast(
     style_params: &StyleParams,
     utterance_frames: &[TimestampedFrame],
     utterance_start: Instant,
+    utterance_end: Instant,
 ) {
     let tts_start = Instant::now();
+
+    // Hard TTS deadline: broadcast_delay - 500ms safety margin
+    let tts_deadline = {
+        let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2500);
+        Duration::from_millis(delay_ms.saturating_sub(500))
+    };
 
     // Use cloned voice if available, otherwise fall back to default per-language voice
     let voice_id = match voice_clone_id {
@@ -408,9 +420,10 @@ async fn do_tts_and_broadcast(
     // Use higher-quality model for cloned voices, flash for defaults
     let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
     println!(
-        "[TTS] requesting ElevenLabs voice={}{} model={} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}]",
+        "[TTS] requesting ElevenLabs voice={}{} model={} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}] [deadline={}ms]",
         &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, text, lang,
-        style_params.style, style_params.stability, style_params.speed
+        style_params.style, style_params.stability, style_params.speed,
+        tts_deadline.as_millis()
     );
 
     let tts_body = serde_json::json!({
@@ -424,47 +437,74 @@ async fn do_tts_and_broadcast(
         }
     });
 
-    let tts_resp = client
-        .post(&url)
-        .header("xi-api-key", &*ELEVENLABS_API_KEY)
-        .header("Content-Type", "application/json")
-        .json(&tts_body)
-        .send()
-        .await;
+    // Wrap entire TTS call + streaming in a hard timeout.
+    // If ElevenLabs exceeds the deadline, drop this utterance to silence.
+    let lang_str = lang.to_string();
+    let tts_result = tokio::time::timeout(tts_deadline, async {
+        let mut audio_buffer: Vec<u8> = Vec::new();
+        let resp = client
+            .post(&url)
+            .header("xi-api-key", &*ELEVENLABS_API_KEY)
+            .header("Content-Type", "application/json")
+            .json(&tts_body)
+            .send()
+            .await;
 
-    // Buffer ALL audio
-    let mut audio_buffer: Vec<u8> = Vec::new();
-
-    match tts_resp {
-        Ok(resp) if resp.status().is_success() => {
-            println!("[TTS] buffering MP3 for {}", lang);
-            let mut stream = resp.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => audio_buffer.extend_from_slice(&chunk),
-                    Err(e) => {
-                        eprintln!("TTS stream error for {}: {}", lang, e);
-                        break;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                println!("[TTS] buffering MP3 for {}", lang_str);
+                let mut stream = r.bytes_stream();
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => audio_buffer.extend_from_slice(&chunk),
+                        Err(e) => {
+                            eprintln!("TTS stream error for {}: {}", lang_str, e);
+                            break;
+                        }
                     }
                 }
             }
+            Ok(r) => eprintln!("TTS error: {} - {:?}", r.status(), r.text().await),
+            Err(e) => eprintln!("TTS request error for {}: {}", lang_str, e),
         }
-        Ok(resp) => eprintln!("TTS error: {} - {:?}", resp.status(), resp.text().await),
-        Err(e) => eprintln!("TTS request error for {}: {}", lang, e),
-    }
+        audio_buffer
+    })
+    .await;
+
+    let audio_buffer = match tts_result {
+        Ok(buf) if !buf.is_empty() => buf,
+        Ok(_) => return, // empty buffer (TTS failed but didn't timeout)
+        Err(_) => {
+            eprintln!(
+                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms deadline — dropping to silence",
+                utterance_id, lang, tts_deadline.as_millis()
+            );
+            return;
+        }
+    };
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     println!("[TTS] buffered {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
-
-    if audio_buffer.is_empty() {
-        return;
-    }
 
     // Push to RTMP streams (decode MP3 → PCM, queue for synced playback)
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
-            Ok(pcm) => {
+            Ok(mut pcm) => {
+                // Truncate TTS audio that exceeds source utterance + 2s margin.
+                // Prevents long translations (e.g., German) from bleeding into next segment.
+                let utterance_dur = utterance_end.duration_since(utterance_start);
+                let max_dur = utterance_dur + Duration::from_millis(2000);
+                let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
+                if pcm.len() > max_bytes {
+                    eprintln!(
+                        "[RTMP] Truncating TTS audio: {:.0}ms → {:.0}ms for {}",
+                        pcm.len() as f64 / 88.2,
+                        max_bytes as f64 / 88.2,
+                        lang
+                    );
+                    crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+                }
                 let mgr = manager.lock().await;
                 mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
                 eprintln!(
@@ -476,7 +516,7 @@ async fn do_tts_and_broadcast(
         }
     }
 
-    // Send synced audio + video to guests
+    // Send synced audio + video to WebSocket guests (full audio, no truncation)
     if let Some(room) = rooms.get(room_id) {
         // Audio
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));

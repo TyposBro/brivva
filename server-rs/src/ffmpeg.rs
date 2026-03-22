@@ -1,23 +1,27 @@
 //! FFmpeg RTMP muxer: host video + translated audio → RTMP streams.
 //!
-//! Implements the "Broadcast Delay" pattern for video-audio synchronization:
+//! Implements the "Fixed-Delay Jitter Buffer" pattern for video-audio sync:
 //!
-//! 1. Video frames are buffered with capture timestamps
-//! 2. A per-stream drain loop ticks at exactly 30fps (33.33ms)
-//! 3. Each tick emits the frame from `now - D` (D = broadcast delay, e.g. 2500ms)
-//! 4. TTS audio is queued and released when the delayed timeline reaches utterance_start
-//! 5. Between utterances, silence is written to maintain the audio timeline
+//! 1. Video frames are buffered with capture timestamps in a shared ring buffer
+//! 2. A dedicated OS thread drains video at exactly 30fps (33.33ms ticks)
+//! 3. A separate dedicated OS thread drains audio at 20ms ticks
+//! 4. Both threads read from a shared delayed clock: `Instant::now() - D`
+//! 5. TTS audio is queued and released when the delayed clock reaches utterance_start
+//! 6. Between utterances, exact silence padding maintains cumulative sample count
+//! 7. TTS calls have a hard timeout at D-500ms; missed utterances become silence
 //!
-//! This ensures FFmpeg always receives a steady 30fps video + continuous audio,
-//! eliminating the freeze→fast-forward jitter from burst-releasing frames.
+//! Using OS threads (not Tokio tasks) ensures timing precision isn't affected
+//! by async runtime contention from STT/translation/TTS futures.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, Command};
-use tokio::task::JoinHandle;
+use tokio::process::Command as TokioCommand;
 
 /// Audio waiting to be played at the right point in the delayed timeline
 struct QueuedAudio {
@@ -27,7 +31,7 @@ struct QueuedAudio {
     pcm: Vec<u8>,
 }
 
-/// State for draining queued audio chunk-by-chunk at 30fps cadence
+/// State for draining queued audio chunk-by-chunk
 struct ActiveAudio {
     pcm: Vec<u8>,
     offset: usize,
@@ -35,17 +39,20 @@ struct ActiveAudio {
 
 /// Handle for one FFmpeg RTMP stream (per language/platform)
 struct RtmpStream {
-    child: Child,
-    drain_handle: JoinHandle<()>,
+    child: std::process::Child,
+    video_handle: Option<thread::JoinHandle<()>>,
+    audio_handle: Option<thread::JoinHandle<()>>,
     audio_fifo: String,
     lang: String,
-    /// Per-stream audio queue: TTS audio waiting to be released at the right time
+    /// Per-stream audio queue
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    /// Signal to stop drain threads
+    stop_flag: Arc<AtomicBool>,
 }
 
 /// Manages all FFmpeg RTMP streams for a session.
 ///
-/// Uses a shared frame buffer + per-stream drain loops for synchronized output.
+/// Uses a shared frame buffer + per-stream drain threads for synchronized output.
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
     /// Shared ring buffer of timestamped video frames from the host webcam
@@ -54,14 +61,22 @@ pub struct RtmpManager {
     broadcast_delay: Duration,
 }
 
-// 33.33ms per frame at 30fps
-const FRAME_INTERVAL_NS: u64 = 33_333_333;
-// Audio bytes per 33.33ms tick: 44100Hz × 2 bytes × 0.03333s ≈ 2940 bytes
-const AUDIO_BYTES_PER_TICK: usize = 2940;
-// Max frames to keep in the buffer (broadcast_delay + 2s margin at 30fps)
+/// Video: 33.33ms per frame at 30fps
+const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
+/// Audio: 20ms per tick
+const AUDIO_TICK: Duration = Duration::from_millis(20);
+/// Audio bytes per 20ms tick: 44100Hz × 2 bytes/sample × 1 channel × 0.02s = 1764 bytes
+const AUDIO_BYTES_PER_TICK: usize = 1764;
+/// Max frames to keep in buffer (~15s at 30fps)
 const MAX_BUFFER_FRAMES: usize = 450;
-// Default broadcast delay
+/// Default broadcast delay
 const DEFAULT_DELAY_MS: u64 = 2500;
+/// Jitter warning threshold
+const JITTER_WARN_THRESHOLD: Duration = Duration::from_millis(5);
+/// Fade-out duration in bytes: 50ms at 44100Hz mono 16-bit = 4410 bytes
+const FADE_OUT_BYTES: usize = 4410;
+/// Audio bytes per second: 44100Hz × 2 bytes/sample = 88200
+const BYTES_PER_SEC: f64 = 88200.0;
 
 impl RtmpManager {
     pub fn new() -> Self {
@@ -79,8 +94,13 @@ impl RtmpManager {
         }
     }
 
-    /// Start an FFmpeg RTMP process with its own drain loop
-    pub async fn start_stream(
+    /// Returns the broadcast delay for TTS timeout calculations
+    pub fn broadcast_delay(&self) -> Duration {
+        self.broadcast_delay
+    }
+
+    /// Start an FFmpeg RTMP process with dedicated video and audio drain threads
+    pub fn start_stream(
         &mut self,
         stream_id: &str,
         lang: &str,
@@ -95,8 +115,8 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        // Start FFmpeg
-        let mut child = Command::new("ffmpeg")
+        // Spawn FFmpeg using std::process for blocking stdin access in drain thread
+        let mut child = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
                 "-loglevel", "warning",
@@ -137,37 +157,49 @@ impl RtmpManager {
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
 
-        // Per-stream audio queue
         let audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>> =
             Arc::new(StdMutex::new(VecDeque::new()));
-
-        // Spawn the drain loop for this stream
-        let frame_buf = self.frame_buffer.clone();
-        let aq = audio_queue.clone();
+        let stop_flag = Arc::new(AtomicBool::new(false));
         let delay = self.broadcast_delay;
-        let fifo_path = audio_fifo.clone();
-        let sid = stream_id.to_string();
 
-        let drain_handle = tokio::spawn(async move {
-            drain_loop(sid, frame_buf, aq, stdin, fifo_path, delay).await;
-        });
+        // Spawn dedicated video drain thread (OS thread, 30fps)
+        let video_frame_buf = self.frame_buffer.clone();
+        let video_stop = stop_flag.clone();
+        let video_sid = stream_id.to_string();
+        let video_handle = thread::Builder::new()
+            .name(format!("video-drain-{}", stream_id))
+            .spawn(move || {
+                video_drain_loop(video_sid, video_frame_buf, stdin, delay, video_stop);
+            })
+            .map_err(|e| format!("Video thread spawn failed: {}", e))?;
+
+        // Spawn dedicated audio drain thread (OS thread, 20ms ticks)
+        let audio_aq = audio_queue.clone();
+        let audio_stop = stop_flag.clone();
+        let audio_sid = stream_id.to_string();
+        let audio_fifo_path = audio_fifo.clone();
+        let audio_handle = thread::Builder::new()
+            .name(format!("audio-drain-{}", stream_id))
+            .spawn(move || {
+                audio_drain_loop(audio_sid, audio_aq, audio_fifo_path, delay, audio_stop);
+            })
+            .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
 
         eprintln!(
-            "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms]",
-            stream_id,
-            lang,
-            rtmp_url,
-            self.broadcast_delay.as_millis()
+            "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms, video+audio on dedicated OS threads]",
+            stream_id, lang, rtmp_url, self.broadcast_delay.as_millis()
         );
 
         self.streams.insert(
             stream_id.to_string(),
             RtmpStream {
                 child,
-                drain_handle,
+                video_handle: Some(video_handle),
+                audio_handle: Some(audio_handle),
                 audio_fifo,
                 lang: lang.to_string(),
                 audio_queue,
+                stop_flag,
             },
         );
 
@@ -175,19 +207,16 @@ impl RtmpManager {
     }
 
     /// Buffer a video frame from the host webcam.
-    /// Frames are stored with their capture timestamp and picked up by drain loops.
+    /// Frames are stored with their capture timestamp and picked up by drain threads.
     pub fn push_video_frame(&self, jpeg_bytes: &[u8]) {
         let mut buf = self.frame_buffer.lock().unwrap();
         buf.push_back((Instant::now(), jpeg_bytes.to_vec()));
-
-        // Prune old frames that are well past the delay window
         while buf.len() > MAX_BUFFER_FRAMES {
             buf.pop_front();
         }
     }
 
-    /// Queue translated audio to be played at the right point in the delayed timeline.
-    /// The drain loop will pick it up when the delayed clock reaches `utterance_start`.
+    /// Queue translated audio for synced playback at the right point in the delayed timeline.
     pub fn queue_audio(&self, lang: &str, pcm: Vec<u8>, utterance_start: Instant) {
         for stream in self.streams.values() {
             if stream.lang == lang {
@@ -201,13 +230,40 @@ impl RtmpManager {
         }
     }
 
-    /// Stop all FFmpeg processes and clean up
+    /// Stop all FFmpeg processes and clean up.
+    /// Drain threads are joined with a 3-second timeout to prevent cleanup from hanging.
     pub async fn stop_all(&mut self) {
         for (id, mut stream) in self.streams.drain() {
-            stream.drain_handle.abort();
-            match stream.child.kill().await {
-                Ok(_) => eprintln!("[FFMPEG:{}] killed", id),
+            // Signal threads to stop
+            stream.stop_flag.store(true, Ordering::Release);
+            // Kill FFmpeg process (causes stdin/FIFO writes to fail, unblocking threads)
+            match stream.child.kill() {
+                Ok(_) => {
+                    let _ = stream.child.wait();
+                    eprintln!("[FFMPEG:{}] killed", id);
+                }
                 Err(e) => eprintln!("[FFMPEG:{}] kill error: {}", id, e),
+            }
+            // Join drain threads with timeout — if a thread is stuck (e.g., blocked
+            // on FIFO write after FFmpeg died in a weird state), don't hang cleanup.
+            let join_timeout = Duration::from_secs(3);
+            for (label, handle) in [
+                ("video", stream.video_handle.take()),
+                ("audio", stream.audio_handle.take()),
+            ] {
+                if let Some(h) = handle {
+                    let id_clone = id.clone();
+                    let result = tokio::time::timeout(join_timeout, async {
+                        tokio::task::spawn_blocking(move || h.join()).await
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(Ok(()))) => {}
+                        Ok(Ok(Err(_))) => eprintln!("[FFMPEG:{}] {} thread panicked", id_clone, label),
+                        Ok(Err(_)) => eprintln!("[FFMPEG:{}] {} thread join cancelled", id_clone, label),
+                        Err(_) => eprintln!("[FFMPEG:{}] {} thread join timed out (3s), abandoning", id_clone, label),
+                    }
+                }
             }
             let _ = std::fs::remove_file(&stream.audio_fifo);
         }
@@ -217,71 +273,163 @@ impl RtmpManager {
 /// Thread-safe wrapper
 pub type SharedRtmpManager = Arc<tokio::sync::Mutex<RtmpManager>>;
 
-/// The core synchronization loop for one RTMP stream.
+// ── Video Drain Thread ─────────────────────────────────────
+
+/// Dedicated OS thread: drains video frames at exactly 30fps.
 ///
-/// Ticks at exactly 30fps. On each tick:
-/// 1. Picks the video frame from `now - delay` in the shared buffer
-/// 2. Writes it to FFmpeg stdin (or repeats the last frame)
-/// 3. Checks the audio queue for audio that should play at this point
-/// 4. Writes audio chunk (from TTS or silence) to the FIFO
-///
-/// Both video and audio advance at the same rate, keeping them perfectly synced.
-async fn drain_loop(
+/// Reads from the shared frame buffer at the delayed timeline position.
+/// Duplicates the last frame if no new frame is available (webcam drop).
+/// Logs warnings when tick jitter exceeds 5ms.
+fn video_drain_loop(
     stream_id: String,
     frame_buffer: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
-    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
-    mut stdin: tokio::process::ChildStdin,
-    fifo_path: String,
+    mut stdin: std::process::ChildStdin,
     delay: Duration,
+    stop: Arc<AtomicBool>,
 ) {
-    // Open FIFO for writing (blocks until FFmpeg opens it for reading)
-    let fifo = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&fifo_path)
-        .await;
-    let mut fifo = match fifo {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[DRAIN:{}] failed to open audio FIFO: {}", stream_id, e);
-            return;
-        }
-    };
-
-    let mut interval = tokio::time::interval(Duration::from_nanos(FRAME_INTERVAL_NS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     let mut last_frame: Option<Vec<u8>> = None;
-    let mut active_audio: Option<ActiveAudio> = None;
-    let silence = vec![0u8; AUDIO_BYTES_PER_TICK];
+    let mut tick_count: u64 = 0;
+    let mut next_tick = Instant::now() + FRAME_INTERVAL;
 
-    eprintln!("[DRAIN:{}] drain loop started", stream_id);
+    eprintln!(
+        "[VIDEO:{}] drain thread started (30fps, {}ms delay)",
+        stream_id,
+        delay.as_millis()
+    );
 
     loop {
-        interval.tick().await;
-        let target_ts = Instant::now() - delay;
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
 
-        // ── VIDEO ──────────────────────────────────────────
+        // Sleep until next tick
+        let now = Instant::now();
+        if next_tick > now {
+            thread::sleep(next_tick - now);
+        }
+
+        // Check jitter
+        let actual = Instant::now();
+        let jitter = actual.saturating_duration_since(next_tick);
+        if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
+            eprintln!(
+                "[VIDEO:{}] jitter warning: tick {} was {}ms late",
+                stream_id,
+                tick_count,
+                jitter.as_millis()
+            );
+        }
+
+        // Anchor next tick to prevent drift accumulation
+        next_tick += FRAME_INTERVAL;
+        tick_count += 1;
+
+        let target_ts = actual - delay;
+
+        // Pick frame at delayed timeline position
         let frame = {
             let buf = frame_buffer.lock().unwrap();
             find_frame_at(&buf, target_ts)
         };
 
-        if let Some(f) = frame {
-            if stdin.write_all(&f).await.is_err() {
-                eprintln!("[DRAIN:{}] video write error, exiting", stream_id);
-                break;
-            }
+        let write_result = if let Some(f) = frame {
+            let r = stdin.write_all(&f);
             last_frame = Some(f);
+            r
         } else if let Some(ref lf) = last_frame {
-            // No frame at target_ts yet — repeat last frame to maintain 30fps
-            if stdin.write_all(lf).await.is_err() {
-                eprintln!("[DRAIN:{}] video write error, exiting", stream_id);
-                break;
-            }
-        }
-        // else: no frames yet at all (startup), skip video this tick
+            // No frame at target — duplicate last frame to maintain 30fps
+            stdin.write_all(lf)
+        } else {
+            // No frames yet at all (startup), skip this tick
+            continue;
+        };
 
-        // ── AUDIO ──────────────────────────────────────────
+        if write_result.is_err() {
+            if !stop.load(Ordering::Acquire) {
+                eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+            }
+            break;
+        }
+    }
+
+    drop(stdin);
+    eprintln!(
+        "[VIDEO:{}] drain thread exited after {} ticks",
+        stream_id, tick_count
+    );
+}
+
+// ── Audio Drain Thread ─────────────────────────────────────
+
+/// Dedicated OS thread: drains audio at 20ms ticks.
+///
+/// Independent from the video thread — shares only the delayed clock reference.
+/// Tracks cumulative samples written to detect drift over long sessions.
+fn audio_drain_loop(
+    stream_id: String,
+    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    fifo_path: String,
+    delay: Duration,
+    stop: Arc<AtomicBool>,
+) {
+    // Open FIFO for writing (blocks until FFmpeg opens it for reading)
+    let mut fifo = match std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            if !stop.load(Ordering::Acquire) {
+                eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
+            }
+            return;
+        }
+    };
+
+    let silence = vec![0u8; AUDIO_BYTES_PER_TICK];
+    let mut active_audio: Option<ActiveAudio> = None;
+    let mut tick_count: u64 = 0;
+    let mut next_tick = Instant::now() + AUDIO_TICK;
+
+    // Cumulative sample tracking for drift detection
+    let start_time = Instant::now();
+    let mut total_bytes_written: u64 = 0;
+
+    eprintln!(
+        "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
+        stream_id,
+        delay.as_millis()
+    );
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+
+        // Sleep until next tick
+        let now = Instant::now();
+        if next_tick > now {
+            thread::sleep(next_tick - now);
+        }
+
+        // Check jitter
+        let actual = Instant::now();
+        let jitter = actual.saturating_duration_since(next_tick);
+        if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
+            eprintln!(
+                "[AUDIO:{}] jitter warning: tick {} was {}ms late",
+                stream_id,
+                tick_count,
+                jitter.as_millis()
+            );
+        }
+
+        // Anchor next tick to prevent drift accumulation
+        next_tick += AUDIO_TICK;
+        tick_count += 1;
+
+        let target_ts = actual - delay;
+
         // Check if a new queued audio should start playing
         if active_audio.is_none() {
             let mut q = audio_queue.lock().unwrap();
@@ -296,37 +444,61 @@ async fn drain_loop(
             }
         }
 
-        // Write one tick's worth of audio (2940 bytes = 33.33ms at 44100Hz mono 16-bit)
-        let audio_result = if let Some(ref mut active) = active_audio {
+        // Write one tick's worth of audio (1764 bytes = 20ms at 44100Hz mono 16-bit)
+        let write_result = if let Some(ref mut active) = active_audio {
             let remaining = active.pcm.len() - active.offset;
             if remaining >= AUDIO_BYTES_PER_TICK {
                 let end = active.offset + AUDIO_BYTES_PER_TICK;
-                let r = fifo.write_all(&active.pcm[active.offset..end]).await;
+                let r = fifo.write_all(&active.pcm[active.offset..end]);
                 active.offset = end;
                 r
             } else if remaining > 0 {
-                // Last partial chunk — pad with silence
+                // Last partial chunk — pad with silence to complete the tick
                 let mut chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
                 chunk[..remaining].copy_from_slice(&active.pcm[active.offset..]);
                 active_audio = None;
-                fifo.write_all(&chunk).await
+                fifo.write_all(&chunk)
             } else {
                 active_audio = None;
-                fifo.write_all(&silence).await
+                fifo.write_all(&silence)
             }
         } else {
-            fifo.write_all(&silence).await
+            fifo.write_all(&silence)
         };
 
-        if audio_result.is_err() {
-            eprintln!("[DRAIN:{}] audio write error, exiting", stream_id);
+        total_bytes_written += AUDIO_BYTES_PER_TICK as u64;
+
+        if write_result.is_err() {
+            if !stop.load(Ordering::Acquire) {
+                eprintln!("[AUDIO:{}] write error, exiting", stream_id);
+            }
             break;
+        }
+
+        // Periodic drift check (every ~5 seconds = 250 ticks at 20ms)
+        if tick_count % 250 == 0 {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let expected_bytes = (elapsed * BYTES_PER_SEC) as u64;
+            let drift_bytes =
+                (total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
+            let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
+            if drift_ms > 50 {
+                eprintln!(
+                    "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
+                    stream_id, drift_ms, total_bytes_written, expected_bytes
+                );
+            }
         }
     }
 
-    drop(stdin);
-    eprintln!("[DRAIN:{}] drain loop exited", stream_id);
+    drop(fifo);
+    eprintln!(
+        "[AUDIO:{}] drain thread exited after {} ticks",
+        stream_id, tick_count
+    );
 }
+
+// ── Shared Helpers ─────────────────────────────────────────
 
 /// Find the latest frame with timestamp <= target in the buffer.
 /// Returns None if no frame is old enough yet (initial startup delay).
@@ -334,7 +506,6 @@ fn find_frame_at(
     buffer: &VecDeque<(Instant, Vec<u8>)>,
     target: Instant,
 ) -> Option<Vec<u8>> {
-    // Iterate from newest to oldest, return first frame at or before target
     for (ts, data) in buffer.iter().rev() {
         if *ts <= target {
             return Some(data.clone());
@@ -343,9 +514,88 @@ fn find_frame_at(
     None
 }
 
+/// Truncate PCM audio to max_bytes and apply a 50ms fade-out at the cut point.
+/// Operates on s16le (16-bit signed little-endian, mono) samples.
+pub fn truncate_with_fadeout(pcm: &mut Vec<u8>, max_bytes: usize) {
+    if pcm.len() <= max_bytes {
+        return;
+    }
+    pcm.truncate(max_bytes);
+
+    // Apply linear fade-out to the last FADE_OUT_BYTES
+    let fade_bytes = FADE_OUT_BYTES.min(pcm.len());
+    let fade_start = pcm.len() - fade_bytes;
+    let fade_samples = fade_bytes / 2; // 16-bit = 2 bytes per sample
+
+    for i in 0..fade_samples {
+        let byte_offset = fade_start + i * 2;
+        if byte_offset + 1 >= pcm.len() {
+            break;
+        }
+        let sample = i16::from_le_bytes([pcm[byte_offset], pcm[byte_offset + 1]]);
+        // Linear fade: 1.0 at start of fade region → 0.0 at end
+        let gain = 1.0 - (i as f32 / fade_samples as f32);
+        let faded = (sample as f32 * gain) as i16;
+        let bytes = faded.to_le_bytes();
+        pcm[byte_offset] = bytes[0];
+        pcm[byte_offset + 1] = bytes[1];
+    }
+}
+
+/// Kill any orphaned FFmpeg processes from a previous server crash.
+/// Called once at startup before accepting connections.
+/// Matches FFmpeg processes whose cmdline contains "brivva_audio" (our FIFO naming convention).
+pub fn kill_orphan_ffmpeg() {
+    let output = match std::process::Command::new("pgrep")
+        .args(["-f", "brivva_audio"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[STARTUP] pgrep not available, skipping orphan cleanup: {}", e);
+            return;
+        }
+    };
+
+    let pids = String::from_utf8_lossy(&output.stdout);
+    let mut killed = 0;
+    for line in pids.lines() {
+        if let Ok(pid) = line.trim().parse::<i32>() {
+            // Don't kill ourselves
+            let my_pid = std::process::id() as i32;
+            if pid == my_pid {
+                continue;
+            }
+            eprintln!("[STARTUP] killing orphan FFmpeg process (PID {})", pid);
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+            killed += 1;
+        }
+    }
+
+    // Clean up stale FIFOs
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("brivva_audio_") {
+                    let _ = std::fs::remove_file(entry.path());
+                    eprintln!("[STARTUP] removed stale FIFO: {}", name);
+                }
+            }
+        }
+    }
+
+    if killed > 0 {
+        eprintln!("[STARTUP] killed {} orphan FFmpeg process(es)", killed);
+    } else {
+        eprintln!("[STARTUP] no orphan FFmpeg processes found");
+    }
+}
+
 /// Decode MP3 bytes to raw PCM s16le 44100Hz mono using FFmpeg subprocess
 pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = TokioCommand::new("ffmpeg")
         .args([
             "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1",
         ])

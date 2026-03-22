@@ -25,6 +25,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Kill any orphan FFmpeg processes from a previous crash before accepting connections
+    ffmpeg::kill_orphan_ffmpeg();
+
     let pool = db::init_db().await;
     let rooms = Arc::new(DashMap::new());
 

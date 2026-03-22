@@ -24,7 +24,7 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 
 - **Backend:** Rust (Axum) orchestrator.
 - **Audio Pipeline:** Deepgram Nova-3 (STT) → NLLB-200 (Translation) → ElevenLabs Flash v2.5 (TTS).
-- **Streaming Engine:** FFmpeg (sidecar/process) handling RTMPS push with adaptive video delay.
+- **Streaming Engine:** FFmpeg (sidecar/process) handling RTMPS push with fixed-delay jitter buffer for A/V sync.
 - **Frontend:** React 19 + TypeScript (Cloudflare Pages).
 - **Infrastructure:** AWS `g5.xlarge` (A10G GPU) + Cloudflared Tunnels.
 - **Local Dev:** Docker Compose with `.env.local` override, frontend on Vite dev server.
@@ -37,7 +37,7 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 - [x] **YouTube Privacy:** Configurable privacy status (public/unlisted/private) from dashboard.
 - [x] **Zero-Config UX:** Magic Paste (RTMP parsing), Credential Vault, and Platform Deep-linking.
 - [x] **FFmpeg Muxing:** Server-side mixing of webcam frames and TTS audio pipes.
-- [x] **Adaptive Video-Audio Sync:** Video frames delayed by rolling average of pipeline latency (EMA-based, 200ms–3000ms range) to align with TTS audio output.
+- [x] **Fixed-Delay A/V Sync (replacing EMA):** Jitter buffer with constant delay D (configurable via `BROADCAST_DELAY_MS`, default 2500ms). Dedicated OS threads (`std::thread`, not Tokio) for video drain (30fps/33ms) and audio drain (20ms) independently. Hard TTS timeout at D−500ms — missed utterances become silence, never sync slips. TTS audio truncated with 50ms fade-out if it exceeds utterance duration + 2s. Cumulative audio sample tracking with 5s drift checks. Jitter monitoring (warns if tick >5ms late). Single D across all languages. YouTube/Twitch platform latency (3-30s) absorbs the delay invisibly.
 - [x] **Local Dev Environment:** Full stack runs locally via `docker compose --env-file .env.local`, frontend via `npm run dev`, YouTube OAuth redirects to localhost.
 
 ### Critical Blocker: The 1:1 Stream Rule
@@ -62,12 +62,24 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 
 ## Active Technical TODOs
 
-1. ~~**Audio-Video Sync:** Implement adaptive delay buffer~~ **DONE** — EMA-based rolling average delay in FFmpeg video writer
+1. ~~**A/V Sync Rewrite (P0):**~~ **DONE** — Fixed-delay jitter buffer implemented in `ffmpeg.rs` and `pipeline.rs`:
+   - [x] Dedicated OS thread (`std::thread`) video drain at 30fps with jitter monitoring
+   - [x] Dedicated OS thread audio drain at 20ms ticks (independent timing domain)
+   - [x] Both threads share delayed clock (`Instant::now() - D`), no direct coordination
+   - [x] Hard TTS timeout at `D - 500ms` in `pipeline.rs` — drops to silence on timeout
+   - [x] Frame duplication on webcam drops (nearest previous frame)
+   - [x] Cumulative audio sample tracking with 5s drift checks (warns if >50ms drift)
+   - [x] TTS audio truncation with 50ms fade-out if exceeds utterance duration + 2s
+   - [x] Single D across all languages, configurable via `BROADCAST_DELAY_MS` env var
+   - [x] FFmpeg spawned via `std::process::Command` (not Tokio) for blocking stdin/FIFO access
+   - [x] Graceful shutdown via `AtomicBool` stop flag + thread join
 2. ~~**YouTube Privacy:** Configurable broadcast privacy~~ **DONE** — dropdown in dashboard
 3. **Dashboard Fix:** Ensure the UI doesn't duplicate the same stream key across multiple language destinations (1:1 mapping logic).
-4. **Observability:** Add Prometheus/Grafana to monitor pipeline latency and FFmpeg process health.
-5. **Session Cleanup:** Ensure Docker containers and FFmpeg processes are killed immediately on WebSocket disconnect.
-6. **Video Feed Quality:** Test and tune video-audio sync under real streaming conditions.
+4. **Observability:** Add Prometheus/Grafana to monitor pipeline latency, FFmpeg process health, drain loop jitter (alert if >5ms late), and TTS-arrival-vs-frame-drain delta per utterance.
+5. ~~**Session Cleanup:**~~ **DONE** — Per-room cleanup on host disconnect (was already correct), plus:
+   - [x] `stop_all()` join timeout (3s) prevents cleanup from hanging on stuck drain threads
+   - [x] Startup orphan sweep (`kill_orphan_ffmpeg()`) kills stale FFmpeg processes + removes FIFOs from `/tmp`
+6. ~~**Video Feed Quality:** Test and tune video-audio sync under real streaming conditions.~~ — Subsumed by TODO #1.
 
 ---
 
