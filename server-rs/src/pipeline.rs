@@ -295,7 +295,7 @@ async fn run_pipeline(
             handles.push(tokio::spawn(async move {
                 do_tts_and_broadcast(
                     &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    voice_clone_id.as_deref(), &sp, &frames, utterance_end,
+                    voice_clone_id.as_deref(), &sp, &frames, utterance_start,
                 )
                 .await;
             }));
@@ -367,7 +367,7 @@ async fn run_pipeline(
                 voice_clone_id.as_deref(),
                 &sp,
                 &frames,
-                utterance_end,
+                utterance_start,
             )
             .await;
         }));
@@ -390,7 +390,7 @@ async fn do_tts_and_broadcast(
     voice_clone_id: Option<&str>,
     style_params: &StyleParams,
     utterance_frames: &[TimestampedFrame],
-    utterance_end: Instant,
+    utterance_start: Instant,
 ) {
     let tts_start = Instant::now();
 
@@ -460,18 +460,16 @@ async fn do_tts_and_broadcast(
         return;
     }
 
-    // Push to RTMP streams (decode MP3 → PCM, flush synced frames + audio)
+    // Push to RTMP streams (decode MP3 → PCM, queue for synced playback)
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
             Ok(pcm) => {
-                let mut mgr = manager.lock().await;
-                mgr.flush_and_push_audio(&lang.to_string(), &pcm, utterance_end);
+                let mgr = manager.lock().await;
+                mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
                 eprintln!(
-                    "[RTMP] Synced {}KB PCM audio for {} (pipeline: {}ms)",
-                    pcm.len() / 1024,
-                    lang,
-                    tts_ms
+                    "[RTMP] Queued audio for {} (pipeline: {}ms, plays at utterance_start)",
+                    lang, tts_ms
                 );
             }
             Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
