@@ -40,7 +40,7 @@ export function useHostRoom() {
   const startWebcam = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 512, height: 512, facingMode: "user" },
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" },
       });
       streamRef.current = stream;
       if (videoElRef.current) {
@@ -61,18 +61,24 @@ export function useHostRoom() {
     if (!video || !socket.current.isOpen) return;
 
     const canvas = document.createElement("canvas");
-    canvas.width = 256;
-    canvas.height = 256;
+    canvas.width = 1920;
+    canvas.height = 1080;
     const ctx = canvas.getContext("2d")!;
 
-    // Center crop to square, then scale to 256x256
-    const size = Math.min(video.videoWidth, video.videoHeight);
-    const sx = (video.videoWidth - size) / 2;
-    const sy = (video.videoHeight - size) / 2;
-    ctx.drawImage(video, sx, sy, size, size, 0, 0, 256, 256);
+    // Scale full webcam frame to 1080p (preserving aspect ratio, letterboxing if needed)
+    const srcW = video.videoWidth;
+    const srcH = video.videoHeight;
+    const scale = Math.max(1920 / srcW, 1080 / srcH);
+    const dw = srcW * scale;
+    const dh = srcH * scale;
+    const dx = (1920 - dw) / 2;
+    const dy = (1080 - dh) / 2;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, 1920, 1080);
+    ctx.drawImage(video, 0, 0, srcW, srcH, dx, dy, dw, dh);
 
     // Extract base64 (strip data:image/jpeg;base64, prefix)
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
     const base64 = dataUrl.split(",")[1];
 
     socket.current.sendJson({ type: "face:frame", data: base64 });

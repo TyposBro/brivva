@@ -29,16 +29,16 @@ from urllib.parse import urlparse, parse_qs
 STT_PORT = int(os.environ.get("STT_PORT", "8766"))
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "en")
-SAMPLE_RATE = 16000
+DEFAULT_SAMPLE_RATE = 44100
 
 
-def build_dg_url(language: str) -> str:
-    """Build Deepgram WebSocket URL for a given language."""
+def build_dg_url(language: str, sample_rate: int = DEFAULT_SAMPLE_RATE) -> str:
+    """Build Deepgram WebSocket URL for a given language and sample rate."""
     return (
         f"wss://api.deepgram.com/v1/listen"
         f"?model=nova-3"
         f"&encoding=linear16"
-        f"&sample_rate={SAMPLE_RATE}"
+        f"&sample_rate={sample_rate}"
         f"&channels=1"
         f"&language={language}"
         f"&punctuate=true"
@@ -51,19 +51,19 @@ def build_dg_url(language: str) -> str:
 
 
 # Default URL for backwards compatibility
-DG_WS_URL = build_dg_url(STT_LANGUAGE)
+DG_WS_URL = build_dg_url(STT_LANGUAGE, DEFAULT_SAMPLE_RATE)
 
 
 # ── Prosody Extraction ────────────────────────────────────
 
-def extract_prosody(pcm_bytes: bytes) -> dict:
-    """Extract prosody features from raw PCM (16kHz, 16-bit, mono)."""
+def extract_prosody(pcm_bytes: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE) -> dict:
+    """Extract prosody features from raw PCM (any sample rate, 16-bit, mono)."""
     if len(pcm_bytes) < 640:
         return {}
 
     n_samples = len(pcm_bytes) // 2
     samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    duration_s = n_samples / SAMPLE_RATE
+    duration_s = n_samples / sample_rate
 
     if duration_s < 0.1:
         return {}
@@ -71,8 +71,8 @@ def extract_prosody(pcm_bytes: bytes) -> dict:
     energy_rms = float(np.sqrt(np.mean(samples ** 2)))
 
     # Pitch estimation via autocorrelation
-    frame_len = int(0.03 * SAMPLE_RATE)
-    hop_len = int(0.01 * SAMPLE_RATE)
+    frame_len = int(0.03 * sample_rate)
+    hop_len = int(0.01 * sample_rate)
     pitches = []
 
     for start in range(0, len(samples) - frame_len, hop_len):
@@ -84,8 +84,8 @@ def extract_prosody(pcm_bytes: bytes) -> dict:
         corr = np.correlate(frame, frame, mode='full')
         corr = corr[len(corr) // 2:]
 
-        min_lag = SAMPLE_RATE // 500
-        max_lag = SAMPLE_RATE // 50
+        min_lag = sample_rate // 500
+        max_lag = sample_rate // 50
 
         if max_lag >= len(corr):
             continue
@@ -96,7 +96,7 @@ def extract_prosody(pcm_bytes: bytes) -> dict:
 
         peak_idx = np.argmax(segment) + min_lag
         if corr[0] > 0 and corr[peak_idx] / corr[0] > 0.3:
-            pitch_hz = SAMPLE_RATE / peak_idx
+            pitch_hz = sample_rate / peak_idx
             if 50 < pitch_hz < 500:
                 pitches.append(pitch_hz)
 
@@ -267,9 +267,9 @@ def extract_sentiment(data: dict) -> tuple[str, float]:
 
 # ── WebSocket Handling ────────────────────────────────────
 
-async def connect_to_deepgram(language: str = None):
+async def connect_to_deepgram(language: str = None, sample_rate: int = DEFAULT_SAMPLE_RATE):
     """Connect to Deepgram Nova-3 WebSocket directly."""
-    url = build_dg_url(language) if language else DG_WS_URL
+    url = build_dg_url(language, sample_rate) if language else DG_WS_URL
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
     for attempt in range(1, 11):
         try:
@@ -293,7 +293,8 @@ async def handle_client(client_ws):
     parsed = urlparse(path)
     params = parse_qs(parsed.query)
     language = params.get("lang", [None])[0]
-    log.info("Client connected (lang=%s)", language or STT_LANGUAGE)
+    sample_rate = int(params.get("sample_rate", [str(DEFAULT_SAMPLE_RATE)])[0])
+    log.info("Client connected (lang=%s, sample_rate=%d)", language or STT_LANGUAGE, sample_rate)
 
     if not DEEPGRAM_API_KEY:
         log.error("DEEPGRAM_API_KEY must be set")
@@ -305,7 +306,7 @@ async def handle_client(client_ws):
         return
 
     try:
-        dg_ws = await connect_to_deepgram(language)
+        dg_ws = await connect_to_deepgram(language, sample_rate)
     except ConnectionError as e:
         log.error("%s", e)
         await client_ws.send(json.dumps({"type": "error", "message": str(e)}))
@@ -363,7 +364,7 @@ async def handle_client(client_ws):
                         log.info("[FINAL] %s", transcript)
 
                         # Extract prosody from buffered PCM
-                        prosody = extract_prosody(bytes(pcm_buffer))
+                        prosody = extract_prosody(bytes(pcm_buffer), sample_rate)
                         word_count = len(transcript.split())
                         prosody = compute_speaking_rate(prosody, word_count)
 

@@ -1,4 +1,4 @@
-const SAMPLE_RATE = 16000;
+const SAMPLE_RATE = 44100;
 const BUFFER_SIZE = 4096;
 const FFT_SIZE = 512;
 

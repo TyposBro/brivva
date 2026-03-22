@@ -77,7 +77,9 @@ struct SttEvent {
 
 // ── STT Connection ────────────────────────────────────────
 
-/// Emit a final transcript: broadcast to room and trigger translation pipeline
+/// Emit a final transcript: broadcast to room and trigger translation pipeline.
+/// `host_audio` is the raw 16kHz PCM captured during this utterance, used for
+/// source-language passthrough (skip TTS for RTMP streams in the host's language).
 fn emit_final(
     rooms: &Rooms,
     room_id: &str,
@@ -86,6 +88,7 @@ fn emit_final(
     source_lang: &Lang,
     style_params: Option<StyleParams>,
     utterance_start: Instant,
+    host_audio: Vec<u8>,
 ) {
     let utterance_end = Instant::now();
 
@@ -109,7 +112,7 @@ fn emit_final(
             tokio::spawn(async move {
                 run_pipeline(
                     &text, uid, &src, &active, &rooms_clone, &rid, &sp,
-                    utterance_start, utterance_end, &frame_buffer,
+                    utterance_start, utterance_end, &frame_buffer, host_audio,
                 ).await;
             });
         }
@@ -126,7 +129,7 @@ pub async fn start_stt(
     // Connect to STT wrapper with retries
     let mut ws_stream = None;
     for attempt in 1..=10 {
-        let stt_url = format!("{}?lang={}", &*STT_URL, source_lang);
+        let stt_url = format!("{}?lang={}&sample_rate=44100", &*STT_URL, source_lang);
         match tokio_tungstenite::connect_async(&stt_url).await {
             Ok((stream, _)) => {
                 println!("Connected to STT wrapper (attempt {})", attempt);
@@ -150,9 +153,19 @@ pub async fn start_stt(
     let (mut stt_sink, mut stt_stream) = ws_stream.split();
     let mut audio_rx = audio_rx;
 
-    // Task 1: Forward host audio → STT wrapper
+    // Shared buffer: accumulate host audio chunks for source-language passthrough.
+    // Drained on each "final" event and passed to the pipeline.
+    let audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Task 1: Forward host audio → STT wrapper + accumulate for passthrough
+    let acc_tx = audio_acc.clone();
     let send_task = tokio::spawn(async move {
         while let Some(data) = audio_rx.recv().await {
+            // Accumulate a copy for passthrough
+            if let Ok(mut acc) = acc_tx.lock() {
+                acc.push(data.clone());
+            }
             if stt_sink
                 .send(tungstenite::Message::Binary(data.into()))
                 .await
@@ -169,6 +182,7 @@ pub async fn start_stt(
     let mut utterance_counter: u64 = 0;
     // Track when the current utterance started (first interim after silence)
     let mut utterance_start: Option<Instant> = None;
+    let acc_rx = audio_acc.clone();
 
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stt_stream.next().await {
@@ -198,8 +212,14 @@ pub async fn start_stt(
                     let style_params = event.style_params.clone();
                     // Use the tracked start time, or fallback to now
                     let start = utterance_start.take().unwrap_or_else(Instant::now);
+                    // Drain accumulated host audio for passthrough
+                    let host_audio = {
+                        let mut acc = acc_rx.lock().unwrap();
+                        let chunks: Vec<u8> = acc.drain(..).flatten().collect();
+                        chunks
+                    };
                     drop(room);
-                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params, start);
+                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params, start, host_audio);
                 }
                 "interim" => {
                     // Mark utterance start on first interim
@@ -243,7 +263,9 @@ struct NllbResponse {
     translate_ms: i64,
 }
 
-/// Run the full translation + TTS pipeline for one utterance
+/// Run the full translation + TTS pipeline for one utterance.
+/// `host_audio` is raw 16kHz PCM of the host's voice during this utterance,
+/// used for source-language passthrough on RTMP streams.
 async fn run_pipeline(
     transcript: &str,
     utterance_id: u64,
@@ -255,6 +277,7 @@ async fn run_pipeline(
     utterance_start: Instant,
     utterance_end: Instant,
     frame_buffer: &FrameBuffer,
+    host_audio: Vec<u8>,
 ) {
     let client = reqwest::Client::new();
     let mut handles = Vec::new();
@@ -283,22 +306,35 @@ async fn run_pipeline(
 
     for lang in target_langs {
         if lang == source_lang {
-            let transcript = transcript.to_string();
-            let lang = lang.clone();
-            let client = client.clone();
-            let rooms = rooms.clone();
-            let room_id = room_id.to_string();
-            let voice_clone_id = voice_clone_id.clone();
-            let sp = style_params.clone();
-            let frames = frames.clone();
-
-            handles.push(tokio::spawn(async move {
-                do_tts_and_broadcast(
-                    &client, &transcript, 0, utterance_id, &lang, &rooms, &room_id,
-                    voice_clone_id.as_deref(), &sp, &frames, utterance_start, utterance_end,
-                )
-                .await;
-            }));
+            // Source-language passthrough: host audio is already 44.1kHz PCM (matches FFmpeg).
+            // Queue directly to RTMP streams. No TTS needed — it's the host's own voice.
+            let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
+            if let Some(manager) = rtmp_mgr {
+                if !host_audio.is_empty() {
+                    let mut pcm = host_audio.clone();
+                    let pcm_len = pcm.len();
+                    let lang_str = lang.to_string();
+                    let mgr = manager.clone();
+                    handles.push(tokio::spawn(async move {
+                        // Apply same truncation as translated audio
+                        let utterance_dur = utterance_end.duration_since(utterance_start);
+                        let max_dur = utterance_dur + Duration::from_millis(2000);
+                        let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
+                        if pcm.len() > max_bytes {
+                            crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+                        }
+                        let locked = mgr.lock().await;
+                        locked.queue_audio(&lang_str, pcm, utterance_start);
+                        eprintln!(
+                            "[PASSTHROUGH] Queued host audio for {} ({}KB, 44.1kHz native)",
+                            lang_str,
+                            pcm_len / 1024
+                        );
+                    }));
+                } else {
+                    eprintln!("[PASSTHROUGH] no host audio captured for source lang {}", lang);
+                }
+            }
             continue;
         }
 

@@ -133,9 +133,9 @@ impl RtmpManager {
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-b:v", "2500k",
-                "-maxrate", "2500k",
-                "-bufsize", "5000k",
+                "-b:v", "8000k",
+                "-maxrate", "8000k",
+                "-bufsize", "16000k",
                 "-pix_fmt", "yuv420p",
                 "-g", "60",
                 // Audio encoding (stereo AAC)
