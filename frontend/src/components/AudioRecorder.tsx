@@ -1,4 +1,6 @@
 import { useRef, useEffect } from "react";
+import { Mic, Square } from "lucide-react";
+import { cn } from "../lib/cn";
 
 interface AudioRecorderProps {
   isRecording: boolean;
@@ -27,24 +29,32 @@ export function AudioRecorder({
   }, [analyser]);
 
   return (
-    <div className="recorder">
+    <div className="flex flex-col items-center gap-4">
       <canvas
         ref={canvasRef}
         width={600}
         height={80}
-        className={`waveform ${isRecording ? "active" : ""}`}
+        className={cn(
+          "w-full max-w-[600px] h-20 rounded-xl transition-opacity",
+          isRecording ? "opacity-100" : "opacity-40"
+        )}
       />
       <button
-        className={`record-btn ${isRecording ? "recording" : ""}`}
+        className={cn(
+          "flex items-center gap-2 px-8 py-3 rounded-xl font-headline font-bold transition-all",
+          isRecording
+            ? "bg-error-container text-on-error-container hover:opacity-90"
+            : "monolith-gradient text-white hover:scale-[0.98] shadow-xl"
+        )}
         onClick={isRecording ? onStop : onStart}
       >
         {isRecording ? (
           <>
-            <span className="dot" /> Stop
+            <Square className="w-4 h-4" /> Stop
           </>
         ) : (
           <>
-            <span className="mic-icon">🎙</span> Record
+            <Mic className="w-4 h-4" /> Record
           </>
         )}
       </button>
@@ -54,18 +64,19 @@ export function AudioRecorder({
 
 // --- waveform rendering ---
 
-const BACKGROUND_COLOR = "#111118";
 const BAR_WIDTH_SCALE = 2.5;
 const BAR_GAP = 1;
 const BAR_HEIGHT_SCALE = 0.9;
 const MAX_BYTE_VALUE = 255;
-const HUE_START = 240; // blue
-const HUE_RANGE = 60; // blue → purple
+const HUE_START = 240;
+const HUE_RANGE = 60;
 const SATURATION = 80;
 const LIGHTNESS = 60;
 
 function clearCanvas(canvas: HTMLCanvasElement) {
-  canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#131313";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function startDrawLoop(
@@ -92,7 +103,7 @@ function drawBars(
   data: Uint8Array,
   length: number
 ) {
-  ctx.fillStyle = BACKGROUND_COLOR;
+  ctx.fillStyle = "#131313";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const barWidth = (canvas.width / length) * BAR_WIDTH_SCALE;
@@ -106,4 +117,3 @@ function drawBars(
     x += barWidth + BAR_GAP;
   }
 }
-

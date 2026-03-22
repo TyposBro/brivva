@@ -25,7 +25,7 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 - **Backend:** Rust (Axum) orchestrator.
 - **Audio Pipeline:** Deepgram Nova-3 (STT) → NLLB-200 (Translation) → ElevenLabs Flash v2.5 (TTS).
 - **Streaming Engine:** FFmpeg (sidecar/process) handling RTMPS push with fixed-delay jitter buffer for A/V sync.
-- **Frontend:** React 19 + TypeScript (Cloudflare Pages).
+- **Frontend:** React 19 + TypeScript + Tailwind 3 + Lucide icons (Cloudflare Pages). "Kinetic Monolith" design system (Space Grotesk + Inter, tonal depth, no-line rule).
 - **Infrastructure:** AWS `g5.xlarge` (A10G GPU) + Cloudflared Tunnels.
 - **Local Dev:** Docker Compose with `.env.local` override, frontend on Vite dev server.
 
@@ -74,7 +74,14 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
    - [x] FFmpeg spawned via `std::process::Command` (not Tokio) for blocking stdin/FIFO access
    - [x] Graceful shutdown via `AtomicBool` stop flag + thread join
 2. ~~**YouTube Privacy:** Configurable broadcast privacy~~ **DONE** — dropdown in dashboard
-3. **Dashboard Fix:** Ensure the UI doesn't duplicate the same stream key across multiple language destinations (1:1 mapping logic).
+3. ~~**Dashboard Fix:**~~ **DONE** — Rewrote dashboard with platform-first UX:
+   - [x] Platform → language auto-mapping (Coupang→ko, Rakuten→ja, Twitch→en, etc.)
+   - [x] YouTube/Custom/Local Test allow user-picked language
+   - [x] Multi-destination support (add multiple platforms, each with its own lang + RTMP config)
+   - [x] Platforms auto-disabled when their fixed language matches source language
+   - [x] Magic Paste auto-detection still works
+   - [x] Migrated to Tailwind 3 + Lucide icons with Kinetic Monolith design tokens
+   - [x] Impossible to create nonsensical combos (e.g., English→Coupang)
 4. **Observability:** Add Prometheus/Grafana to monitor pipeline latency, FFmpeg process health, drain loop jitter (alert if >5ms late), and TTS-arrival-vs-frame-drain delta per utterance.
 5. ~~**Session Cleanup:**~~ **DONE** — Per-room cleanup on host disconnect (was already correct), plus:
    - [x] `stop_all()` join timeout (3s) prevents cleanup from hanging on stuck drain threads

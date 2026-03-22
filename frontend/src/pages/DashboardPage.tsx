@@ -1,16 +1,30 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  Mic,
+  Trash2,
+  Plus,
+  X,
+  Radio,
+  ExternalLink,
+  ChevronDown,
+  ChevronRight,
+  Youtube,
+  Tv,
+  Globe,
+  Monitor,
+  Settings2,
+  Clipboard,
+} from "lucide-react";
+import { cn } from "../lib/cn";
 import * as api from "../lib/api";
 
-const LANGS = [
-  { code: "ko", label: "Korean" },
-  { code: "en", label: "English" },
-  { code: "ja", label: "Japanese" },
-  { code: "zh", label: "Chinese" },
-];
+// ── Types ──────────────────────────────────────────────
 
-type PlatformEntry = {
+type Destination = {
+  uid: string;
   platform: string;
+  lang: string;
   rtmp_url: string;
   stream_key: string;
 };
@@ -24,6 +38,33 @@ function getUserId(): string {
   return id;
 }
 
+// ── Platform icons ─────────────────────────────────────
+
+function PlatformIcon({ id, className }: { id: string; className?: string }) {
+  switch (id) {
+    case "youtube":
+      return <Youtube className={className} />;
+    case "twitch":
+      return <Tv className={className} />;
+    case "local-test":
+      return <Monitor className={className} />;
+    default:
+      return <Globe className={className} />;
+  }
+}
+
+// ── Region grouping for the picker ─────────────────────
+
+const REGION_GROUPS = [
+  { key: "Global", label: "Global", icon: "🌐" },
+  { key: "Korea", label: "Korean Platforms", icon: "🇰🇷" },
+  { key: "Japan", label: "Japanese Platforms", icon: "🇯🇵" },
+  { key: "China", label: "Chinese Platforms", icon: "🇨🇳" },
+  { key: "Other", label: "Other", icon: "⚙️" },
+];
+
+// ── Component ──────────────────────────────────────────
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -33,21 +74,25 @@ export default function DashboardPage() {
   const [voices, setVoices] = useState<api.Voice[]>([]);
   const [sessions, setSessions] = useState<api.Session[]>([]);
   const [loading, setLoading] = useState(true);
-  const [savedCreds, setSavedCreds] = useState<Record<string, api.PlatformCredential>>({});
+  const [savedCreds, setSavedCreds] = useState<
+    Record<string, api.PlatformCredential>
+  >({});
 
   // Session form
   const [title, setTitle] = useState("");
   const [sourceLang, setSourceLang] = useState("ko");
-  const [targetLangs, setTargetLangs] = useState<string[]>(["en"]);
-  const [selectedVoice, setSelectedVoice] = useState<string>("");
+  const [selectedVoice, setSelectedVoice] = useState("");
+  const [destinations, setDestinations] = useState<Destination[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
-
-  // Platform — single selection
-  const [privacyStatus, setPrivacyStatus] = useState<string>("unlisted");
-  const [selectedPlatform, setSelectedPlatform] = useState<string>("");
-  const [platformConfig, setPlatformConfig] = useState<PlatformEntry>({ platform: "", rtmp_url: "", stream_key: "" });
+  const [privacyStatus, setPrivacyStatus] = useState("unlisted");
   const [magicPaste, setMagicPaste] = useState("");
+
+  // Progressive disclosure
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [expandedRegion, setExpandedRegion] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -61,9 +106,7 @@ export default function DashboardPage() {
       setVoices(v.voices);
       setSessions(s.sessions);
       const credMap: Record<string, api.PlatformCredential> = {};
-      for (const cred of c.credentials) {
-        credMap[cred.platform] = cred;
-      }
+      for (const cred of c.credentials) credMap[cred.platform] = cred;
       setSavedCreds(credMap);
     } catch (e) {
       console.error("Failed to load data:", e);
@@ -76,54 +119,105 @@ export default function DashboardPage() {
     loadData();
   }, [loadData]);
 
+  // Close picker on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    if (pickerOpen) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [pickerOpen]);
+
   const youtubeJustConnected = searchParams.get("youtube") === "connected";
 
-  const selectPlatform = (id: string) => {
-    setSelectedPlatform(id);
-    // Pre-fill from saved credentials
-    const cred = savedCreds[id];
-    const p = api.PLATFORMS.find((x) => x.id === id);
-    setPlatformConfig({
-      platform: id,
-      rtmp_url: cred?.rtmp_url ?? p?.defaultRtmp ?? "",
-      stream_key: cred?.stream_key ?? "",
-    });
+  // ── Destination management ─────────────────────────
+
+  const addDestination = (platformId: string) => {
+    const platform = api.PLATFORMS.find((p) => p.id === platformId);
+    if (!platform) return;
+
+    const autoLang = api.PLATFORM_LANG[platformId];
+    const lang = autoLang ?? (sourceLang === "en" ? "ja" : "en");
+    const cred = savedCreds[platformId];
+
+    setDestinations((prev) => [
+      ...prev,
+      {
+        uid: crypto.randomUUID(),
+        platform: platformId,
+        lang,
+        rtmp_url: cred?.rtmp_url ?? platform.defaultRtmp ?? "",
+        stream_key: cred?.stream_key ?? "",
+      },
+    ]);
+    setPickerOpen(false);
+    setExpandedRegion(null);
+  };
+
+  const removeDestination = (uid: string) => {
+    setDestinations((prev) => prev.filter((d) => d.uid !== uid));
+  };
+
+  const updateDestination = (uid: string, patch: Partial<Destination>) => {
+    setDestinations((prev) =>
+      prev.map((d) => (d.uid === uid ? { ...d, ...patch } : d))
+    );
   };
 
   const handleMagicPaste = (value: string) => {
     setMagicPaste(value);
     const detected = api.detectPlatform(value);
     if (detected) {
-      setSelectedPlatform(detected.platform);
-      setPlatformConfig({
-        platform: detected.platform,
-        rtmp_url: detected.rtmpUrl,
-        stream_key: detected.streamKey,
-      });
+      const autoLang = api.PLATFORM_LANG[detected.platform];
+      setDestinations((prev) => [
+        ...prev,
+        {
+          uid: crypto.randomUUID(),
+          platform: detected.platform,
+          lang: autoLang ?? "en",
+          rtmp_url: detected.rtmpUrl,
+          stream_key: detected.streamKey,
+        },
+      ]);
       setMagicPaste("");
     }
   };
 
+  // ── Create session ─────────────────────────────────
+
   const handleCreateSession = async () => {
-    if (!title.trim()) { setError("Please enter a session title"); return; }
-    if (targetLangs.length === 0) { setError("Select at least one target language"); return; }
-    if (!selectedPlatform) { setError("Select a platform"); return; }
-
-    const p = api.PLATFORMS.find((x) => x.id === selectedPlatform);
-
-    if (selectedPlatform === "youtube" && !user?.youtube_connected) {
-      setError("Connect your YouTube account first");
+    if (!title.trim()) {
+      setError("Enter a session title");
+      return;
+    }
+    if (destinations.length === 0) {
+      setError("Add at least one destination");
       return;
     }
 
-    if (p && !p.auto) {
-      if (!p.keyOnly && !platformConfig.rtmp_url && !p.defaultRtmp) {
-        setError(`Enter server URL for ${p.label}`);
+    for (const dest of destinations) {
+      if (dest.lang === sourceLang) {
+        setError(
+          `${api.langLabel(dest.lang)} is your source language — remove or change the destination`
+        );
         return;
       }
-      if (!platformConfig.stream_key) {
-        setError(`Enter stream key for ${p.label}`);
+      const p = api.PLATFORMS.find((x) => x.id === dest.platform);
+      if (dest.platform === "youtube" && !user?.youtube_connected) {
+        setError("Connect your YouTube account first");
         return;
+      }
+      if (p && !p.auto) {
+        if (!p.keyOnly && !dest.rtmp_url) {
+          setError(`Enter server URL for ${p.label}`);
+          return;
+        }
+        if (!dest.stream_key) {
+          setError(`Enter stream key for ${p.label}`);
+          return;
+        }
       }
     }
 
@@ -131,17 +225,22 @@ export default function DashboardPage() {
     setError("");
 
     try {
-      const platforms: api.PlatformConfig[] = [];
-      if (p?.auto) {
-        platforms.push({ platform: selectedPlatform });
-      } else {
-        const rtmpUrl = p?.keyOnly ? p.defaultRtmp : (platformConfig.rtmp_url || p?.defaultRtmp || "");
-        platforms.push({
-          platform: selectedPlatform,
+      const targetLangs = [...new Set(destinations.map((d) => d.lang))];
+      const platforms: api.PlatformConfig[] = destinations.map((d) => {
+        const p = api.PLATFORMS.find((x) => x.id === d.platform);
+        if (p?.auto) return { platform: d.platform, lang: d.lang };
+        const rtmpUrl = p?.keyOnly
+          ? p.defaultRtmp
+          : d.rtmp_url || p?.defaultRtmp || "";
+        return {
+          platform: d.platform,
+          lang: d.lang,
           rtmp_url: rtmpUrl,
-          stream_key: platformConfig.stream_key,
-        });
-      }
+          stream_key: d.stream_key,
+        };
+      });
+
+      const hasYoutube = destinations.some((d) => d.platform === "youtube");
 
       const result = await api.createSession({
         user_id: userId,
@@ -150,13 +249,10 @@ export default function DashboardPage() {
         target_langs: targetLangs,
         voice_id: selectedVoice || undefined,
         platforms,
-        privacy_status: selectedPlatform === "youtube" ? privacyStatus : undefined,
+        privacy_status: hasYoutube ? privacyStatus : undefined,
       });
 
-      if (result.errors?.length) {
-        setError(result.errors.join("; "));
-      }
-
+      if (result.errors?.length) setError(result.errors.join("; "));
       navigate(`/session/${result.session.id}`);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to create session");
@@ -170,269 +266,525 @@ export default function DashboardPage() {
     if (selectedVoice === voiceId) setSelectedVoice("");
   };
 
+  // ── Render ─────────────────────────────────────────
+
   if (loading) {
     return (
-      <div className="app">
-        <header className="header"><h1 className="logo">brivva</h1></header>
-        <main className="main">
-          <p style={{ textAlign: "center", color: "var(--text-muted)" }}>Loading...</p>
-        </main>
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <p className="text-on-surface-variant font-label">Loading...</p>
       </div>
     );
   }
 
-  const activePlatform = api.PLATFORMS.find((x) => x.id === selectedPlatform);
+  const hasYoutubeDest = destinations.some((d) => d.platform === "youtube");
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1 className="logo" onClick={() => navigate("/")} style={{ cursor: "pointer" }}>
-          brivva
-        </h1>
-        <p className="tagline">Stream Dashboard</p>
+    <div className="min-h-screen bg-background">
+      {/* Header */}
+      <header className="fixed top-0 w-full z-50 bg-background/60 backdrop-blur-xl">
+        <div className="flex justify-between items-center max-w-2xl mx-auto px-6 h-16">
+          <h1
+            className="text-xl font-bold tracking-tighter text-on-surface font-headline cursor-pointer"
+            onClick={() => navigate("/")}
+          >
+            BRIVVA
+          </h1>
+          <button
+            className="text-on-surface-variant hover:text-on-surface transition-colors p-2"
+            onClick={() => setShowSettings(!showSettings)}
+          >
+            <Settings2 className="w-4 h-4" />
+          </button>
+        </div>
       </header>
 
-      <main className="main">
+      <main className="max-w-2xl mx-auto px-6 pt-24 pb-16 space-y-6">
         {youtubeJustConnected && (
-          <div className="dash-banner dash-banner--success">
-            YouTube account connected successfully!
+          <div className="bg-success/10 text-success px-4 py-2.5 rounded-xl font-label text-sm">
+            YouTube account connected
           </div>
         )}
 
-        {/* YouTube Connection */}
-        <section className="dash-section">
-          <h2 className="dash-section-title">YouTube Account</h2>
-          {user?.youtube_connected ? (
-            <div className="dash-youtube-connected">
-              <span className="dash-yt-icon">&#9654;</span>
-              <span>{user.youtube_channel_name}</span>
-              <span className="dash-badge dash-badge--success">Connected</span>
+        {/* ── Settings drawer (YouTube, Voices) ─── */}
+        {showSettings && (
+          <div className="space-y-4 bg-surface-container-low rounded-xl p-5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-label font-bold uppercase tracking-widest text-on-surface-variant">
+                Settings
+              </span>
+              <button
+                className="text-on-surface-variant hover:text-on-surface p-1"
+                onClick={() => setShowSettings(false)}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-          ) : (
-            <a href={api.youtubeAuthUrl(userId)} className="record-btn dash-yt-connect-btn">
-              Connect YouTube Account
-            </a>
-          )}
-        </section>
 
-        {/* Saved Voices */}
-        <section className="dash-section">
-          <h2 className="dash-section-title">Saved Voices</h2>
-          {voices.length === 0 ? (
-            <p className="dash-empty">No saved voices yet. You can record one when starting a broadcast.</p>
-          ) : (
-            <div className="dash-voice-list">
-              {voices.map((v) => (
-                <div key={v.id} className="dash-voice-item">
-                  <input
-                    type="radio"
-                    name="voice"
-                    checked={selectedVoice === v.id}
-                    onChange={() => setSelectedVoice(v.id)}
-                  />
-                  <span className="dash-voice-name">{v.name}</span>
-                  <span className="dash-voice-date">
-                    {new Date(v.created_at * 1000).toLocaleDateString()}
+            {/* YouTube */}
+            <div>
+              <span className="text-on-surface-variant text-xs font-label block mb-2">
+                YouTube Account
+              </span>
+              {user?.youtube_connected ? (
+                <div className="flex items-center gap-2">
+                  <Youtube className="w-4 h-4 text-[#ff0000]" />
+                  <span className="text-on-surface font-label text-sm">
+                    {user.youtube_channel_name}
                   </span>
-                  <button className="dash-voice-delete" onClick={() => handleDeleteVoice(v.id)}>
-                    &#10005;
-                  </button>
+                  <span className="text-[10px] font-label font-bold uppercase tracking-widest text-success bg-success/10 px-2 py-0.5 rounded">
+                    Connected
+                  </span>
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Create Session */}
-        <section className="dash-section">
-          <h2 className="dash-section-title">Create Live Session</h2>
-
-          <div className="dash-form">
-            <label className="dash-label">
-              Session Title
-              <input
-                className="dash-input"
-                placeholder="My Live Stream"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-            </label>
-
-            <div style={{ display: "flex", gap: "0.75rem" }}>
-              <label className="dash-label" style={{ flex: 1 }}>
-                You speak
-                <select
-                  className="dash-select"
-                  value={sourceLang}
-                  onChange={(e) => {
-                    setSourceLang(e.target.value);
-                    // Remove new source from targets if selected
-                    setTargetLangs((prev) => prev.filter((l) => l !== e.target.value));
-                  }}
+              ) : (
+                <a
+                  href={api.youtubeAuthUrl(userId)}
+                  className="inline-flex items-center gap-2 bg-surface-container-high hover:bg-surface-bright text-on-surface px-4 py-2 rounded-lg font-label text-sm transition-colors"
                 >
-                  {LANGS.map((l) => (
-                    <option key={l.code} value={l.code}>{l.label}</option>
-                  ))}
-                </select>
-              </label>
-
-              <fieldset className="dash-label" style={{ flex: 1 }}>
-                <legend style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "0.25rem" }}>Translate to</legend>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                  {LANGS.filter((l) => l.code !== sourceLang).map((l) => (
-                    <label key={l.code} style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={targetLangs.includes(l.code)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setTargetLangs((prev) => [...prev, l.code]);
-                          } else {
-                            setTargetLangs((prev) => prev.filter((c) => c !== l.code));
-                          }
-                        }}
-                      />
-                      {l.label}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+                  <Youtube className="w-3.5 h-3.5" />
+                  Connect YouTube
+                </a>
+              )}
             </div>
 
-            {/* Platform Selection — single */}
-            <fieldset className="dash-fieldset">
-              <legend className="dash-legend">Stream To</legend>
-              <div className="dash-magic-paste">
-                <input
-                  className="dash-input"
-                  placeholder="Paste any RTMP URL to auto-detect platform..."
-                  value={magicPaste}
-                  onChange={(e) => handleMagicPaste(e.target.value)}
-                />
+            {/* Voices */}
+            <div>
+              <span className="text-on-surface-variant text-xs font-label block mb-2">
+                Saved Voices
+              </span>
+              {voices.length === 0 ? (
+                <p className="text-on-surface-variant/60 text-xs">
+                  No saved voices. Record one when broadcasting.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {voices.map((v) => (
+                    <div
+                      key={v.id}
+                      className={cn(
+                        "flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm",
+                        selectedVoice === v.id
+                          ? "bg-primary-container/20"
+                          : "bg-surface-container-high hover:bg-surface-bright"
+                      )}
+                      onClick={() => setSelectedVoice(v.id)}
+                    >
+                      <Mic className="w-3.5 h-3.5 text-primary" />
+                      <span className="text-on-surface font-label flex-1 truncate">
+                        {v.name}
+                      </span>
+                      <button
+                        className="text-on-surface-variant hover:text-error transition-colors p-0.5"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteVoice(v.id);
+                        }}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Session Title + Language (compact row) ─── */}
+        <div className="flex gap-3">
+          <input
+            className="flex-1 min-w-0 bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label outline-none"
+            placeholder="Session title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <div className="relative shrink-0">
+            <select
+              className="appearance-none bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label focus:ring-2 focus:ring-primary/50 transition-all outline-none pr-9 cursor-pointer"
+              value={sourceLang}
+              onChange={(e) => setSourceLang(e.target.value)}
+            >
+              {api.LANGS.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.flag} {l.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant pointer-events-none" />
+          </div>
+        </div>
+
+        {/* ── Destinations ─────────────────────────── */}
+        <div className="space-y-3">
+          {/* Added destination cards */}
+          {destinations.map((dest) => (
+            <DestinationCard
+              key={dest.uid}
+              dest={dest}
+              sourceLang={sourceLang}
+              savedCreds={savedCreds}
+              user={user}
+              privacyStatus={privacyStatus}
+              onPrivacyChange={setPrivacyStatus}
+              onUpdate={(patch) => updateDestination(dest.uid, patch)}
+              onRemove={() => removeDestination(dest.uid)}
+            />
+          ))}
+
+          {/* Add destination button + picker */}
+          <div className="relative" ref={pickerRef}>
+            {!pickerOpen ? (
+              <div className="flex gap-2">
+                <button
+                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-outline-variant/20 text-on-surface-variant hover:border-primary/40 hover:text-primary transition-all font-label text-sm"
+                  onClick={() => setPickerOpen(true)}
+                >
+                  <Plus className="w-4 h-4" />
+                  Add destination
+                </button>
+                <button
+                  className="flex items-center gap-2 px-4 py-3 rounded-xl border-2 border-dashed border-outline-variant/20 text-on-surface-variant hover:border-primary/40 hover:text-primary transition-all"
+                  onClick={() => {
+                    const url = prompt("Paste RTMP URL");
+                    if (url) handleMagicPaste(url);
+                  }}
+                  title="Paste RTMP URL"
+                >
+                  <Clipboard className="w-4 h-4" />
+                </button>
               </div>
-              <div className="dash-platform-list">
-                {["Global", "Korea", "Japan", "China", "Other"].map((region) => {
-                  const regionPlatforms = api.PLATFORMS.filter((p) => p.region === region);
-                  if (regionPlatforms.length === 0) return null;
+            ) : (
+              <div className="bg-surface-container-low rounded-xl overflow-hidden">
+                {/* Paste bar inside picker */}
+                <div className="p-3 border-b border-outline-variant/10">
+                  <input
+                    className="w-full bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none"
+                    placeholder="Paste RTMP URL to auto-detect..."
+                    value={magicPaste}
+                    onChange={(e) => handleMagicPaste(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+
+                {/* Region groups */}
+                {REGION_GROUPS.map((group) => {
+                  const platforms = api.PLATFORMS.filter(
+                    (p) => p.region === group.key
+                  );
+                  if (platforms.length === 0) return null;
+
+                  const isExpanded = expandedRegion === group.key;
+
                   return (
-                    <div key={region} className="dash-platform-region">
-                      <div className="dash-platform-region-label">{region}</div>
-                      {regionPlatforms.map((p) => {
-                        const selected = selectedPlatform === p.id;
-                        return (
-                          <div key={p.id} className="dash-platform-item">
-                            <label className="dash-platform-toggle">
-                              <input
-                                type="radio"
-                                name="platform"
-                                checked={selected}
-                                onChange={() => selectPlatform(p.id)}
-                              />
-                              <span className="dash-platform-label">{p.label}</span>
-                              {p.auto && selected && (
-                                <span className="dash-badge dash-badge--success" style={{ marginLeft: "0.5rem" }}>
-                                  Auto
+                    <div key={group.key}>
+                      <button
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-container-high transition-colors text-left"
+                        onClick={() =>
+                          setExpandedRegion(isExpanded ? null : group.key)
+                        }
+                      >
+                        <span className="text-sm">{group.icon}</span>
+                        <span className="text-on-surface font-label text-sm flex-1">
+                          {group.label}
+                        </span>
+                        <span className="text-on-surface-variant/40 text-xs font-label">
+                          {platforms.length}
+                        </span>
+                        {isExpanded ? (
+                          <ChevronDown className="w-3.5 h-3.5 text-on-surface-variant" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 text-on-surface-variant" />
+                        )}
+                      </button>
+
+                      {isExpanded && (
+                        <div className="pb-2">
+                          {platforms.map((p) => {
+                            const autoLang = api.PLATFORM_LANG[p.id];
+                            const disabled =
+                              autoLang !== null && autoLang === sourceLang;
+
+                            return (
+                              <button
+                                key={p.id}
+                                disabled={disabled}
+                                className={cn(
+                                  "w-full flex items-center gap-3 px-4 pl-10 py-2.5 text-left transition-colors",
+                                  disabled
+                                    ? "text-on-surface-variant/30 cursor-not-allowed"
+                                    : "text-on-surface hover:bg-surface-container-high cursor-pointer"
+                                )}
+                                onClick={() => addDestination(p.id)}
+                              >
+                                <PlatformIcon
+                                  id={p.id}
+                                  className="w-4 h-4 shrink-0"
+                                />
+                                <span className="font-label text-sm flex-1">
+                                  {p.label}
                                 </span>
-                              )}
-                            </label>
-                          </div>
-                        );
-                      })}
+                                {autoLang && !disabled && (
+                                  <span className="text-xs text-on-surface-variant/50">
+                                    {api.langFlag(autoLang)}{" "}
+                                    {api.langLabel(autoLang)}
+                                  </span>
+                                )}
+                                {disabled && (
+                                  <span className="text-[10px] text-on-surface-variant/30 font-label">
+                                    same as source
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
+
+                {/* Close */}
+                <button
+                  className="w-full py-2.5 text-on-surface-variant text-xs font-label hover:bg-surface-container-high transition-colors border-t border-outline-variant/10"
+                  onClick={() => {
+                    setPickerOpen(false);
+                    setExpandedRegion(null);
+                  }}
+                >
+                  Cancel
+                </button>
               </div>
-
-              {/* YouTube privacy setting */}
-              {selectedPlatform === "youtube" && (
-                <div style={{ marginTop: "0.75rem" }}>
-                  <label className="dash-label">
-                    Privacy
-                    <select
-                      className="dash-select"
-                      value={privacyStatus}
-                      onChange={(e) => setPrivacyStatus(e.target.value)}
-                    >
-                      <option value="public">Public</option>
-                      <option value="unlisted">Unlisted</option>
-                      <option value="private">Private</option>
-                    </select>
-                  </label>
-                </div>
-              )}
-
-              {/* Config for selected platform */}
-              {activePlatform && !activePlatform.auto && (
-                <div className="dash-platform-expand" style={{ marginTop: "0.75rem" }}>
-                  {savedCreds[selectedPlatform] && (
-                    <div className="dash-platform-saved">Saved from last session</div>
-                  )}
-                  {activePlatform.settingsUrl && (
-                    <a
-                      href={activePlatform.settingsUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="dash-platform-deeplink"
-                    >
-                      Open {activePlatform.label} Settings &rarr;
-                    </a>
-                  )}
-                  <p className="dash-platform-help">{activePlatform.help}</p>
-                  <div className="dash-platform-config">
-                    {!activePlatform.keyOnly && (
-                      <input
-                        className="dash-input"
-                        placeholder="Server URL"
-                        value={platformConfig.rtmp_url}
-                        onChange={(e) => setPlatformConfig((prev) => ({ ...prev, rtmp_url: e.target.value }))}
-                      />
-                    )}
-                    <input
-                      className="dash-input"
-                      placeholder="Stream Key (paste from platform)"
-                      type="password"
-                      value={platformConfig.stream_key}
-                      onChange={(e) => setPlatformConfig((prev) => ({ ...prev, stream_key: e.target.value }))}
-                    />
-                  </div>
-                </div>
-              )}
-            </fieldset>
-
-            {error && <p className="dash-error">{error}</p>}
-
-            <button
-              className="record-btn dash-go-live-btn"
-              onClick={handleCreateSession}
-              disabled={creating}
-            >
-              {creating ? "Creating stream..." : "Go Live"}
-            </button>
+            )}
           </div>
-        </section>
+        </div>
 
-        {/* Past Sessions */}
+        {/* Error */}
+        {error && (
+          <p className="text-error text-sm font-label bg-error-container/20 px-4 py-2.5 rounded-xl">
+            {error}
+          </p>
+        )}
+
+        {/* YouTube privacy (only if YouTube destination added) */}
+        {hasYoutubeDest && (
+          <div className="flex items-center gap-3 bg-surface-container-low rounded-xl px-4 py-3">
+            <Youtube className="w-4 h-4 text-[#ff0000]" />
+            <span className="text-on-surface-variant text-xs font-label flex-1">
+              YouTube privacy
+            </span>
+            <div className="relative">
+              <select
+                className="appearance-none bg-surface-container-highest border-none rounded-lg px-3 py-1.5 text-on-surface font-label text-sm focus:ring-2 focus:ring-primary/50 outline-none pr-7 cursor-pointer"
+                value={privacyStatus}
+                onChange={(e) => setPrivacyStatus(e.target.value)}
+              >
+                <option value="public">Public</option>
+                <option value="unlisted">Unlisted</option>
+                <option value="private">Private</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-on-surface-variant pointer-events-none" />
+            </div>
+          </div>
+        )}
+
+        {/* Go Live */}
+        <button
+          className={cn(
+            "w-full py-4 rounded-xl font-headline font-extrabold text-lg uppercase tracking-tight transition-all",
+            destinations.length > 0
+              ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
+              : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
+          )}
+          onClick={handleCreateSession}
+          disabled={creating || destinations.length === 0}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Radio className="w-5 h-5" />
+            {creating
+              ? "Creating..."
+              : destinations.length === 0
+                ? "Add a destination to go live"
+                : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+          </span>
+        </button>
+
+        {/* ── Past Sessions ───────────────────────── */}
         {sessions.length > 0 && (
-          <section className="dash-section">
-            <h2 className="dash-section-title">Past Sessions</h2>
-            <div className="dash-session-list">
+          <div className="pt-6">
+            <span className="text-xs font-label font-bold uppercase tracking-widest text-on-surface-variant block mb-3">
+              Recent Sessions
+            </span>
+            <div className="space-y-1.5">
               {sessions.map((s) => (
                 <div
                   key={s.id}
-                  className="dash-session-item"
+                  className="flex items-center gap-3 bg-surface-container-high hover:bg-surface-bright px-4 py-3 rounded-lg cursor-pointer transition-colors"
                   onClick={() => navigate(`/session/${s.id}`)}
                 >
-                  <span className="dash-session-title">{s.title}</span>
-                  <span className={`dash-badge dash-badge--${s.status}`}>{s.status}</span>
-                  <span className="dash-session-date">
-                    {new Date(s.created_at * 1000).toLocaleDateString()}
+                  <span className="text-on-surface font-label text-sm flex-1 truncate">
+                    {s.title}
+                  </span>
+                  <span
+                    className={cn(
+                      "text-[10px] font-label font-bold uppercase tracking-widest px-2 py-0.5 rounded shrink-0",
+                      s.status === "live"
+                        ? "text-success bg-success/10"
+                        : s.status === "ended"
+                          ? "text-on-surface-variant bg-surface-container-highest"
+                          : "text-primary bg-primary/10"
+                    )}
+                  >
+                    {s.status}
                   </span>
                 </div>
               ))}
             </div>
-          </section>
+          </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// ── Destination Card ──────────────────────────────────
+
+function DestinationCard({
+  dest,
+  sourceLang,
+  savedCreds,
+  user: _user,
+  privacyStatus: _privacyStatus,
+  onPrivacyChange: _onPrivacyChange,
+  onUpdate,
+  onRemove,
+}: {
+  dest: Destination;
+  sourceLang: string;
+  savedCreds: Record<string, api.PlatformCredential>;
+  user: api.UserInfo | null;
+  privacyStatus: string;
+  onPrivacyChange: (v: string) => void;
+  onUpdate: (patch: Partial<Destination>) => void;
+  onRemove: () => void;
+}) {
+  const [expanded, setExpanded] = useState(() => {
+    const p = api.PLATFORMS.find((x) => x.id === dest.platform);
+    // Auto-expand if needs manual config and no saved creds
+    return !!(p && !p.auto && !savedCreds[dest.platform]);
+  });
+
+  const platform = api.PLATFORMS.find((p) => p.id === dest.platform);
+  const fixedLang = api.PLATFORM_LANG[dest.platform];
+  if (!platform) return null;
+
+  const needsConfig = !platform.auto;
+  const hasConfig = !!(dest.rtmp_url || dest.stream_key);
+  const hasSavedCreds = !!savedCreds[dest.platform];
+
+  return (
+    <div className="bg-surface-container-low rounded-xl overflow-hidden">
+      {/* Compact header — always visible */}
+      <div className="flex items-center gap-3 px-4 py-3">
+        <PlatformIcon id={dest.platform} className="w-4 h-4 text-primary" />
+        <span className="font-label font-bold text-on-surface text-sm flex-1 truncate">
+          {platform.label}
+        </span>
+
+        {/* Language: badge or picker */}
+        {fixedLang ? (
+          <span className="text-[10px] font-label font-bold uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded">
+            {api.langFlag(dest.lang)} {api.langLabel(dest.lang)}
+          </span>
+        ) : (
+          <div className="relative">
+            <select
+              className="appearance-none bg-surface-container-highest border-none rounded px-2.5 py-1 text-on-surface font-label text-xs focus:ring-2 focus:ring-primary/50 outline-none pr-6 cursor-pointer"
+              value={dest.lang}
+              onChange={(e) => onUpdate({ lang: e.target.value })}
+            >
+              {api.LANGS.filter((l) => l.code !== sourceLang).map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.flag} {l.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-on-surface-variant pointer-events-none" />
+          </div>
+        )}
+
+        {/* Status dot */}
+        {needsConfig && (
+          <span
+            className={cn(
+              "w-2 h-2 rounded-full shrink-0",
+              hasConfig || hasSavedCreds ? "bg-success" : "bg-error/60"
+            )}
+            title={hasConfig || hasSavedCreds ? "Configured" : "Needs stream key"}
+          />
+        )}
+
+        {/* Expand toggle for manual platforms */}
+        {needsConfig && (
+          <button
+            className="text-on-surface-variant hover:text-on-surface p-1 transition-colors"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? (
+              <ChevronDown className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5" />
+            )}
+          </button>
+        )}
+
+        <button
+          className="text-on-surface-variant hover:text-error transition-colors p-1"
+          onClick={onRemove}
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Expandable config section */}
+      {needsConfig && expanded && (
+        <div className="px-4 pb-4 space-y-2">
+          {hasSavedCreds && (
+            <span className="text-[10px] font-label text-success uppercase tracking-widest">
+              Pre-filled from saved credentials
+            </span>
+          )}
+          {platform.settingsUrl && (
+            <a
+              href={platform.settingsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-primary text-xs font-label hover:underline"
+            >
+              Open {platform.label} Settings
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+          <p className="text-on-surface-variant/60 text-xs leading-relaxed">
+            {platform.help}
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {!platform.keyOnly && (
+              <input
+                className="bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none"
+                placeholder="Server URL"
+                value={dest.rtmp_url}
+                onChange={(e) => onUpdate({ rtmp_url: e.target.value })}
+              />
+            )}
+            <input
+              className="bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none"
+              placeholder="Stream Key"
+              type="password"
+              value={dest.stream_key}
+              onChange={(e) => onUpdate({ stream_key: e.target.value })}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

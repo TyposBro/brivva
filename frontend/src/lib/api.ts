@@ -36,6 +36,7 @@ export function youtubeAuthUrl(userId: string): string {
 
 export type PlatformConfig = {
   platform: string;
+  lang?: string;
   rtmp_url?: string;
   stream_key?: string;
 };
@@ -72,6 +73,43 @@ export const PLATFORMS: Platform[] = [
   { id: "custom", label: "Custom RTMP", region: "Other", auto: false, defaultRtmp: "", help: "Enter any RTMP/RTMPS endpoint URL and stream key.", settingsUrl: "", keyOnly: false },
   { id: "local-test", label: "Local Test (MediaMTX)", region: "Other", auto: true, defaultRtmp: "rtmp://rtmp:1935/live/", help: "Auto-creates one stream per language on local MediaMTX. View with: ffplay rtmp://localhost:1935/live/{lang}", settingsUrl: "", keyOnly: false },
 ];
+
+/**
+ * Platform → default language mapping.
+ * null = user picks (YouTube, Custom, Local Test).
+ * Regional platforms auto-assign their audience's language.
+ */
+export const PLATFORM_LANG: Record<string, string | null> = {
+  youtube: null,
+  instagram: "en",
+  tiktok: "en",
+  twitch: "en",
+  coupang: "ko",
+  naver: "ko",
+  rakuten: "ja",
+  douyin: "zh",
+  taobao: "zh",
+  kuaishou: "zh",
+  xiaohongshu: "zh",
+  bilibili: "zh",
+  custom: null,
+  "local-test": null,
+};
+
+export const LANGS = [
+  { code: "ko", label: "Korean", flag: "\uD83C\uDDF0\uD83C\uDDF7" },
+  { code: "en", label: "English", flag: "\uD83C\uDDEC\uD83C\uDDE7" },
+  { code: "ja", label: "Japanese", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
+  { code: "zh", label: "Chinese", flag: "\uD83C\uDDE8\uD83C\uDDF3" },
+] as const;
+
+export function langLabel(code: string): string {
+  return LANGS.find((l) => l.code === code)?.label ?? code;
+}
+
+export function langFlag(code: string): string {
+  return LANGS.find((l) => l.code === code)?.flag ?? "";
+}
 
 // ── Sessions ────────────────────────────────────────────
 
