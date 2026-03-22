@@ -42,6 +42,7 @@ fn default_privacy() -> String { "unlisted".to_string() }
 #[derive(Deserialize, Clone)]
 pub struct PlatformConfig {
     pub platform: String,    // "youtube", "instagram", "coupang", "custom"
+    pub lang: Option<String>,        // target language for this stream
     pub rtmp_url: Option<String>,    // required for non-YouTube
     pub stream_key: Option<String>,  // required for non-YouTube
 }
@@ -188,18 +189,11 @@ pub async fn create_session(
         }
     };
 
-    // All languages: source + targets
-    let mut all_langs = vec![body.source_lang.clone()];
-    for lang in &body.target_langs {
-        if !all_langs.contains(lang) {
-            all_langs.push(lang.clone());
-        }
-    }
-
     // Default to YouTube if no platforms specified
     let platforms = if body.platforms.is_empty() {
         vec![PlatformConfig {
             platform: "youtube".to_string(),
+            lang: None,
             rtmp_url: None,
             stream_key: None,
         }]
@@ -215,7 +209,7 @@ pub async fn create_session(
 
         match platform.as_str() {
             "youtube" => {
-                // Auto-create YouTube broadcasts via API
+                // Auto-create YouTube broadcast via API — one per platform entry
                 let access_token = match youtube::ensure_valid_token(&state.db, &body.user_id).await {
                     Ok(t) => t,
                     Err(e) => {
@@ -227,7 +221,11 @@ pub async fn create_session(
 
                 let scheduled_start = chrono::Utc::now().to_rfc3339();
 
-                for lang in &all_langs {
+                // Use the lang from the platform config, or fall back to first target lang
+                let lang = platform_config.lang.as_deref()
+                    .unwrap_or_else(|| body.target_langs.first().map(|s| s.as_str()).unwrap_or(&body.source_lang));
+
+                {
                     let stream_record = db::create_stream(&state.db, &session.id, lang, "youtube").await;
                     let broadcast_title = format!("{} [{}]", body.title, lang.to_uppercase());
 
@@ -271,31 +269,32 @@ pub async fn create_session(
                     }));
                 }
             }
-            // Local test: auto-create per-language streams on local MediaMTX
+            // Local test: auto-create stream on local MediaMTX
             "local-test" => {
                 let rtmp_base = std::env::var("LOCAL_RTMP_URL")
                     .unwrap_or_else(|_| "rtmp://rtmp:1935/live".to_string());
 
-                for lang in &all_langs {
-                    let rtmp_url = format!("{}/{}", rtmp_base.trim_end_matches('/'), lang);
-                    let record = db::create_stream_manual(
-                        &state.db,
-                        &session.id,
-                        lang,
-                        "local-test",
-                        &rtmp_url,
-                        "",
-                    )
-                    .await;
+                let lang = platform_config.lang.as_deref()
+                    .unwrap_or_else(|| body.target_langs.first().map(|s| s.as_str()).unwrap_or(&body.source_lang));
 
-                    streams.push(serde_json::json!({
-                        "id": record.id,
-                        "lang": lang,
-                        "platform": "local-test",
-                        "rtmp_url": rtmp_url,
-                        "status": "ready",
-                    }));
-                }
+                let rtmp_url = format!("{}/{}", rtmp_base.trim_end_matches('/'), lang);
+                let record = db::create_stream_manual(
+                    &state.db,
+                    &session.id,
+                    lang,
+                    "local-test",
+                    &rtmp_url,
+                    "",
+                )
+                .await;
+
+                streams.push(serde_json::json!({
+                    "id": record.id,
+                    "lang": lang,
+                    "platform": "local-test",
+                    "rtmp_url": rtmp_url,
+                    "status": "ready",
+                }));
             }
             // Manual RTMP platforms: 1 stream per platform account (1 RTMP key = 1 stream)
             _ => {
@@ -308,9 +307,8 @@ pub async fn create_session(
                 };
                 let stream_key = platform_config.stream_key.as_deref().unwrap_or("");
 
-                // Use the first target language for this stream
-                // (Phase 2 will allow per-language platform assignment)
-                let lang = body.target_langs.first().map(|s| s.as_str()).unwrap_or(&body.source_lang);
+                let lang = platform_config.lang.as_deref()
+                    .unwrap_or_else(|| body.target_langs.first().map(|s| s.as_str()).unwrap_or(&body.source_lang));
 
                 let record = db::create_stream_manual(
                     &state.db,
