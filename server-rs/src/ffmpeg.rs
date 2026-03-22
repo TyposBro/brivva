@@ -129,13 +129,14 @@ impl RtmpManager {
                 "-ar", "44100",
                 "-ac", "1",
                 "-i", &audio_fifo,
-                // Video encoding
+                // Video encoding — CRF for resolution-adaptive quality
+                // CRF 20 = high quality at any resolution, maxrate caps bandwidth
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-b:v", "8000k",
-                "-maxrate", "8000k",
-                "-bufsize", "16000k",
+                "-crf", "20",
+                "-maxrate", "35000k",
+                "-bufsize", "70000k",
                 "-pix_fmt", "yuv420p",
                 "-g", "60",
                 // Audio encoding (stereo AAC)

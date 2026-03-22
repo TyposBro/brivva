@@ -39,8 +39,9 @@ export function useHostRoom() {
 
   const startWebcam = useCallback(async () => {
     try {
+      // Request highest resolution the camera supports (up to 4K)
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" },
+        video: { width: { ideal: 3840 }, height: { ideal: 2160 }, facingMode: "user" },
       });
       streamRef.current = stream;
       if (videoElRef.current) {
@@ -58,27 +59,21 @@ export function useHostRoom() {
 
   const captureAndSendFrame = useCallback(() => {
     const video = videoElRef.current;
-    if (!video || !socket.current.isOpen) return;
+    if (!video || !socket.current.isOpen || !video.videoWidth) return;
+
+    // Use the camera's native resolution — no downscaling
+    const w = video.videoWidth;
+    const h = video.videoHeight;
 
     const canvas = document.createElement("canvas");
-    canvas.width = 1920;
-    canvas.height = 1080;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(video, 0, 0, w, h);
 
-    // Scale full webcam frame to 1080p (preserving aspect ratio, letterboxing if needed)
-    const srcW = video.videoWidth;
-    const srcH = video.videoHeight;
-    const scale = Math.max(1920 / srcW, 1080 / srcH);
-    const dw = srcW * scale;
-    const dh = srcH * scale;
-    const dx = (1920 - dw) / 2;
-    const dy = (1080 - dh) / 2;
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, 1920, 1080);
-    ctx.drawImage(video, 0, 0, srcW, srcH, dx, dy, dw, dh);
-
-    // Extract base64 (strip data:image/jpeg;base64, prefix)
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    // Higher quality for 1080p+, slightly lower for 4K to manage bandwidth
+    const quality = w > 2000 ? 0.80 : 0.85;
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
     const base64 = dataUrl.split(",")[1];
 
     socket.current.sendJson({ type: "face:frame", data: base64 });
