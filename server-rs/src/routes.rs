@@ -33,7 +33,11 @@ pub struct CreateSessionBody {
     pub voice_id: Option<String>,
     #[serde(default)]
     pub platforms: Vec<PlatformConfig>, // which platforms to stream to
+    #[serde(default = "default_privacy")]
+    pub privacy_status: String, // "public", "unlisted", or "private"
 }
+
+fn default_privacy() -> String { "unlisted".to_string() }
 
 #[derive(Deserialize, Clone)]
 pub struct PlatformConfig {
@@ -227,7 +231,7 @@ pub async fn create_session(
                     let stream_record = db::create_stream(&state.db, &session.id, lang, "youtube").await;
                     let broadcast_title = format!("{} [{}]", body.title, lang.to_uppercase());
 
-                    let broadcast = match youtube::create_broadcast(&access_token, &broadcast_title, &scheduled_start).await {
+                    let broadcast = match youtube::create_broadcast(&access_token, &broadcast_title, &scheduled_start, &body.privacy_status).await {
                         Ok(b) => b,
                         Err(e) => {
                             eprintln!("[SESSION] YouTube broadcast failed for {}: {}", lang, e);

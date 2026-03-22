@@ -163,6 +163,7 @@ pub async fn create_broadcast(
     access_token: &str,
     title: &str,
     scheduled_start: &str, // ISO 8601
+    privacy_status: &str,  // "public", "unlisted", or "private"
 ) -> Result<BroadcastInfo, String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({
@@ -171,7 +172,7 @@ pub async fn create_broadcast(
             "scheduledStartTime": scheduled_start,
         },
         "status": {
-            "privacyStatus": "unlisted",
+            "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": false,
         },
         "contentDetails": {

@@ -1,22 +1,33 @@
 //! FFmpeg RTMP muxer: host video + translated audio → RTMP streams.
 //!
 //! Each RTMP endpoint gets its own FFmpeg process:
-//! - Video: JPEG frames piped to stdin (image2pipe)
+//! - Video: JPEG frames piped to stdin (image2pipe) with adaptive delay
 //! - Audio: PCM s16le written to a named FIFO (silence when idle, TTS audio when available)
+//!
+//! Video frames are buffered and delayed to sync with the TTS audio pipeline.
+//! The delay adapts based on a rolling average of measured pipeline latency.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
+/// A video frame waiting to be released after a delay
+struct DelayedFrame {
+    data: Vec<u8>,
+    release_at: Instant,
+}
+
 /// Handle for one FFmpeg RTMP process
 struct RtmpStream {
     child: Child,
-    video_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw JPEG bytes
+    video_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw JPEG bytes (after delay)
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw PCM s16le bytes
+    delay_tx: mpsc::UnboundedSender<Vec<u8>>,  // raw JPEG bytes (before delay)
     audio_fifo: String,                         // FIFO path for cleanup
     lang: String,                               // language code
 }
@@ -24,15 +35,28 @@ struct RtmpStream {
 /// Manages all FFmpeg RTMP streams for a session
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,  // stream_id → handle
+    /// Rolling average pipeline latency in ms (STT + translate + TTS)
+    pipeline_delay_ms: Arc<AtomicU64>,
 }
 
 // 20ms of silence at 44100Hz, 16-bit mono = 1764 bytes
 const SILENCE_CHUNK_SIZE: usize = 1764;
 const SILENCE_INTERVAL_MS: u64 = 20;
+// Initial delay before any pipeline measurements (conservative default)
+const INITIAL_DELAY_MS: u64 = 500;
+// Minimum delay to prevent zero-delay (pipeline always has some latency)
+const MIN_DELAY_MS: u64 = 200;
+// Maximum delay to cap buffering
+const MAX_DELAY_MS: u64 = 3000;
+// How fast the rolling average adapts (0.0–1.0, higher = faster)
+const EMA_ALPHA: f64 = 0.3;
 
 impl RtmpManager {
     pub fn new() -> Self {
-        Self { streams: HashMap::new() }
+        Self {
+            streams: HashMap::new(),
+            pipeline_delay_ms: Arc::new(AtomicU64::new(INITIAL_DELAY_MS)),
+        }
     }
 
     /// Start an FFmpeg RTMP process for a stream
@@ -93,7 +117,7 @@ impl RtmpManager {
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
 
-        // Video writer channel
+        // Video writer channel (receives frames AFTER delay)
         let (video_tx, mut video_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let stream_id_v = stream_id.to_string();
         tokio::spawn(async move {
@@ -105,6 +129,52 @@ impl RtmpManager {
                 }
             }
             drop(stdin);
+        });
+
+        // Video delay buffer: receives frames immediately, releases after delay
+        let (delay_tx, mut delay_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let video_tx_delayed = video_tx.clone();
+        let delay_ref = self.pipeline_delay_ms.clone();
+        let _stream_id_d = stream_id.to_string();
+        tokio::spawn(async move {
+            let mut buffer: VecDeque<DelayedFrame> = VecDeque::new();
+            let tick = Duration::from_millis(5); // check buffer every 5ms
+
+            loop {
+                // Drain all available incoming frames without blocking
+                loop {
+                    match delay_rx.try_recv() {
+                        Ok(data) => {
+                            let delay_ms = delay_ref.load(Ordering::Relaxed);
+                            let release_at = Instant::now() + Duration::from_millis(delay_ms);
+                            buffer.push_back(DelayedFrame { data, release_at });
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            // Flush remaining frames
+                            while let Some(frame) = buffer.pop_front() {
+                                let _ = video_tx_delayed.send(frame.data);
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                // Release frames whose delay has elapsed
+                let now = Instant::now();
+                while let Some(front) = buffer.front() {
+                    if now >= front.release_at {
+                        let frame = buffer.pop_front().unwrap();
+                        if video_tx_delayed.send(frame.data).is_err() {
+                            return;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(tick).await;
+            }
         });
 
         // Audio writer channel
@@ -153,8 +223,8 @@ impl RtmpManager {
         });
 
         eprintln!(
-            "[FFMPEG] Started RTMP stream {} ({}) → {}",
-            stream_id, lang, rtmp_url
+            "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms]",
+            stream_id, lang, rtmp_url, self.pipeline_delay_ms.load(Ordering::Relaxed)
         );
 
         self.streams.insert(
@@ -163,6 +233,7 @@ impl RtmpManager {
                 child,
                 video_tx,
                 audio_tx,
+                delay_tx,
                 audio_fifo,
                 lang: lang.to_string(),
             },
@@ -171,10 +242,10 @@ impl RtmpManager {
         Ok(())
     }
 
-    /// Push a video frame to ALL RTMP streams (all languages get the same video)
+    /// Push a video frame to ALL RTMP streams (enters delay buffer first)
     pub fn push_video_frame(&self, jpeg_bytes: &[u8]) {
         for stream in self.streams.values() {
-            let _ = stream.video_tx.send(jpeg_bytes.to_vec());
+            let _ = stream.delay_tx.send(jpeg_bytes.to_vec());
         }
     }
 
@@ -187,9 +258,22 @@ impl RtmpManager {
         }
     }
 
+    /// Update the adaptive pipeline delay based on measured latency.
+    /// Called after each TTS round-trip completes.
+    pub fn update_pipeline_delay(&self, measured_ms: u64) {
+        let current = self.pipeline_delay_ms.load(Ordering::Relaxed) as f64;
+        let new_avg = current * (1.0 - EMA_ALPHA) + measured_ms as f64 * EMA_ALPHA;
+        let clamped = (new_avg as u64).clamp(MIN_DELAY_MS, MAX_DELAY_MS);
+        let prev = self.pipeline_delay_ms.swap(clamped, Ordering::Relaxed);
+        if prev != clamped {
+            eprintln!("[SYNC] pipeline delay updated: {}ms → {}ms (measured: {}ms)", prev, clamped, measured_ms);
+        }
+    }
+
     /// Stop all FFmpeg processes and clean up FIFOs
     pub async fn stop_all(&mut self) {
         for (id, mut stream) in self.streams.drain() {
+            drop(stream.delay_tx);
             drop(stream.video_tx);
             drop(stream.audio_tx);
             match stream.child.kill().await {

@@ -112,6 +112,7 @@ export function createSession(body: {
   target_langs: string[];
   voice_id?: string;
   platforms?: PlatformConfig[];
+  privacy_status?: string;
 }): Promise<CreateSessionResponse> {
   return request("/api/sessions", {
     method: "POST",

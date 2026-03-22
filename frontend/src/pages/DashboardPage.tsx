@@ -44,6 +44,7 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
 
   // Platform — single selection
+  const [privacyStatus, setPrivacyStatus] = useState<string>("unlisted");
   const [selectedPlatform, setSelectedPlatform] = useState<string>("");
   const [platformConfig, setPlatformConfig] = useState<PlatformEntry>({ platform: "", rtmp_url: "", stream_key: "" });
   const [magicPaste, setMagicPaste] = useState("");
@@ -149,6 +150,7 @@ export default function DashboardPage() {
         target_langs: targetLangs,
         voice_id: selectedVoice || undefined,
         platforms,
+        privacy_status: selectedPlatform === "youtube" ? privacyStatus : undefined,
       });
 
       if (result.errors?.length) {
@@ -340,6 +342,24 @@ export default function DashboardPage() {
                   );
                 })}
               </div>
+
+              {/* YouTube privacy setting */}
+              {selectedPlatform === "youtube" && (
+                <div style={{ marginTop: "0.75rem" }}>
+                  <label className="dash-label">
+                    Privacy
+                    <select
+                      className="dash-select"
+                      value={privacyStatus}
+                      onChange={(e) => setPrivacyStatus(e.target.value)}
+                    >
+                      <option value="public">Public</option>
+                      <option value="unlisted">Unlisted</option>
+                      <option value="private">Private</option>
+                    </select>
+                  </label>
+                </div>
+              )}
 
               {/* Config for selected platform */}
               {activePlatform && !activePlatform.auto && (

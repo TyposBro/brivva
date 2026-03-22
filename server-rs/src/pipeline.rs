@@ -465,10 +465,13 @@ async fn do_tts_and_broadcast(
             Ok(pcm) => {
                 let mgr = manager.lock().await;
                 mgr.push_audio_pcm(&lang.to_string(), &pcm);
+                // Update adaptive video delay based on total pipeline latency
+                mgr.update_pipeline_delay(tts_ms);
                 eprintln!(
-                    "[RTMP] Pushed {}KB PCM audio for {}",
+                    "[RTMP] Pushed {}KB PCM audio for {} (pipeline: {}ms)",
                     pcm.len() / 1024,
-                    lang
+                    lang,
+                    tts_ms
                 );
             }
             Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
