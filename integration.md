@@ -55,23 +55,35 @@ FFmpeg per stream:
 | Same as host (passthrough) | Raw 44.1kHz PCM → queue directly | ~0ms processing | None |
 | Different from host | STT → Google Translate → TTS → decode → queue | ~1-3s | Deepgram + Google Translate + ElevenLabs |
 
-### Estimated Cost Per Stream (2-hour session)
+### Estimated Cost Per Stream (2-hour session, 4 utterances/min)
 
-| Service | Cost | Calculation |
-|---------|------|-------------|
-| Deepgram STT | ~$0.52 | 120 min × $0.0043/min |
-| Google Translate | ~$0.00 (free tier) | ~36K chars, free tier covers 500K/mo |
-| ElevenLabs TTS | Plan-dependent | Included in subscription |
-| **Total per stream** | **~$0.52** | After free tier, add ~$0.70 for translation |
+Assumptions: ~15 words/utterance, ~5 chars/word, 480 utterances per 2-hour stream
 
-### Infrastructure Cost
+| Service | Cost/Stream | Calculation | Pricing |
+|---------|-------------|-------------|---------|
+| Deepgram STT | $0.52 | 120 min × $0.0043/min | $0.0043/min (Nova-3 Pay-as-you-go) |
+| Google Translate | $0.72 | 36K chars × $20/M chars | $20/M chars (first 500K/mo free) |
+| ElevenLabs TTS | ~$0.00 | Included in plan | Scale plan: $99/mo for 2M chars |
+| **Total per stream** | **$1.24** | | After free tier; $0.52 within free tier |
 
-| Component | Old (v11) | New (v12) | Savings |
-|-----------|-----------|-----------|---------|
+### Monthly Cost Projections
+
+| Streams/Month | Deepgram | Google Translate | ElevenLabs | AWS EC2 | Total |
+|---------------|----------|-----------------|------------|---------|-------|
+| 5 (starter) | $2.60 | $0 (free tier) | $5 (starter) | $30 | **~$38/mo** |
+| 30 (growing) | $15.60 | $7.80 | $22 (creator) | $30 | **~$75/mo** |
+| 100 (scale) | $52 | $52 | $99 (scale) | $30 | **~$233/mo** |
+| 500 (enterprise) | $260 | $260 | $330 (scale+) | $60 (t3.large) | **~$910/mo** |
+
+### Infrastructure Cost Comparison
+
+| Component | Old (v11 + GPU) | New (v12, API-only) | Savings |
+|-----------|----------------|---------------------|---------|
 | AWS EC2 | g5.xlarge $750/mo | t3.medium $30/mo | **96% reduction** |
 | Docker containers | 3 (server, stt, nllb) | 2 (server, stt) | Simpler stack |
 | GPU | Required (NLLB) | Not needed | No GPU management |
-| Translation | Self-hosted NLLB 80-160ms | Google API ~40ms (Seoul) | Faster + cheaper |
+| Translation latency | NLLB 80-160ms (local GPU) | Google API ~40ms (Seoul region) | **2-4x faster** |
+| Break-even vs GPU | — | ~600 streams/mo | GPU only wins at extreme scale |
 
 ## Implementation Progress
 

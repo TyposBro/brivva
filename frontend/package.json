@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && npx wrangler pages deploy dist --project-name=brivva --branch=main --commit-dirty=true"
+    "deploy": "VITE_WORKER_URL=https://brivva-server.milliytechnology.org tsc && VITE_WORKER_URL=https://brivva-server.milliytechnology.org vite build && npx wrangler pages deploy dist --project-name=brivva --branch=main --commit-dirty=true"
   },
   "dependencies": {
     "clsx": "^2.1.1",

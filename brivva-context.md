@@ -31,14 +31,16 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 
 ### Estimated Monthly Cost
 
-| Service | Cost | Notes |
-|---------|------|-------|
-| AWS EC2 t3.medium | ~$30/mo | CPU only, no GPU needed |
-| Deepgram Nova-3 | Pay-per-use | ~$0.0043/min |
-| Google Cloud Translation | Free tier 500K chars/mo | ~$0.50/stream after free tier |
-| ElevenLabs | Plan-dependent | ~$5-22/mo for starter/creator |
-| Cloudflare Pages | Free | Frontend hosting |
-| **Total (low volume)** | **~$35-55/mo** | vs $750+/mo with GPU |
+| Service | Pricing | 5 streams/mo | 30 streams/mo | 100 streams/mo |
+|---------|---------|-------------|--------------|----------------|
+| AWS EC2 t3.medium | Fixed | $30 | $30 | $30 |
+| Deepgram Nova-3 | $0.0043/min | $2.60 | $15.60 | $52 |
+| Google Translate | $20/M chars (500K free) | $0 | $7.80 | $52 |
+| ElevenLabs TTS | Plan-based | $5 | $22 | $99 |
+| Cloudflare Pages | Free | $0 | $0 | $0 |
+| **Total** | | **~$38** | **~$75** | **~$233** |
+
+Per-stream cost: ~$1.24 (2-hour session). Previous stack with GPU: $750+/mo fixed.
 
 ### Working Features
 

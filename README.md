@@ -45,14 +45,16 @@ All services are API-based — no local GPU needed. Runs on any CPU instance.
 
 ### Estimated Cost
 
-| Component | Monthly Cost |
-|-----------|-------------|
-| AWS EC2 t3.medium | ~$30 |
-| Deepgram STT | Pay-per-use (~$0.0043/min) |
-| Google Translate | Free tier 500K chars/mo, then $20/M chars |
-| ElevenLabs TTS | Plan-dependent ($5-22/mo) |
-| Cloudflare Pages | Free |
-| **Total (low volume)** | **~$35-55/mo** |
+Per-stream cost: ~$1.24 (2-hour session, 4 utterances/min)
+
+| Service | Pricing | 5 streams/mo | 30 streams/mo | 100 streams/mo |
+|---------|---------|-------------|--------------|----------------|
+| AWS EC2 t3.medium | Fixed | $30 | $30 | $30 |
+| Deepgram STT | $0.0043/min | $2.60 | $15.60 | $52 |
+| Google Translate | $20/M chars (500K free) | $0 | $7.80 | $52 |
+| ElevenLabs TTS | Plan-based | $5 | $22 | $99 |
+| Cloudflare Pages | Free | $0 | $0 | $0 |
+| **Total** | | **~$38** | **~$75** | **~$233** |
 
 ---
 
