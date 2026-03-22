@@ -17,7 +17,7 @@ static GOOGLE_REDIRECT_URI: LazyLock<String> = LazyLock::new(|| {
         .unwrap_or_else(|_| "https://brivva-server.milliytechnology.org/auth/youtube/callback".into())
 });
 
-const SCOPES: &str = "https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube.readonly";
+const SCOPES: &str = "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.readonly";
 
 // ── Types ──────────────────────────────────────────────
 
