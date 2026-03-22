@@ -15,6 +15,7 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva-server.milliytechnology.org/auth/youtube/callback}
+      - FRONTEND_URL=${FRONTEND_URL:-https://brivva.pages.dev}
       - DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
     volumes:
       - db-data:/data

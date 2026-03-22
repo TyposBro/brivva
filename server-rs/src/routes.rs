@@ -129,7 +129,9 @@ pub async fn youtube_callback(
     );
 
     // Redirect back to frontend dashboard
-    Redirect::temporary("https://brivva.pages.dev/dashboard?youtube=connected").into_response()
+    let frontend_url = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "https://brivva.pages.dev".into());
+    Redirect::temporary(&format!("{}/dashboard?youtube=connected", frontend_url)).into_response()
 }
 
 // ── User ────────────────────────────────────────────────
