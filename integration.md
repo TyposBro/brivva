@@ -2,7 +2,7 @@
 
 ## Overview
 
-Host signs up → connects YouTube account (optional) → selects voice → creates session with title + target language + platform + stream key → Brivva creates 1 FFmpeg RTMP stream → host talks → that stream gets real-time translated audio + host video pushed to the platform.
+Host signs up → connects YouTube account (optional) → selects voice → creates session with destinations (platform + language + stream key per destination) → Brivva creates N FFmpeg RTMP streams → host talks → source-language streams get passthrough audio (host's actual voice), other streams get translated TTS audio + host video pushed to each platform.
 
 ## Fundamental Challenge: 1 Stream = 1 Account = 1 Language
 
@@ -21,58 +21,57 @@ To stream Korean host → English + Japanese + Chinese simultaneously:
 - **Restream, Castr**: Multi-platform RTMP relay — still 1 language per account, user provides N stream keys
 - **No one** does real-time multi-language RTMP distribution to native platform players yet. This is Brivva's unique value prop.
 
-### Implementation Phases
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **Phase 1** | 1 session → 1 stream → 1 platform account → 1 language | **In progress** |
-| **Phase 2** | 1 session → N streams, each with own platform/account/language | Next |
-| **Phase 3** | YouTube auto-creates N broadcasts per language on 1 account via API | YouTube API approved |
-
-### Phase 1 Model (Current Focus)
-
-```
-Dashboard: Pick 1 platform, 1 language, paste 1 stream key
-  → Session has 1 stream record in DB
-  → Host clicks "Start Broadcasting" → /host?sessionId=xxx
-  → Server reads stream from DB → starts 1 FFmpeg process
-  → FFmpeg: host video (stdin) + translated TTS audio (FIFO) → RTMP push
-  → Platform shows live stream with translated audio
-```
-
-### Phase 2 Model (Next)
-
-```
-Dashboard: For each target language, assign a platform + stream key
-  EN → Twitch (stream key A)
-  JA → YouTube (auto-created)
-  ZH → Bilibili (stream key B)
-  → Session has N stream records in DB
-  → Server starts N FFmpeg processes, each with different RTMP URL
-  → Each FFmpeg gets same video but different TTS audio (per language)
-```
-
-## Architecture (v9)
+## Architecture (v12)
 
 ```
 Host Browser (/dashboard)
-  → Connect YouTube (OAuth2)
-  → Create session: title, source lang, target lang, platform, stream key
-  → Session page shows stream card
+  → Connect YouTube (OAuth2, settings drawer)
+  → Create session: title, source lang, N destinations (platform + lang + RTMP)
+  → Progressive disclosure: collapsible platform picker grouped by region
+  → Platform-language auto-mapping (Coupang→ko, Rakuten→ja, Twitch→en)
 
 Host Browser (/host?sessionId=xxx)
-  → Webcam 30fps JPEG → face:frame → server-rs → FFmpeg stdin (all streams)
-  → Mic audio → WebSocket → server-rs
-  → STT (Deepgram Nova-3) → transcript
-  → NLLB translate → ElevenLabs TTS → MP3
-  → MP3 → decode to PCM → FFmpeg audio FIFO (per-language stream)
-  → FFmpeg: H.264 + AAC → FLV → RTMP push to platform
+  → Camera capture at native resolution (up to 4K) → JPEG → face:frame → server-rs
+  → Mic audio 44.1kHz PCM → WebSocket → server-rs
+  → server-rs routes audio to:
+    - STT (Deepgram Nova-3, 44.1kHz) → transcript
+    - Source-lang RTMP streams: passthrough (host's raw audio, no TTS)
+  → For other languages:
+    - Google Cloud Translation API v2 → ElevenLabs TTS → MP3 → decode to PCM
+    - Queue PCM to language-matched FFmpeg audio FIFO
+  → FFmpeg per stream: H.264 CRF 20 + AAC → FLV → RTMP push
 
 FFmpeg per stream:
   Video: -f image2pipe -framerate 30 -i pipe:0
   Audio: -f s16le -ar 44100 -ac 1 -i /tmp/brivva_audio_{stream_id}
-  Output: -c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -f flv rtmp://...
+  Encode: -c:v libx264 -crf 20 -maxrate 35000k -preset ultrafast -tune zerolatency
+  Output: -c:a aac -ac 2 -b:a 128k -f flv rtmp://...
 ```
+
+### Audio Routing
+
+| Stream Language | Path | Latency | API Cost |
+|----------------|------|---------|----------|
+| Same as host (passthrough) | Raw 44.1kHz PCM → queue directly | ~0ms processing | None |
+| Different from host | STT → Google Translate → TTS → decode → queue | ~1-3s | Deepgram + Google Translate + ElevenLabs |
+
+### Estimated Cost Per Stream (2-hour session)
+
+| Service | Cost | Calculation |
+|---------|------|-------------|
+| Deepgram STT | ~$0.52 | 120 min × $0.0043/min |
+| Google Translate | ~$0.00 (free tier) | ~36K chars, free tier covers 500K/mo |
+| ElevenLabs TTS | Plan-dependent | Included in subscription |
+| **Total per stream** | **~$0.52** | After free tier, add ~$0.70 for translation |
+
+### Infrastructure Cost
+
+| Component | Old (v11) | New (v12) | Savings |
+|-----------|-----------|-----------|---------|
+| AWS EC2 | g5.xlarge $750/mo | t3.medium $30/mo | **96% reduction** |
+| Docker containers | 3 (server, stt, nllb) | 2 (server, stt) | Simpler stack |
+| GPU | Required (NLLB) | Not needed | No GPU management |
+| Translation | Self-hosted NLLB 80-160ms | Google API ~40ms (Seoul) | Faster + cheaper |
 
 ## Implementation Progress
 
@@ -80,9 +79,10 @@ FFmpeg per stream:
 
 **1.1 Google Cloud Setup** — DONE
 
-- [x] GCP project `brivva-live` created, YouTube Data API v3 enabled
-- [x] OAuth2 web credentials configured
+- [x] GCP project `brivva-live` created, YouTube Data API v3 + Cloud Translation API enabled
+- [x] OAuth2 web credentials configured (scope: `youtube` + `youtube.readonly`)
 - [x] Redirect URI: `https://brivva-server.milliytechnology.org/auth/youtube/callback`
+- [x] Google Search Console domain verification via meta tag
 
 **1.2 Backend: OAuth2 Flow** — DONE (`youtube.rs` + `routes.rs`)
 
@@ -93,8 +93,8 @@ FFmpeg per stream:
 
 **1.3 Backend: Broadcast Management** — DONE (`routes.rs`)
 
-- [x] `POST /api/sessions` → create session + stream per platform
-  - YouTube: liveBroadcasts.insert, liveStreams.insert, bind (auto)
+- [x] `POST /api/sessions` → create session + one stream per platform destination
+  - YouTube: liveBroadcasts.insert, liveStreams.insert, bind (auto) — one per destination
   - Others: create_stream_manual with pre-filled RTMP URL + stream key (status "ready")
 - [x] `GET /api/sessions?user_id=...` → list sessions
 - [x] `GET /api/sessions/:id` → session + streams detail
@@ -119,19 +119,24 @@ FFmpeg per stream:
 
 **1.7 Frontend: Dashboard + Session UI** — DONE
 
-- [x] `DashboardPage.tsx` — YouTube connect, voice selection, platform picker
-- [x] `SessionPage.tsx` — stream cards with platform badges, RTMP URLs
-- [x] `HostPage.tsx` — stream status cards, webcam, audio recorder (redesigned v9)
+- [x] `DashboardPage.tsx` — Notion-style progressive disclosure: collapsible platform picker by region, expandable destination cards, settings drawer for YouTube/voices
+- [x] `SessionPage.tsx` — stream cards with platform badges, RTMP URLs, status
+- [x] `HostPage.tsx` — stream status cards, webcam preview, audio recorder, latency dashboard
+- [x] `PrivacyPage.tsx` + `TermsPage.tsx` — for Google OAuth verification
 - [x] Zero-config UX: magic paste, credential vault, key-only mode, deep links
+- [x] Platform-language auto-mapping prevents nonsensical combos (e.g., English on Coupang)
 
-### Phase 2: FFmpeg RTMP Streaming — DONE (code wired, needs 1:1 fix)
+### Phase 2: FFmpeg RTMP Streaming — DONE
 
 **2.1 FFmpeg Manager** — DONE (`ffmpeg.rs`)
 
 - [x] RtmpManager with per-stream FFmpeg child processes
-- [x] Dual-input: video via stdin (image2pipe JPEG 30fps), audio via named FIFO (s16le 44100Hz)
+- [x] Dual-input: video via stdin (image2pipe JPEG, native resolution up to 4K), audio via named FIFO (s16le 44100Hz)
+- [x] CRF 20 encoding with 35Mbps maxrate — auto-adapts quality to any input resolution
 - [x] Silence padding fills gaps between TTS utterances (20ms zero chunks)
 - [x] decode_mp3_to_pcm() for TTS MP3 → raw PCM conversion
+- [x] Dedicated OS threads for video drain (30fps) and audio drain (20ms ticks)
+- [x] Graceful shutdown with 3s join timeout + startup orphan sweep
 - [x] FFmpeg binary in Docker image
 
 **2.2 Session-Room Linking** — DONE (`handler.rs`)
@@ -143,14 +148,10 @@ FFmpeg per stream:
 
 **2.3 Pipeline Integration** — DONE (`pipeline.rs` + `handler.rs`)
 
-- [x] face:frame → decoded JPEG → push to all FFmpeg video stdin
-- [x] TTS MP3 → decode to PCM → push to language-matched FFmpeg audio FIFO
+- [x] face:frame → decoded JPEG → push to all FFmpeg video stdin (native resolution)
+- [x] Source-lang streams: host audio accumulated per utterance, queued directly (passthrough)
+- [x] Other langs: Google Translate → TTS MP3 → decode to PCM → push to language-matched FFmpeg audio FIFO
 - [x] DashMap borrow safety: clone Arc before await
-
-**2.4 Remaining Issues**
-
-- [ ] **1:1 stream model**: Dashboard creates duplicate streams (same key, all languages). Must create exactly 1 stream per unique RTMP endpoint.
-- [ ] **Audio-video sync**: TTS audio arrives in bursts (3-5s) but video is continuous 30fps. Utterances need timestamps for correct placement.
 
 ### Phase 3: Multi-Platform Support — DONE (13 platforms configured)
 
@@ -210,10 +211,12 @@ FFmpeg per stream:
 ## Environment Variables
 
 ```env
+DEEPGRAM_API_KEY=...
+ELEVENLABS_API_KEY=...
+GOOGLE_TRANSLATE_API_KEY=...
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_REDIRECT_URI=https://brivva-server.milliytechnology.org/auth/youtube/callback
 DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
-ELEVENLABS_API_KEY=...
-DEEPGRAM_API_KEY=...
+BROADCAST_DELAY_MS=2500
 ```

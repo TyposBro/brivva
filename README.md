@@ -1,34 +1,58 @@
 # Brivva Real-Time Translation
 
-Real-time multilingual voice translation for live commerce. Host speaks → guests hear translated audio in their language.
+Real-time multilingual live commerce broadcasting. One host speaks → N platforms receive translated audio in the host's cloned voice. Source-language platforms get the host's actual voice (passthrough).
 
 **Live:** https://brivva.pages.dev
 
 ## What It Does
 
-- Host creates a room, speaks into mic (English or Korean)
-- Guests join with a room code, pick their language (EN / JA / ZH)
-- Each guest sees live subtitles + hears TTS audio in their language
-- Translation runs once per language group — 50 JA guests = 1 translation call
+- Host creates a session with N destinations (platform + language + RTMP key)
+- Each destination gets its own RTMP stream pushed to the platform
+- Source-language streams get the host's actual voice (zero latency, zero API cost)
+- Other-language streams get real-time translated TTS in the host's cloned voice
+- Supports 13 platforms across Global, Korea, Japan, and China regions
+- YouTube broadcasts auto-created via OAuth2 API; other platforms use manual RTMP keys
 
-## Architecture (v3)
+## Architecture (v12)
 
 ```
-Host Browser → PCM 16kHz → WebSocket → server-rs (Rust/axum :3000)
-  → STT Wrapper (:8766) → CF Nova-3 (streaming transcription)
-  → NLLB Translation (:8000) — per active language, parallel
-  → ElevenLabs TTS (API) — streaming MP3
-  → WebSocket → Guest Browser (Blob URL playback)
+Host Browser (/dashboard)
+  → Connect YouTube (OAuth2, settings drawer)
+  → Create session: title, source lang, N destinations (platform + lang + RTMP)
+  → Notion-style progressive disclosure: collapsible platform picker by region
+
+Host Browser (/host?sessionId=xxx)
+  → Camera capture at native resolution (up to 4K) → JPEG → face:frame → server-rs
+  → Mic audio 44.1kHz PCM → WebSocket → server-rs
+  → server-rs routes audio to:
+    - STT (Deepgram Nova-3, 44.1kHz) → transcript
+    - Source-lang RTMP streams: passthrough (host's raw audio, no TTS)
+  → For other languages:
+    - Google Cloud Translation API v2 → ElevenLabs TTS → MP3 → decode to PCM
+    - Queue PCM to language-matched FFmpeg audio FIFO
+  → FFmpeg per stream: H.264 CRF 20 + AAC → FLV → RTMP push
 ```
 
-| Service | Port | Tech | Purpose |
-|---------|------|------|---------|
-| server-rs | 3000 | Rust/axum | WebSocket rooms, pipeline orchestration |
-| stt-wrapper | 8766 | CF Nova-3 (API) | STT proxy (clean events) |
-| NLLB | 8000 | nllb-200-distilled-600M | Translation (82–164ms on GPU) |
-| ElevenLabs | API | eleven_flash_v2_5 | TTS (548–1,440ms, 32 languages) |
+| Service | Tech | Purpose |
+|---------|------|---------|
+| server-rs (:3000) | Rust/axum | WebSocket rooms, pipeline orchestration, YouTube API, FFmpeg management |
+| stt-wrapper (:8766) | Deepgram Nova-3 (API) | STT proxy (clean events, 44.1kHz) |
+| Google Translate | Cloud Translation API v2 | Translation (~40ms from Seoul, free 500K chars/mo) |
+| ElevenLabs | eleven_flash_v2_5 (API) | TTS (548–1,440ms, 32 languages) |
+| FFmpeg | per-stream process | H.264 CRF 20 + AAC → RTMP push |
 
-Only NLLB runs locally with GPU. STT and TTS are API-based — no local GPU needed for those.
+All services are API-based — no local GPU needed. Runs on any CPU instance.
+
+### Estimated Cost
+
+| Component | Monthly Cost |
+|-----------|-------------|
+| AWS EC2 t3.medium | ~$30 |
+| Deepgram STT | Pay-per-use (~$0.0043/min) |
+| Google Translate | Free tier 500K chars/mo, then $20/M chars |
+| ElevenLabs TTS | Plan-dependent ($5-22/mo) |
+| Cloudflare Pages | Free |
+| **Total (low volume)** | **~$35-55/mo** |
 
 ---
 
@@ -40,37 +64,25 @@ cd brivva
 
 # Create .env with API keys
 cat > .env << 'EOF'
-CF_ACCOUNT_ID=80a55132ae169d5b282ccf505bc66bf7
-CF_API_TOKEN=your-cf-api-token
+DEEPGRAM_API_KEY=your-deepgram-api-key
 ELEVENLABS_API_KEY=your-elevenlabs-api-key
+GOOGLE_TRANSLATE_API_KEY=your-google-translate-api-key
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GOOGLE_REDIRECT_URI=https://brivva-server.milliytechnology.org/auth/youtube/callback
+DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
+BROADCAST_DELAY_MS=2500
 EOF
 
 # Build and start all services
 docker compose up --build
 ```
 
-That's it. Three containers: server-rs, stt-wrapper, nllb.
-
-**Without GPU (Mac/any):** NLLB runs on CPU. Translation works, just slower.
-**With NVIDIA GPU (Linux):** Use the GPU override for fast translation (82–164ms):
-```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
-```
+That's it. Two containers: server-rs + stt-wrapper. No GPU required.
 
 **Verify:**
 ```bash
 curl http://localhost:3000       # → "Brivva Translation Server"
-curl http://localhost:8000/health # → {"status":"healthy","model":"...","device":"cuda/cpu"}
-```
-
-### GPU on Linux
-
-If you have an NVIDIA GPU and want fast translation:
-
-```bash
-# Install nvidia-container-toolkit
-# Then verify:
-docker run --rm --gpus all nvidia/cuda:12.4.1-runtime-ubuntu22.04 nvidia-smi
 ```
 
 ---
@@ -114,58 +126,6 @@ cloudflared tunnel --config ~/.cloudflared/brivva-kokoro.yml run
 
 ---
 
-## NixOS Setup
-
-### System config
-
-```nix
-# Docker with NVIDIA GPU passthrough
-virtualisation.docker.enable = true;
-hardware.nvidia-container-toolkit.enable = true;
-
-# Add your user to the docker group
-users.users.<your-user>.extraGroups = [ "docker" ];
-```
-
-### Packages needed
-
-```nix
-home.packages = with pkgs; [
-  awscli2
-  cloudflared
-];
-```
-
-### Full steps
-
-```bash
-# 1. Rebuild NixOS
-sudo nixos-rebuild switch --flake .#nixos
-
-# 2. Log out and back in (docker group needs new session)
-
-# 3. Verify GPU in Docker
-docker run --rm --gpus all nvidia/cuda:12.4.1-runtime-ubuntu22.04 nvidia-smi
-
-# 4. Copy tunnel credentials from Mac
-mkdir -p ~/.cloudflared
-scp mac:~/.cloudflared/brivva-kokoro.yml ~/.cloudflared/
-scp mac:~/.cloudflared/b6e5239e-*.json ~/.cloudflared/
-# Edit brivva-kokoro.yml: update credentials-file path to /home/<user>/...
-
-# 5. Clone and start
-git clone git@github.com:TyposBro/brivva.git
-cd brivva
-docker compose up --build -d
-
-# 6. Start tunnel
-cloudflared tunnel --config ~/.cloudflared/brivva-kokoro.yml run
-
-# 7. Open https://brivva.pages.dev — it now hits your NixOS machine
-```
-
----
-
 ## Frontend
 
 Deployed on Cloudflare Pages. Points to `brivva-server.milliytechnology.org` (set in `frontend/.env`).
@@ -179,36 +139,33 @@ npm run deploy     # deploy to Cloudflare Pages
 
 ---
 
-## AWS Deployment (ECS)
+## AWS Deployment
 
-### Phase 2 — Single EC2
+### Current — Single EC2 (CPU only)
 
 ```
-EC2 g5.xlarge (A10G 24GB VRAM, ~$1/hr)
-├── server-rs          :3000  (CPU, ~10MB RAM)
-├── stt-wrapper        :8766  (CPU, CF Nova-3 API)
-├── NLLB               :8000  (GPU, ~2GB VRAM)
+EC2 t3.medium (~$30/mo, 2 vCPU, 4GB RAM)
+├── server-rs          :3000  (Rust/axum, ~10MB RAM)
+├── stt-wrapper        :8766  (Deepgram Nova-3 API proxy)
+├── Google Translate   API    (external, no local resources)
 ├── ElevenLabs         API    (external, no local resources)
-└── Total VRAM: ~2GB / 24GB available
+└── FFmpeg             sidecar (per-stream, CPU encoding)
 ```
 
 ```bash
-# On EC2 with Docker (GPU optional but recommended for fast translation)
+# On EC2 with Docker
 git clone git@github.com:TyposBro/brivva.git
 cd brivva
 docker compose up --build -d
 ```
 
-### Phase 3 — ECS (production)
+### Future — ECS (production)
 
 ```
 ALB → ECS Service: server-rs (CPU task, auto-scale)
-        ├→ ECS Service: stt-wrapper (CPU task, CF Nova-3 API)
-        ├→ ECS Service: NLLB (GPU task, g5.xlarge or CPU with quantization)
-        └→ ElevenLabs TTS (external API, no ECS task needed)
+        ├→ ECS Service: stt-wrapper (CPU task, Deepgram API proxy)
+        └→ All translation/TTS via external APIs (no GPU tasks needed)
 ```
-
-Push images to ECR, create task definitions with GPU resource reservations.
 
 ---
 
@@ -216,33 +173,52 @@ Push images to ECR, create task definitions with GPU resource reservations.
 
 ```
 brivva/
-├── docker-compose.yml             3 services (server, stt-wrapper, nllb)
-├── .env                           API keys (CF_ACCOUNT_ID, CF_API_TOKEN, ELEVENLABS_API_KEY)
+├── docker-compose.yml             2 services (server, stt-wrapper)
+├── .env                           API keys (Deepgram, ElevenLabs, Google)
 ├── server-rs/                     Rust axum WebSocket server
 │   ├── Dockerfile
 │   └── src/
 │       ├── main.rs                Entry, router, state
 │       ├── types.rs               Lang, Room, Guest, ServerMsg
-│       ├── pipeline.rs            STT → Translate → TTS pipeline
+│       ├── db.rs                  SQLite (users, voices, sessions, streams)
+│       ├── youtube.rs             YouTube OAuth2 + Data API v3
+│       ├── ffmpeg.rs              Per-stream FFmpeg RTMP manager
+│       ├── pipeline.rs            STT → Google Translate → TTS pipeline + passthrough
 │       └── room/handler.rs        WebSocket host/guest handlers
-├── stt-wrapper/                   STT proxy (CF Nova-3)
+├── stt-wrapper/                   STT proxy (Deepgram Nova-3)
 │   ├── Dockerfile
-│   └── server.py                  asyncio WebSocket proxy
-├── nllb/                          NLLB translation server
-│   ├── Dockerfile
-│   └── server.py                  FastAPI, POST /translate
-├── frontend/                      React + TypeScript + Vite
+│   └── server.py                  asyncio WebSocket proxy (44.1kHz)
+├── frontend/                      React 19 + TypeScript + Tailwind + Vite
 │   └── src/
-│       ├── pages/                 HostPage, GuestPage, HomePage
+│       ├── pages/                 DashboardPage, HostPage, SessionPage, PrivacyPage, TermsPage
 │       ├── components/            LatencyDashboard, PipelineAnalysis
 │       ├── hooks/                 useHostRoom, useGuestRoom, useTimings
-│       ├── lib/                   RoomSocket, TtsPlayer
+│       ├── lib/                   RoomSocket, AudioPipeline
 │       └── state/                 Host/guest reducers + message handlers
-├── worker/                        CF Worker (v1/v2 legacy)
 ├── CLAUDE.md                      Project context
-├── BENCHMARK.md                   Benchmark dashboard spec
-└── docs.md                        Full technical documentation
+├── brivva-context.md              Full project context for AI collaborators
+└── integration.md                 Multi-platform integration spec
 ```
+
+---
+
+## Supported Platforms (13)
+
+| Platform | Region | Auto | Default RTMP |
+|----------|--------|------|--------------|
+| YouTube | Global | Yes (OAuth API) | Auto-created via YouTube Data API |
+| Instagram | Global | No | rtmps://live-upload.instagram.com:443/rtmp/ |
+| TikTok | Global | No | Dynamic (from TikTok LIVE Studio) |
+| Twitch | Global | No | rtmp://live.twitch.tv/app/ |
+| Coupang Live | Korea | No | Dynamic (from Coupang Seller Portal) |
+| Naver Shopping Live | Korea | No | Dynamic (from Naver Live Studio) |
+| Rakuten Live | Japan | No | Dynamic (from Rakuten dashboard) |
+| Douyin (抖音) | China | No | Dynamic (from Douyin Live Companion) |
+| Taobao Live (淘宝直播) | China | No | Dynamic (from Taobao Live Studio) |
+| Kuaishou (快手) | China | No | rtmp://live.kuaishou.com/live/ |
+| Xiaohongshu (小红书) | China | No | Dynamic (from web after app auth) |
+| Bilibili (哔哩哔哩) | China | No | rtmp://live-push.bilivideo.com/live-bvc/ |
+| Custom RTMP | Other | No | User-provided |
 
 ---
 
@@ -250,9 +226,8 @@ brivva/
 
 | Problem | Fix |
 |---------|-----|
-| `nvidia-smi` works but Docker can't see GPU | Install `nvidia-container-toolkit`, restart Docker |
-| stt-wrapper not transcribing | Check CF_ACCOUNT_ID and CF_API_TOKEN env vars in .env |
-| Guest doesn't hear audio | Check browser console for autoplay errors; click language picker to unlock AudioContext |
+| stt-wrapper not transcribing | Check DEEPGRAM_API_KEY in .env |
+| Translation not working | Check GOOGLE_TRANSLATE_API_KEY in .env; verify Cloud Translation API is enabled in GCP |
+| RTMP stream not connecting | Verify stream key and RTMP URL; check FFmpeg logs in server-rs output |
+| YouTube OAuth fails | Ensure GOOGLE_CLIENT_ID/SECRET are set and redirect URI matches |
 | Duplicate translations firing | stt-wrapper handles dedup; check stt-wrapper logs |
-| NLLB first request very slow | Model loading on first inference (~5-15s). Subsequent requests are fast. |
-| No GPU on Mac | That's fine — NLLB runs on CPU (slower translation but works) |
