@@ -126,7 +126,8 @@ pub async fn start_stt(
     // Connect to STT wrapper with retries
     let mut ws_stream = None;
     for attempt in 1..=10 {
-        match tokio_tungstenite::connect_async(&*STT_URL).await {
+        let stt_url = format!("{}?lang={}", &*STT_URL, source_lang);
+        match tokio_tungstenite::connect_async(&stt_url).await {
             Ok((stream, _)) => {
                 println!("Connected to STT wrapper (attempt {})", attempt);
                 ws_stream = Some(stream);
