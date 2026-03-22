@@ -83,6 +83,19 @@ export default function HomePage() {
           </div>
         </div>
       </main>
+
+      {/* Footer */}
+      <footer className="relative z-10 pb-8 text-center">
+        <div className="flex items-center justify-center gap-6 text-sm text-on-surface-variant/60">
+          <button onClick={() => navigate("/privacy")} className="hover:text-on-surface-variant transition-colors">
+            Privacy
+          </button>
+          <span className="text-on-surface-variant/20">|</span>
+          <button onClick={() => navigate("/terms")} className="hover:text-on-surface-variant transition-colors">
+            Terms
+          </button>
+        </div>
+      </footer>
     </div>
   );
 }
