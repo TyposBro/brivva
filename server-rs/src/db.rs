@@ -45,7 +45,9 @@ pub struct StreamRecord {
     pub session_id: String,
     pub lang: String,
     pub platform: String, // "youtube", "instagram", "coupang", "custom"
+    #[serde(rename = "broadcast_id")]
     pub platform_broadcast_id: Option<String>,
+    #[serde(rename = "stream_id")]
     pub platform_stream_id: Option<String>,
     pub stream_key: Option<String>,
     pub rtmp_url: Option<String>,
