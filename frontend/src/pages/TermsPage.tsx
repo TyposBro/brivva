@@ -108,8 +108,8 @@ export default function TermsPage() {
             <h2 className="font-headline font-bold text-xl text-on-surface mb-3">10. Contact</h2>
             <p>
               For questions about these Terms:{" "}
-              <a href="mailto:legal@milliytechnology.org" className="text-primary hover:underline">
-                legal@milliytechnology.org
+              <a href="mailto:typosbro@proton.me" className="text-primary hover:underline">
+                typosbro@proton.me
               </a>
             </p>
           </section>

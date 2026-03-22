@@ -116,8 +116,8 @@ export default function PrivacyPage() {
             <h2 className="font-headline font-bold text-xl text-on-surface mb-3">Contact</h2>
             <p>
               For privacy questions or data deletion requests:{" "}
-              <a href="mailto:privacy@milliytechnology.org" className="text-primary hover:underline">
-                privacy@milliytechnology.org
+              <a href="mailto:typosbro@proton.me" className="text-primary hover:underline">
+                typosbro@proton.me
               </a>
             </p>
           </section>
