@@ -73,7 +73,7 @@ GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_REDIRECT_URI=https://brivva-server.milliytechnology.org/auth/youtube/callback
 DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
-BROADCAST_DELAY_MS=2500
+BROADCAST_DELAY_MS=5000
 EOF
 
 # Build and start all services
@@ -161,23 +161,32 @@ cd brivva
 docker compose up --build -d
 ```
 
-### Production — ECS Fargate (pay-per-session)
+### Production — ECS Fargate
 
+3 containers in one task: server-rs + stt-wrapper + cloudflared tunnel.
+
+```bash
+# Full deploy (build + push + deploy)
+./deploy.sh
+
+# Rebuild only stt-wrapper
+./deploy.sh --only stt-wrapper
+
+# Just restart (same images, e.g. after env change)
+./deploy.sh --skip-build
+
+# Tail logs
+aws logs tail /ecs/brivva --follow
 ```
-Host clicks "Go Live"
-  → API creates ECS Fargate task (4–16 vCPU, auto-sized)
-  → Task runs server-rs + stt-wrapper + FFmpeg (same Docker images)
-  → Cloudflared tunnel routes traffic to running task
-  → Session ends → task shuts down → billing stops
 
-No idle cost. Each 2hr session: $0.40–$1.44 compute + $1.24/stream API fees.
-```
-
-| Task Size | Languages/Session | Compute/hr | Per 2hr Session |
-|-----------|-------------------|------------|-----------------|
-| 4 vCPU / 8 GB | 6–8 | $0.20 | $0.40 |
-| 8 vCPU / 16 GB | 14–16 | $0.38 | $0.76 |
-| 16 vCPU / 30 GB | 30+ | $0.72 | $1.44 |
+| Resource | Value |
+|----------|-------|
+| Cluster | `brivva` (ap-northeast-2) |
+| Service | `brivva` (Fargate, 1 task) |
+| Task | 1 vCPU / 2 GB |
+| ECR repos | `brivva/server-rs`, `brivva/stt-wrapper`, `brivva/cloudflared` |
+| Secrets | `brivva/env` in Secrets Manager |
+| Logs | CloudWatch `/ecs/brivva` |
 
 ---
 
@@ -199,7 +208,13 @@ brivva/
 │       └── room/handler.rs        WebSocket host/guest handlers
 ├── stt-wrapper/                   STT proxy (Deepgram Nova-3)
 │   ├── Dockerfile
-│   └── server.py                  asyncio WebSocket proxy (44.1kHz)
+│   ├── server.py                  asyncio WebSocket proxy (44.1kHz)
+│   └── chunking/                  Language-aware clause boundary detection
+│       ├── __init__.py            Base class + detector registry
+│       ├── korean.py              Korean connective endings (은데요, 거든, 니까)
+│       ├── japanese.py            Japanese clause particles (けど, から, ので)
+│       ├── english.py             English conjunctions (and, but, because)
+│       └── chinese.py             Chinese comma + conjunctions (但是, 所以)
 ├── frontend/                      React 19 + TypeScript + Tailwind + Vite
 │   └── src/
 │       ├── pages/                 DashboardPage, HostPage, SessionPage, PrivacyPage, TermsPage
