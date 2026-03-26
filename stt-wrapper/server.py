@@ -21,6 +21,8 @@ import logging
 import numpy as np
 import websockets
 
+from chunking import get_detector
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("stt")
 
@@ -336,6 +338,13 @@ async def handle_client(client_ws):
     last_interim = ""
     pcm_buffer = bytearray()
 
+    # Clause boundary chunking: forces finalize on long utterances
+    chunk_detector = get_detector(language or STT_LANGUAGE)
+    log.info("Chunk detector: %s (min=%.1fs, max=%.1fs)",
+             type(chunk_detector).__name__,
+             chunk_detector.min_duration,
+             chunk_detector.max_duration)
+
     # Adaptive endpointing state
     wpm_samples: list[int] = []  # WPM from first 5 final utterances
     adapted = False  # Only adapt once per session
@@ -439,8 +448,9 @@ async def handle_client(client_ws):
                                 "style_params": style_params,
                             }))
 
-                            # Reset buffer for next utterance
+                            # Reset buffer and chunk detector for next utterance
                             pcm_buffer = bytearray()
+                            chunk_detector.reset()
 
                             # Adaptive endpointing: track WPM over first 5 finals
                             if not adapted:
@@ -487,6 +497,14 @@ async def handle_client(client_ws):
                                     "type": "interim",
                                     "text": transcript,
                                 }))
+
+                                # Check if we should force-finalize at a clause boundary
+                                if chunk_detector.check(transcript):
+                                    log.info("[CHUNK] Forcing finalize at clause boundary (text so far: '%s')", transcript[:50])
+                                    try:
+                                        await dg_ws.send(json.dumps({"type": "Finalize"}))
+                                    except websockets.ConnectionClosed:
+                                        pass
 
                     elif msg_type == "SpeechStarted":
                         log.info("VAD: speech started")

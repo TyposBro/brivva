@@ -541,7 +541,7 @@ async fn do_tts_and_broadcast(
         let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2500);
+            .unwrap_or(5000);
         let sync_deadline = Duration::from_millis(delay_ms.saturating_sub(500));
         let hard_cap = Duration::from_secs(5);
         sync_deadline.min(hard_cap)

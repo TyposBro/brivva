@@ -72,8 +72,8 @@ const AUDIO_TICK: Duration = Duration::from_millis(20);
 const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// Max frames to keep in buffer (~15s at 30fps)
 const MAX_BUFFER_FRAMES: usize = 450;
-/// Default broadcast delay
-const DEFAULT_DELAY_MS: u64 = 2500;
+/// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
+const DEFAULT_DELAY_MS: u64 = 5000;
 /// Max FFmpeg restart attempts per stream
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts
