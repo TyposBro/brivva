@@ -9,6 +9,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -82,6 +83,9 @@ async fn handle_host(
     let mut room = Room::new(room_id.clone(), source_lang, session_id.clone());
     room.host_tx = Some(host_tx);
 
+    // Stop flag for the FFmpeg health monitor (set on room close)
+    let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));
+
     // If session_id provided, start FFmpeg RTMP streams
     if let Some(ref sid) = session_id {
         let streams = crate::db::list_streams(&state.db, sid).await;
@@ -103,14 +107,20 @@ async fn handle_host(
                     }
                 }
             }
-            room.rtmp_manager =
-                Some(Arc::new(tokio::sync::Mutex::new(manager)));
+            let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
+            room.rtmp_manager = Some(shared_mgr.clone());
             room.rtmp_langs = rtmp_langs;
             eprintln!(
                 "[RTMP] Started {} FFmpeg streams for session {}, langs: {:?}",
                 streams.len(),
                 sid,
                 room.rtmp_langs
+            );
+
+            // Start FFmpeg health monitor (detects crashes + auto-restarts)
+            let _health_monitor = crate::ffmpeg::spawn_health_monitor(
+                shared_mgr,
+                ffmpeg_monitor_stop.clone(),
             );
         }
 
@@ -231,6 +241,9 @@ async fn handle_host(
     }
 
     // Host disconnected — clean up
+    // Stop FFmpeg health monitor first
+    ffmpeg_monitor_stop.store(true, Ordering::Release);
+
     if let Some((_, room)) = rooms.remove(&room_id) {
         room.send_to_all_guests(to_ws(&ServerMsg::RoomClosed));
 

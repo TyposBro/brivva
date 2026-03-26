@@ -26,21 +26,25 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 - **Audio Pipeline:** Deepgram Nova-3 (STT, 44.1kHz) → Google Cloud Translation API v2 (~40ms from Seoul) → ElevenLabs Flash v2.5 (TTS). Source-language streams bypass pipeline entirely (passthrough).
 - **Streaming Engine:** FFmpeg (sidecar/process) handling RTMPS push with fixed-delay jitter buffer for A/V sync. CRF 20 encoding auto-adapts quality to input resolution (up to 4K).
 - **Frontend:** React 19 + TypeScript + Tailwind 3 + Lucide icons (Cloudflare Pages). "Kinetic Monolith" design system (Space Grotesk + Inter, tonal depth, no-line rule). Notion-style progressive disclosure dashboard.
-- **Infrastructure:** AWS CPU instance (t3.medium, ~$30/mo) + Cloudflared Tunnels. No GPU needed.
+- **Infrastructure:** AWS ECS Fargate (pay-per-session, zero idle cost) + Cloudflared Tunnels. No GPU needed. Each live session spins up a Fargate task with the exact CPU/RAM needed, and shuts down when the session ends.
 - **Local Dev:** Docker Compose with `.env.local` override, frontend on Vite dev server.
 
-### Estimated Monthly Cost
+### Estimated Monthly Cost (ECS Fargate)
 
-| Service | Pricing | 5 streams/mo | 30 streams/mo | 100 streams/mo |
-|---------|---------|-------------|--------------|----------------|
-| AWS EC2 t3.medium | Fixed | $30 | $30 | $30 |
+Per-stream API cost: ~$1.24 (2-hour session: Deepgram $0.52 + Google Translate $0.72).
+Per-session compute cost: $0.40–$1.44 depending on task size (see Capacity & Scaling).
+**Zero idle cost** — no server running when nobody is live.
+
+| Service | Pricing | 5 sessions/mo | 30 sessions/mo | 100 sessions/mo |
+|---------|---------|---------------|----------------|-----------------|
+| AWS Fargate (4 vCPU) | $0.20/hr | $2.00 | $12.00 | $40 |
 | Deepgram Nova-3 | $0.0043/min | $2.60 | $15.60 | $52 |
 | Google Translate | $20/M chars (500K free) | $0 | $7.80 | $52 |
 | ElevenLabs TTS | Plan-based | $5 | $22 | $99 |
 | Cloudflare Pages | Free | $0 | $0 | $0 |
-| **Total** | | **~$38** | **~$75** | **~$233** |
+| **Total** | | **~$10** | **~$57** | **~$243** |
 
-Per-stream cost: ~$1.24 (2-hour session). Previous stack with GPU: $750+/mo fixed.
+Previous stack: EC2 t3.medium ($30/mo fixed even when idle). GPU era: $750+/mo fixed.
 
 ### Working Features
 
@@ -58,6 +62,54 @@ Per-stream cost: ~$1.24 (2-hour session). Previous stack with GPU: $750+/mo fixe
 - [x] **Google Cloud Translation:** Replaced self-hosted NLLB-200 (GPU) with Google Cloud Translation API v2. Seoul region (~40ms), free tier 500K chars/mo. Eliminated $750/mo GPU cost.
 - [x] **Per-Platform Language:** Each platform destination has its own language. YouTube no longer auto-creates unwanted source-language streams.
 - [x] **Local Dev Environment:** Full stack runs locally via `docker compose --env-file .env.local`, frontend via `npm run dev`, YouTube OAuth redirects to localhost.
+
+### Capacity & Scaling (ECS Fargate)
+
+#### What is ECS Fargate?
+
+**EC2** (what we had) = you rent a computer that runs 24/7. You pay $30/mo whether anyone is streaming or not. Like renting an apartment — you pay rent even when you're not home.
+
+**ECS** (Elastic Container Service) = AWS's way of running Docker containers. Same `docker-compose.yml` images, but AWS manages where they run. Think of it as "Docker Compose but AWS manages the machines."
+
+**Fargate** = the "serverless" mode of ECS. You don't pick a server. You say "run this container with 4 vCPU" and AWS handles everything. When the container stops, you stop paying. Like a taxi — you only pay when you're riding.
+
+**How it works for Brivva:**
+1. Host clicks "Go Live" → API tells AWS to start a Fargate task
+2. AWS spins it up in ~30-60s with the right amount of CPU
+3. Streams go live, host broadcasts
+4. Host ends session → task dies → billing stops instantly
+
+**The win:** At 5 sessions/month, you go from $30/mo (EC2 idle 24/7) to $2/mo (Fargate, only pay for ~10 hours of actual streaming). At 30 sessions/mo it's $12 vs $30.
+
+**vs Docker Compose (local dev):** Same Docker images, same containers. Fargate just runs them in AWS instead of on your laptop.
+
+#### Per-Stream Resource Footprint
+
+- CPU: ~20% of 1 vCPU (H.264 `ultrafast` + `zerolatency`, 30fps)
+- RAM: ~75 MB (FFmpeg process + video/audio drain threads)
+- Network: ~5-8 Mbps actual egress (webcam talking head; 35Mbps maxrate cap)
+- OS threads: 2 dedicated (video drain @ 33ms, audio drain @ 20ms)
+
+#### Key Constraint: Session Affinity
+
+All streams in one session share the same video frames and WebSocket — they must live on the **same Fargate task**. To support more languages in one session, you request a bigger task (more vCPU). To support more concurrent sessions, Fargate just launches more tasks automatically.
+
+#### Languages Per Session by Task Size
+
+| Task Size | vCPU | Languages/Session | Cost/hr | Per 2hr Session | Total w/ API costs (8 langs) |
+|-----------|------|-------------------|---------|-----------------|------------------------------|
+| 4 vCPU / 8 GB | 4 | 6–8 | $0.20 | $0.40 | ~$10.32 |
+| 8 vCPU / 16 GB | 8 | 14–16 | $0.38 | $0.76 | ~$10.68 |
+| 16 vCPU / 30 GB | 16 | 30+ | $0.72 | $1.44 | ~$11.36 |
+
+*Total = Fargate compute + ($1.24 × N translated streams). Source-language passthrough streams cost $0 in API fees.*
+
+#### Scaling Strategy
+
+- **MVP (now):** Keep t3.medium for development/testing. Migrate to Fargate for production.
+- **Production:** ECS Fargate — one task per session, auto-sized. Zero idle cost. 6–8 languages per session on smallest task.
+- **Scale (245+ hrs/mo):** Switch to ECS on EC2 with auto-scaling group — same orchestration, cheaper compute for sustained workloads.
+- **GPU (NVENC):** Not recommended. g4dn.xlarge costs $380/mo, marginal quality gain, contradicts v12 cost structure.
 
 ### Critical Blocker: The 1:1 Stream Rule
 
@@ -95,6 +147,13 @@ Per-stream cost: ~$1.24 (2-hour session). Previous stack with GPU: $750+/mo fixe
 11. ~~**Demo Video**~~ — Recorded for Google OAuth verification
 12. ~~**Google Cloud Translation**~~ — Replaced NLLB-200 (GPU) with Google Translate API v2. $750/mo → $30/mo server cost
 13. ~~**Per-Platform Language Fix**~~ — YouTube no longer auto-creates source-lang streams. Each destination uses its own lang
+14. ~~**ECS Fargate Migration**~~ — Migrated from EC2 t3.medium ($30/mo) to ECS Fargate (pay-per-session). 3 containers: server-rs + stt-wrapper + cloudflared sidecar. Secrets in AWS Secrets Manager. EC2 instances stopped. Zero idle cost.
+15. ~~**YouTube frameRate Fix**~~ — YouTube liveStreams.insert requires `frameRate` field. With `resolution: "variable"`, must use `frameRate: "variable"` (not `"30fps"` or omitted). Was blocking all YouTube stream creation and translations.
+16. ~~**EFS for Persistent Storage**~~ — EFS `fs-04e75aef9c41c4bc1` mounted at `/data` in server-rs. SQLite DB persists across redeploys. Task def `brivva:5`.
+17. ~~**CloudWatch Observability**~~ — 9 metric filters (sessions, transcripts, TTS, translations, errors, crashes, voice clones), structured `[METRIC]` log lines (translate_ms, tts_ms, pipeline_ms), CloudWatch Dashboard "Brivva" with 6 widgets, alarms for TTS timeouts (>3/5min) and FFmpeg crashes.
+18. ~~**STT Reconnect Logic**~~ — STT WebSocket reconnects up to 5 times on unexpected disconnect. Audio buffer persists across reconnections. Utterance counter preserved.
+19. ~~**Adaptive Endpointing**~~ — Measures host WPM over first 5 utterances, classifies as fast/normal/slow, reconnects to Deepgram with adjusted `utterance_end_ms` and `endpointing`. Per-session, one-time adaptation.
+20. ~~**Error Handling Hardening**~~ — FFmpeg crash recovery (3 retries, 2s delay, health monitor every 2s), STT WebSocket reconnect (5 retries, audio buffer preserved), TTS hard timeout (min of broadcast_delay-500ms or 5s)
 
 ### In Progress
 
@@ -106,10 +165,47 @@ Per-stream cost: ~$1.24 (2-hour session). Previous stack with GPU: $750+/mo fixe
 
 | Priority | Task | Details |
 |----------|------|---------|
-| P1 | **Observability** | Prometheus/Grafana for pipeline latency, FFmpeg process health, drain loop jitter (alert if >5ms late), TTS-arrival-vs-frame-drain delta per utterance |
-| P2 | **Error Handling Hardening** | Reconnect logic for FFmpeg crashes, STT disconnects, TTS timeouts mid-stream |
+| P2 | **Voice-Sample WPM** | Measure WPM during 30s voice cloning sample instead of first 5 utterances — eliminates reconnect and wasted utterances. Pass endpointing params to STT at session start |
 | P2 | **Platform Partnerships** | Korean business registration for Coupang/Naver, Japanese for Rakuten, Chinese for Douyin/Taobao/Kuaishou/Xiaohongshu/Bilibili — blocked on business entity |
-| P2 | **Downsize AWS Instance** | Migrate from g5.xlarge ($750/mo) to t3.medium ($30/mo) now that GPU is no longer needed |
+| P2 | **TTS Provider Evaluation** | Evaluate Cartesia Sonic 3 and Fish Audio as ElevenLabs replacements — see Provider Alternatives section below |
+
+---
+
+## Provider Alternatives Research (Mar 2026)
+
+### STT (Currently: Deepgram Nova-3) — Keep
+
+| Provider | Latency | Price | Languages |
+|----------|---------|-------|-----------|
+| **Deepgram Nova-3** (current) | ~300ms | ~$0.26/hr ($0.0043/min) | 10 lang code-switch |
+| Gladia Solaria-1 | 103ms partials | $0.55/hr | 100+ languages, native code-switching |
+| AssemblyAI Universal-3 | <300ms | $0.45/hr | 20+ languages |
+
+**Decision:** Keep Deepgram. Cheapest option, good enough for our pipeline. Gladia worth revisiting if we need mid-sentence language switching.
+
+### Translation (Currently: Google Cloud Translation API v2) — Keep
+
+~40ms from Seoul, 500K chars/mo free tier. No reason to change.
+
+### TTS + Voice Cloning (Currently: ElevenLabs Flash v2.5) — Evaluate Alternatives
+
+| Provider | TTFB | Voice Clone Input | Price | Languages | Notes |
+|----------|------|-------------------|-------|-----------|-------|
+| **ElevenLabs Flash v2.5** (current) | ~75ms | 3 min audio | Plan-based ($5–99/mo) | 70+ | Proven, but most expensive |
+| **Cartesia Sonic 3** ⭐ | **40ms** | **3 sec** audio | ~$47/1M chars (~73% cheaper) | 40+ | Fastest TTFB, WebSocket multiplexing, directly helps A/V sync |
+| **Fish Audio** ⭐ | <500ms | 15 sec audio | $15/1M chars (~80% cheaper) | 30+ (incl. KR/JP/CN) | #1 TTS-Arena, cross-lingual cloning (clone EN → output KR/JP) |
+| Inworld TTS-1.5 Mini | <130ms | 15 sec audio | $5/1M chars | Unknown | Unproven for broadcast use case |
+| Deepgram Aura | <200ms | No cloning | Pay-per-use | Limited | No voice cloning — not viable |
+
+**Top candidates:**
+
+1. **Cartesia Sonic 3** — Best for latency. 40ms TTFB vs ElevenLabs 75ms. Voice clone from just 3 seconds of audio. WebSocket streaming with multiplexing. Directly reduces broadcast delay and improves A/V sync. 40+ languages.
+
+2. **Fish Audio** — Best for cost + quality. #1 on TTS-Arena blind tests. 80% cheaper than ElevenLabs. Cross-lingual voice cloning (clone from English, generate in Korean/Japanese/Chinese) is perfect for our multilingual broadcasting use case. 30+ languages including all our target markets.
+
+**Open-source options:** Chatterbox, GPT-SoVITS, Qwen3-TTS — free but require self-hosted GPU, contradicts our serverless cost structure.
+
+**Next step:** Prototype Cartesia Sonic 3 and Fish Audio in a test branch. The TTS integration is modular (HTTP/WebSocket call in pipeline.rs) — swap should be straightforward.
 
 ---
 

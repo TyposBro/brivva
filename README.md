@@ -143,7 +143,7 @@ npm run deploy     # deploy to Cloudflare Pages
 
 ## AWS Deployment
 
-### Current — Single EC2 (CPU only)
+### Development — Single EC2 (CPU only)
 
 ```
 EC2 t3.medium (~$30/mo, 2 vCPU, 4GB RAM)
@@ -161,13 +161,23 @@ cd brivva
 docker compose up --build -d
 ```
 
-### Future — ECS (production)
+### Production — ECS Fargate (pay-per-session)
 
 ```
-ALB → ECS Service: server-rs (CPU task, auto-scale)
-        ├→ ECS Service: stt-wrapper (CPU task, Deepgram API proxy)
-        └→ All translation/TTS via external APIs (no GPU tasks needed)
+Host clicks "Go Live"
+  → API creates ECS Fargate task (4–16 vCPU, auto-sized)
+  → Task runs server-rs + stt-wrapper + FFmpeg (same Docker images)
+  → Cloudflared tunnel routes traffic to running task
+  → Session ends → task shuts down → billing stops
+
+No idle cost. Each 2hr session: $0.40–$1.44 compute + $1.24/stream API fees.
 ```
+
+| Task Size | Languages/Session | Compute/hr | Per 2hr Session |
+|-----------|-------------------|------------|-----------------|
+| 4 vCPU / 8 GB | 6–8 | $0.20 | $0.40 |
+| 8 vCPU / 16 GB | 14–16 | $0.38 | $0.76 |
+| 16 vCPU / 30 GB | 30+ | $0.72 | $1.44 |
 
 ---
 

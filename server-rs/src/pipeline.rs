@@ -118,132 +118,217 @@ fn emit_final(
     }
 }
 
-/// Connect to STT wrapper and stream audio / receive clean events
+/// Max reconnect attempts for STT WebSocket mid-session
+const STT_RECONNECT_MAX: u32 = 5;
+/// Delay between STT reconnect attempts
+const STT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+/// Connect to STT wrapper and stream audio / receive clean events.
+/// If the WebSocket disconnects mid-session, attempts to reconnect up to 5 times.
 pub async fn start_stt(
     room_id: String,
     rooms: Rooms,
     source_lang: Lang,
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    // Connect to STT wrapper with retries
-    let mut ws_stream = None;
-    for attempt in 1..=10 {
-        let stt_url = format!("{}?lang={}&sample_rate=44100", &*STT_URL, source_lang);
-        match tokio_tungstenite::connect_async(&stt_url).await {
-            Ok((stream, _)) => {
-                println!("Connected to STT wrapper (attempt {})", attempt);
-                ws_stream = Some(stream);
-                break;
-            }
-            Err(e) => {
-                eprintln!("STT connect attempt {}/10 failed: {}", attempt, e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            }
-        }
-    }
-    let ws_stream = match ws_stream {
-        Some(s) => s,
-        None => {
-            eprintln!("Failed to connect to STT wrapper after 10 attempts");
-            return;
-        }
-    };
-
-    let (mut stt_sink, mut stt_stream) = ws_stream.split();
-    let mut audio_rx = audio_rx;
+    // Wrap audio_rx in Arc<Mutex> so it can be reused across reconnections
+    let audio_rx = Arc::new(tokio::sync::Mutex::new(audio_rx));
+    let mut utterance_counter: u64 = 0;
+    let mut reconnect_count: u32 = 0;
 
     // Shared buffer: accumulate host audio chunks for source-language passthrough.
-    // Drained on each "final" event and passed to the pipeline.
+    // Persists across reconnections so we don't lose audio.
     let audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    // Task 1: Forward host audio → STT wrapper + accumulate for passthrough
-    let acc_tx = audio_acc.clone();
-    let send_task = tokio::spawn(async move {
-        while let Some(data) = audio_rx.recv().await {
-            // Accumulate a copy for passthrough
-            if let Ok(mut acc) = acc_tx.lock() {
-                acc.push(data.clone());
+    loop {
+        // Connect to STT wrapper (initial = 10 attempts, reconnects = 5)
+        let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
+        let mut ws_stream = None;
+
+        for attempt in 1..=max_attempts {
+            if !rooms.contains_key(&room_id) {
+                eprintln!("[STT] Room {} gone, stopping STT pipeline", room_id);
+                return;
             }
-            if stt_sink
-                .send(tungstenite::Message::Binary(data.into()))
-                .await
-                .is_err()
-            {
-                break;
+
+            if reconnect_count > 0 {
+                eprintln!(
+                    "[STT] Disconnected, reconnecting (attempt {}/{})...",
+                    attempt, STT_RECONNECT_MAX
+                );
             }
-        }
-    });
 
-    // Task 2: Read clean interim/final events from STT wrapper
-    let rooms_ref = rooms.clone();
-    let rid = room_id.clone();
-    let mut utterance_counter: u64 = 0;
-    // Track when the current utterance started (first interim after silence)
-    let mut utterance_start: Option<Instant> = None;
-    let acc_rx = audio_acc.clone();
-
-    let recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = stt_stream.next().await {
-            let text = match msg {
-                tungstenite::Message::Text(t) => t.to_string(),
-                _ => continue,
-            };
-
-            let event: SttEvent = match serde_json::from_str(&text) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("[STT] parse error: {}", e);
-                    continue;
-                }
-            };
-
-            let room = match rooms_ref.get(&rid) {
-                Some(r) => r,
-                None => break,
-            };
-
-            match event.event_type.as_str() {
-                "final" => {
-                    utterance_counter += 1;
-                    let uid = utterance_counter;
-                    println!("[FINAL #{}] {}", uid, event.text);
-                    let style_params = event.style_params.clone();
-                    // Use the tracked start time, or fallback to now
-                    let start = utterance_start.take().unwrap_or_else(Instant::now);
-                    // Drain accumulated host audio for passthrough
-                    let host_audio = {
-                        let mut acc = acc_rx.lock().unwrap();
-                        let chunks: Vec<u8> = acc.drain(..).flatten().collect();
-                        chunks
-                    };
-                    drop(room);
-                    emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang, style_params, start, host_audio);
-                }
-                "interim" => {
-                    // Mark utterance start on first interim
-                    if utterance_start.is_none() {
-                        utterance_start = Some(Instant::now());
+            let stt_url = format!("{}?lang={}&sample_rate=44100", &*STT_URL, source_lang);
+            match tokio_tungstenite::connect_async(&stt_url).await {
+                Ok((stream, _)) => {
+                    if reconnect_count > 0 {
+                        eprintln!("[STT] Reconnected to STT wrapper (attempt {})", attempt);
+                    } else {
+                        println!("Connected to STT wrapper (attempt {})", attempt);
                     }
-                    println!("[INTERIM] {}", event.text);
-                    let msg = to_ws(&ServerMsg::Interim {
-                        transcript: event.text,
-                    });
-                    room.send_to_host(msg.clone());
-                    room.send_to_all_guests(msg);
-                }
-                "error" => {
-                    eprintln!("[STT] error: {}", event.message);
+                    ws_stream = Some(stream);
                     break;
                 }
-                _ => {}
+                Err(e) => {
+                    let delay = if reconnect_count == 0 {
+                        Duration::from_secs(3)
+                    } else {
+                        STT_RECONNECT_DELAY
+                    };
+                    eprintln!("STT connect attempt {}/{} failed: {}", attempt, max_attempts, e);
+                    tokio::time::sleep(delay).await;
+                }
             }
         }
-    });
 
-    tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
+        let ws_stream = match ws_stream {
+            Some(s) => s,
+            None => {
+                if reconnect_count > 0 {
+                    eprintln!(
+                        "[STT] Failed to reconnect after {} attempts, stopping pipeline",
+                        STT_RECONNECT_MAX
+                    );
+                } else {
+                    eprintln!("Failed to connect to STT wrapper after {} attempts", max_attempts);
+                }
+                return;
+            }
+        };
+
+        let (mut stt_sink, mut stt_stream) = ws_stream.split();
+
+        // Task 1: Forward host audio -> STT wrapper + accumulate for passthrough
+        let acc_tx = audio_acc.clone();
+        let audio_rx_clone = audio_rx.clone();
+        let send_task = tokio::spawn(async move {
+            let mut rx = audio_rx_clone.lock().await;
+            while let Some(data) = rx.recv().await {
+                if let Ok(mut acc) = acc_tx.lock() {
+                    acc.push(data.clone());
+                }
+                if stt_sink
+                    .send(tungstenite::Message::Binary(data.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Task 2: Read events from STT wrapper
+        let rooms_ref = rooms.clone();
+        let rid = room_id.clone();
+        let source_lang_clone = source_lang.clone();
+        let acc_rx = audio_acc.clone();
+        let mut uc = utterance_counter;
+        let mut utterance_start: Option<Instant> = None;
+
+        // Track whether disconnect was unexpected (should trigger reconnect)
+        let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let disc_flag = disconnected_unexpectedly.clone();
+
+        let recv_task = tokio::spawn(async move {
+            while let Some(msg_result) = stt_stream.next().await {
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("[STT] WebSocket read error: {}", e);
+                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                };
+
+                let text = match msg {
+                    tungstenite::Message::Text(t) => t.to_string(),
+                    tungstenite::Message::Close(_) => {
+                        eprintln!("[STT] WebSocket closed by server");
+                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                let event: SttEvent = match serde_json::from_str(&text) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("[STT] parse error: {}", e);
+                        continue;
+                    }
+                };
+
+                let room = match rooms_ref.get(&rid) {
+                    Some(r) => r,
+                    None => break, // room gone = normal shutdown
+                };
+
+                match event.event_type.as_str() {
+                    "final" => {
+                        uc += 1;
+                        let uid = uc;
+                        println!("[FINAL #{}] {}", uid, event.text);
+                        let style_params = event.style_params.clone();
+                        let start = utterance_start.take().unwrap_or_else(Instant::now);
+                        let host_audio = {
+                            let mut acc = acc_rx.lock().unwrap();
+                            let chunks: Vec<u8> = acc.drain(..).flatten().collect();
+                            chunks
+                        };
+                        drop(room);
+                        emit_final(&rooms_ref, &rid, &event.text, uid, &source_lang_clone, style_params, start, host_audio);
+                    }
+                    "interim" => {
+                        if utterance_start.is_none() {
+                            utterance_start = Some(Instant::now());
+                        }
+                        println!("[INTERIM] {}", event.text);
+                        let msg = to_ws(&ServerMsg::Interim {
+                            transcript: event.text,
+                        });
+                        room.send_to_host(msg.clone());
+                        room.send_to_all_guests(msg);
+                    }
+                    "error" => {
+                        eprintln!("[STT] error: {}", event.message);
+                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            uc
+        });
+
+        // Wait for either task to finish
+        tokio::select! {
+            _ = send_task => {},
+            result = recv_task => {
+                if let Ok(uc) = result {
+                    utterance_counter = uc;
+                }
+            },
+        }
+
+        // Decide whether to reconnect
+        if !disconnected_unexpectedly.load(std::sync::atomic::Ordering::Acquire) {
+            // Normal shutdown (room removed, host disconnected, audio_rx closed)
+            break;
+        }
+
+        if !rooms.contains_key(&room_id) {
+            break;
+        }
+
+        reconnect_count += 1;
+        if reconnect_count > STT_RECONNECT_MAX {
+            eprintln!("[STT] Exceeded max reconnect attempts ({}), giving up", STT_RECONNECT_MAX);
+            break;
+        }
+
+        eprintln!("[STT] Will attempt reconnect {}/{}", reconnect_count, STT_RECONNECT_MAX);
+        tokio::time::sleep(STT_RECONNECT_DELAY).await;
     }
 }
 
@@ -396,6 +481,7 @@ async fn run_pipeline(
                 "[TRANSLATE] {} → {} = '{}' ({}ms)",
                 source, target, translated_text, translate_ms
             );
+            println!("[METRIC] translate_ms={} lang={}", translate_ms, target);
 
             // 2. Broadcast translation text
             if let Some(room) = rooms.get(&room_id) {
@@ -450,13 +536,15 @@ async fn do_tts_and_broadcast(
 ) {
     let tts_start = Instant::now();
 
-    // Hard TTS deadline: broadcast_delay - 500ms safety margin
+    // Hard TTS deadline: min(broadcast_delay - 500ms, 5s absolute cap)
     let tts_deadline = {
         let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(2500);
-        Duration::from_millis(delay_ms.saturating_sub(500))
+        let sync_deadline = Duration::from_millis(delay_ms.saturating_sub(500));
+        let hard_cap = Duration::from_secs(5);
+        sync_deadline.min(hard_cap)
     };
 
     // Use cloned voice if available, otherwise fall back to default per-language voice
@@ -528,6 +616,11 @@ async fn do_tts_and_broadcast(
         Ok(buf) if !buf.is_empty() => buf,
         Ok(_) => return, // empty buffer (TTS failed but didn't timeout)
         Err(_) => {
+            let preview: String = text.chars().take(10).collect();
+            eprintln!(
+                "[TTS] Timeout for utterance \"{}...\", skipping",
+                preview
+            );
             eprintln!(
                 "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms deadline — dropping to silence",
                 utterance_id, lang, tts_deadline.as_millis()
@@ -538,6 +631,7 @@ async fn do_tts_and_broadcast(
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     println!("[TTS] buffered {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
+    println!("[METRIC] tts_ms={} lang={} size_kb={}", tts_ms, lang, audio_buffer.len() / 1024);
 
     // Push to RTMP streams (decode MP3 → PCM, queue for synced playback)
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
@@ -560,10 +654,12 @@ async fn do_tts_and_broadcast(
                 }
                 let mgr = manager.lock().await;
                 mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
+                let pipeline_ms = tts_start.elapsed().as_millis() as u64;
                 eprintln!(
                     "[RTMP] Queued audio for {} (pipeline: {}ms, plays at utterance_start)",
-                    lang, tts_ms
+                    lang, pipeline_ms
                 );
+                println!("[METRIC] pipeline_ms={} lang={}", pipeline_ms, lang);
             }
             Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
         }

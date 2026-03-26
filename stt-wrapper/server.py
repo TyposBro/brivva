@@ -32,7 +32,12 @@ STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "en")
 DEFAULT_SAMPLE_RATE = 44100
 
 
-def build_dg_url(language: str, sample_rate: int = DEFAULT_SAMPLE_RATE) -> str:
+def build_dg_url(
+    language: str,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    endpointing: int = 400,
+    utterance_end_ms: int = 1500,
+) -> str:
     """Build Deepgram WebSocket URL for a given language and sample rate."""
     return (
         f"wss://api.deepgram.com/v1/listen"
@@ -44,9 +49,9 @@ def build_dg_url(language: str, sample_rate: int = DEFAULT_SAMPLE_RATE) -> str:
         f"&punctuate=true"
         f"&smart_format=true"
         f"&interim_results=true"
-        f"&endpointing=400"
+        f"&endpointing={endpointing}"
         f"&vad_events=true"
-        f"&utterance_end_ms=1500"
+        f"&utterance_end_ms={utterance_end_ms}"
     )
 
 
@@ -267,9 +272,24 @@ def extract_sentiment(data: dict) -> tuple[str, float]:
 
 # ── WebSocket Handling ────────────────────────────────────
 
-async def connect_to_deepgram(language: str = None, sample_rate: int = DEFAULT_SAMPLE_RATE):
+def classify_speaking_speed(avg_wpm: float) -> tuple[str, int, int]:
+    """Classify speaker speed and return (label, utterance_end_ms, endpointing)."""
+    if avg_wpm >= 180:
+        return "fast", 800, 300
+    elif avg_wpm < 120:
+        return "slow", 2000, 500
+    else:
+        return "normal", 1500, 400
+
+
+async def connect_to_deepgram(
+    language: str = None,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    endpointing: int = 400,
+    utterance_end_ms: int = 1500,
+):
     """Connect to Deepgram Nova-3 WebSocket directly."""
-    url = build_dg_url(language, sample_rate) if language else DG_WS_URL
+    url = build_dg_url(language or STT_LANGUAGE, sample_rate, endpointing, utterance_end_ms)
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
     for attempt in range(1, 11):
         try:
@@ -316,14 +336,25 @@ async def handle_client(client_ws):
     last_interim = ""
     pcm_buffer = bytearray()
 
+    # Adaptive endpointing state
+    wpm_samples: list[int] = []  # WPM from first 5 final utterances
+    adapted = False  # Only adapt once per session
+    reconnecting = asyncio.Event()  # Signals audio forwarder to pause during reconnect
+
     async def forward_audio():
         """Forward binary audio from client to Deepgram."""
-        nonlocal pcm_buffer
+        nonlocal pcm_buffer, dg_ws
         try:
             async for msg in client_ws:
                 if isinstance(msg, bytes):
                     pcm_buffer.extend(msg)
-                    await dg_ws.send(msg)
+                    # During reconnect, buffer audio but don't send (connection is changing)
+                    if reconnecting.is_set():
+                        continue
+                    try:
+                        await dg_ws.send(msg)
+                    except websockets.ConnectionClosed:
+                        pass
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -332,96 +363,146 @@ async def handle_client(client_ws):
             except Exception:
                 pass
 
-    async def parse_responses():
-        """Parse Deepgram responses and emit clean events with emotion."""
-        nonlocal last_interim, pcm_buffer
+    async def read_dg_messages(ws):
+        """Yield messages from a Deepgram WebSocket, stopping on close."""
         try:
-            async for msg in dg_ws:
-                if isinstance(msg, bytes):
-                    continue
-                try:
-                    data = json.loads(msg)
-                except json.JSONDecodeError:
-                    continue
-
-                msg_type = data.get("type", "")
-
-                if msg_type == "Results":
-                    channel = data.get("channel", {})
-                    alts = channel.get("alternatives", [])
-                    if not alts:
-                        continue
-
-                    transcript = alts[0].get("transcript", "").strip()
-                    if not transcript:
-                        continue
-
-                    is_final = data.get("is_final", False)
-                    speech_final = data.get("speech_final", False)
-
-                    if speech_final or is_final:
-                        last_interim = ""
-                        log.info("[FINAL] %s", transcript)
-
-                        # Extract prosody from buffered PCM
-                        prosody = extract_prosody(bytes(pcm_buffer), sample_rate)
-                        word_count = len(transcript.split())
-                        prosody = compute_speaking_rate(prosody, word_count)
-
-                        # Extract sentiment from Deepgram response
-                        sentiment_label, sentiment_score = extract_sentiment(data)
-
-                        # Classify emotion from prosody + sentiment
-                        emotion = classify_emotion(prosody, sentiment_label, sentiment_score)
-
-                        # Map emotion to ElevenLabs style params
-                        style_params = map_style_params(emotion)
-
-                        log.info("[EMOTION] %s (sentiment=%s/%.2f energy=%.4f rate=%dwpm pitch_std=%.1f)",
-                                 emotion, sentiment_label, sentiment_score,
-                                 prosody.get("energy_rms", 0),
-                                 prosody.get("speaking_rate_wpm", 0),
-                                 prosody.get("pitch_std", 0))
-                        log.info("[STYLE] stability=%.2f similarity=%.2f style=%.2f speed=%.2f",
-                                 style_params["stability"],
-                                 style_params["similarity_boost"],
-                                 style_params["style"],
-                                 style_params["speed"])
-
-                        await client_ws.send(json.dumps({
-                            "type": "final",
-                            "text": transcript,
-                            "emotion": emotion,
-                            "prosody": prosody,
-                            "style_params": style_params,
-                        }))
-
-                        # Reset buffer for next utterance
-                        pcm_buffer = bytearray()
-                    else:
-                        if transcript != last_interim:
-                            last_interim = transcript
-                            log.info("[INTERIM] %s", transcript)
-                            await client_ws.send(json.dumps({
-                                "type": "interim",
-                                "text": transcript,
-                            }))
-
-                elif msg_type == "SpeechStarted":
-                    log.info("VAD: speech started")
-
-                elif msg_type == "UtteranceEnd":
-                    log.info("VAD: utterance end")
-
-                elif msg_type == "Metadata":
-                    log.info("Deepgram session started (request_id=%s)",
-                             data.get("request_id", "?"))
-
-                elif msg_type == "Error":
-                    log.error("Deepgram error: %s", data.get("message", ""))
-
+            async for msg in ws:
+                yield msg
         except websockets.ConnectionClosed:
             pass
+
+    async def parse_responses():
+        """Parse Deepgram responses and emit clean events with emotion."""
+        nonlocal last_interim, pcm_buffer, dg_ws, adapted
+        need_restart = True  # Start reading from current dg_ws
+
+        while need_restart:
+            need_restart = False
+            try:
+                async for msg in read_dg_messages(dg_ws):
+                    if isinstance(msg, bytes):
+                        continue
+                    try:
+                        data = json.loads(msg)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg_type = data.get("type", "")
+
+                    if msg_type == "Results":
+                        channel = data.get("channel", {})
+                        alts = channel.get("alternatives", [])
+                        if not alts:
+                            continue
+
+                        transcript = alts[0].get("transcript", "").strip()
+                        if not transcript:
+                            continue
+
+                        is_final = data.get("is_final", False)
+                        speech_final = data.get("speech_final", False)
+
+                        if speech_final or is_final:
+                            last_interim = ""
+                            log.info("[FINAL] %s", transcript)
+
+                            # Extract prosody from buffered PCM
+                            prosody = extract_prosody(bytes(pcm_buffer), sample_rate)
+                            word_count = len(transcript.split())
+                            prosody = compute_speaking_rate(prosody, word_count)
+
+                            # Extract sentiment from Deepgram response
+                            sentiment_label, sentiment_score = extract_sentiment(data)
+
+                            # Classify emotion from prosody + sentiment
+                            emotion = classify_emotion(prosody, sentiment_label, sentiment_score)
+
+                            # Map emotion to ElevenLabs style params
+                            style_params = map_style_params(emotion)
+
+                            log.info("[EMOTION] %s (sentiment=%s/%.2f energy=%.4f rate=%dwpm pitch_std=%.1f)",
+                                     emotion, sentiment_label, sentiment_score,
+                                     prosody.get("energy_rms", 0),
+                                     prosody.get("speaking_rate_wpm", 0),
+                                     prosody.get("pitch_std", 0))
+                            log.info("[STYLE] stability=%.2f similarity=%.2f style=%.2f speed=%.2f",
+                                     style_params["stability"],
+                                     style_params["similarity_boost"],
+                                     style_params["style"],
+                                     style_params["speed"])
+
+                            await client_ws.send(json.dumps({
+                                "type": "final",
+                                "text": transcript,
+                                "emotion": emotion,
+                                "prosody": prosody,
+                                "style_params": style_params,
+                            }))
+
+                            # Reset buffer for next utterance
+                            pcm_buffer = bytearray()
+
+                            # Adaptive endpointing: track WPM over first 5 finals
+                            if not adapted:
+                                wpm = prosody.get("speaking_rate_wpm", 0)
+                                if wpm > 0:
+                                    wpm_samples.append(wpm)
+                                if len(wpm_samples) >= 5:
+                                    avg_wpm = sum(wpm_samples) / len(wpm_samples)
+                                    label, new_utt_ms, new_endp = classify_speaking_speed(avg_wpm)
+                                    adapted = True
+
+                                    if label != "normal":
+                                        log.info(
+                                            "[ADAPTIVE] Avg WPM: %.0f, classified as: %s, "
+                                            "reconnecting with utterance_end_ms=%d endpointing=%d",
+                                            avg_wpm, label, new_utt_ms, new_endp,
+                                        )
+                                        # Signal audio forwarder to buffer instead of sending
+                                        reconnecting.set()
+                                        try:
+                                            await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                                            await dg_ws.close()
+                                        except Exception:
+                                            pass
+                                        # Reconnect with adapted parameters
+                                        dg_ws = await connect_to_deepgram(
+                                            language, sample_rate, new_endp, new_utt_ms,
+                                        )
+                                        reconnecting.clear()
+                                        # Break inner loop, restart reading from new dg_ws
+                                        need_restart = True
+                                        break
+                                    else:
+                                        log.info(
+                                            "[ADAPTIVE] Avg WPM: %.0f, classified as: %s, "
+                                            "keeping defaults (utterance_end_ms=1500 endpointing=400)",
+                                            avg_wpm, label,
+                                        )
+                        else:
+                            if transcript != last_interim:
+                                last_interim = transcript
+                                log.info("[INTERIM] %s", transcript)
+                                await client_ws.send(json.dumps({
+                                    "type": "interim",
+                                    "text": transcript,
+                                }))
+
+                    elif msg_type == "SpeechStarted":
+                        log.info("VAD: speech started")
+
+                    elif msg_type == "UtteranceEnd":
+                        log.info("VAD: utterance end")
+
+                    elif msg_type == "Metadata":
+                        log.info("Deepgram session started (request_id=%s)",
+                                 data.get("request_id", "?"))
+
+                    elif msg_type == "Error":
+                        log.error("Deepgram error: %s", data.get("message", ""))
+
+            except websockets.ConnectionClosed:
+                pass
 
     audio_task = asyncio.create_task(forward_audio())
     parse_task = asyncio.create_task(parse_responses())

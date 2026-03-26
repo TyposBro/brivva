@@ -209,7 +209,7 @@ pub async fn create_live_stream(access_token: &str, title: &str) -> Result<Strea
             "title": title,
         },
         "cdn": {
-            "frameRate": "30fps",
+            "frameRate": "variable",
             "ingestionType": "rtmp",
             "resolution": "variable",
         }

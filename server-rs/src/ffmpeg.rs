@@ -44,10 +44,13 @@ struct RtmpStream {
     audio_handle: Option<thread::JoinHandle<()>>,
     audio_fifo: String,
     lang: String,
+    rtmp_url: String,
     /// Per-stream audio queue
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     /// Signal to stop drain threads
     stop_flag: Arc<AtomicBool>,
+    /// How many times we've restarted this stream after a crash
+    restart_count: u32,
 }
 
 /// Manages all FFmpeg RTMP streams for a session.
@@ -71,6 +74,10 @@ const AUDIO_BYTES_PER_TICK: usize = 1764;
 const MAX_BUFFER_FRAMES: usize = 450;
 /// Default broadcast delay
 const DEFAULT_DELAY_MS: u64 = 2500;
+/// Max FFmpeg restart attempts per stream
+const MAX_FFMPEG_RESTARTS: u32 = 3;
+/// Delay between FFmpeg restart attempts
+const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
 /// Jitter warning threshold
 const JITTER_WARN_THRESHOLD: Duration = Duration::from_millis(5);
 /// Fade-out duration in bytes: 50ms at 44100Hz mono 16-bit = 4410 bytes
@@ -106,104 +113,11 @@ impl RtmpManager {
         lang: &str,
         rtmp_url: &str,
     ) -> Result<(), String> {
-        let audio_fifo = format!("/tmp/brivva_audio_{}", stream_id);
-
-        // Create named FIFO
-        let _ = std::fs::remove_file(&audio_fifo);
-        std::process::Command::new("mkfifo")
-            .arg(&audio_fifo)
-            .output()
-            .map_err(|e| format!("mkfifo failed: {}", e))?;
-
-        // Spawn FFmpeg using std::process for blocking stdin access in drain thread
-        let mut child = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-loglevel", "warning",
-                // Video input: JPEG frames from stdin
-                "-f", "image2pipe",
-                "-framerate", "30",
-                "-i", "pipe:0",
-                // Audio input: raw PCM from FIFO (mono input)
-                "-f", "s16le",
-                "-ar", "44100",
-                "-ac", "1",
-                "-i", &audio_fifo,
-                // Video encoding — CRF for resolution-adaptive quality
-                // CRF 20 = high quality at any resolution, maxrate caps bandwidth
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-crf", "20",
-                "-maxrate", "35000k",
-                "-bufsize", "70000k",
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                // Audio encoding (stereo AAC)
-                "-c:a", "aac",
-                "-ac:a", "2",
-                "-b:a", "128k",
-                // Mapping
-                "-map", "0:v",
-                "-map", "1:a",
-                // Output
-                "-f", "flv",
-                rtmp_url,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
-
-        let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
-
-        let audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>> =
-            Arc::new(StdMutex::new(VecDeque::new()));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let delay = self.broadcast_delay;
-
-        // Spawn dedicated video drain thread (OS thread, 30fps)
-        let video_frame_buf = self.frame_buffer.clone();
-        let video_stop = stop_flag.clone();
-        let video_sid = stream_id.to_string();
-        let video_handle = thread::Builder::new()
-            .name(format!("video-drain-{}", stream_id))
-            .spawn(move || {
-                video_drain_loop(video_sid, video_frame_buf, stdin, delay, video_stop);
-            })
-            .map_err(|e| format!("Video thread spawn failed: {}", e))?;
-
-        // Spawn dedicated audio drain thread (OS thread, 20ms ticks)
-        let audio_aq = audio_queue.clone();
-        let audio_stop = stop_flag.clone();
-        let audio_sid = stream_id.to_string();
-        let audio_fifo_path = audio_fifo.clone();
-        let audio_handle = thread::Builder::new()
-            .name(format!("audio-drain-{}", stream_id))
-            .spawn(move || {
-                audio_drain_loop(audio_sid, audio_aq, audio_fifo_path, delay, audio_stop);
-            })
-            .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
-
+        self.spawn_stream_inner(stream_id, lang, rtmp_url, None)?;
         eprintln!(
             "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms, video+audio on dedicated OS threads]",
             stream_id, lang, rtmp_url, self.broadcast_delay.as_millis()
         );
-
-        self.streams.insert(
-            stream_id.to_string(),
-            RtmpStream {
-                child,
-                video_handle: Some(video_handle),
-                audio_handle: Some(audio_handle),
-                audio_fifo,
-                lang: lang.to_string(),
-                audio_queue,
-                stop_flag,
-            },
-        );
-
         Ok(())
     }
 
@@ -229,6 +143,190 @@ impl RtmpManager {
                 return;
             }
         }
+    }
+
+    /// Check all FFmpeg processes for crashes. Returns a list of streams that need
+    /// restarting (id, lang, rtmp_url, prev_restart_count, audio_queue).
+    /// The caller is responsible for waiting between retries (to avoid blocking the runtime).
+    pub(crate) fn detect_crashed(&mut self) -> Vec<(String, String, String, u32, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
+        let mut to_restart = Vec::new();
+
+        for (id, stream) in &mut self.streams {
+            match stream.child.try_wait() {
+                Ok(Some(status)) => {
+                    let code = status.code().unwrap_or(-1);
+                    if stream.stop_flag.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    eprintln!(
+                        "[FFMPEG] Process crashed for lang={}, exit={}, restarting...",
+                        stream.lang, code
+                    );
+                    if stream.restart_count >= MAX_FFMPEG_RESTARTS {
+                        eprintln!(
+                            "[FFMPEG] Failed to restart after {} attempts for lang={}",
+                            MAX_FFMPEG_RESTARTS, stream.lang
+                        );
+                        stream.stop_flag.store(true, Ordering::Release);
+                        continue;
+                    }
+                    to_restart.push((
+                        id.clone(),
+                        stream.lang.clone(),
+                        stream.rtmp_url.clone(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[FFMPEG] Error checking process status for {}: {}", id, e);
+                }
+            }
+        }
+
+        // Collect cleanup info and remove old entries
+        let mut result = Vec::new();
+        for (id, lang, rtmp_url) in to_restart {
+            if let Some(mut old) = self.streams.remove(&id) {
+                old.stop_flag.store(true, Ordering::Release);
+                let _ = old.child.kill();
+                let _ = old.child.wait();
+                let _ = std::fs::remove_file(&old.audio_fifo);
+                let prev_count = old.restart_count;
+                let audio_queue = old.audio_queue.clone();
+                result.push((id, lang, rtmp_url, prev_count, audio_queue));
+            }
+        }
+
+        result
+    }
+
+    /// Restart a single stream after a crash. Called after an async delay.
+    pub(crate) fn restart_stream(
+        &mut self,
+        id: &str,
+        lang: &str,
+        rtmp_url: &str,
+        prev_count: u32,
+        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    ) {
+        match self.spawn_stream_inner(id, lang, rtmp_url, Some(audio_queue)) {
+            Ok(()) => {
+                if let Some(stream) = self.streams.get_mut(id) {
+                    stream.restart_count = prev_count + 1;
+                }
+                eprintln!(
+                    "[FFMPEG] Restarted stream {} ({}) attempt {}/{}",
+                    id, lang, prev_count + 1, MAX_FFMPEG_RESTARTS
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[FFMPEG] Restart failed for {} ({}): {}",
+                    id, lang, e
+                );
+            }
+        }
+    }
+
+    /// Internal helper to spawn an FFmpeg process and its drain threads.
+    /// If `existing_queue` is provided (restart case), reuses the audio queue
+    /// so pending audio isn't lost.
+    fn spawn_stream_inner(
+        &mut self,
+        stream_id: &str,
+        lang: &str,
+        rtmp_url: &str,
+        existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
+    ) -> Result<(), String> {
+        let audio_fifo = format!("/tmp/brivva_audio_{}", stream_id);
+
+        // Create named FIFO
+        let _ = std::fs::remove_file(&audio_fifo);
+        std::process::Command::new("mkfifo")
+            .arg(&audio_fifo)
+            .output()
+            .map_err(|e| format!("mkfifo failed: {}", e))?;
+
+        // Spawn FFmpeg
+        let mut child = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel", "warning",
+                "-f", "image2pipe",
+                "-framerate", "30",
+                "-i", "pipe:0",
+                "-f", "s16le",
+                "-ar", "44100",
+                "-ac", "1",
+                "-i", &audio_fifo,
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-crf", "20",
+                "-maxrate", "35000k",
+                "-bufsize", "70000k",
+                "-pix_fmt", "yuv420p",
+                "-g", "60",
+                "-c:a", "aac",
+                "-ac:a", "2",
+                "-b:a", "128k",
+                "-map", "0:v",
+                "-map", "1:a",
+                "-f", "flv",
+                rtmp_url,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
+
+        let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
+
+        let audio_queue = existing_queue
+            .unwrap_or_else(|| Arc::new(StdMutex::new(VecDeque::new())));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let delay = self.broadcast_delay;
+
+        // Spawn video drain thread
+        let video_frame_buf = self.frame_buffer.clone();
+        let video_stop = stop_flag.clone();
+        let video_sid = stream_id.to_string();
+        let video_handle = thread::Builder::new()
+            .name(format!("video-drain-{}", stream_id))
+            .spawn(move || {
+                video_drain_loop(video_sid, video_frame_buf, stdin, delay, video_stop);
+            })
+            .map_err(|e| format!("Video thread spawn failed: {}", e))?;
+
+        // Spawn audio drain thread
+        let audio_aq = audio_queue.clone();
+        let audio_stop = stop_flag.clone();
+        let audio_sid = stream_id.to_string();
+        let audio_fifo_path = audio_fifo.clone();
+        let audio_handle = thread::Builder::new()
+            .name(format!("audio-drain-{}", stream_id))
+            .spawn(move || {
+                audio_drain_loop(audio_sid, audio_aq, audio_fifo_path, delay, audio_stop);
+            })
+            .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
+
+        self.streams.insert(
+            stream_id.to_string(),
+            RtmpStream {
+                child,
+                video_handle: Some(video_handle),
+                audio_handle: Some(audio_handle),
+                audio_fifo,
+                lang: lang.to_string(),
+                rtmp_url: rtmp_url.to_string(),
+                audio_queue,
+                stop_flag,
+                restart_count: 0,
+            },
+        );
+
+        Ok(())
     }
 
     /// Stop all FFmpeg processes and clean up.
@@ -273,6 +371,37 @@ impl RtmpManager {
 
 /// Thread-safe wrapper
 pub type SharedRtmpManager = Arc<tokio::sync::Mutex<RtmpManager>>;
+
+/// Spawn a background task that periodically checks for crashed FFmpeg processes
+/// and restarts them. Runs every 2 seconds. Stops when stop_flag is set.
+pub fn spawn_health_monitor(
+    manager: SharedRtmpManager,
+    stop_flag: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            if stop_flag.load(Ordering::Acquire) {
+                break;
+            }
+            // Detect crashes (quick, non-blocking check)
+            let crashed = {
+                let mut mgr = manager.lock().await;
+                mgr.detect_crashed()
+            };
+            // Restart each crashed stream with async delay between attempts
+            for (id, lang, rtmp_url, prev_count, audio_queue) in crashed {
+                tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
+                if stop_flag.load(Ordering::Acquire) {
+                    break;
+                }
+                let mut mgr = manager.lock().await;
+                mgr.restart_stream(&id, &lang, &rtmp_url, prev_count, audio_queue);
+            }
+        }
+    })
+}
 
 // ── Video Drain Thread ─────────────────────────────────────
 
