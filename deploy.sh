@@ -45,20 +45,21 @@ aws ecr get-login-password --region "$AWS_REGION" \
 # ── Build & Push ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
 
+    # Fargate requires linux/amd64 — cross-compile from Apple Silicon
+    PLATFORM="linux/amd64"
+
     if [[ -z "$ONLY" || "$ONLY" == "server-rs" ]]; then
-        echo "==> Building server-rs"
-        docker build -t brivva/server-rs -f server-rs/Dockerfile .
-        docker tag brivva/server-rs "$ECR_BASE/brivva/server-rs:latest"
-        echo "==> Pushing server-rs"
-        docker push "$ECR_BASE/brivva/server-rs:latest"
+        echo "==> Building server-rs (${PLATFORM})"
+        docker buildx build --platform "$PLATFORM" \
+            -t "$ECR_BASE/brivva/server-rs:latest" \
+            -f server-rs/Dockerfile --push .
     fi
 
     if [[ -z "$ONLY" || "$ONLY" == "stt-wrapper" ]]; then
-        echo "==> Building stt-wrapper"
-        docker build -t brivva/stt-wrapper -f stt-wrapper/Dockerfile stt-wrapper/
-        docker tag brivva/stt-wrapper "$ECR_BASE/brivva/stt-wrapper:latest"
-        echo "==> Pushing stt-wrapper"
-        docker push "$ECR_BASE/brivva/stt-wrapper:latest"
+        echo "==> Building stt-wrapper (${PLATFORM})"
+        docker buildx build --platform "$PLATFORM" \
+            -t "$ECR_BASE/brivva/stt-wrapper:latest" \
+            -f stt-wrapper/Dockerfile --push stt-wrapper/
     fi
 
 fi
