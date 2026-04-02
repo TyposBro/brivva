@@ -1,4 +1,5 @@
 pub mod ffmpeg;
+pub mod stt;
 mod pipeline;
 mod types;
 

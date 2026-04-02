@@ -1,7 +1,7 @@
 //! Translation pipeline: STT → Translate → TTS → RTMP
 //!
 //! Host audio flows through:
-//! 1. STT Wrapper (localhost:8766/asr) — clean interim/final events
+//! 1. Deepgram Nova-3 (direct WebSocket, no Python wrapper)
 //! 2. Google Cloud Translation API v2 — per target language, parallel
 //! 3. ElevenLabs TTS — streaming MP3 response (with optional cloned voice)
 //! 4. MP3 → PCM decode → queue to RTMP manager for synced playback
@@ -14,15 +14,14 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
+use tungstenite::client::IntoClientRequest;
 
 use crate::types::{Lang, Sessions, ServerMsg};
 
-// ── Service URLs ──────────────────────────────────────────
+// ── Service Keys ──────────────────────────────────────────
 
-static STT_URL: LazyLock<String> = LazyLock::new(|| {
-    let host = std::env::var("STT_HOST").unwrap_or_else(|_| "localhost".to_string());
-    let port = std::env::var("STT_PORT").unwrap_or_else(|_| "8766".to_string());
-    format!("ws://{}:{}/asr", host, port)
+static DEEPGRAM_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("DEEPGRAM_API_KEY").unwrap_or_default()
 });
 static GOOGLE_TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default()
@@ -31,7 +30,7 @@ static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
 });
 
-// ── STT Events ───────────────────────────────────────────
+// ── STT Style Params ─────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleParams {
@@ -64,23 +63,8 @@ impl Default for StyleParams {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct SttEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    style_params: Option<StyleParams>,
-}
+// ── STT Connection (Direct Deepgram) ──────────────────────
 
-// ── STT Connection ────────────────────────────────────────
-
-/// Emit a final transcript: notify host and trigger translation pipeline.
-/// `host_audio` is the raw 44.1kHz PCM captured during this utterance, used for
-/// source-language passthrough (skip TTS for RTMP streams in the host's language).
 fn emit_final(
     sessions: &Sessions,
     session_id: &str,
@@ -132,10 +116,20 @@ pub async fn start_stt(
     let mut utterance_counter: u64 = 0;
     let mut reconnect_count: u32 = 0;
 
-    // Shared buffer: accumulate host audio chunks for source-language passthrough.
-    // Persists across reconnections so we don't lose audio.
+    // Shared buffer: accumulate host audio chunks for source-language passthrough
     let audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Adaptive endpointing parameters
+    let mut endpointing: u32 = 400;
+    let mut utterance_end_ms: u32 = 1500;
+    let mut wpm_samples: Vec<u32> = Vec::new();
+    let mut adapted = false;
+
+    if DEEPGRAM_API_KEY.is_empty() {
+        eprintln!("[STT] DEEPGRAM_API_KEY not set, STT disabled");
+        return;
+    }
 
     loop {
         let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
@@ -147,10 +141,30 @@ pub async fn start_stt(
                 return;
             }
 
-            let stt_url = format!("{}?lang={}&sample_rate=44100", &*STT_URL, source_lang);
-            match tokio_tungstenite::connect_async(&stt_url).await {
+            // Connect directly to Deepgram Nova-3
+            let url = crate::stt::build_deepgram_url(
+                &source_lang.to_string(), 44100, endpointing, utterance_end_ms,
+            );
+            let request = match url.into_client_request() {
+                Ok(mut req) => {
+                    req.headers_mut().insert(
+                        "Authorization",
+                        format!("Token {}", &*DEEPGRAM_API_KEY).parse().unwrap(),
+                    );
+                    req
+                }
+                Err(e) => {
+                    eprintln!("[STT] Failed to build request: {}", e);
+                    return;
+                }
+            };
+
+            match tokio_tungstenite::connect_async(request).await {
                 Ok((stream, _)) => {
-                    println!("[STT] Connected (attempt {})", attempt);
+                    println!(
+                        "[STT] Connected to Deepgram Nova-3 (attempt {}, endpointing={}, utterance_end_ms={})",
+                        attempt, endpointing, utterance_end_ms
+                    );
                     ws_stream = Some(stream);
                     break;
                 }
@@ -174,37 +188,53 @@ pub async fn start_stt(
             }
         };
 
-        let (mut stt_sink, mut stt_stream) = ws_stream.split();
+        let (stt_sink, mut stt_stream) = ws_stream.split();
+        let stt_sink = Arc::new(tokio::sync::Mutex::new(stt_sink));
 
-        // Task 1: Forward host audio → STT wrapper + accumulate for passthrough
+        // Control channel: recv_task can send Finalize/CloseStream via sink
+        let sink_for_ctrl = stt_sink.clone();
+
+        // Task 1: Forward host audio → Deepgram + accumulate for passthrough
         let acc_tx = audio_acc.clone();
         let audio_rx_clone = audio_rx.clone();
+        let sink_for_audio = stt_sink.clone();
         let send_task = tokio::spawn(async move {
             let mut rx = audio_rx_clone.lock().await;
             while let Some(data) = rx.recv().await {
                 if let Ok(mut acc) = acc_tx.lock() {
                     acc.push(data.clone());
                 }
-                if stt_sink
-                    .send(tungstenite::Message::Binary(data.into()))
-                    .await
-                    .is_err()
-                {
+                let mut sink = sink_for_audio.lock().await;
+                if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
                     break;
                 }
             }
+            // Send CloseStream on shutdown
+            let mut sink = sink_for_audio.lock().await;
+            let _ = sink.send(tungstenite::Message::Text(
+                r#"{"type":"CloseStream"}"#.to_string().into()
+            )).await;
         });
 
-        // Task 2: Read events from STT wrapper
+        // Task 2: Read Deepgram responses, extract prosody/emotion, emit events
         let sessions_ref = sessions.clone();
         let sid = session_id.clone();
         let source_lang_clone = source_lang.clone();
         let acc_rx = audio_acc.clone();
         let mut uc = utterance_counter;
         let mut utterance_start: Option<Instant> = None;
+        let mut chunk_detector = crate::stt::get_detector(&source_lang.to_string());
 
         let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disc_flag = disconnected_unexpectedly.clone();
+
+        // Capture adaptive state for this connection
+        let mut local_wpm_samples = wpm_samples.clone();
+        let mut local_adapted = adapted;
+        let needs_adaptive_reconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let adaptive_flag = needs_adaptive_reconnect.clone();
+        let adaptive_endpointing = Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
+        let adaptive_params = adaptive_endpointing.clone();
 
         let recv_task = tokio::spawn(async move {
             while let Some(msg_result) = stt_stream.next().await {
@@ -226,63 +256,156 @@ pub async fn start_stt(
                     _ => continue,
                 };
 
-                let event: SttEvent = match serde_json::from_str(&text) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("[STT] parse error: {}", e);
-                        continue;
-                    }
+                let dg: crate::stt::DgResponse = match serde_json::from_str(&text) {
+                    Ok(d) => d,
+                    Err(_) => continue,
                 };
 
                 if !sessions_ref.contains_key(&sid) {
                     break;
                 }
 
-                match event.event_type.as_str() {
-                    "final" => {
-                        uc += 1;
-                        let uid = uc;
-                        println!("[FINAL #{}] {}", uid, event.text);
-                        let start = utterance_start.take().unwrap_or_else(Instant::now);
-                        let host_audio = {
-                            let mut acc = acc_rx.lock().unwrap();
-                            acc.drain(..).flatten().collect()
+                match dg.msg_type.as_str() {
+                    "Results" => {
+                        let transcript = match dg.transcript() {
+                            Some(t) => t,
+                            None => continue,
                         };
-                        emit_final(
-                            &sessions_ref, &sid, &event.text, uid,
-                            &source_lang_clone, event.style_params,
-                            start, host_audio,
-                        );
-                    }
-                    "interim" => {
-                        if utterance_start.is_none() {
-                            utterance_start = Some(Instant::now());
+
+                        if dg.speech_final || dg.is_final {
+                            // ── Final event ──
+                            uc += 1;
+                            let uid = uc;
+                            println!("[FINAL #{}] {}", uid, transcript);
+
+                            let start = utterance_start.take().unwrap_or_else(Instant::now);
+                            let host_audio: Vec<u8> = {
+                                let mut acc = acc_rx.lock().unwrap();
+                                acc.drain(..).flatten().collect()
+                            };
+
+                            // Prosody → emotion → style params
+                            let mut prosody = crate::stt::extract_prosody(&host_audio, 44100);
+                            let word_count = transcript.split_whitespace().count();
+                            crate::stt::compute_speaking_rate(&mut prosody, word_count);
+                            let emotion = crate::stt::classify_emotion(&prosody);
+                            let (stability, similarity, style, speed) = crate::stt::map_style(emotion);
+
+                            eprintln!(
+                                "[EMOTION] {} (energy={:.4} pitch_std={:.1} rate={}wpm)",
+                                emotion, prosody.energy_rms, prosody.pitch_std, prosody.speaking_rate_wpm
+                            );
+
+                            let sp = StyleParams {
+                                stability, similarity_boost: similarity, style, speed,
+                                use_speaker_boost: true,
+                            };
+
+                            emit_final(
+                                &sessions_ref, &sid, &transcript, uid,
+                                &source_lang_clone, Some(sp),
+                                start, host_audio,
+                            );
+                            chunk_detector.reset();
+
+                            // Adaptive endpointing: track WPM over first 5 finals
+                            if !local_adapted && prosody.speaking_rate_wpm > 0 {
+                                local_wpm_samples.push(prosody.speaking_rate_wpm);
+                                if local_wpm_samples.len() >= 5 {
+                                    let avg_wpm = local_wpm_samples.iter().sum::<u32>() as f32
+                                        / local_wpm_samples.len() as f32;
+                                    let (label, new_endp, new_utt_ms) =
+                                        crate::stt::classify_speaking_speed(avg_wpm);
+                                    local_adapted = true;
+
+                                    if label != "normal" {
+                                        eprintln!(
+                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, reconnecting (endpointing={}, utterance_end_ms={})",
+                                            avg_wpm, label, new_endp, new_utt_ms
+                                        );
+                                        if let Ok(mut params) = adaptive_params.lock() {
+                                            *params = Some((new_endp, new_utt_ms));
+                                        }
+                                        adaptive_flag.store(true, std::sync::atomic::Ordering::Release);
+                                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                                        // Send CloseStream
+                                        let mut sink = sink_for_ctrl.lock().await;
+                                        let _ = sink.send(tungstenite::Message::Text(
+                                            r#"{"type":"CloseStream"}"#.to_string().into()
+                                        )).await;
+                                        break;
+                                    } else {
+                                        eprintln!(
+                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, keeping defaults",
+                                            avg_wpm, label
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            // ── Interim event ──
+                            if utterance_start.is_none() {
+                                utterance_start = Some(Instant::now());
+                            }
+                            println!("[INTERIM] {}", transcript);
+
+                            if let Some(session) = sessions_ref.get(&sid) {
+                                session.send_to_host(to_ws(&ServerMsg::Interim {
+                                    transcript: transcript.clone(),
+                                }));
+                            }
+
+                            // Clause boundary chunking: force finalize if needed
+                            if chunk_detector.check(&transcript) {
+                                eprintln!("[CHUNK] Forcing finalize at clause boundary");
+                                let mut sink = sink_for_ctrl.lock().await;
+                                let _ = sink.send(tungstenite::Message::Text(
+                                    r#"{"type":"Finalize"}"#.to_string().into()
+                                )).await;
+                            }
                         }
-                        println!("[INTERIM] {}", event.text);
-                        if let Some(session) = sessions_ref.get(&sid) {
-                            session.send_to_host(to_ws(&ServerMsg::Interim {
-                                transcript: event.text,
-                            }));
-                        }
                     }
-                    "error" => {
-                        eprintln!("[STT] error: {}", event.message);
+                    "SpeechStarted" => {
+                        eprintln!("[DG] VAD: speech started");
+                    }
+                    "UtteranceEnd" => {
+                        eprintln!("[DG] VAD: utterance end");
+                    }
+                    "Metadata" => {
+                        eprintln!("[DG] Session started (request_id={})", dg.request_id);
+                    }
+                    "Error" => {
+                        eprintln!("[DG] Error: {}", dg.message);
                         disc_flag.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
                     _ => {}
                 }
             }
-            uc
+            (uc, local_wpm_samples, local_adapted)
         });
 
         tokio::select! {
             _ = send_task => {},
             result = recv_task => {
-                if let Ok(uc) = result {
+                if let Ok((uc, wpm, adapt)) = result {
                     utterance_counter = uc;
+                    wpm_samples = wpm;
+                    adapted = adapt;
                 }
             },
+        }
+
+        // Check for adaptive reconnect (intentional, not an error)
+        if needs_adaptive_reconnect.load(std::sync::atomic::Ordering::Acquire) {
+            if let Ok(params) = adaptive_endpointing.lock() {
+                if let Some((new_endp, new_utt_ms)) = *params {
+                    endpointing = new_endp;
+                    utterance_end_ms = new_utt_ms;
+                }
+            }
+            // Don't increment reconnect_count for adaptive reconnects
+            continue;
         }
 
         if !disconnected_unexpectedly.load(std::sync::atomic::Ordering::Acquire) {
@@ -319,9 +442,6 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
-/// Run the full translation + TTS pipeline for one utterance.
-/// `host_audio` is raw 44.1kHz PCM of the host's voice during this utterance,
-/// used for source-language passthrough on RTMP streams.
 async fn run_pipeline(
     transcript: &str,
     utterance_id: u64,
@@ -342,8 +462,7 @@ async fn run_pipeline(
 
     for lang in target_langs {
         if lang == source_lang {
-            // Source-language passthrough: host audio is already 44.1kHz PCM.
-            // Queue directly to RTMP streams. No TTS needed — it's the host's own voice.
+            // Source-language passthrough: host audio queued directly to RTMP
             let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
             if let Some(manager) = rtmp_mgr {
                 if !host_audio.is_empty() {
@@ -352,7 +471,6 @@ async fn run_pipeline(
                     let lang_str = lang.to_string();
                     let mgr = manager.clone();
                     handles.push(tokio::spawn(async move {
-                        // Apply same truncation as translated audio
                         let utterance_dur = utterance_end.duration_since(utterance_start);
                         let max_dur = utterance_dur + Duration::from_millis(2000);
                         let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
@@ -362,12 +480,10 @@ async fn run_pipeline(
                         let locked = mgr.lock().await;
                         locked.queue_audio(&lang_str, pcm, utterance_start);
                         eprintln!(
-                            "[PASSTHROUGH] Queued host audio for {} ({}KB, 44.1kHz native)",
+                            "[PASSTHROUGH] Queued host audio for {} ({}KB)",
                             lang_str, pcm_len / 1024
                         );
                     }));
-                } else {
-                    eprintln!("[PASSTHROUGH] no host audio captured for source lang {}", lang);
                 }
             }
             continue;
@@ -383,7 +499,7 @@ async fn run_pipeline(
         let sp = style_params.clone();
 
         handles.push(tokio::spawn(async move {
-            // 1. Translate via Google Cloud Translation API v2
+            // 1. Translate
             let start = Instant::now();
             let url = format!(
                 "https://translation.googleapis.com/language/translate/v2?key={}",
@@ -426,7 +542,7 @@ async fn run_pipeline(
             let translate_ms = start.elapsed().as_millis() as u64;
             println!("[TRANSLATE] {} -> {} = '{}' ({}ms)", source, target, translated_text, translate_ms);
 
-            // 2. Send translation text to host
+            // 2. Send translation to host
             if let Some(session) = sessions.get(&session_id) {
                 session.send_to_host(to_ws(&ServerMsg::Translation {
                     lang: target.to_string(),
@@ -452,8 +568,6 @@ async fn run_pipeline(
     }
 }
 
-/// Call ElevenLabs TTS and queue decoded PCM to RTMP for synced playback.
-/// Has a hard timeout at broadcast_delay - 500ms to prevent sync slips.
 async fn do_tts(
     client: &reqwest::Client,
     text: &str,
@@ -468,7 +582,6 @@ async fn do_tts(
 ) {
     let tts_start = Instant::now();
 
-    // Hard TTS deadline: min(broadcast_delay - 500ms, 10s absolute cap)
     let tts_deadline = {
         let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
             .ok()
@@ -543,7 +656,7 @@ async fn do_tts(
         Ok(_) => return,
         Err(_) => {
             eprintln!(
-                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms -- dropping to silence",
+                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms",
                 utterance_id, lang, tts_deadline.as_millis()
             );
             return;
@@ -553,20 +666,15 @@ async fn do_tts(
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     println!("[TTS] {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
 
-    // Queue decoded PCM to RTMP streams for synced playback
+    // Queue decoded PCM to RTMP
     let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
             Ok(mut pcm) => {
-                // Truncate TTS audio that exceeds source utterance + 2s margin
                 let utterance_dur = utterance_end.duration_since(utterance_start);
                 let max_dur = utterance_dur + Duration::from_millis(2000);
                 let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
                 if pcm.len() > max_bytes {
-                    eprintln!(
-                        "[RTMP] Truncating TTS: {:.0}ms -> {:.0}ms for {}",
-                        pcm.len() as f64 / 88.2, max_bytes as f64 / 88.2, lang
-                    );
                     crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
                 }
                 let mgr = manager.lock().await;
@@ -577,7 +685,7 @@ async fn do_tts(
         }
     }
 
-    // Send MP3 audio to host via WebSocket (for monitoring/playback)
+    // Send MP3 to host for monitoring
     if let Some(session) = sessions.get(session_id) {
         session.send_to_host(to_ws(&ServerMsg::TtsStart { lang: lang.to_string(), utterance_id }));
         session.send_to_host(Message::Binary(audio_buffer.into()));
