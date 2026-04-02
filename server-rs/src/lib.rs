@@ -135,7 +135,26 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
         while let Some(Ok(msg)) = ws_stream.next().await {
             match msg {
                 Message::Binary(data) => {
-                    let _ = audio_tx.send(data.to_vec());
+                    if data.is_empty() { continue; }
+                    match data[0] {
+                        0x01 => {
+                            // Audio PCM (tagged)
+                            let _ = audio_tx.send(data[1..].to_vec());
+                        }
+                        0x02 => {
+                            // Encoded video chunk from MediaRecorder
+                            let mgr = sessions_ref.get(&sid)
+                                .and_then(|s| s.rtmp_manager.clone());
+                            if let Some(manager) = mgr {
+                                let locked = manager.lock().await;
+                                locked.push_video_chunk(&data[1..]);
+                            }
+                        }
+                        _ => {
+                            // Legacy: untagged = raw audio
+                            let _ = audio_tx.send(data.to_vec());
+                        }
+                    }
                 }
                 Message::Text(text) => {
                     // Handle JSON messages
@@ -155,22 +174,7 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                                     }
                                 }
                             }
-                            Some("face:frame") => {
-                                // Video frame from webcam: base64 JPEG → push to RTMP
-                                if let Some(data) = json.get("data").and_then(|d| d.as_str()) {
-                                    if let Ok(jpeg_bytes) = base64::Engine::decode(
-                                        &base64::engine::general_purpose::STANDARD,
-                                        data,
-                                    ) {
-                                        let mgr = sessions_ref.get(&sid)
-                                            .and_then(|s| s.rtmp_manager.clone());
-                                        if let Some(manager) = mgr {
-                                            let locked = manager.lock().await;
-                                            locked.push_video_frame(&jpeg_bytes);
-                                        }
-                                    }
-                                }
-                            }
+                            // face:frame removed — video now uses binary tagged messages (0x02)
                             Some("rtmp:config") => {
                                 // Start RTMP streams per language
                                 if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {

@@ -55,48 +55,20 @@
 
 ## Implementation Phases
 
-### Phase 1: Restore FFmpeg Muxing (Weekend Apr 5-6)
+### Phase 1: FFmpeg RTMP Muxing + Single Binary (DONE — Apr 2)
 
-**Goal:** App captures webcam + mic, translates, and pushes synced RTMP streams locally.
+**Goal:** App captures webcam + mic, translates, and pushes synced RTMP streams. No external dependencies.
 
-**Steps:**
+**Completed:**
 
-1. **Restore `ffmpeg.rs` from git** — the core jitter buffer, video/audio drain threads, RTMP push logic. Adapt:
-
-   - Remove AWS/ECS-specific code
-   - Remove CloudWatch metric logging
-   - Keep: `RtmpManager`, `push_video_frame()`, `queue_audio()`, `truncate_with_fadeout()`, `decode_mp3_to_pcm()`, video/audio drain OS threads, crash recovery
-   - FFmpeg must be installed on the host machine (document as prerequisite)
-
-2. **Add webcam capture to the backend** — two approaches:
-
-   - **Option A (simpler):** Keep browser-based capture via WebSocket (current approach). Frontend captures webcam frames via canvas → sends as binary to backend. Backend feeds frames to FFmpeg. This already worked in v12.
-   - **Option B (better perf):** Native webcam capture in Rust via `nokhwa` crate. Eliminates WebSocket overhead for video. But adds complexity.
-   - **Decision:** Option A for demo. Optimize to Option B later if needed.
-
-3. **Update `pipeline.rs`** — re-add RTMP audio queueing:
-
-   - After TTS completes, decode MP3 → PCM via `ffmpeg::decode_mp3_to_pcm()`
-   - Truncate + fadeout if exceeds utterance duration + 2s
-   - Queue to `RtmpManager` via `queue_audio(lang, pcm, utterance_start)`
-   - Re-add source-language passthrough (host audio → RTMP, zero API cost)
-
-4. **Update `types.rs`** — re-add to Session:
-
-   - `frame_buffer: FrameBuffer` (ring buffer of timestamped video frames)
-   - `rtmp_manager: Option<SharedRtmpManager>`
-   - `rtmp_langs: Vec<Lang>` (which languages have RTMP streams)
-
-5. **Update WebSocket handler (`lib.rs`)** — re-add:
-
-   - Video frame reception (`face:frame` JSON messages)
-   - Push frames to `session.frame_buffer` and to `rtmp_manager.push_video_frame()`
-   - RTMP stream lifecycle: start FFmpeg processes when session starts, stop on disconnect
-
-6. **Update frontend** — re-add:
-   - Webcam capture (canvas → base64 JPEG → WebSocket)
-   - RTMP destination config: for each target language, user enters RTMP URL + stream key
-   - Source language gets passthrough (no TTS cost)
+1. **Restored `ffmpeg.rs`** — jitter buffer, audio drain threads, RTMP push, crash recovery (3 retries), orphan cleanup
+2. **MediaRecorder video capture** — browser hardware-encodes H.264/VP8 at up to 1080p60+, sends encoded chunks via tagged binary WebSocket messages (0x02). No canvas→JPEG→base64 overhead. FFmpeg receives pre-encoded video, re-encodes for FLV container
+3. **Tagged binary protocol** — 0x01 = audio PCM (STT), 0x02 = video chunk (RTMP). Replaces the old base64 JSON `face:frame` messages
+4. **Pipeline RTMP integration** — TTS MP3→PCM decode, truncate+fadeout, queue to RTMP. Source-language passthrough (host audio → RTMP, zero API cost)
+5. **Direct Deepgram STT** — Python stt-wrapper eliminated. Connects directly to `wss://api.deepgram.com`. Clause-boundary chunking (EN/JA/KO/ZH), prosody extraction, emotion classification, adaptive endpointing — all in Rust
+6. **FFmpeg bundled as Tauri sidecar** — static binary in `src-tauri/binaries/`, resolved at runtime next to executable. No system FFmpeg needed
+7. **Voice cloning UI** — record 30s sample, progress bar, auto-activates cloned voice for all TTS
+8. **RTMP destination config** — per-language RTMP URL inputs in frontend, source-language passthrough
 
 **RTMP config in frontend:**
 
@@ -113,27 +85,21 @@ Target Languages:
 
 ### Phase 2: 4K + Quality (Weekend Apr 12-13)
 
-**Goal:** Production-quality video output.
+**Goal:** Production-quality video at high resolution and framerate.
 
 **Steps:**
 
-1. **4K webcam capture** — request `{ video: { width: { ideal: 3840 }, height: { ideal: 2160 } } }` from getUserMedia. Test in Tauri WebView.
+1. **4K/60fps+ webcam capture** — MediaRecorder handles any resolution/fps via hardware encoder (VideoToolbox on macOS). Request `{ video: { width: 3840, height: 2160, frameRate: { ideal: 60 } } }`.
 
-2. **FFmpeg encoding optimization:**
+2. **H.264 passthrough** — if MediaRecorder outputs H.264 (`video/mp4;codecs=avc1`), use `-c:v copy` in FFmpeg (zero CPU for video). Test WebKit H.264 MediaRecorder in Tauri WebView. Falls back to re-encode for VP8/VP9.
 
-   - Keep CRF 20 + `ultrafast` + `zerolatency` for software encoding
-   - Test NVENC if GPU available: `-c:v h264_nvenc -preset p1 -tune ll`
-   - 4K × N streams with software encoding will be CPU-heavy — may need to fall back to 1080p for >4 languages
+3. **Multi-stream efficiency** — all RTMP streams share one encoded video chunk buffer. Only audio differs per language. N streams = 1 video encode + N audio encodes.
 
-3. **Broadcast delay tuning:**
+4. **Broadcast delay tuning** — measure P90/P95 TTS latency, set D = P95 + 200ms. Add `BROADCAST_DELAY_MS` slider to settings UI.
 
-   - Measure P90/P95 TTS latency per language under real conditions
-   - Set D = P95 + 200ms margin (start with 2.5s, tune down)
-   - Add `BROADCAST_DELAY_MS` to frontend settings UI
+5. **Audio quality** — 44.1kHz, 16-bit, mono. AAC 128kbps.
 
-4. **Audio quality** — keep 44.1kHz, 16-bit, mono. AAC output at 128kbps.
-
-**Validation:** 4K stream to YouTube via RTMP, verify quality matches native OBS output.
+**Validation:** 4K60 stream to YouTube, verify A/V sync under 300ms.
 
 ---
 

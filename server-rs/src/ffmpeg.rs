@@ -94,23 +94,22 @@ struct RtmpStream {
 
 /// Manages all FFmpeg RTMP streams for a session.
 ///
-/// Uses a shared frame buffer + per-stream drain threads for synchronized output.
+/// Receives pre-encoded video chunks from MediaRecorder (H.264/VP8) and
+/// queued PCM audio from the translation pipeline. Video chunks are delayed
+/// by D seconds to allow TTS to complete before the corresponding video plays.
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
-    /// Shared ring buffer of timestamped video frames from the host webcam
-    frame_buffer: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
+    /// Delayed queue of encoded video chunks (timestamp, data)
+    video_chunks: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
     /// Fixed broadcast delay applied to all streams
     broadcast_delay: Duration,
 }
-
-/// Video: 66.67ms per frame at 15fps
-const FRAME_INTERVAL: Duration = Duration::from_nanos(66_666_666);
 /// Audio: 20ms per tick
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// Audio bytes per 20ms tick: 44100Hz × 2 bytes/sample × 1 channel × 0.02s = 1764 bytes
 const AUDIO_BYTES_PER_TICK: usize = 1764;
-/// Max frames to keep in buffer (~15s at 15fps)
-const MAX_BUFFER_FRAMES: usize = 225;
+/// Max video chunks to buffer (~60s at 10 chunks/sec)
+const MAX_VIDEO_CHUNKS: usize = 600;
 /// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
 const DEFAULT_DELAY_MS: u64 = 5000;
 /// Max FFmpeg restart attempts per stream
@@ -135,7 +134,7 @@ impl RtmpManager {
 
         Self {
             streams: HashMap::new(),
-            frame_buffer: Arc::new(StdMutex::new(VecDeque::new())),
+            video_chunks: Arc::new(StdMutex::new(VecDeque::new())),
             broadcast_delay: Duration::from_millis(delay_ms),
         }
     }
@@ -160,12 +159,13 @@ impl RtmpManager {
         Ok(())
     }
 
-    /// Buffer a video frame from the host webcam.
-    /// Frames are stored with their capture timestamp and picked up by drain threads.
-    pub fn push_video_frame(&self, jpeg_bytes: &[u8]) {
-        let mut buf = self.frame_buffer.lock().unwrap();
-        buf.push_back((Instant::now(), jpeg_bytes.to_vec()));
-        while buf.len() > MAX_BUFFER_FRAMES {
+    /// Buffer an encoded video chunk from MediaRecorder.
+    /// Chunks are timestamped and released after the broadcast delay.
+    pub fn push_video_chunk(&self, data: &[u8]) {
+        let mut buf = self.video_chunks.lock().unwrap();
+        buf.push_back((Instant::now(), data.to_vec()));
+        // Cap buffer at ~60s of chunks (assuming ~10 chunks/sec at 100ms intervals)
+        while buf.len() > 600 {
             buf.pop_front();
         }
     }
@@ -286,26 +286,29 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        // Spawn FFmpeg
+        // Spawn FFmpeg — accepts encoded video (webm/mp4) from stdin,
+        // PCM audio from FIFO. Re-encodes to H.264+AAC FLV for RTMP.
         let mut child = std::process::Command::new(&*FFMPEG_BIN)
             .args([
                 "-y",
                 "-loglevel", "warning",
-                "-f", "image2pipe",
-                "-framerate", "15",
+                // Video input: encoded stream from MediaRecorder (webm or mp4)
                 "-i", "pipe:0",
+                // Audio input: raw PCM from FIFO
                 "-f", "s16le",
                 "-ar", "44100",
                 "-ac", "1",
                 "-i", &audio_fifo,
+                // Video: re-encode to H.264 (needed for webm→flv container change)
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-crf", "28",
-                "-maxrate", "4000k",
-                "-bufsize", "8000k",
+                "-crf", "23",
+                "-maxrate", "8000k",
+                "-bufsize", "16000k",
                 "-pix_fmt", "yuv420p",
-                "-g", "30",
+                "-g", "60",
+                // Audio: encode to AAC
                 "-c:a", "aac",
                 "-ac:a", "2",
                 "-b:a", "128k",
@@ -327,14 +330,14 @@ impl RtmpManager {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let delay = self.broadcast_delay;
 
-        // Spawn video drain thread
-        let video_frame_buf = self.frame_buffer.clone();
+        // Spawn video drain thread — forwards delayed encoded chunks to FFmpeg stdin
+        let video_chunk_buf = self.video_chunks.clone();
         let video_stop = stop_flag.clone();
         let video_sid = stream_id.to_string();
         let video_handle = thread::Builder::new()
             .name(format!("video-drain-{}", stream_id))
             .spawn(move || {
-                video_drain_loop(video_sid, video_frame_buf, stdin, delay, video_stop);
+                video_chunk_drain_loop(video_sid, video_chunk_buf, stdin, delay, video_stop);
             })
             .map_err(|e| format!("Video thread spawn failed: {}", e))?;
 
@@ -442,28 +445,27 @@ pub fn spawn_health_monitor(
     })
 }
 
-// ── Video Drain Thread ─────────────────────────────────────
+// ── Video Chunk Drain Thread ──────────────────────────────
 
-/// Dedicated OS thread: drains video frames at exactly 30fps.
+/// Dedicated OS thread: forwards encoded video chunks to FFmpeg stdin
+/// after the broadcast delay has elapsed.
 ///
-/// Reads from the shared frame buffer at the delayed timeline position.
-/// Duplicates the last frame if no new frame is available (webcam drop).
-/// Logs warnings when tick jitter exceeds 5ms.
-fn video_drain_loop(
+/// Polls every 20ms. Chunks older than D seconds are written to FFmpeg.
+/// Much lighter than the old per-frame JPEG approach since the browser's
+/// hardware encoder already compressed the video.
+fn video_chunk_drain_loop(
     stream_id: String,
-    frame_buffer: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
+    chunk_buffer: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
     mut stdin: std::process::ChildStdin,
     delay: Duration,
     stop: Arc<AtomicBool>,
 ) {
-    let mut last_frame: Option<Vec<u8>> = None;
-    let mut tick_count: u64 = 0;
-    let mut next_tick = Instant::now() + FRAME_INTERVAL;
+    let poll_interval = Duration::from_millis(20);
+    let mut chunks_written: u64 = 0;
 
     eprintln!(
-        "[VIDEO:{}] drain thread started (30fps, {}ms delay)",
-        stream_id,
-        delay.as_millis()
+        "[VIDEO:{}] chunk drain thread started ({}ms delay)",
+        stream_id, delay.as_millis()
     );
 
     loop {
@@ -471,60 +473,40 @@ fn video_drain_loop(
             break;
         }
 
-        // Sleep until next tick
-        let now = Instant::now();
-        if next_tick > now {
-            thread::sleep(next_tick - now);
-        }
+        thread::sleep(poll_interval);
 
-        // Check jitter
-        let actual = Instant::now();
-        let jitter = actual.saturating_duration_since(next_tick);
-        if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
-            eprintln!(
-                "[VIDEO:{}] jitter warning: tick {} was {}ms late",
-                stream_id,
-                tick_count,
-                jitter.as_millis()
-            );
-        }
+        let deadline = Instant::now() - delay;
 
-        // Anchor next tick to prevent drift accumulation
-        next_tick += FRAME_INTERVAL;
-        tick_count += 1;
+        // Drain all chunks that are old enough
+        loop {
+            let chunk = {
+                let mut buf = chunk_buffer.lock().unwrap();
+                match buf.front() {
+                    Some((ts, _)) if *ts <= deadline => buf.pop_front(),
+                    _ => None,
+                }
+            };
 
-        let target_ts = actual - delay;
-
-        // Pick frame at delayed timeline position
-        let frame = {
-            let buf = frame_buffer.lock().unwrap();
-            find_frame_at(&buf, target_ts)
-        };
-
-        let write_result = if let Some(f) = frame {
-            let r = stdin.write_all(&f);
-            last_frame = Some(f);
-            r
-        } else if let Some(ref lf) = last_frame {
-            // No frame at target — duplicate last frame to maintain 30fps
-            stdin.write_all(lf)
-        } else {
-            // No frames yet at all (startup), skip this tick
-            continue;
-        };
-
-        if write_result.is_err() {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+            match chunk {
+                Some((_, data)) => {
+                    if stdin.write_all(&data).is_err() {
+                        if !stop.load(Ordering::Acquire) {
+                            eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+                        }
+                        drop(stdin);
+                        return;
+                    }
+                    chunks_written += 1;
+                }
+                None => break,
             }
-            break;
         }
     }
 
     drop(stdin);
     eprintln!(
-        "[VIDEO:{}] drain thread exited after {} ticks",
-        stream_id, tick_count
+        "[VIDEO:{}] chunk drain thread exited after {} chunks",
+        stream_id, chunks_written
     );
 }
 
@@ -668,20 +650,6 @@ fn audio_drain_loop(
 }
 
 // ── Shared Helpers ─────────────────────────────────────────
-
-/// Find the latest frame with timestamp <= target in the buffer.
-/// Returns None if no frame is old enough yet (initial startup delay).
-fn find_frame_at(
-    buffer: &VecDeque<(Instant, Vec<u8>)>,
-    target: Instant,
-) -> Option<Vec<u8>> {
-    for (ts, data) in buffer.iter().rev() {
-        if *ts <= target {
-            return Some(data.clone());
-        }
-    }
-    None
-}
 
 /// Truncate PCM audio to max_bytes and apply a 50ms fade-out at the cut point.
 /// Operates on s16le (16-bit signed little-endian, mono) samples.

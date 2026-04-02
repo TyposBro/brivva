@@ -39,8 +39,7 @@ export default function BroadcastPage() {
   const audioRef = useRef(new AudioPipeline());
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const frameIntervalRef = useRef<number | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -58,33 +57,49 @@ export default function BroadcastPage() {
   const startWebcam = useCallback(async (ws: WebSocket) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
       });
       const video = videoRef.current!;
       video.srcObject = stream;
       await video.play();
 
-      const canvas = canvasRef.current!;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d")!;
+      // Use MediaRecorder with hardware H.264 encoder — no per-frame JPEG overhead
+      const mimeType = MediaRecorder.isTypeSupported("video/mp4;codecs=avc1.42E01E")
+        ? "video/mp4;codecs=avc1.42E01E"
+        : MediaRecorder.isTypeSupported("video/webm;codecs=h264")
+          ? "video/webm;codecs=h264"
+          : "video/webm;codecs=vp8";
 
-      frameIntervalRef.current = window.setInterval(() => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        ctx.drawImage(video, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-        const base64 = dataUrl.split(",")[1];
-        ws.send(JSON.stringify({ type: "face:frame", data: base64 }));
-      }, 66); // ~15fps
+      console.log("[WEBCAM] MediaRecorder codec:", mimeType);
+
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: 8_000_000, // 8 Mbps
+      });
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+          // Tag byte 0x02 = video chunk (0x01 = audio PCM)
+          e.data.arrayBuffer().then((buf) => {
+            const tagged = new Uint8Array(buf.byteLength + 1);
+            tagged[0] = 0x02;
+            tagged.set(new Uint8Array(buf), 1);
+            ws.send(tagged.buffer);
+          });
+        }
+      };
+
+      recorder.start(100); // chunk every 100ms
+      recorderRef.current = recorder;
     } catch (e) {
       console.error("[WEBCAM] Failed to start:", e);
     }
   }, []);
 
   const stopWebcam = useCallback(() => {
-    if (frameIntervalRef.current) {
-      clearInterval(frameIntervalRef.current);
-      frameIntervalRef.current = null;
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+      recorderRef.current = null;
     }
     const video = videoRef.current;
     if (video?.srcObject) {
@@ -230,10 +245,13 @@ export default function BroadcastPage() {
       await startWebcam(ws);
     }
 
-    // Start audio capture
+    // Start audio capture (tag byte 0x01 = audio PCM)
     await audioRef.current.start((buffer) => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(buffer);
+        const tagged = new Uint8Array(buffer.byteLength + 1);
+        tagged[0] = 0x01;
+        tagged.set(new Uint8Array(buffer), 1);
+        ws.send(tagged.buffer);
       }
     });
 
@@ -257,8 +275,6 @@ export default function BroadcastPage() {
 
   return (
     <div className="min-h-screen bg-background text-on-surface p-6">
-      {/* Hidden canvas for webcam frame capture */}
-      <canvas ref={canvasRef} className="hidden" />
 
       <div className="max-w-3xl mx-auto space-y-6">
         {/* Header */}
