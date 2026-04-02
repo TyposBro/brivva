@@ -68,6 +68,7 @@ export default function BroadcastPage() {
   const [audioDeviceId, setAudioDeviceId] = useState(saved.audioDeviceId);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [showSettings, setShowSettings] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
   const [isCloning, setIsCloning] = useState(false);
   const [cloneProgress, setCloneProgress] = useState(0);
 
@@ -263,6 +264,9 @@ export default function BroadcastPage() {
         setVoiceReady(true);
         setIsCloning(false);
         break;
+      case "error":
+        setErrors((prev) => [...prev, msg.message]);
+        break;
     }
   }, []);
 
@@ -279,13 +283,25 @@ export default function BroadcastPage() {
     wsRef.current = ws;
 
     ws.onmessage = handleWsMessage;
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      if (isLive && e.code !== 1000) {
+        setErrors((prev) => [...prev, `Connection lost (code ${e.code}). Stop and restart to reconnect.`]);
+      }
       setIsLive(false);
       setSessionId(null);
     };
+    ws.onerror = () => {
+      setErrors((prev) => [...prev, "WebSocket error — is the backend running on localhost:3000?"]);
+    };
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       ws.onopen = () => resolve();
+      // Override onerror during connect to reject the promise
+      const origError = ws.onerror;
+      ws.onerror = (e) => { origError?.call(ws, e as Event); reject(e); };
+    }).catch(() => {
+      setIsLive(false);
+      return;
     });
 
     // Send RTMP config if any URLs are set
@@ -340,6 +356,22 @@ export default function BroadcastPage() {
             </span>
           )}
         </div>
+
+        {/* Error Banners */}
+        {errors.map((err, i) => (
+          <div
+            key={i}
+            className="flex items-center justify-between bg-error-container text-on-error-container rounded-lg px-4 py-2 text-sm"
+          >
+            <span>{err}</span>
+            <button
+              onClick={() => setErrors((prev) => prev.filter((_, j) => j !== i))}
+              className="ml-4 text-on-error-container/60 hover:text-on-error-container text-lg leading-none"
+            >
+              x
+            </button>
+          </div>
+        ))}
 
         {/* Tier Selection */}
         <div className="bg-surface-container-low rounded-xl p-4 space-y-3">

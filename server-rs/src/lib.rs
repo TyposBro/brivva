@@ -221,7 +221,15 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                                                         rtmp_langs.push(l);
                                                     }
                                                 }
-                                                Err(e) => eprintln!("[RTMP] Failed to start {}: {}", lang, e),
+                                                Err(e) => {
+                                                    eprintln!("[RTMP] Failed to start {}: {}", lang, e);
+                                                    if let Some(session) = sessions_ref.get(&sid) {
+                                                        let err_msg = serde_json::to_string(&ServerMsg::Error {
+                                                            message: format!("RTMP failed for {}: {}", lang, e),
+                                                        }).unwrap();
+                                                        session.send_to_host(Message::Text(err_msg.into()));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
