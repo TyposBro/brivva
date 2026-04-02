@@ -1,5 +1,5 @@
 const WS_BASE = (
-  import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787"
+  import.meta.env.VITE_WORKER_URL ?? "http://localhost:3000"
 ).replace(/^http/, "ws");
 
 export type RoomMessage = { type: string; [k: string]: unknown };

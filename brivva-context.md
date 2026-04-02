@@ -4,7 +4,7 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 
 ---
 
-# Brivva Project Context & User Profile (Mar 22, 2026)
+# Brivva Project Context & User Profile (Apr 2, 2026)
 
 ## User Profile: Azizbek Umidjonov
 
@@ -12,7 +12,7 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 - **Education:** B.S. in Computer Science and Engineering.
 - **Expertise:** Frontend (Kotlin, Jetpack Compose, Flutter), Backend (Rust, Axum, Tokio), and Systems (Linux, NixOS, Docker).
 - **Focus:** Real-time audio processing, low-latency streaming pipelines, and AI-driven examination platforms.
-- **Status:** Accepted as partner at Brivva (pending formal offer). CEO MJ looking into visa sponsorship (follow-up ~early April after her brother's wedding).
+- **Status:** CTO role at Brivva, negotiating terms (profit-sharing vs employment). Building product on weekends while staying at StoneLab. Decision deferred until Sep 2026 (F-2-7 visa timeline).
 
 ---
 
@@ -20,114 +20,89 @@ Below is a single Markdown file. You can save this as `brivva_context.md`. If yo
 
 **Core Value Prop:** Real-time multilingual live commerce broadcasting. One host speaks; N platforms receive translated audio in the host's cloned voice. Source-language platforms get the host's actual voice (passthrough).
 
-### Current Technical Stack
+**New Direction (Apr 2026):** Pivoting from web-based to **desktop app with OBS Studio integration**. Prism (owned by Naver) is direct competitor — Brivva can't partner with Naver. Desktop app captures host audio, translates per language, and pushes each language to a separate OBS instance → each OBS streams to a different platform (YouTube EN, Coupang KR, Rakuten JP). Bypasses 1:1 stream rule while remaining ToS-compliant. **Tauri** (Rust + web frontend) is the target framework — reuses existing Rust backend + React frontend. Brivva already has merchant accounts on Coupang, Rakuten, etc. — ready to test in production.
 
-- **Backend:** Rust (Axum) orchestrator. 2 Docker containers (server-rs + stt-wrapper). No GPU required.
-- **Audio Pipeline:** Deepgram Nova-3 (STT, 44.1kHz) → Google Cloud Translation API v2 (~40ms from Seoul) → ElevenLabs Flash v2.5 (TTS). Source-language streams bypass pipeline entirely (passthrough).
-- **Streaming Engine:** FFmpeg (sidecar/process) handling RTMPS push with fixed-delay jitter buffer for A/V sync. CRF 20 encoding auto-adapts quality to input resolution (up to 4K).
-- **Frontend:** React 19 + TypeScript + Tailwind 3 + Lucide icons (Cloudflare Pages). "Kinetic Monolith" design system (Space Grotesk + Inter, tonal depth, no-line rule). Notion-style progressive disclosure dashboard.
-- **Infrastructure:** AWS ECS Fargate (pay-per-session, zero idle cost) + Cloudflared Tunnels. No GPU needed. Each live session spins up a Fargate task with the exact CPU/RAM needed, and shuts down when the session ends.
-- **Local Dev:** Docker Compose with `.env.local` override, frontend on Vite dev server.
+### Current Technical Stack (v13 — Desktop App Rewrite, Apr 2 2026)
 
-### Estimated Monthly Cost (ECS Fargate)
+- **Desktop App:** Tauri v2 (Rust + React frontend). Single-page UI, no routing. Builds to native macOS `.app` + `.dmg`.
+- **Backend:** Rust (Axum) embedded in Tauri, running on localhost:3000. Stripped to 3 files (~450 lines): `lib.rs` (WebSocket server), `pipeline.rs` (STT→Translate→TTS), `types.rs` (Lang, Session, ServerMsg). No DB, no REST routes, no YouTube OAuth, no FFmpeg.
+- **Audio Pipeline:** Deepgram Nova-3 (STT, 44.1kHz) → Google Cloud Translation API v2 (~40ms) → ElevenLabs Flash v2.5 (TTS). Translated audio sent back to host via WebSocket, tagged by language.
+- **Frontend:** React 19 + TypeScript + Tailwind 3. Single `BroadcastPage` — tier selector (4 options), language config, mic capture, live transcript display. ~250 lines.
+- **Video:** Handled entirely by OBS — the app does NOT capture or process video. OBS captures the webcam directly.
+- **Infrastructure:** None. All processing local. API keys loaded from `.env.local`. All AWS resources deleted Apr 2, 2026.
+- **Translation Tiers:** Backend supports `tier` parameter: tier 1 = subtitles only (STT + Translate, no TTS), tier 2 = voice + subtitles (full pipeline). Tiers 3-4 (lipsync) not yet implemented.
+- **stt-wrapper:** Python subprocess (Deepgram WebSocket proxy with language-aware chunking). Still required as sidecar.
+- **Open question:** A/V sync strategy — whether to bring back the jitter buffer (from deleted `ffmpeg.rs`) or let OBS handle sync independently per language. Getting second opinion on platform latency assumptions.
+
+### Estimated Cost Per Session (Desktop App — No Cloud Compute)
 
 Per-stream API cost: ~$1.24 (2-hour session: Deepgram $0.52 + Google Translate $0.72).
-Per-session compute cost: $0.40–$1.44 depending on task size (see Capacity & Scaling).
-**Zero idle cost** — no server running when nobody is live.
+Compute cost: $0 — runs locally on desktop. No AWS infrastructure.
 
 | Service | Pricing | 5 sessions/mo | 30 sessions/mo | 100 sessions/mo |
 |---------|---------|---------------|----------------|-----------------|
-| AWS Fargate (4 vCPU) | $0.20/hr | $2.00 | $12.00 | $40 |
 | Deepgram Nova-3 | $0.0043/min | $2.60 | $15.60 | $52 |
 | Google Translate | $20/M chars (500K free) | $0 | $7.80 | $52 |
 | ElevenLabs TTS | Plan-based | $5 | $22 | $99 |
-| Cloudflare Pages | Free | $0 | $0 | $0 |
-| **Total** | | **~$10** | **~$57** | **~$243** |
+| **Total** | | **~$8** | **~$45** | **~$203** |
 
-Previous stack: EC2 t3.medium ($30/mo fixed even when idle). GPU era: $750+/mo fixed.
+Previous stacks: ECS Fargate (~$22/mo), EC2 t3.medium ($30/mo), GPU era ($750+/mo). All decommissioned Apr 2, 2026.
 
-### Working Features
+### Working Features (Desktop App v13)
 
-- [x] **Voice Cloning:** Real-time ElevenLabs voice cloning via `/v1/voices/add`.
-- [x] **Twitch Integration:** Full RTMP push (Video + Translated Audio).
-- [x] **YouTube OAuth2:** Flow complete; auto-creation of broadcasts via Data API v3. Scope: `youtube` (sensitive, not restricted — no CASA audit).
-- [x] **YouTube Privacy:** Configurable privacy status (public/unlisted/private) from dashboard.
-- [x] **Zero-Config UX:** Magic Paste (RTMP parsing), Credential Vault, and Platform Deep-linking.
-- [x] **FFmpeg Muxing:** Server-side mixing of webcam frames and TTS audio pipes.
-- [x] **Source-Language Passthrough:** Host's raw 44.1kHz audio queued directly to source-language RTMP streams — no STT, no translation, no TTS. Zero API cost, zero latency for the host's own language.
-- [x] **Premium Quality (up to 4K):** Audio at 44.1kHz (CD quality). Video captured at camera's native resolution (up to 3840x2160). FFmpeg uses CRF 20 with 35Mbps maxrate — auto-adapts bitrate to any resolution. YouTube stream set to "variable" resolution. External cameras (USB, HDMI capture cards) work automatically via browser `getUserMedia`.
-- [x] **Fixed-Delay A/V Sync:** Jitter buffer with constant delay D (configurable via `BROADCAST_DELAY_MS`, default 2500ms). Dedicated OS threads (`std::thread`, not Tokio) for video drain (30fps/33ms) and audio drain (20ms) independently. Hard TTS timeout at D-500ms — missed utterances become silence, never sync slips. TTS audio truncated with 50ms fade-out if it exceeds utterance duration + 2s. Cumulative audio sample tracking with 5s drift checks. Jitter monitoring (warns if tick >5ms late). Single D across all languages. YouTube/Twitch platform latency (3-30s) absorbs the delay invisibly.
-- [x] **Progressive Disclosure Dashboard:** Notion-style UX — collapsible platform picker grouped by region, expandable RTMP config per destination card, settings drawer for YouTube/voices. Most users see title + "Add destination" + Go Live.
-- [x] **Privacy & Terms Pages:** `/privacy` and `/terms` for Google OAuth verification compliance.
-- [x] **Google Cloud Translation:** Replaced self-hosted NLLB-200 (GPU) with Google Cloud Translation API v2. Seoul region (~40ms), free tier 500K chars/mo. Eliminated $750/mo GPU cost.
-- [x] **Per-Platform Language:** Each platform destination has its own language. YouTube no longer auto-creates unwanted source-language streams.
-- [x] **Local Dev Environment:** Full stack runs locally via `docker compose --env-file .env.local`, frontend via `npm run dev`, YouTube OAuth redirects to localhost.
+- [x] **Tauri Desktop App:** Builds to native macOS `.app` + `.dmg`. Axum backend embedded, starts on launch.
+- [x] **Single-Page UI:** Source/target language config, tier selector, start/stop, live transcript + translations.
+- [x] **Translation Pipeline:** STT → Google Translate → ElevenLabs TTS, parallel per language.
+- [x] **Tier Support:** Tier 1 (subtitles only, no TTS) and Tier 2 (voice + subtitles). Backend skips TTS for tier 1.
+- [x] **Voice Cloning:** Real-time ElevenLabs voice cloning via `/v1/voices/add`. Auto-deleted on session end.
+- [x] **WebSocket Protocol:** Single `/ws` endpoint. Connect with `?sourceLang=en&targetLangs=ja,ko&tier=2`. Send binary audio, receive JSON messages + binary TTS audio tagged by language.
+- [x] **STT Reconnection:** Up to 5 reconnect attempts on unexpected disconnect.
+- [x] **Google Cloud Translation:** API v2, ~40ms from Seoul, 500K chars/mo free tier.
+- [x] **.env Loading:** Prefers `.env.local` over `.env`. Searches project root automatically.
 
-### Capacity & Scaling (ECS Fargate)
+### Removed from v12 (web-based) → v13 (desktop)
 
-#### What is ECS Fargate?
+- YouTube OAuth, broadcast auto-creation
+- FFmpeg RTMP muxing, fixed-delay jitter buffer, A/V sync threads
+- SQLite database (users, sessions, streams, voices, credentials tables)
+- REST API routes (sessions, streams, credentials, voices)
+- Platform detection, RTMP credential management
+- Multi-page dashboard, guest page, privacy/terms pages
+- Video capture and frame streaming
+- Source-language passthrough (host audio → RTMP)
+- All AWS infrastructure (ECS, EC2, ECR, EFS, Secrets Manager, CloudWatch)
 
-**EC2** (what we had) = you rent a computer that runs 24/7. You pay $30/mo whether anyone is streaming or not. Like renting an apartment — you pay rent even when you're not home.
+### Architecture (Desktop App v13)
 
-**ECS** (Elastic Container Service) = AWS's way of running Docker containers. Same `docker-compose.yml` images, but AWS manages where they run. Think of it as "Docker Compose but AWS manages the machines."
+**App responsibility:** Audio only — capture mic, run STT → Translate → TTS, output translated audio per language. App does NOT handle video.
 
-**Fargate** = the "serverless" mode of ECS. You don't pick a server. You say "run this container with 4 vCPU" and AWS handles everything. When the container stops, you stop paying. Like a taxi — you only pay when you're riding.
+**OBS responsibility:** Video capture (webcam), encoding (H.264/NVENC), RTMP push to platforms. One OBS instance per language/platform.
 
-**How it works for Brivva:**
-1. Host clicks "Go Live" → API tells AWS to start a Fargate task
-2. AWS spins it up in ~30-60s with the right amount of CPU
-3. Streams go live, host broadcasts
-4. Host ends session → task dies → billing stops instantly
+**Scaling concern:** 8 OBS instances × 4K is not viable with software encoding. NVENC (GPU) is mandatory for multi-stream 4K. Alternative: app handles FFmpeg muxing internally (one video source shared across N audio tracks → N RTMP outputs), eliminating the need for multiple OBS instances. This was the v12 architecture — may need to bring back selectively.
 
-**The win:** At 5 sessions/month, you go from $30/mo (EC2 idle 24/7) to $2/mo (Fargate, only pay for ~10 hours of actual streaming). At 30 sessions/mo it's $12 vs $30.
-
-**vs Docker Compose (local dev):** Same Docker images, same containers. Fargate just runs them in AWS instead of on your laptop.
-
-#### Per-Stream Resource Footprint
-
-- CPU: ~20% of 1 vCPU (H.264 `ultrafast` + `zerolatency`, 30fps)
-- RAM: ~75 MB (FFmpeg process + video/audio drain threads)
-- Network: ~5-8 Mbps actual egress (webcam talking head; 35Mbps maxrate cap)
-- OS threads: 2 dedicated (video drain @ 33ms, audio drain @ 20ms)
-
-#### Key Constraint: Session Affinity
-
-All streams in one session share the same video frames and WebSocket — they must live on the **same Fargate task**. To support more languages in one session, you request a bigger task (more vCPU). To support more concurrent sessions, Fargate just launches more tasks automatically.
-
-#### Languages Per Session by Task Size
-
-| Task Size | vCPU | Languages/Session | Cost/hr | Per 2hr Session | Total w/ API costs (8 langs) |
-|-----------|------|-------------------|---------|-----------------|------------------------------|
-| 4 vCPU / 8 GB | 4 | 6–8 | $0.20 | $0.40 | ~$10.32 |
-| 8 vCPU / 16 GB | 8 | 14–16 | $0.38 | $0.76 | ~$10.68 |
-| 16 vCPU / 30 GB | 16 | 30+ | $0.72 | $1.44 | ~$11.36 |
-
-*Total = Fargate compute + ($1.24 × N translated streams). Source-language passthrough streams cost $0 in API fees.*
-
-#### Scaling Strategy
-
-- **MVP (now):** Keep t3.medium for development/testing. Migrate to Fargate for production.
-- **Production:** ECS Fargate — one task per session, auto-sized. Zero idle cost. 6–8 languages per session on smallest task.
-- **Scale (245+ hrs/mo):** Switch to ECS on EC2 with auto-scaling group — same orchestration, cheaper compute for sustained workloads.
-- **GPU (NVENC):** Not recommended. g4dn.xlarge costs $380/mo, marginal quality gain, contradicts v12 cost structure.
+**Open question:** Whether to use multiple OBS instances (simple but resource-heavy) or internal FFmpeg muxing (efficient but needs jitter buffer for A/V sync). Getting second opinion on platform latency and sync requirements.
 
 ### Critical Blocker: The 1:1 Stream Rule
 
 - **Constraint:** Most platforms (Twitch, IG, TikTok) allow only **one ingest stream per account**.
-- **Architecture:** To support 3 languages, the user needs 3 accounts per platform (e.g., `@brand_en`, `@brand_jp`).
-- **The Exception:** YouTube, which allows multiple broadcasts on one account via API.
+- **Solution (Apr 2026):** Each language gets its own OBS instance → its own platform. YouTube EN, Coupang KR, Rakuten JP — each platform receives one stream in one language. ToS-compliant.
+- **YouTube exception:** Allows multiple broadcasts on one account via API (still useful for multi-language on single platform).
 
 ---
 
 ## Business Context & Timeline
 
-- **Interview Outcome (Mar 21):** Culture-fit interview with two CEOs went great. Azizbek is #1 pick out of 40 candidates. Partner offer (not just employee).
-- **Compensation:** Target 100M KRW + equity (stated at screening). Current salary 55M KRW + 30% bonus shared for transparency. Motivation: ownership & new challenges, not money.
-- **Visa:** CEO MJ looking into immigration sponsorship. Follow-up early April 2026.
+- **Interview Outcome (Mar 21):** Culture-fit interview with two CEOs went great. Azizbek is #1 pick out of 40 candidates.
+- **Apr 2 Meeting (Simon only):** Pivoted from employment to **partnership** — explicitly stated: Aziz = tech, Brivva = sales, not an employee/employer relationship. Simon proposed 30% Aziz / 70% Brivva split. Azizbek countered with ₩100M + 10%. Not finalized — observing Brivva's business performance through Sep 2026.
+- **Compensation options under discussion:**
+  - **Option A:** 30%+ profit split (higher upside, no floor — crossover at ~25-30 streams/month)
+  - **Option B:** ₩100M salary + 10% revenue share (stable floor, lower upside)
+- **Visa:** Staying at StoneLab on E-7. Target F-2-7 visa Jun-Aug 2026 → open own company → formalize B2B partnership.
+- **Revenue model:** $3-4K per live stream per language. Existing contracts ~₩100M. Revenue breakdown: client 50%, influencers 5%, production 5%, Brivva team 10%, Brivva exec + Aziz split TBD.
 - **High Stakes:** Each stream can generate up to $1M revenue. Zero tolerance for bugs, frame drops, or clunky translation.
-- **Major Business Blockers:**
-  - Need Korean business registration for Coupang/Naver APIs.
-  - Need Japanese/Chinese entities for Rakuten/Douyin/TikTok APIs.
+- **Competitive landscape:** Prism (Naver-owned) is direct competitor — Brivva can't use Naver partnerships. OBS-based approach avoids this.
+- **Business Blockers (RESOLVED):** Brivva already has merchant accounts on Coupang, Rakuten, etc. Ready for production testing.
+- **Remaining blockers:** Japanese/Chinese entities for Douyin/TikTok APIs.
 
 ---
 
@@ -147,27 +122,37 @@ All streams in one session share the same video frames and WebSocket — they mu
 11. ~~**Demo Video**~~ — Recorded for Google OAuth verification
 12. ~~**Google Cloud Translation**~~ — Replaced NLLB-200 (GPU) with Google Translate API v2. $750/mo → $30/mo server cost
 13. ~~**Per-Platform Language Fix**~~ — YouTube no longer auto-creates source-lang streams. Each destination uses its own lang
-14. ~~**ECS Fargate Migration**~~ — Migrated from EC2 t3.medium ($30/mo) to ECS Fargate (pay-per-session). 3 containers: server-rs + stt-wrapper + cloudflared sidecar. Secrets in AWS Secrets Manager. EC2 instances stopped. Zero idle cost.
+14. ~~**ECS Fargate Migration**~~ — Migrated from EC2 to ECS Fargate. **DECOMMISSIONED Apr 2, 2026** — all AWS resources deleted (EC2, ECS, ECR, EFS, Secrets Manager, CloudWatch). Moving to desktop app.
 15. ~~**YouTube frameRate Fix**~~ — YouTube liveStreams.insert requires `frameRate` field. With `resolution: "variable"`, must use `frameRate: "variable"` (not `"30fps"` or omitted). Was blocking all YouTube stream creation and translations.
-16. ~~**EFS for Persistent Storage**~~ — EFS `fs-04e75aef9c41c4bc1` mounted at `/data` in server-rs. SQLite DB persists across redeploys. Task def `brivva:5`.
-17. ~~**CloudWatch Observability**~~ — 9 metric filters (sessions, transcripts, TTS, translations, errors, crashes, voice clones), structured `[METRIC]` log lines (translate_ms, tts_ms, pipeline_ms), CloudWatch Dashboard "Brivva" with 6 widgets, alarms for TTS timeouts (>3/5min) and FFmpeg crashes.
+16. ~~**EFS for Persistent Storage**~~ — **DECOMMISSIONED** — was EFS mounted at `/data`. Deleted with AWS teardown.
+17. ~~**CloudWatch Observability**~~ — **DECOMMISSIONED** — was 9 metric filters + dashboard + alarms. Deleted with AWS teardown.
 18. ~~**STT Reconnect Logic**~~ — STT WebSocket reconnects up to 5 times on unexpected disconnect. Audio buffer persists across reconnections. Utterance counter preserved.
 19. ~~**Adaptive Endpointing**~~ — Measures host WPM over first 5 utterances, classifies as fast/normal/slow, reconnects to Deepgram with adjusted `utterance_end_ms` and `endpointing`. Per-session, one-time adaptation.
 20. ~~**Error Handling Hardening**~~ — FFmpeg crash recovery (3 retries, 2s delay, health monitor every 2s), STT WebSocket reconnect (5 retries, audio buffer preserved), TTS hard timeout (min of broadcast_delay-500ms or 5s)
+
+### Done (v13 Desktop Rewrite — Apr 2, 2026)
+21. ~~**Tauri Desktop App**~~ — Wrapped Rust backend + React frontend in Tauri v2. Builds to `.app` + `.dmg`. Axum embedded on localhost:3000.
+22. ~~**Backend Strip-Down**~~ — Removed ffmpeg.rs, youtube.rs, routes.rs, db.rs, platform.rs, room/. Server is 3 files (~450 lines): lib.rs, pipeline.rs, types.rs.
+23. ~~**Frontend Strip-Down**~~ — Single `BroadcastPage` replacing multi-page dashboard. Tier selector, language config, live transcript. ~250 lines.
+24. ~~**Tier Support**~~ — Backend accepts `tier` param. Tier 1 = subtitles only (skips TTS). Tier 2 = voice + subtitles (full pipeline).
+25. ~~**AWS Decommission**~~ — All resources deleted (EC2, ECS, ECR, EFS, Secrets Manager, CloudWatch). ~$78/$100 credit preserved.
 
 ### In Progress
 
 | Priority | Task | Status |
 |----------|------|--------|
-| Waiting | **Google OAuth Verification** — submitted for review | Waiting on Google (2-6 weeks) |
+| **P0** | **A/V Sync Decision** | Getting second opinion on whether platform latency absorbs sync offset, or if jitter buffer is needed. Determines whether to bring back FFmpeg muxing |
+| **P0** | **OBS Audio Routing** | How translated audio reaches OBS — named pipes, virtual audio devices, or internal FFmpeg RTMP push to local relay |
 
 ### Not Started
 
 | Priority | Task | Details |
 |----------|------|---------|
-| P2 | **Voice-Sample WPM** | Measure WPM during 30s voice cloning sample instead of first 5 utterances — eliminates reconnect and wasted utterances. Pass endpointing params to STT at session start |
-| P2 | **Platform Partnerships** | Korean business registration for Coupang/Naver, Japanese for Rakuten, Chinese for Douyin/Taobao/Kuaishou/Xiaohongshu/Bilibili — blocked on business entity |
-| P2 | **TTS Provider Evaluation** | Evaluate Cartesia Sonic 3 and Fish Audio as ElevenLabs replacements — see Provider Alternatives section below |
+| **P0** | **Coupang/Rakuten Production Test** | Brivva has merchant accounts ready. Test live streams on real accounts once audio routing is working |
+| **P1** | **Lipsync (Tiers 3-4)** | Real-time (tier 3) and post-processed (tier 4) lipsync. Not production ready. Stretch goal |
+| **P1** | **stt-wrapper Rust Port** | Rewrite Python STT wrapper in Rust to eliminate Python dependency for distribution |
+| P2 | **TTS Provider Evaluation** | Evaluate Cartesia Sonic 3 and Fish Audio as ElevenLabs replacements |
+| P2 | **Platform Partnerships** | Japanese/Chinese entities for Douyin/Taobao etc. — blocked on business entity |
 
 ---
 
