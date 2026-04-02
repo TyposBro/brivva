@@ -157,7 +157,7 @@ export default function BroadcastPage() {
     } catch (e) {
       console.error("[WEBCAM] Failed to start:", e);
     }
-  }, []);
+  }, [videoDeviceId]);
 
   const stopWebcam = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
