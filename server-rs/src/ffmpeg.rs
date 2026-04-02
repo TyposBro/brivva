@@ -17,11 +17,50 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
+
+// ── FFmpeg Binary Resolution ──────────────────────────────
+//
+// Looks for bundled FFmpeg (Tauri sidecar) next to the executable first,
+// then falls back to system PATH.
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+const SIDECAR_NAME: &str = "ffmpeg-aarch64-apple-darwin";
+#[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+const SIDECAR_NAME: &str = "ffmpeg-x86_64-apple-darwin";
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+const SIDECAR_NAME: &str = "ffmpeg-x86_64-unknown-linux-gnu";
+#[cfg(not(any(
+    all(target_arch = "aarch64", target_os = "macos"),
+    all(target_arch = "x86_64", target_os = "macos"),
+    all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"),
+)))]
+const SIDECAR_NAME: &str = "ffmpeg";
+
+static FFMPEG_BIN: LazyLock<String> = LazyLock::new(|| {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Tauri sidecar convention: ffmpeg-{target_triple}
+            let sidecar = dir.join(SIDECAR_NAME);
+            if sidecar.exists() {
+                eprintln!("[FFMPEG] Using bundled: {}", sidecar.display());
+                return sidecar.to_string_lossy().to_string();
+            }
+            // Plain name (manual placement)
+            let plain = dir.join("ffmpeg");
+            if plain.exists() {
+                eprintln!("[FFMPEG] Using bundled: {}", plain.display());
+                return plain.to_string_lossy().to_string();
+            }
+        }
+    }
+    eprintln!("[FFMPEG] Using system ffmpeg from PATH");
+    "ffmpeg".to_string()
+});
 
 /// Audio waiting to be played at the right point in the delayed timeline
 pub(crate) struct QueuedAudio {
@@ -248,7 +287,7 @@ impl RtmpManager {
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
         // Spawn FFmpeg
-        let mut child = std::process::Command::new("ffmpeg")
+        let mut child = std::process::Command::new(&*FFMPEG_BIN)
             .args([
                 "-y",
                 "-loglevel", "warning",
@@ -725,7 +764,7 @@ pub fn kill_orphan_ffmpeg() {
 
 /// Decode MP3 bytes to raw PCM s16le 44100Hz mono using FFmpeg subprocess
 pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = TokioCommand::new("ffmpeg")
+    let mut child = TokioCommand::new(&*FFMPEG_BIN)
         .args([
             "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1",
         ])
