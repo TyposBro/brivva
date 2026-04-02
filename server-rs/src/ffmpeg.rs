@@ -103,22 +103,22 @@ pub struct RtmpManager {
     broadcast_delay: Duration,
 }
 
-/// Video: 33.33ms per frame at 30fps
-const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
+/// Video: 66.67ms per frame at 15fps
+const FRAME_INTERVAL: Duration = Duration::from_nanos(66_666_666);
 /// Audio: 20ms per tick
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// Audio bytes per 20ms tick: 44100Hz × 2 bytes/sample × 1 channel × 0.02s = 1764 bytes
 const AUDIO_BYTES_PER_TICK: usize = 1764;
-/// Max frames to keep in buffer (~15s at 30fps)
-const MAX_BUFFER_FRAMES: usize = 450;
+/// Max frames to keep in buffer (~15s at 15fps)
+const MAX_BUFFER_FRAMES: usize = 225;
 /// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
 const DEFAULT_DELAY_MS: u64 = 5000;
 /// Max FFmpeg restart attempts per stream
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts
 const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
-/// Jitter warning threshold
-const JITTER_WARN_THRESHOLD: Duration = Duration::from_millis(5);
+/// Jitter warning threshold (100ms avoids log spam)
+const JITTER_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 /// Fade-out duration in bytes: 50ms at 44100Hz mono 16-bit = 4410 bytes
 const FADE_OUT_BYTES: usize = 4410;
 /// Audio bytes per second: 44100Hz × 2 bytes/sample = 88200
@@ -292,7 +292,7 @@ impl RtmpManager {
                 "-y",
                 "-loglevel", "warning",
                 "-f", "image2pipe",
-                "-framerate", "30",
+                "-framerate", "15",
                 "-i", "pipe:0",
                 "-f", "s16le",
                 "-ar", "44100",
@@ -301,11 +301,11 @@ impl RtmpManager {
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-crf", "20",
-                "-maxrate", "35000k",
-                "-bufsize", "70000k",
+                "-crf", "28",
+                "-maxrate", "4000k",
+                "-bufsize", "8000k",
                 "-pix_fmt", "yuv420p",
-                "-g", "60",
+                "-g", "30",
                 "-c:a", "aac",
                 "-ac:a", "2",
                 "-b:a", "128k",

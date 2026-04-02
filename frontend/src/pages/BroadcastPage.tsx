@@ -56,7 +56,7 @@ export default function BroadcastPage() {
   const startWebcam = useCallback(async (ws: WebSocket) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
       });
       const video = videoRef.current!;
       video.srcObject = stream;
@@ -70,10 +70,10 @@ export default function BroadcastPage() {
       frameIntervalRef.current = window.setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
         ctx.drawImage(video, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
         const base64 = dataUrl.split(",")[1];
         ws.send(JSON.stringify({ type: "face:frame", data: base64 }));
-      }, 33); // ~30fps
+      }, 66); // ~15fps
     } catch (e) {
       console.error("[WEBCAM] Failed to start:", e);
     }
