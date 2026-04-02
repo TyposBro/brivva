@@ -32,6 +32,8 @@ export default function BroadcastPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [voiceReady, setVoiceReady] = useState(false);
   const [rtmpUrls, setRtmpUrls] = useState<Record<string, string>>({});
+  const [isCloning, setIsCloning] = useState(false);
+  const [cloneProgress, setCloneProgress] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef(new AudioPipeline());
@@ -91,6 +93,74 @@ export default function BroadcastPage() {
     }
   }, []);
 
+  // ── Voice Cloning ──────────────────────────────────────
+
+  const cloneVoice = useCallback(async () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    setIsCloning(true);
+    setCloneProgress(0);
+
+    const CLONE_DURATION = 30; // seconds
+    const SAMPLE_RATE = 44100;
+    const chunks: Int16Array[] = [];
+
+    // Capture mic audio for voice sample
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      const float32 = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      }
+      chunks.push(int16);
+    };
+
+    source.connect(processor);
+    processor.connect(ctx.destination);
+
+    // Progress timer
+    const startTime = Date.now();
+    const progressInterval = window.setInterval(() => {
+      const elapsed = (Date.now() - startTime) / 1000;
+      setCloneProgress(Math.min(elapsed / CLONE_DURATION, 1));
+    }, 200);
+
+    // Wait for recording duration
+    await new Promise((resolve) => setTimeout(resolve, CLONE_DURATION * 1000));
+
+    clearInterval(progressInterval);
+    processor.disconnect();
+    stream.getTracks().forEach((t) => t.stop());
+    ctx.close();
+
+    // Combine chunks into single PCM buffer
+    const totalSamples = chunks.reduce((sum, c) => sum + c.length, 0);
+    const pcm = new Int16Array(totalSamples);
+    let offset = 0;
+    for (const chunk of chunks) {
+      pcm.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    // Convert to base64 and send
+    const bytes = new Uint8Array(pcm.buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+
+    ws.send(JSON.stringify({ type: "voice:sample", audio: base64 }));
+    setCloneProgress(1);
+    // isCloning stays true until voice:ready arrives
+  }, []);
+
   // ── WebSocket Messages ────────────────────────────────
 
   const handleWsMessage = useCallback((e: MessageEvent) => {
@@ -122,6 +192,7 @@ export default function BroadcastPage() {
         break;
       case "voice:ready":
         setVoiceReady(true);
+        setIsCloning(false);
         break;
     }
   }, []);
@@ -381,8 +452,27 @@ export default function BroadcastPage() {
               {hasRtmpStreams && (
                 <span className="text-xs text-primary ml-2">RTMP</span>
               )}
-              {voiceReady && (
+              {voiceReady ? (
                 <span className="text-xs text-secondary ml-2">Voice cloned</span>
+              ) : !isCloning ? (
+                <button
+                  onClick={cloneVoice}
+                  className="ml-2 px-3 py-1 rounded-lg bg-secondary-container text-on-secondary-container text-xs font-semibold hover:opacity-90 transition-opacity"
+                >
+                  Clone Voice
+                </button>
+              ) : (
+                <div className="ml-2 flex items-center gap-2">
+                  <div className="w-24 h-1.5 bg-surface-container-high rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-secondary rounded-full transition-all duration-200"
+                      style={{ width: `${cloneProgress * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-outline">
+                    {cloneProgress < 1 ? `${Math.round(cloneProgress * 30)}s / 30s` : "Cloning..."}
+                  </span>
+                </div>
               )}
             </div>
           )}
