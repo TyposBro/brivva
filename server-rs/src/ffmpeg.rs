@@ -311,13 +311,11 @@ impl RtmpManager {
             "-i".to_string(), audio_fifo.clone(),
         ];
 
-        if self.video_codec == "h264" {
-            // H.264 passthrough — zero CPU for video
-            eprintln!("[FFMPEG] Using H.264 passthrough (-c:v copy)");
-            args.extend(["-c:v".to_string(), "copy".to_string()]);
-        } else {
-            // Re-encode VP8/VP9 → H.264 for FLV container
-            eprintln!("[FFMPEG] Re-encoding {} → H.264", self.video_codec);
+        // Always re-encode to H.264 for FLV container.
+        // -c:v copy doesn't work with chunked WebM from MediaRecorder stdin.
+        // ultrafast preset keeps CPU usage low since MediaRecorder already compressed.
+        {
+            eprintln!("[FFMPEG] Encoding {} → H.264 (ultrafast)", self.video_codec);
             args.extend([
                 "-c:v".to_string(), "libx264".to_string(),
                 "-preset".to_string(), "ultrafast".to_string(),
