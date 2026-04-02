@@ -314,7 +314,7 @@ pub async fn start_stt(
                                 if local_wpm_samples.len() >= 5 {
                                     let avg_wpm = local_wpm_samples.iter().sum::<u32>() as f32
                                         / local_wpm_samples.len() as f32;
-                                    let (label, new_endp, new_utt_ms) =
+                                    let (label, new_utt_ms, new_endp) =
                                         crate::stt::classify_speaking_speed(avg_wpm);
                                     local_adapted = true;
 
