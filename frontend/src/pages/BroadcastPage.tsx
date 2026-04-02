@@ -310,9 +310,10 @@ export default function BroadcastPage() {
       .map(([lang, url]) => ({ lang, url: url.trim() }));
 
     if (streams.length > 0) {
-      ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay }));
-      // Start webcam capture for RTMP video
+      // Start webcam first — reports video:codec to backend before FFmpeg spawns
       await startWebcam(ws);
+      // Then start RTMP streams (uses reported codec for passthrough decision)
+      ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay }));
     }
 
     // Start audio capture (tag byte 0x01 = audio PCM)
