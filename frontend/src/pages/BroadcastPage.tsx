@@ -83,9 +83,17 @@ export default function BroadcastPage() {
     saveConfig({ sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId });
   }, [sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId]);
 
-  // Enumerate media devices
+  // Enumerate media devices (request permission first to reveal labels)
   useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then(setDevices).catch(() => {});
+    (async () => {
+      try {
+        // Brief permission request to unlock device labels
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      setDevices(devs);
+    })();
   }, []);
 
   // Auto-scroll transcript
