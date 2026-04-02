@@ -624,31 +624,51 @@ export default function BroadcastPage() {
               {hasRtmpStreams && (
                 <span className="text-xs text-primary ml-2">RTMP</span>
               )}
-              {voiceReady ? (
+              {voiceReady && (
                 <span className="text-xs text-secondary ml-2">Voice cloned</span>
-              ) : !isCloning ? (
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Voice Cloning (visible when live, tier 2+) */}
+        {isLive && tier >= 2 && !voiceReady && (
+          <div className="bg-surface-container-low rounded-xl p-4 space-y-3">
+            <h2 className="font-headline text-sm font-semibold text-on-surface-variant uppercase tracking-wider">
+              Voice Cloning
+            </h2>
+            {!isCloning ? (
+              <div className="space-y-2">
+                <p className="text-xs text-outline">
+                  Record 30 seconds of your voice. All translations will use your cloned voice instead of the default.
+                </p>
                 <button
                   onClick={cloneVoice}
-                  className="ml-2 px-3 py-1 rounded-lg bg-secondary-container text-on-secondary-container text-xs font-semibold hover:opacity-90 transition-opacity"
+                  className="px-4 py-2 rounded-lg bg-secondary-container text-on-secondary-container text-sm font-semibold hover:opacity-90 transition-opacity"
                 >
-                  Clone Voice
+                  Start Recording (30s)
                 </button>
-              ) : (
-                <div className="ml-2 flex items-center gap-2">
-                  <div className="w-24 h-1.5 bg-surface-container-high rounded-full overflow-hidden">
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-2 bg-surface-container-high rounded-full overflow-hidden">
                     <div
                       className="h-full bg-secondary rounded-full transition-all duration-200"
                       style={{ width: `${cloneProgress * 100}%` }}
                     />
                   </div>
-                  <span className="text-xs text-outline">
+                  <span className="text-sm text-on-surface-variant font-mono w-20 text-right">
                     {cloneProgress < 1 ? `${Math.round(cloneProgress * 30)}s / 30s` : "Cloning..."}
                   </span>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+                {cloneProgress < 1 && (
+                  <p className="text-xs text-outline">Speak naturally into your microphone...</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Live Transcript */}
         {isLive && (
