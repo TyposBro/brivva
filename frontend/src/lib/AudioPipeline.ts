@@ -7,8 +7,8 @@ export class AudioPipeline {
   private processor: ScriptProcessorNode | null = null;
   private stream: MediaStream | null = null;
 
-  async start(onAudio: (buffer: ArrayBuffer) => void): Promise<AnalyserNode> {
-    this.stream = await this.captureMic();
+  async start(onAudio: (buffer: ArrayBuffer) => void, deviceId?: string): Promise<AnalyserNode> {
+    this.stream = await this.captureMic(deviceId);
     this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     const source = this.ctx.createMediaStreamSource(this.stream);
 
@@ -18,8 +18,11 @@ export class AudioPipeline {
     return analyser;
   }
 
-  private captureMic(): Promise<MediaStream> {
-    return navigator.mediaDevices.getUserMedia({ audio: true });
+  private captureMic(deviceId?: string): Promise<MediaStream> {
+    const constraints: MediaStreamConstraints = {
+      audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+    };
+    return navigator.mediaDevices.getUserMedia(constraints);
   }
 
   private createAnalyser(source: MediaStreamAudioSourceNode): AnalyserNode {

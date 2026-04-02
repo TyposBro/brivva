@@ -103,6 +103,8 @@ pub struct RtmpManager {
     video_chunks: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
     /// Fixed broadcast delay applied to all streams
     broadcast_delay: Duration,
+    /// Video codec from MediaRecorder ("h264" = passthrough, "vp8"/"vp9" = re-encode)
+    video_codec: String,
 }
 /// Audio: 20ms per tick
 const AUDIO_TICK: Duration = Duration::from_millis(20);
@@ -136,12 +138,21 @@ impl RtmpManager {
             streams: HashMap::new(),
             video_chunks: Arc::new(StdMutex::new(VecDeque::new())),
             broadcast_delay: Duration::from_millis(delay_ms),
+            video_codec: "vp8".to_string(), // default, updated by video:codec message
         }
     }
 
     /// Returns the broadcast delay for TTS timeout calculations
     pub fn broadcast_delay(&self) -> Duration {
         self.broadcast_delay
+    }
+
+    /// Set video codec for FFmpeg passthrough decision.
+    /// "h264" = use `-c:v copy` (zero CPU), anything else = re-encode.
+    pub fn set_video_codec(&mut self, codec: &str) {
+        self.video_codec = codec.to_string();
+        eprintln!("[FFMPEG] Video codec set to: {} ({})",
+            codec, if codec == "h264" { "passthrough" } else { "re-encode" });
     }
 
     /// Start an FFmpeg RTMP process with dedicated video and audio drain threads
@@ -287,36 +298,50 @@ impl RtmpManager {
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
         // Spawn FFmpeg — accepts encoded video (webm/mp4) from stdin,
-        // PCM audio from FIFO. Re-encodes to H.264+AAC FLV for RTMP.
+        // PCM audio from FIFO. H.264 input = passthrough (zero CPU), VP8/VP9 = re-encode.
+        let mut args = vec![
+            "-y".to_string(),
+            "-loglevel".to_string(), "warning".to_string(),
+            // Video input: encoded stream from MediaRecorder
+            "-i".to_string(), "pipe:0".to_string(),
+            // Audio input: raw PCM from FIFO
+            "-f".to_string(), "s16le".to_string(),
+            "-ar".to_string(), "44100".to_string(),
+            "-ac".to_string(), "1".to_string(),
+            "-i".to_string(), audio_fifo.clone(),
+        ];
+
+        if self.video_codec == "h264" {
+            // H.264 passthrough — zero CPU for video
+            eprintln!("[FFMPEG] Using H.264 passthrough (-c:v copy)");
+            args.extend(["-c:v".to_string(), "copy".to_string()]);
+        } else {
+            // Re-encode VP8/VP9 → H.264 for FLV container
+            eprintln!("[FFMPEG] Re-encoding {} → H.264", self.video_codec);
+            args.extend([
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "ultrafast".to_string(),
+                "-tune".to_string(), "zerolatency".to_string(),
+                "-crf".to_string(), "23".to_string(),
+                "-maxrate".to_string(), "8000k".to_string(),
+                "-bufsize".to_string(), "16000k".to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+                "-g".to_string(), "60".to_string(),
+            ]);
+        }
+
+        args.extend([
+            "-c:a".to_string(), "aac".to_string(),
+            "-ac:a".to_string(), "2".to_string(),
+            "-b:a".to_string(), "128k".to_string(),
+            "-map".to_string(), "0:v".to_string(),
+            "-map".to_string(), "1:a".to_string(),
+            "-f".to_string(), "flv".to_string(),
+            rtmp_url.to_string(),
+        ]);
+
         let mut child = std::process::Command::new(&*FFMPEG_BIN)
-            .args([
-                "-y",
-                "-loglevel", "warning",
-                // Video input: encoded stream from MediaRecorder (webm or mp4)
-                "-i", "pipe:0",
-                // Audio input: raw PCM from FIFO
-                "-f", "s16le",
-                "-ar", "44100",
-                "-ac", "1",
-                "-i", &audio_fifo,
-                // Video: re-encode to H.264 (needed for webm→flv container change)
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-crf", "23",
-                "-maxrate", "8000k",
-                "-bufsize", "16000k",
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                // Audio: encode to AAC
-                "-c:a", "aac",
-                "-ac:a", "2",
-                "-b:a", "128k",
-                "-map", "0:v",
-                "-map", "1:a",
-                "-f", "flv",
-                rtmp_url,
-            ])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

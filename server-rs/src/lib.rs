@@ -174,11 +174,39 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                                     }
                                 }
                             }
-                            // face:frame removed — video now uses binary tagged messages (0x02)
+                            Some("video:codec") => {
+                                // Frontend reports MediaRecorder codec for FFmpeg passthrough
+                                if let Some(codec) = json.get("codec").and_then(|c| c.as_str()) {
+                                    if let Some(mgr) = sessions_ref.get(&sid)
+                                        .and_then(|s| s.rtmp_manager.clone())
+                                    {
+                                        let mut locked = mgr.lock().await;
+                                        locked.set_video_codec(codec);
+                                    }
+                                    // Store for streams not yet started
+                                    if let Some(mut session) = sessions_ref.get_mut(&sid) {
+                                        session.video_codec = Some(codec.to_string());
+                                    }
+                                }
+                            }
                             Some("rtmp:config") => {
                                 // Start RTMP streams per language
                                 if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+                                    // Accept optional broadcastDelay from frontend
+                                    if let Some(delay) = json.get("broadcastDelay").and_then(|d| d.as_u64()) {
+                                        // SAFETY: single-threaded at this point, no concurrent env reads
+                                        unsafe { std::env::set_var("BROADCAST_DELAY_MS", delay.to_string()); }
+                                    }
+
                                     let mut manager = ffmpeg::RtmpManager::new();
+
+                                    // Apply video codec if already reported
+                                    if let Some(codec) = sessions_ref.get(&sid)
+                                        .and_then(|s| s.video_codec.clone())
+                                    {
+                                        manager.set_video_codec(&codec);
+                                    }
+
                                     let mut rtmp_langs = Vec::new();
 
                                     for stream_cfg in streams {

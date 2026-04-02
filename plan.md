@@ -6,100 +6,69 @@
 
 ---
 
-## Architecture Decision
+## Architecture
 
-**Fixed-delay jitter buffer (Option 2)** — one global delay D for all languages. The app handles video + audio muxing internally via FFmpeg and pushes N RTMP streams directly to platforms. No multiple OBS instances needed.
+**Fixed-delay jitter buffer** — one global delay D for all languages. App handles video + audio muxing internally via FFmpeg and pushes N RTMP streams directly to platforms. No OBS needed.
 
-**Why Option 2 over Option 3 (per-language delay):**
+**Video pipeline:** Camera → MediaRecorder (hardware H.264/VP8 encoder) → encoded chunks → WebSocket (tagged binary 0x02) → delayed buffer → FFmpeg stdin → FLV mux → RTMP
 
-- Already built and proven in v12's `ffmpeg.rs`
-- Difference is ~500ms latency savings on fast languages — not worth the complexity
-- One video delay pipeline vs N — critical for single developer shipping by Apr 30
-- All three second opinions (ChatGPT, Gemini, Perplexity) confirmed jitter buffer is mandatory
+**Audio pipeline:** Mic → PCM (44.1kHz 16-bit mono) → WebSocket (tagged binary 0x01) → Deepgram Nova-3 STT → Google Translate → ElevenLabs TTS → MP3→PCM → jitter buffer → FFmpeg audio FIFO → AAC → RTMP
 
-**Key insight from second opinions:**
-
+**Key constraints:**
 - Platform latency does NOT absorb sync gaps — offset encoded = offset viewed
-- Detection threshold: ~125ms audio-late, ~185ms annoying. 1-3s is broken.
+- Detection threshold: ~125ms audio-late, ~185ms annoying
 - Variability is worse than consistent delay — brain adapts to fixed offset in ~30s
 
 ---
 
 ## Current State (end of Apr 2 session)
 
-### What exists and works
+### Single binary — no external dependencies
 
-- Tauri v2 desktop app builds to `.app` + `.dmg` (macOS)
-- Stripped backend: 3 files (~450 lines) — `lib.rs`, `pipeline.rs`, `types.rs`
-- WebSocket protocol: `/ws?sourceLang=en&targetLangs=ja,ko&tier=2`
-- Pipeline: STT (Deepgram) → Translate (Google) → TTS (ElevenLabs)
-- Tier support: tier 1 (subtitles only), tier 2 (voice + subtitles)
-- Frontend: single-page BroadcastPage with tier selector, language config, live transcript
-- Voice cloning works (ElevenLabs Instant Voice Clone)
-
-### What was removed (from v12)
-
-- `ffmpeg.rs` — RTMP muxing, jitter buffer, A/V sync ← **BRINGING THIS BACK**
-- `youtube.rs` — not needed (OBS/manual RTMP)
-- `routes.rs`, `db.rs` — not needed
-- `platform.rs` — not needed
-- `room/handler.rs` — replaced with simplified WebSocket handler
-- All AWS infrastructure — deleted, not needed
-
-### What still exists in git history
-
-- Full `ffmpeg.rs` with jitter buffer, video/audio drain threads, crash recovery
-- Can be restored from git and adapted for desktop
+- **Tauri v2 desktop app** — builds to `.app` + `.dmg` (macOS)
+- **Backend:** 5 Rust files (~1500 lines) — `lib.rs`, `pipeline.rs`, `ffmpeg.rs`, `stt.rs`, `types.rs`
+- **Frontend:** Single-page `BroadcastPage` (~400 lines) — tier selector, language config, RTMP destinations, webcam preview, voice cloning, live transcript
+- **FFmpeg:** Bundled as Tauri sidecar (77MB static binary, gitignored)
+- **STT:** Direct Deepgram Nova-3 WebSocket (no Python wrapper)
+- **Video:** MediaRecorder with hardware encoder, any resolution/fps
+- **Protocol:** Tagged binary WebSocket (0x01=audio, 0x02=video) + JSON control messages
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: FFmpeg RTMP Muxing + Single Binary (DONE — Apr 2)
+### Phase 1: Core Pipeline + Single Binary (DONE — Apr 2)
 
-**Goal:** App captures webcam + mic, translates, and pushes synced RTMP streams. No external dependencies.
-
-**Completed:**
-
-1. **Restored `ffmpeg.rs`** — jitter buffer, audio drain threads, RTMP push, crash recovery (3 retries), orphan cleanup
-2. **MediaRecorder video capture** — browser hardware-encodes H.264/VP8 at up to 1080p60+, sends encoded chunks via tagged binary WebSocket messages (0x02). No canvas→JPEG→base64 overhead. FFmpeg receives pre-encoded video, re-encodes for FLV container
-3. **Tagged binary protocol** — 0x01 = audio PCM (STT), 0x02 = video chunk (RTMP). Replaces the old base64 JSON `face:frame` messages
-4. **Pipeline RTMP integration** — TTS MP3→PCM decode, truncate+fadeout, queue to RTMP. Source-language passthrough (host audio → RTMP, zero API cost)
-5. **Direct Deepgram STT** — Python stt-wrapper eliminated. Connects directly to `wss://api.deepgram.com`. Clause-boundary chunking (EN/JA/KO/ZH), prosody extraction, emotion classification, adaptive endpointing — all in Rust
-6. **FFmpeg bundled as Tauri sidecar** — static binary in `src-tauri/binaries/`, resolved at runtime next to executable. No system FFmpeg needed
-7. **Voice cloning UI** — record 30s sample, progress bar, auto-activates cloned voice for all TTS
-8. **RTMP destination config** — per-language RTMP URL inputs in frontend, source-language passthrough
-
-**RTMP config in frontend:**
-
-```
-Target Languages:
-  🇯🇵 Japanese → rtmp://... + stream key (for Rakuten)
-  🇰🇷 Korean   → rtmp://... + stream key (for Coupang)
-  🇬🇧 English  → passthrough, rtmp://... + stream key (for YouTube)
-```
-
-**Validation:** Start session → speak → see translated audio + synced video arrive on a local RTMP test server (MediaMTX) → verify with `ffplay`.
+1. Restored `ffmpeg.rs` — jitter buffer, audio drain threads, RTMP push, crash recovery (3 retries), orphan cleanup
+2. MediaRecorder video capture — hardware-encoded H.264/VP8 at any fps, tagged binary protocol
+3. Direct Deepgram STT in Rust — clause-boundary chunking (EN/JA/KO/ZH), prosody extraction, emotion classification, adaptive endpointing
+4. Pipeline RTMP integration — MP3→PCM decode, truncate+fadeout, source-language passthrough (zero API cost)
+5. FFmpeg bundled as Tauri sidecar — resolved at runtime, no system install needed
+6. Voice cloning UI — 30s recording, progress bar, auto-activates for all TTS
+7. RTMP destination config — per-language URL inputs
 
 ---
 
-### Phase 2: 4K + Quality (Weekend Apr 12-13)
+### Phase 2: 4K + Quality Tuning (Weekend Apr 12-13)
 
-**Goal:** Production-quality video at high resolution and framerate.
+**Goal:** Production-quality 4K60 video, tuned A/V sync.
 
 **Steps:**
 
-1. **4K/60fps+ webcam capture** — MediaRecorder handles any resolution/fps via hardware encoder (VideoToolbox on macOS). Request `{ video: { width: 3840, height: 2160, frameRate: { ideal: 60 } } }`.
+1. **H.264 passthrough** — test if WebKit MediaRecorder outputs H.264 (`video/mp4;codecs=avc1`). If yes, use `-c:v copy` in FFmpeg (zero CPU for video). If no, keep re-encode from VP8/VP9.
 
-2. **H.264 passthrough** — if MediaRecorder outputs H.264 (`video/mp4;codecs=avc1`), use `-c:v copy` in FFmpeg (zero CPU for video). Test WebKit H.264 MediaRecorder in Tauri WebView. Falls back to re-encode for VP8/VP9.
+2. **4K capture** — request `{ width: 3840, height: 2160, frameRate: { ideal: 60 } }`. Test with studio capture card (Elgato/BlackMagic).
 
-3. **Multi-stream efficiency** — all RTMP streams share one encoded video chunk buffer. Only audio differs per language. N streams = 1 video encode + N audio encodes.
+3. **Broadcast delay tuning:**
+   - Measure P90/P95 TTS latency per language under real conditions
+   - Set D = P95 + 200ms margin (start with 2.5s, tune down from 5s)
+   - Add `BROADCAST_DELAY_MS` slider to settings UI
 
-4. **Broadcast delay tuning** — measure P90/P95 TTS latency, set D = P95 + 200ms. Add `BROADCAST_DELAY_MS` slider to settings UI.
+4. **Audio quality validation** — verify 44.1kHz PCM → AAC 128kbps output quality on RTMP streams.
 
-5. **Audio quality** — 44.1kHz, 16-bit, mono. AAC 128kbps.
+5. **Local validation** — test with MediaMTX local RTMP server + `ffplay` before pushing to YouTube.
 
-**Validation:** 4K60 stream to YouTube, verify A/V sync under 300ms.
+**Validation:** 4K60 stream to YouTube, A/V sync under 300ms.
 
 ---
 
@@ -110,109 +79,93 @@ Target Languages:
 **Steps:**
 
 1. **Settings UI:**
+   - API keys (Deepgram, ElevenLabs, Google Translate) — stored in `.env.local`
+   - Broadcast delay slider (`BROADCAST_DELAY_MS`)
+   - Audio/video device selection (camera picker, mic picker)
+   - Per-language RTMP destination config (already have inputs, add save/load)
 
-   - API keys (Deepgram, ElevenLabs, Google Translate)
-   - Broadcast delay slider
-   - Audio/video device selection
-   - Per-language RTMP destination config (URL + key)
+2. **Error handling polish:**
+   - FFmpeg crash recovery — already works (3 retries)
+   - STT reconnect — already works (5 retries + adaptive endpointing)
+   - TTS timeout — already works (D-500ms deadline)
+   - Add clear error banners in UI (connection lost, API key invalid, etc.)
 
-2. **Error handling:**
+3. **System tray / background operation** — app continues streaming when window minimized.
 
-   - FFmpeg crash recovery (3 retries, already implemented in v12)
-   - STT reconnect (5 retries, already works)
-   - TTS timeout (hard deadline at D-500ms, already implemented)
-   - Clear error messages in UI
+4. **Session persistence** — save/load RTMP URLs and language config across app restarts.
 
-3. **Voice cloning UX:**
-
-   - Record 30s voice sample
-   - Clone → use cloned voice for all TTS
-   - Show status in UI
-
-4. **System tray / background operation** — app continues running during live stream even if window is minimized.
-
-**Validation:** Full end-to-end test with all 4 languages, voice cloning, 2+ hour session.
+**Validation:** Full end-to-end test — 4 languages, voice cloning, 2+ hour session without crash.
 
 ---
 
-### Phase 4: Demo Day
+### Phase 4: Demo Day (Weekend Apr 26-27)
 
-**Goal:** Ship demo to Simon for Apr 20 deadline.
+**Goal:** Ship demo to Simon for Apr 30 deadline.
 
 **Steps:**
 
 1. **Test on Brivva's merchant accounts:**
-
    - Coupang (Korean stream)
    - Rakuten (Japanese stream)
-   - YouTube (English stream)
+   - YouTube (English passthrough)
    - Verify each platform receives correct language
 
 2. **Record backup demo video** in case live demo has issues.
 
 3. **Package:**
-
-   - `.dmg` installer for macOS
-   - README with prerequisites (FFmpeg, Python for stt-wrapper)
+   - `.dmg` installer for macOS (Tauri builds this)
+   - No prerequisites — single binary with bundled FFmpeg
    - Quick-start guide
 
 4. **Prepare demo script:**
    - Host speaks English
    - 3 output streams: YouTube EN (passthrough), Coupang KR, Rakuten JP
-   - Show voice cloning
+   - Show voice cloning (30s sample → cloned voice)
    - Show tier switching (subtitles only vs voice + subtitles)
-   - Show 4K quality
+   - Show 4K quality with studio camera
 
 ---
 
 ## Open Questions
 
-1. **stt-wrapper dependency** — currently requires Python. Options:
+1. **macOS code signing** — unsigned app works for demo. Need Apple Developer account ($99/year) for distribution.
 
-   - (a) Ship with Python as prerequisite (fine for demo)
-   - (b) Bundle Python via PyInstaller (heavy)
-   - (c) Rewrite in Rust (cleanest, but takes time)
-   - **Decision:** (a) for demo, (c) as follow-up
+2. **TTS provider evaluation** — Cartesia Sonic 3 (40ms TTFB, 3s clone) and Fish Audio (#1 TTS-Arena, 80% cheaper) are strong alternatives to ElevenLabs. Evaluate after demo.
 
-2. **OBS vs internal FFmpeg** — with internal FFmpeg muxing, OBS is no longer needed for the core workflow. OBS becomes optional (for overlays, scene switching, monitoring). The app IS the streaming engine.
-
-3. **Multiple simultaneous 4K streams** — may need NVENC or resolution fallback. Test on Phase 2 weekend.
-
-4. **macOS code signing** — unsigned app works for demo. Need Apple Developer account for distribution.
+3. **Lipsync (Tiers 3-4)** — real-time and post-processed lipsync. Not production ready. Stretch goal after demo.
 
 ---
 
-## File Structure (Target)
+## File Structure
 
 ```
 brivva/
-├── Cargo.toml              ← workspace
-├── .env.local              ← API keys (localhost config)
+├── Cargo.toml              ← workspace (server-rs, src-tauri)
+├── .env.local              ← API keys (DEEPGRAM, ELEVENLABS, GOOGLE_TRANSLATE)
 ├── plan.md                 ← this file
-├── brivva-context.md       ← project context for AI collaborator
 ├── src-tauri/
 │   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   ├── src/main.rs         ← Tauri entry, spawns Axum
+│   ├── tauri.conf.json     ← externalBin: ffmpeg sidecar
+│   ├── binaries/           ← ffmpeg-aarch64-apple-darwin (gitignored)
+│   ├── src/main.rs         ← Tauri entry, spawns Axum server
 │   └── icons/
 ├── server-rs/
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs          ← Axum server + WebSocket handler
-│       ├── pipeline.rs     ← STT → Translate → TTS + RTMP queueing
-│       ├── ffmpeg.rs       ← RESTORED: jitter buffer, RTMP muxing, drain threads
-│       └── types.rs        ← Lang, Session, ServerMsg, FrameBuffer
-├── stt-wrapper/            ← Python Deepgram proxy (sidecar)
+│       ├── lib.rs          ← Axum server + WebSocket handler (tagged binary routing)
+│       ├── pipeline.rs     ← Deepgram STT → Google Translate → ElevenLabs TTS → RTMP
+│       ├── stt.rs          ← Deepgram client, chunking, prosody, emotion, style mapping
+│       ├── ffmpeg.rs       ← RTMP muxer: video chunk buffer + audio jitter buffer
+│       └── types.rs        ← Lang, Session, ServerMsg
 └── frontend/
     ├── package.json
-    ├── vite.config.ts
     └── src/
         ├── App.tsx
         ├── pages/
-        │   └── BroadcastPage.tsx  ← single page: config + transcript + RTMP destinations
+        │   └── BroadcastPage.tsx  ← all-in-one: config, webcam, RTMP, voice clone, transcript
         └── lib/
-            ├── AudioPipeline.ts   ← mic capture
-            └── RoomSocket.ts      ← WebSocket client (simplified)
+            ├── AudioPipeline.ts   ← mic capture (44.1kHz PCM)
+            └── RoomSocket.ts      ← WebSocket client (unused, kept for reference)
 ```
 
 ---
@@ -221,6 +174,7 @@ brivva/
 
 - **Sync quality:** <300ms audio-video offset (consistent, not variable)
 - **Translation latency:** <3s end-to-end (speech → translated audio on stream)
-- **Video quality:** 1080p minimum, 4K if hardware supports
+- **Video quality:** 1080p minimum, 4K60 with studio camera
 - **Crash-free:** 2+ hour session without restart
 - **Languages:** 3+ simultaneous (EN passthrough + JA + KO minimum)
+- **Single binary:** No prerequisites, no Python, no system FFmpeg

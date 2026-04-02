@@ -68,6 +68,8 @@ pub struct Session {
     pub rtmp_langs: Vec<Lang>,
     /// Signal to stop RTMP health monitor
     pub rtmp_stop: Arc<AtomicBool>,
+    /// Video codec from MediaRecorder ("h264" or "vp8")
+    pub video_codec: Option<String>,
 }
 
 impl Session {
@@ -82,6 +84,7 @@ impl Session {
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
             rtmp_stop: Arc::new(AtomicBool::new(false)),
+            video_codec: None,
         }
     }
 

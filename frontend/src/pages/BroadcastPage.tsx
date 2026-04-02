@@ -22,16 +22,52 @@ type TranscriptEntry = {
 
 // ── Component ────────────────────────────────────────────
 
+// ── Persistence ──────────────────────────────────────────
+
+const STORAGE_KEY = "brivva_config";
+
+function loadConfig(): {
+  sourceLang: string; targetLangs: string[]; tier: TranslationTier;
+  rtmpUrls: Record<string, string>; broadcastDelay: number;
+  videoDeviceId: string; audioDeviceId: string;
+} {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return { ...defaultConfig(), ...JSON.parse(raw) };
+  } catch {}
+  return defaultConfig();
+}
+
+function defaultConfig() {
+  return {
+    sourceLang: "en", targetLangs: ["ja", "ko"] as string[], tier: 2 as TranslationTier,
+    rtmpUrls: {} as Record<string, string>, broadcastDelay: 5000,
+    videoDeviceId: "", audioDeviceId: "",
+  };
+}
+
+function saveConfig(cfg: ReturnType<typeof loadConfig>) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+}
+
+// ── Component ────────────────────────────────────────────
+
 export default function BroadcastPage() {
-  const [sourceLang, setSourceLang] = useState("en");
-  const [targetLangs, setTargetLangs] = useState<string[]>(["ja", "ko"]);
-  const [tier, setTier] = useState<TranslationTier>(2);
+  const saved = loadConfig();
+  const [sourceLang, setSourceLang] = useState(saved.sourceLang);
+  const [targetLangs, setTargetLangs] = useState<string[]>(saved.targetLangs);
+  const [tier, setTier] = useState<TranslationTier>(saved.tier);
   const [isLive, setIsLive] = useState(false);
   const [interim, setInterim] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [voiceReady, setVoiceReady] = useState(false);
-  const [rtmpUrls, setRtmpUrls] = useState<Record<string, string>>({});
+  const [rtmpUrls, setRtmpUrls] = useState<Record<string, string>>(saved.rtmpUrls);
+  const [broadcastDelay, setBroadcastDelay] = useState(saved.broadcastDelay);
+  const [videoDeviceId, setVideoDeviceId] = useState(saved.videoDeviceId);
+  const [audioDeviceId, setAudioDeviceId] = useState(saved.audioDeviceId);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [showSettings, setShowSettings] = useState(false);
   const [isCloning, setIsCloning] = useState(false);
   const [cloneProgress, setCloneProgress] = useState(0);
 
@@ -40,6 +76,16 @@ export default function BroadcastPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+
+  // Persist config on change
+  useEffect(() => {
+    saveConfig({ sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId });
+  }, [sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId]);
+
+  // Enumerate media devices
+  useEffect(() => {
+    navigator.mediaDevices.enumerateDevices().then(setDevices).catch(() => {});
+  }, []);
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -56,9 +102,11 @@ export default function BroadcastPage() {
 
   const startWebcam = useCallback(async (ws: WebSocket) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
-      });
+      const videoConstraints: MediaTrackConstraints = {
+        width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 },
+        ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}),
+      };
+      const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
       const video = videoRef.current!;
       video.srcObject = stream;
       await video.play();
@@ -70,7 +118,13 @@ export default function BroadcastPage() {
           ? "video/webm;codecs=h264"
           : "video/webm;codecs=vp8";
 
-      console.log("[WEBCAM] MediaRecorder codec:", mimeType);
+      const isH264 = mimeType.includes("avc1") || mimeType.includes("h264");
+      console.log("[WEBCAM] MediaRecorder codec:", mimeType, isH264 ? "(H.264 — passthrough)" : "(re-encode)");
+
+      // Notify backend of video codec for FFmpeg passthrough decision
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "video:codec", codec: isH264 ? "h264" : "vp8", mimeType }));
+      }
 
       const recorder = new MediaRecorder(stream, {
         mimeType,
@@ -240,7 +294,7 @@ export default function BroadcastPage() {
       .map(([lang, url]) => ({ lang, url: url.trim() }));
 
     if (streams.length > 0) {
-      ws.send(JSON.stringify({ type: "rtmp:config", streams }));
+      ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay }));
       // Start webcam capture for RTMP video
       await startWebcam(ws);
     }
@@ -253,13 +307,13 @@ export default function BroadcastPage() {
         tagged.set(new Uint8Array(buffer), 1);
         ws.send(tagged.buffer);
       }
-    });
+    }, audioDeviceId || undefined);
 
     setIsLive(true);
     setTranscripts([]);
     setInterim("");
     setVoiceReady(false);
-  }, [sourceLang, targetLangs, tier, rtmpUrls, handleWsMessage, startWebcam]);
+  }, [sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, audioDeviceId, handleWsMessage, startWebcam]);
 
   const stop = useCallback(() => {
     stopWebcam();
@@ -433,6 +487,76 @@ export default function BroadcastPage() {
                 </div>
               ) : null;
             })}
+        </div>
+
+        {/* Settings */}
+        <div className="bg-surface-container-low rounded-xl overflow-hidden">
+          <button
+            onClick={() => setShowSettings((p) => !p)}
+            className="w-full px-4 py-3 flex items-center justify-between text-sm font-semibold text-on-surface-variant uppercase tracking-wider hover:bg-surface-container transition-colors"
+          >
+            Settings
+            <span className="text-xs text-outline">{showSettings ? "Hide" : "Show"}</span>
+          </button>
+          {showSettings && (
+            <div className="px-4 pb-4 space-y-4 border-t border-outline-variant">
+              {/* Broadcast Delay */}
+              <div className="pt-3 space-y-1">
+                <label className="text-sm text-on-surface-variant">
+                  Broadcast Delay: {(broadcastDelay / 1000).toFixed(1)}s
+                </label>
+                <input
+                  type="range"
+                  min={1000}
+                  max={10000}
+                  step={500}
+                  disabled={isLive}
+                  value={broadcastDelay}
+                  onChange={(e) => setBroadcastDelay(Number(e.target.value))}
+                  className="w-full accent-primary"
+                />
+                <p className="text-xs text-outline">
+                  Higher = more time for TTS, lower = less stream latency
+                </p>
+              </div>
+
+              {/* Camera Selection */}
+              <div className="space-y-1">
+                <label className="text-sm text-on-surface-variant">Camera</label>
+                <select
+                  disabled={isLive}
+                  value={videoDeviceId}
+                  onChange={(e) => setVideoDeviceId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-sm text-on-surface disabled:opacity-50"
+                >
+                  <option value="">Default</option>
+                  {devices.filter((d) => d.kind === "videoinput").map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label || `Camera ${d.deviceId.slice(0, 8)}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Microphone Selection */}
+              <div className="space-y-1">
+                <label className="text-sm text-on-surface-variant">Microphone</label>
+                <select
+                  disabled={isLive}
+                  value={audioDeviceId}
+                  onChange={(e) => setAudioDeviceId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-sm text-on-surface disabled:opacity-50"
+                >
+                  <option value="">Default</option>
+                  {devices.filter((d) => d.kind === "audioinput").map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label || `Mic ${d.deviceId.slice(0, 8)}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Webcam Preview (visible when streaming) */}
