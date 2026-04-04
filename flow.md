@@ -183,7 +183,7 @@ Frontend                                     Backend
                                               │
                                               spawn clone_voice()
 
-                                         pipeline.rs:756
+                                         pipeline.rs:1017
                                          ⑤ pcm_to_wav(pcm):
                                               44-byte WAV header:
                                                 RIFF, WAVE, fmt (PCM, 44100Hz,

@@ -30,6 +30,7 @@ function loadConfig(): {
   sourceLang: string; targetLangs: string[]; tier: TranslationTier;
   rtmpUrls: Record<string, string>; broadcastDelay: number;
   videoDeviceId: string; audioDeviceId: string;
+  ttsModel: "turbo" | "flash";
 } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -42,7 +43,7 @@ function defaultConfig() {
   return {
     sourceLang: "en", targetLangs: ["ja", "ko"] as string[], tier: 2 as TranslationTier,
     rtmpUrls: {} as Record<string, string>, broadcastDelay: 5000,
-    videoDeviceId: "", audioDeviceId: "",
+    videoDeviceId: "", audioDeviceId: "", ttsModel: "turbo" as const,
   };
 }
 
@@ -67,6 +68,7 @@ export default function BroadcastPage() {
   const [videoDeviceId, setVideoDeviceId] = useState(saved.videoDeviceId);
   const [audioDeviceId, setAudioDeviceId] = useState(saved.audioDeviceId);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [ttsModel, setTtsModel] = useState<"turbo" | "flash">(saved.ttsModel);
   const [showSettings, setShowSettings] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [isCloning, setIsCloning] = useState(false);
@@ -80,20 +82,27 @@ export default function BroadcastPage() {
 
   // Persist config on change
   useEffect(() => {
-    saveConfig({ sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId });
-  }, [sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId]);
+    saveConfig({ sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId, ttsModel });
+  }, [sourceLang, targetLangs, tier, rtmpUrls, broadcastDelay, videoDeviceId, audioDeviceId, ttsModel]);
 
   // Enumerate media devices (request permission first to reveal labels)
   useEffect(() => {
     (async () => {
       try {
-        // Brief permission request to unlock device labels
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
         stream.getTracks().forEach((t) => t.stop());
       } catch {}
       const devs = await navigator.mediaDevices.enumerateDevices();
       setDevices(devs);
     })();
+  }, []);
+
+  // Check if a persisted voice clone exists on mount
+  useEffect(() => {
+    fetch("http://localhost:3000/api/voice")
+      .then((r) => r.json())
+      .then((data) => { if (data.active) setVoiceReady(true); })
+      .catch(() => {});
   }, []);
 
   // Auto-scroll transcript
@@ -174,17 +183,14 @@ export default function BroadcastPage() {
   // ── Voice Cloning ──────────────────────────────────────
 
   const cloneVoice = useCallback(async () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
     setIsCloning(true);
     setCloneProgress(0);
+    setVoiceReady(false);
 
-    const CLONE_DURATION = 30; // seconds
+    const CLONE_DURATION = 30;
     const SAMPLE_RATE = 44100;
     const chunks: Int16Array[] = [];
 
-    // Capture mic audio for voice sample
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     const source = ctx.createMediaStreamSource(stream);
@@ -202,14 +208,12 @@ export default function BroadcastPage() {
     source.connect(processor);
     processor.connect(ctx.destination);
 
-    // Progress timer
     const startTime = Date.now();
     const progressInterval = window.setInterval(() => {
       const elapsed = (Date.now() - startTime) / 1000;
       setCloneProgress(Math.min(elapsed / CLONE_DURATION, 1));
     }, 200);
 
-    // Wait for recording duration
     await new Promise((resolve) => setTimeout(resolve, CLONE_DURATION * 1000));
 
     clearInterval(progressInterval);
@@ -226,17 +230,25 @@ export default function BroadcastPage() {
       offset += chunk.length;
     }
 
-    // Convert to base64 and send
-    const bytes = new Uint8Array(pcm.buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const base64 = btoa(binary);
-
-    ws.send(JSON.stringify({ type: "voice:sample", audio: base64 }));
     setCloneProgress(1);
-    // isCloning stays true until voice:ready arrives
+
+    // POST raw PCM to REST endpoint
+    try {
+      const resp = await fetch("http://localhost:3000/api/voice/clone", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Uint8Array(pcm.buffer),
+      });
+      if (resp.ok) {
+        setVoiceReady(true);
+      } else {
+        const err = await resp.text();
+        setErrors((prev) => [...prev, `Voice clone failed: ${err}`]);
+      }
+    } catch (e) {
+      setErrors((prev) => [...prev, `Voice clone failed: ${e}`]);
+    }
+    setIsCloning(false);
   }, []);
 
   // ── WebSocket Messages ────────────────────────────────
@@ -268,10 +280,6 @@ export default function BroadcastPage() {
           )
         );
         break;
-      case "voice:ready":
-        setVoiceReady(true);
-        setIsCloning(false);
-        break;
       case "error":
         setErrors((prev) => [...prev, msg.message]);
         break;
@@ -285,7 +293,7 @@ export default function BroadcastPage() {
     if (available.length === 0) return;
 
     const ws = new WebSocket(
-      `ws://localhost:3000/ws?sourceLang=${sourceLang}&targetLangs=${available.join(",")}&tier=${tier}`
+      `ws://localhost:3000/ws?sourceLang=${sourceLang}&targetLangs=${available.join(",")}&tier=${tier}&ttsModel=${ttsModel}`
     );
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -598,9 +606,96 @@ export default function BroadcastPage() {
                   ))}
                 </select>
               </div>
+
+              {/* TTS Model */}
+              <div className="space-y-1">
+                <label className="text-sm text-on-surface-variant">TTS Model</label>
+                <div className="flex gap-2">
+                  <button
+                    disabled={isLive}
+                    onClick={() => setTtsModel("turbo")}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
+                      ttsModel === "turbo"
+                        ? "bg-primary text-on-primary"
+                        : "bg-surface-container border border-outline-variant text-on-surface-variant hover:bg-surface-container-high"
+                    }`}
+                  >
+                    Expressive
+                    <span className="block text-xs opacity-70">~300ms</span>
+                  </button>
+                  <button
+                    disabled={isLive}
+                    onClick={() => setTtsModel("flash")}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
+                      ttsModel === "flash"
+                        ? "bg-primary text-on-primary"
+                        : "bg-surface-container border border-outline-variant text-on-surface-variant hover:bg-surface-container-high"
+                    }`}
+                  >
+                    Fast
+                    <span className="block text-xs opacity-70">~75ms</span>
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
+
+        {/* Voice Cloning (pre-broadcast step) */}
+        {!isLive && tier >= 2 && (
+          <div className="bg-surface-container-low rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="font-headline text-sm font-semibold text-on-surface-variant uppercase tracking-wider">
+                Voice Cloning
+              </h2>
+              {voiceReady && (
+                <span className="text-xs text-secondary font-medium px-2 py-0.5 bg-secondary-container rounded-full">
+                  Active
+                </span>
+              )}
+            </div>
+            {isCloning ? (
+              <div className="space-y-3">
+                <div className="bg-surface-container rounded-lg p-3">
+                  <p className="text-sm text-on-surface leading-relaxed italic">
+                    "The sun went down and the sky turned orange and purple. Below, the city lights began
+                    to flicker on. The busy noise of the day, cars honking and people rushing, started to
+                    fade away. It was finally quiet. While most people were going home to eat dinner and
+                    rest, some were just starting their work."
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-2 bg-surface-container-high rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-secondary rounded-full transition-all duration-200"
+                      style={{ width: `${cloneProgress * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-sm text-on-surface-variant font-mono w-24 text-right">
+                    {cloneProgress < 1 ? `${Math.round(cloneProgress * 30)}s / 30s` : "Uploading..."}
+                  </span>
+                </div>
+                {cloneProgress < 1 && (
+                  <p className="text-xs text-outline">Read the text above naturally into your microphone.</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-xs text-outline">
+                  {voiceReady
+                    ? "Your cloned voice will be used for all translated speech."
+                    : "Record 30 seconds of your voice. All translations will use your cloned voice instead of the default."}
+                </p>
+                <button
+                  onClick={cloneVoice}
+                  className="px-4 py-2 rounded-lg bg-secondary-container text-on-secondary-container text-sm font-semibold hover:opacity-90 transition-opacity"
+                >
+                  {voiceReady ? "Re-clone Voice" : "Start Recording (30s)"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Webcam Preview (visible when streaming) */}
         <video
@@ -633,7 +728,15 @@ export default function BroadcastPage() {
               <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
               <span className="text-sm text-success font-mono">LIVE</span>
               {hasRtmpStreams && (
-                <span className="text-xs text-primary ml-2">RTMP</span>
+                <>
+                  <span className="text-xs text-primary ml-2">RTMP</span>
+                  <button
+                    onClick={() => wsRef.current?.send(JSON.stringify({ type: "rtmp:restart" }))}
+                    className="ml-2 px-2 py-1 rounded bg-surface-container border border-outline-variant text-on-surface-variant text-xs font-medium hover:bg-surface-container-high transition-colors"
+                  >
+                    Restart Stream
+                  </button>
+                </>
               )}
               {voiceReady && (
                 <span className="text-xs text-secondary ml-2">Voice cloned</span>
@@ -642,44 +745,7 @@ export default function BroadcastPage() {
           )}
         </div>
 
-        {/* Voice Cloning (visible when live, tier 2+) */}
-        {isLive && tier >= 2 && !voiceReady && (
-          <div className="bg-surface-container-low rounded-xl p-4 space-y-3">
-            <h2 className="font-headline text-sm font-semibold text-on-surface-variant uppercase tracking-wider">
-              Voice Cloning
-            </h2>
-            {!isCloning ? (
-              <div className="space-y-2">
-                <p className="text-xs text-outline">
-                  Record 30 seconds of your voice. All translations will use your cloned voice instead of the default.
-                </p>
-                <button
-                  onClick={cloneVoice}
-                  className="px-4 py-2 rounded-lg bg-secondary-container text-on-secondary-container text-sm font-semibold hover:opacity-90 transition-opacity"
-                >
-                  Start Recording (30s)
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 h-2 bg-surface-container-high rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-secondary rounded-full transition-all duration-200"
-                      style={{ width: `${cloneProgress * 100}%` }}
-                    />
-                  </div>
-                  <span className="text-sm text-on-surface-variant font-mono w-20 text-right">
-                    {cloneProgress < 1 ? `${Math.round(cloneProgress * 30)}s / 30s` : "Cloning..."}
-                  </span>
-                </div>
-                {cloneProgress < 1 && (
-                  <p className="text-xs text-outline">Speak naturally into your microphone...</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Voice Cloning (pre-broadcast only) */}
 
         {/* Live Transcript */}
         {isLive && (

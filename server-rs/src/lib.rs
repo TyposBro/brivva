@@ -4,14 +4,16 @@ mod pipeline;
 mod types;
 
 use axum::{
-    Router,
+    Router, Json,
+    body::Bytes,
     extract::{Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post, delete},
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -41,6 +43,9 @@ pub async fn run_server() {
     let app = Router::new()
         .route("/", get(|| async { "Brivva Desktop" }))
         .route("/ws", get(ws_handler))
+        .route("/api/voice/clone", post(voice_clone_handler))
+        .route("/api/voice", get(voice_status_handler).delete(voice_delete_handler))
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB for voice samples
         .layer(cors)
         .with_state(sessions);
 
@@ -50,6 +55,44 @@ pub async fn run_server() {
 
     println!("Brivva server on http://localhost:3000");
     axum::serve(listener, app).await.unwrap();
+}
+
+// ── Voice Clone REST API ─────────────────────────────────
+
+#[derive(Serialize)]
+struct VoiceStatus {
+    active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice_id: Option<String>,
+}
+
+/// GET /api/voice — check if a persisted voice clone exists.
+async fn voice_status_handler() -> Json<VoiceStatus> {
+    let voice_id = pipeline::load_persisted_voice();
+    Json(VoiceStatus { active: voice_id.is_some(), voice_id })
+}
+
+/// POST /api/voice/clone — accepts raw PCM s16le 44100Hz mono, clones via ElevenLabs.
+async fn voice_clone_handler(body: Bytes) -> Result<Json<VoiceStatus>, (StatusCode, String)> {
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty audio body".to_string()));
+    }
+    eprintln!("[API] voice clone request: {}B PCM ({:.1}s audio)", body.len(), body.len() as f64 / 88200.0);
+
+    let voice_id = pipeline::clone_voice_standalone(body.to_vec()).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(VoiceStatus { active: true, voice_id: Some(voice_id) }))
+}
+
+/// DELETE /api/voice — delete the persisted voice clone.
+async fn voice_delete_handler() -> StatusCode {
+    if let Some(voice_id) = pipeline::load_persisted_voice() {
+        pipeline::delete_cloned_voice(&voice_id).await;
+        let _ = std::fs::remove_file(".brivva_voice_clone");
+        eprintln!("[API] voice clone deleted: {}", voice_id);
+    }
+    StatusCode::NO_CONTENT
 }
 
 // ── WebSocket Handler ────────────────────────────────────
@@ -63,9 +106,13 @@ struct WsQuery {
     /// Translation tier: 1 = subtitles only, 2 = voice + subtitles
     #[serde(default = "default_tier")]
     tier: u8,
+    /// ElevenLabs TTS model: "turbo" or "flash"
+    #[serde(rename = "ttsModel", default = "default_tts_model")]
+    tts_model: String,
 }
 
 fn default_tier() -> u8 { 2 }
+fn default_tts_model() -> String { "turbo".to_string() }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -90,16 +137,24 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
 
     let session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let tier = query.tier;
-    println!("[WS] Session {} started: {} -> {:?} (tier {})", session_id, source_lang, target_langs, tier);
+    let tts_model = match query.tts_model.as_str() {
+        "flash" => "eleven_flash_v2_5",
+        _ => "eleven_turbo_v2_5",
+    }.to_string();
+    println!("[WS] Session {} started: {} -> {:?} (tier {}, tts={})", session_id, source_lang, target_langs, tier, tts_model);
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Channel for sending messages back to the WebSocket
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
 
-    // Create session
+    // Create session — load persisted voice clone if available
     let mut session = Session::new(session_id.clone(), source_lang.clone(), target_langs, tier);
+    session.tts_model = tts_model;
     session.host_tx = Some(host_tx);
+    if let Some(vid) = pipeline::load_persisted_voice() {
+        session.voice_clone_id = Some(vid);
+    }
     sessions.insert(session_id.clone(), session);
 
     // Send session ID to client
@@ -138,13 +193,9 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                     if data.is_empty() { continue; }
                     match data[0] {
                         0x01 => {
-                            // Audio PCM (tagged)
-                            eprintln!("[WS:{}] audio chunk: {}B", sid, data.len() - 1);
                             let _ = audio_tx.send(data[1..].to_vec());
                         }
                         0x02 => {
-                            // Encoded video chunk from MediaRecorder
-                            eprintln!("[WS:{}] video chunk: {}B", sid, data.len() - 1);
                             let mgr = sessions_ref.get(&sid)
                                 .and_then(|s| s.rtmp_manager.clone());
                             if let Some(manager) = mgr {
@@ -163,24 +214,6 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                     // Handle JSON messages
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                         match json.get("type").and_then(|t| t.as_str()) {
-                            Some("voice:sample") => {
-                                eprintln!("[WS:{}] received voice:sample", sid);
-                                if let Some(audio_b64) = json.get("audio").and_then(|a| a.as_str()) {
-                                    if let Ok(pcm) = base64::Engine::decode(
-                                        &base64::engine::general_purpose::STANDARD,
-                                        audio_b64,
-                                    ) {
-                                        eprintln!("[WS:{}] voice sample decoded: {}B PCM ({:.1}s at 44.1kHz)", sid, pcm.len(), pcm.len() as f64 / 88200.0);
-                                        let sessions_clone = sessions_ref.clone();
-                                        let sid_clone = sid.clone();
-                                        tokio::spawn(async move {
-                                            pipeline::clone_voice(pcm, &sessions_clone, &sid_clone).await;
-                                        });
-                                    } else {
-                                        eprintln!("[WS:{}] voice:sample base64 decode failed", sid);
-                                    }
-                                }
-                            }
                             Some("video:codec") => {
                                 // Frontend reports MediaRecorder codec for FFmpeg passthrough
                                 if let Some(codec) = json.get("codec").and_then(|c| c.as_str()) {
@@ -264,6 +297,21 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                                     eprintln!("[RTMP] Started {} stream(s): {:?}", rtmp_langs.len(), rtmp_langs);
                                 }
                             }
+                            Some("rtmp:restart") => {
+                                eprintln!("[WS:{}] rtmp:restart requested", sid);
+                                let mgr = sessions_ref.get(&sid)
+                                    .and_then(|s| s.rtmp_manager.clone());
+                                if let Some(manager) = mgr {
+                                    let mut locked = manager.lock().await;
+                                    locked.restart_all().await;
+                                    if let Some(session) = sessions_ref.get(&sid) {
+                                        let msg = serde_json::to_string(&ServerMsg::Error {
+                                            message: "RTMP streams restarted".to_string(),
+                                        }).unwrap();
+                                        session.send_to_host(Message::Text(msg.into()));
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -292,13 +340,7 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
             locked.stop_all().await;
             eprintln!("[WS:{}] all RTMP streams stopped", session_id);
         }
-        // Delete cloned voice
-        if let Some(voice_id) = session.voice_clone_id {
-            eprintln!("[WS:{}] deleting cloned voice {}", session_id, voice_id);
-            tokio::spawn(async move {
-                pipeline::delete_cloned_voice(&voice_id).await;
-            });
-        }
+        // Voice clone persists across sessions — don't delete on disconnect
     }
     println!("[WS] Session {} cleanup complete", session_id);
 }

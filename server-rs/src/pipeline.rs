@@ -14,7 +14,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
-use tungstenite::client::IntoClientRequest;
 
 use crate::types::{Lang, Sessions, ServerMsg};
 
@@ -28,15 +27,15 @@ static STT_API_KEY: LazyLock<String> = LazyLock::new(|| {
 static TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("TRANSLATE_API_KEY").unwrap_or_default()
 });
-/// TTS provider API key (currently: Cartesia Sonic 3)
+/// TTS provider API key (ElevenLabs)
 static TTS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("TTS_API_KEY").unwrap_or_default()
 });
-/// Default Cartesia voice (multilingual — speaks all languages).
-/// Override with CARTESIA_DEFAULT_VOICE env var.
-static CARTESIA_DEFAULT_VOICE: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("CARTESIA_DEFAULT_VOICE")
-        .unwrap_or_else(|_| "694f9389-aac1-45b6-b726-9d9369183238".to_string())
+/// Default ElevenLabs voice. Rachel — multilingual, works with all models.
+/// Override with DEFAULT_VOICE env var.
+static DEFAULT_VOICE: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("DEFAULT_VOICE")
+        .unwrap_or_else(|_| "21m00Tcm4TlvDq8ikWAM".to_string())
 });
 
 /// Shared HTTP client — reused across all pipeline requests.
@@ -117,6 +116,59 @@ fn emit_final(
 const STT_RECONNECT_MAX: u32 = 5;
 const STT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
+/// Create a Gladia live session via POST, returns WebSocket URL.
+async fn create_gladia_session(
+    lang: &str,
+    endpointing: f64,
+    max_duration: f64,
+) -> Result<crate::stt::GladiaSession, String> {
+    let body = serde_json::json!({
+        "encoding": "wav/pcm",
+        "bit_depth": 16,
+        "sample_rate": 44100,
+        "channels": 1,
+        "endpointing": endpointing,
+        "maximum_duration_without_endpointing": max_duration,
+        "language_config": {
+            "languages": [lang],
+            "code_switching": true
+        },
+        "messages_config": {
+            "receive_partial_transcripts": true,
+            "receive_final_transcripts": true,
+            "receive_speech_events": true,
+            "receive_acknowledgments": false,
+            "receive_lifecycle_events": false,
+            "receive_pre_processing_events": false,
+            "receive_realtime_processing_events": false,
+            "receive_post_processing_events": false,
+            "receive_errors": true
+        },
+        "realtime_processing": {
+            "words_accurate_timestamps": true
+        }
+    });
+
+    let resp = HTTP_CLIENT
+        .post("https://api.gladia.io/v2/live")
+        .header("Content-Type", "application/json")
+        .header("x-gladia-key", &*STT_API_KEY)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gladia session POST failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Gladia error {}: {}", status, body));
+    }
+
+    resp.json::<crate::stt::GladiaSession>()
+        .await
+        .map_err(|e| format!("Gladia session parse error: {}", e))
+}
+
 pub async fn start_stt(
     session_id: String,
     sessions: Sessions,
@@ -131,9 +183,9 @@ pub async fn start_stt(
     let audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    // Adaptive endpointing parameters
-    let mut endpointing: u32 = 400;
-    let mut utterance_end_ms: u32 = 1500;
+    // Adaptive endpointing parameters (Gladia uses seconds)
+    let mut endpointing: f64 = 0.25;
+    let mut max_duration: f64 = 5.0;
     let mut wpm_samples: Vec<u32> = Vec::new();
     let mut adapted = false;
 
@@ -152,20 +204,29 @@ pub async fn start_stt(
                 return;
             }
 
-            // Connect directly to Deepgram Nova-3
-            let url = crate::stt::build_deepgram_url(
-                &source_lang.to_string(), 44100, endpointing, utterance_end_ms,
-            );
-            let request = match url.into_client_request() {
-                Ok(mut req) => {
-                    req.headers_mut().insert(
-                        "Authorization",
-                        format!("Token {}", &*STT_API_KEY).parse().unwrap(),
-                    );
-                    req
-                }
+            // Step 1: Create Gladia session via POST
+            let gladia_session = match create_gladia_session(
+                &source_lang.to_string(), endpointing, max_duration,
+            ).await {
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[STT] Failed to build request: {}", e);
+                    let delay = if reconnect_count == 0 {
+                        Duration::from_secs(3)
+                    } else {
+                        STT_RECONNECT_DELAY
+                    };
+                    eprintln!("[STT] session create attempt {}/{} failed: {}", attempt, max_attempts, e);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            };
+
+            // Step 2: Connect WebSocket to returned URL
+            use tungstenite::client::IntoClientRequest;
+            let request = match gladia_session.url.into_client_request() {
+                Ok(req) => req,
+                Err(e) => {
+                    eprintln!("[STT] Failed to build WS request: {}", e);
                     return;
                 }
             };
@@ -173,8 +234,8 @@ pub async fn start_stt(
             match tokio_tungstenite::connect_async(request).await {
                 Ok((stream, _)) => {
                     println!(
-                        "[STT] Connected to Deepgram Nova-3 (attempt {}, endpointing={}, utterance_end_ms={})",
-                        attempt, endpointing, utterance_end_ms
+                        "[STT] Connected to Gladia Solaria-1 (attempt {}, endpointing={:.2}s, max_dur={:.0}s, session={})",
+                        attempt, endpointing, max_duration, gladia_session.id
                     );
                     ws_stream = Some(stream);
                     break;
@@ -185,7 +246,7 @@ pub async fn start_stt(
                     } else {
                         STT_RECONNECT_DELAY
                     };
-                    eprintln!("[STT] connect attempt {}/{} failed: {}", attempt, max_attempts, e);
+                    eprintln!("[STT] WS connect attempt {}/{} failed: {}", attempt, max_attempts, e);
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -202,10 +263,9 @@ pub async fn start_stt(
         let (stt_sink, mut stt_stream) = ws_stream.split();
         let stt_sink = Arc::new(tokio::sync::Mutex::new(stt_sink));
 
-        // Control channel: recv_task can send Finalize/CloseStream via sink
         let sink_for_ctrl = stt_sink.clone();
 
-        // Task 1: Forward host audio → Deepgram + accumulate for passthrough
+        // Task 1: Forward host audio → Gladia + accumulate for passthrough
         let acc_tx = audio_acc.clone();
         let audio_rx_clone = audio_rx.clone();
         let sink_for_audio = stt_sink.clone();
@@ -219,7 +279,7 @@ pub async fn start_stt(
                 total_bytes += data.len() as u64;
                 if chunk_count % 100 == 0 {
                     eprintln!(
-                        "[STT:{}] forwarded {} audio chunks ({}KB total) to Deepgram",
+                        "[STT:{}] forwarded {} audio chunks ({}KB total) to Gladia",
                         sid_audio, chunk_count, total_bytes / 1024
                     );
                 }
@@ -228,19 +288,19 @@ pub async fn start_stt(
                 }
                 let mut sink = sink_for_audio.lock().await;
                 if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
-                    eprintln!("[STT:{}] Deepgram sink write error, stopping audio forward", sid_audio);
+                    eprintln!("[STT:{}] Gladia sink write error, stopping audio forward", sid_audio);
                     break;
                 }
             }
-            // Send CloseStream on shutdown
-            eprintln!("[STT:{}] sending CloseStream to Deepgram (total: {} chunks, {}KB)", sid_audio, chunk_count, total_bytes / 1024);
+            // Send stop_recording on shutdown
+            eprintln!("[STT:{}] sending stop_recording to Gladia (total: {} chunks, {}KB)", sid_audio, chunk_count, total_bytes / 1024);
             let mut sink = sink_for_audio.lock().await;
             let _ = sink.send(tungstenite::Message::Text(
-                r#"{"type":"CloseStream"}"#.to_string().into()
+                r#"{"type":"stop_recording"}"#.to_string().into()
             )).await;
         });
 
-        // Task 2: Read Deepgram responses, extract prosody/emotion, emit events
+        // Task 2: Read Gladia responses, extract prosody/emotion, emit events
         let sessions_ref = sessions.clone();
         let sid = session_id.clone();
         let source_lang_clone = source_lang.clone();
@@ -252,12 +312,11 @@ pub async fn start_stt(
         let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disc_flag = disconnected_unexpectedly.clone();
 
-        // Capture adaptive state for this connection
         let mut local_wpm_samples = wpm_samples.clone();
         let mut local_adapted = adapted;
         let needs_adaptive_reconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let adaptive_flag = needs_adaptive_reconnect.clone();
-        let adaptive_endpointing = Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
+        let adaptive_endpointing = Arc::new(std::sync::Mutex::new(None::<(f64, f64)>));
         let adaptive_params = adaptive_endpointing.clone();
 
         let recv_task = tokio::spawn(async move {
@@ -273,14 +332,11 @@ pub async fn start_stt(
 
                 let text = match msg {
                     tungstenite::Message::Text(t) => t.to_string(),
-                    tungstenite::Message::Close(_) => {
-                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
+                    tungstenite::Message::Close(_) => break,
                     _ => continue,
                 };
 
-                let dg: crate::stt::DgResponse = match serde_json::from_str(&text) {
+                let gm: crate::stt::GladiaMessage = match serde_json::from_str(&text) {
                     Ok(d) => d,
                     Err(_) => continue,
                 };
@@ -289,14 +345,21 @@ pub async fn start_stt(
                     break;
                 }
 
-                match dg.msg_type.as_str() {
-                    "Results" => {
-                        let transcript = match dg.transcript() {
+                // Handle errors from any message
+                if let Some(ref err) = gm.error {
+                    eprintln!("[STT] Gladia error {}: {}", err.status_code, err.message);
+                    disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
+
+                match gm.msg_type.as_str() {
+                    "transcript" => {
+                        let transcript = match gm.transcript() {
                             Some(t) => t,
                             None => continue,
                         };
 
-                        if dg.speech_final || dg.is_final {
+                        if gm.is_final() {
                             // ── Final event ──
                             uc += 1;
                             let uid = uc;
@@ -333,29 +396,29 @@ pub async fn start_stt(
                             chunk_detector.reset();
 
                             // Adaptive endpointing: track WPM over first 5 finals
-                            if !local_adapted && prosody.speaking_rate_wpm > 0 {
+                            if !local_adapted && prosody.speaking_rate_wpm > 0 && prosody.speaking_rate_wpm <= 500 {
                                 local_wpm_samples.push(prosody.speaking_rate_wpm);
                                 if local_wpm_samples.len() >= 5 {
                                     let avg_wpm = local_wpm_samples.iter().sum::<u32>() as f32
                                         / local_wpm_samples.len() as f32;
-                                    let (label, new_utt_ms, new_endp) =
+                                    let (label, new_endp, new_max_dur) =
                                         crate::stt::classify_speaking_speed(avg_wpm);
                                     local_adapted = true;
 
                                     if label != "normal" {
                                         eprintln!(
-                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, reconnecting (endpointing={}, utterance_end_ms={})",
-                                            avg_wpm, label, new_endp, new_utt_ms
+                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, reconnecting (endpointing={:.2}s, max_dur={:.0}s)",
+                                            avg_wpm, label, new_endp, new_max_dur
                                         );
                                         if let Ok(mut params) = adaptive_params.lock() {
-                                            *params = Some((new_endp, new_utt_ms));
+                                            *params = Some((new_endp, new_max_dur));
                                         }
                                         adaptive_flag.store(true, std::sync::atomic::Ordering::Release);
                                         disc_flag.store(true, std::sync::atomic::Ordering::Release);
-                                        // Send CloseStream
+                                        // Send stop_recording to end session cleanly
                                         let mut sink = sink_for_ctrl.lock().await;
                                         let _ = sink.send(tungstenite::Message::Text(
-                                            r#"{"type":"CloseStream"}"#.to_string().into()
+                                            r#"{"type":"stop_recording"}"#.to_string().into()
                                         )).await;
                                         break;
                                     } else {
@@ -367,7 +430,7 @@ pub async fn start_stt(
                                 }
                             }
                         } else {
-                            // ── Interim event ──
+                            // ── Interim (partial) event ──
                             if utterance_start.is_none() {
                                 utterance_start = Some(Instant::now());
                             }
@@ -379,29 +442,16 @@ pub async fn start_stt(
                                 }));
                             }
 
-                            // Clause boundary chunking: force finalize if needed
-                            if chunk_detector.check(&transcript) {
-                                eprintln!("[CHUNK] Forcing finalize at clause boundary");
-                                let mut sink = sink_for_ctrl.lock().await;
-                                let _ = sink.send(tungstenite::Message::Text(
-                                    r#"{"type":"Finalize"}"#.to_string().into()
-                                )).await;
-                            }
+                            // Clause boundary check (no force-finalize with Gladia,
+                            // but max_duration timeout still tracked)
+                            chunk_detector.check(&transcript);
                         }
                     }
-                    "SpeechStarted" => {
-                        eprintln!("[DG] VAD: speech started");
+                    "speech_start" => {
+                        eprintln!("[STT] VAD: speech started");
                     }
-                    "UtteranceEnd" => {
-                        eprintln!("[DG] VAD: utterance end");
-                    }
-                    "Metadata" => {
-                        eprintln!("[DG] Session started (request_id={})", dg.request_id);
-                    }
-                    "Error" => {
-                        eprintln!("[DG] Error: {}", dg.message);
-                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
-                        break;
+                    "speech_end" => {
+                        eprintln!("[STT] VAD: speech ended");
                     }
                     _ => {}
                 }
@@ -420,15 +470,14 @@ pub async fn start_stt(
             },
         }
 
-        // Check for adaptive reconnect (intentional, not an error)
+        // Check for adaptive reconnect (creates new Gladia session with adjusted params)
         if needs_adaptive_reconnect.load(std::sync::atomic::Ordering::Acquire) {
             if let Ok(params) = adaptive_endpointing.lock() {
-                if let Some((new_endp, new_utt_ms)) = *params {
+                if let Some((new_endp, new_max_dur)) = *params {
                     endpointing = new_endp;
-                    utterance_end_ms = new_utt_ms;
+                    max_duration = new_max_dur;
                 }
             }
-            // Don't increment reconnect_count for adaptive reconnects
             continue;
         }
 
@@ -484,6 +533,7 @@ async fn run_pipeline(
     let mut handles = Vec::new();
 
     let voice_clone_id = sessions.get(session_id).and_then(|s| s.voice_clone_id.clone());
+    let tts_model = sessions.get(session_id).map(|s| s.tts_model.clone()).unwrap_or_else(|| "eleven_turbo_v2_5".to_string());
     eprintln!(
         "[PIPELINE] #{} starting: '{}' -> {:?} (voice_clone={}) delay_since_utterance_start={}ms",
         utterance_id, &transcript[..transcript.len().min(60)],
@@ -529,6 +579,7 @@ async fn run_pipeline(
         let session_id = session_id.to_string();
         let voice_clone_id = voice_clone_id.clone();
         let sp = style_params.clone();
+        let tts_model = tts_model.clone();
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
@@ -598,7 +649,7 @@ async fn run_pipeline(
                 do_tts(
                     &client, &translated_text, utterance_id, &target,
                     &sessions, &session_id, voice_clone_id.as_deref(), &sp,
-                    utterance_start, utterance_end,
+                    utterance_start, utterance_end, &tts_model,
                 ).await;
                 eprintln!(
                     "[PIPELINE] #{} {} complete (total {}ms since pipeline start)",
@@ -622,26 +673,19 @@ async fn run_pipeline(
     );
 }
 
-// ── Cartesia WebSocket TTS Response Types ────────────────
+// ── ElevenLabs TTS ───────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct CartesiaTtsResponse {
+struct ElevenLabsTtsResponse {
     #[serde(default)]
-    status_code: u16,
-    #[serde(default)]
-    done: bool,
-    #[serde(default, rename = "type")]
-    msg_type: String,
-    #[serde(default)]
-    data: Option<String>, // base64-encoded PCM chunk
-    #[serde(default)]
-    error: Option<String>,
+    audio: Option<String>,
+    #[serde(default, rename = "isFinal")]
+    is_final: Option<bool>,
 }
 
-/// Cartesia Sonic 3 TTS — WebSocket streaming for 40ms TTFB.
+/// ElevenLabs Turbo v2.5 TTS — WebSocket streaming for low-latency output.
 /// Streams raw PCM s16le 44100Hz chunks directly to RTMP as they arrive.
-/// Falls back to REST /tts/bytes if WebSocket connection fails.
+/// Falls back to REST if WebSocket connection fails.
 async fn do_tts(
     client: &reqwest::Client,
     text: &str,
@@ -653,6 +697,7 @@ async fn do_tts(
     style_params: &StyleParams,
     utterance_start: Instant,
     utterance_end: Instant,
+    tts_model: &str,
 ) {
     let tts_start = Instant::now();
 
@@ -667,24 +712,28 @@ async fn do_tts(
 
     let voice_id = match voice_clone_id {
         Some(id) => id.to_string(),
-        None => CARTESIA_DEFAULT_VOICE.clone(),
+        None => DEFAULT_VOICE.clone(),
     };
 
     let is_cloned = voice_clone_id.is_some();
     let lang_str = lang.to_string();
+
+    // Map emotion → ElevenLabs voice_settings via prosody mapping
+    let (stability, similarity_boost, style, _) = crate::stt::map_style(&style_params.emotion);
+    let voice_settings = serde_json::json!({
+        "stability": stability,
+        "similarity_boost": similarity_boost,
+        "style": style,
+        "speed": style_params.speed,
+    });
+
     println!(
-        "[TTS] cartesia WS voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
+        "[TTS] elevenlabs WS voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
         &voice_id[..8.min(voice_id.len())],
         if is_cloned { " (cloned)" } else { "" },
         lang, style_params.emotion, style_params.speed, text,
         tts_deadline.as_millis()
     );
-
-    // Map "serious" → "calm" for Cartesia
-    let cartesia_emotion = match style_params.emotion.as_str() {
-        "serious" => "calm",
-        other => other,
-    };
 
     // Calculate max PCM bytes for this utterance (duration + 2s tolerance)
     let utterance_dur = utterance_end.duration_since(utterance_start);
@@ -711,22 +760,16 @@ async fn do_tts(
         session.send_to_host(to_ws(&ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id }));
     }
 
-    // Try WebSocket streaming first, fall back to REST
-    eprintln!(
-        "[TTS] #{} {} connecting Cartesia WS (deadline={}ms, emotion={}, speed={:.2})",
-        utterance_id, lang_str, tts_deadline.as_millis(), cartesia_emotion, style_params.speed
-    );
+    // Try WebSocket streaming, fall back to REST
     let tts_result = tokio::time::timeout(tts_deadline, async {
         match do_tts_ws(
-            text, &voice_id, &lang_str, cartesia_emotion, style_params.speed,
-            max_bytes, streaming.as_ref(),
+            text, &voice_id, &lang_str, &voice_settings, max_bytes, streaming.as_ref(), tts_model,
         ).await {
             Ok(total_bytes) => Ok(total_bytes),
             Err(ws_err) => {
                 eprintln!("[TTS] #{} {} WebSocket failed: {}, falling back to REST", utterance_id, lang_str, ws_err);
                 do_tts_rest(
-                    client, text, &voice_id, &lang_str, cartesia_emotion, style_params.speed,
-                    max_bytes, streaming.as_ref(),
+                    client, text, &voice_id, &lang_str, &voice_settings, max_bytes, streaming.as_ref(), tts_model,
                 ).await
             }
         }
@@ -759,128 +802,61 @@ async fn do_tts(
     }
 }
 
-// ── Cartesia WebSocket Connection Pool ────────────────────
+// ── ElevenLabs WebSocket TTS ─────────────────────────────
 //
-// Reuses WebSocket connections to avoid ~300ms overhead of
-// DNS + TCP + TLS + WS upgrade on each utterance.
+// Each connection is single-use (voice_id baked into URL).
+// No pooling needed — Turbo v2.5 has fast enough TTFB.
 
-type TtsWs = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
->;
-
-static TTS_WS_POOL: LazyLock<tokio::sync::Mutex<Vec<TtsWs>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(Vec::new()));
-
-async fn connect_cartesia_ws() -> Result<TtsWs, String> {
-    use tungstenite::client::IntoClientRequest;
-
-    let connect_start = Instant::now();
-    let url = format!(
-        "wss://api.cartesia.ai/tts/websocket?api_key={}&cartesia_version=2025-04-16",
-        &*TTS_API_KEY
-    );
-    let request = url.into_client_request()
-        .map_err(|e| format!("WS request build failed: {}", e))?;
-    let (ws, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| format!("WS connect failed: {}", e))?;
-    eprintln!("[TTS-POOL] New Cartesia WS in {}ms", connect_start.elapsed().as_millis());
-    Ok(ws)
-}
-
-async fn get_pooled_ws() -> Result<TtsWs, String> {
-    let mut pool = TTS_WS_POOL.lock().await;
-    if let Some(ws) = pool.pop() {
-        let remaining = pool.len();
-        drop(pool);
-        eprintln!("[TTS-POOL] Reusing pooled connection (pool_remaining={})", remaining);
-        return Ok(ws);
-    }
-    drop(pool);
-    connect_cartesia_ws().await
-}
-
-async fn return_ws_to_pool(ws: TtsWs) {
-    let mut pool = TTS_WS_POOL.lock().await;
-    if pool.len() < 4 {
-        let new_size = pool.len() + 1;
-        pool.push(ws);
-        eprintln!("[TTS-POOL] Returned to pool (pool_size={})", new_size);
-    }
-}
-
-/// WebSocket streaming TTS with connection pooling.
-/// Reuses connections for lower TTFB on subsequent requests.
 async fn do_tts_ws(
     text: &str,
     voice_id: &str,
     lang: &str,
-    emotion: &str,
-    speed: f64,
+    voice_settings: &serde_json::Value,
     max_bytes: usize,
     streaming: Option<&crate::ffmpeg::StreamingPcm>,
-) -> Result<usize, String> {
-    let mut ws = get_pooled_ws().await?;
-
-    match do_tts_on_ws(&mut ws, text, voice_id, lang, emotion, speed, max_bytes, streaming).await {
-        Ok(total) => {
-            return_ws_to_pool(ws).await;
-            Ok(total)
-        }
-        Err(e) => {
-            eprintln!("[TTS:{}] Pooled WS failed: {}, retrying fresh", lang, e);
-            let mut ws = connect_cartesia_ws().await?;
-            let result = do_tts_on_ws(&mut ws, text, voice_id, lang, emotion, speed, max_bytes, streaming).await;
-            if result.is_ok() {
-                return_ws_to_pool(ws).await;
-            }
-            result
-        }
-    }
-}
-
-/// Execute a single TTS request on an existing WebSocket connection.
-async fn do_tts_on_ws(
-    ws: &mut TtsWs,
-    text: &str,
-    voice_id: &str,
-    lang: &str,
-    emotion: &str,
-    speed: f64,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    model_id: &str,
 ) -> Result<usize, String> {
     use futures_util::{SinkExt, StreamExt};
+    use tungstenite::client::IntoClientRequest;
 
-    let context_id = uuid::Uuid::new_v4().to_string();
+    let connect_start = Instant::now();
+    let url = format!(
+        "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input\
+         ?model_id={}\
+         &output_format=mp3_44100_128\
+         &language_code={}",
+        voice_id, model_id, lang
+    );
+    let request = url.into_client_request()
+        .map_err(|e| format!("WS request build failed: {}", e))?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|e| format!("WS connect failed: {}", e))?;
+    eprintln!("[TTS:{}] connected in {}ms", lang, connect_start.elapsed().as_millis());
+
     let tts_start = Instant::now();
 
-    let tts_request = serde_json::json!({
-        "context_id": context_id,
-        "model_id": "sonic-3",
-        "transcript": text,
-        "voice": { "mode": "id", "id": voice_id },
-        "output_format": {
-            "container": "raw",
-            "encoding": "pcm_s16le",
-            "sample_rate": 44100
-        },
-        "language": lang,
-        "generation_config": {
-            "speed": speed,
-            "emotion": emotion,
-        }
+    // BOS: initialize with API key, voice settings, and low-latency chunking
+    let bos = serde_json::json!({
+        "text": " ",
+        "xi_api_key": &*TTS_API_KEY,
+        "voice_settings": voice_settings,
+        "generation_config": { "chunk_length_schedule": [50] }
     });
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&bos).unwrap().into()))
+        .await.map_err(|e| format!("BOS send failed: {}", e))?;
 
-    ws.send(tungstenite::Message::Text(
-        serde_json::to_string(&tts_request).unwrap().into()
-    ))
-    .await
-    .map_err(|e| format!("WS send failed: {}", e))?;
+    // Send full text with flush to force generation
+    let text_msg = serde_json::json!({ "text": text, "flush": true });
+    ws.send(tungstenite::Message::Text(serde_json::to_string(&text_msg).unwrap().into()))
+        .await.map_err(|e| format!("text send failed: {}", e))?;
 
-    eprintln!("[TTS:{}] request sent, waiting for chunks...", lang);
+    // EOS: signal end of input
+    ws.send(tungstenite::Message::Text(r#"{"text":""}"#.to_string().into()))
+        .await.map_err(|e| format!("EOS send failed: {}", e))?;
 
-    let mut total_bytes: usize = 0;
+    // Read MP3 audio chunks until isFinal, accumulate for batch decode
+    let mut mp3_buf: Vec<u8> = Vec::new();
     let mut chunk_count: u32 = 0;
 
     while let Some(msg_result) = ws.next().await {
@@ -888,56 +864,68 @@ async fn do_tts_on_ws(
 
         let text_data = match msg {
             tungstenite::Message::Text(t) => t.to_string(),
-            tungstenite::Message::Close(_) => {
-                return Err("WS closed unexpectedly".to_string());
+            tungstenite::Message::Close(frame) => {
+                let reason = frame.map(|f| format!("code={} reason='{}'", f.code, f.reason))
+                    .unwrap_or_else(|| "no frame".to_string());
+                eprintln!("[TTS:{}] WS closed by server: {}", lang, reason);
+                break;
             }
             _ => continue,
         };
 
-        let resp: CartesiaTtsResponse = serde_json::from_str(&text_data)
-            .map_err(|e| format!("WS parse error: {}", e))?;
-
-        if let Some(err) = resp.error {
-            return Err(format!("Cartesia error: {}", err));
+        // Detect error responses from ElevenLabs (not captured by our struct)
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text_data) {
+            if let Some(detail) = raw.get("detail") {
+                return Err(format!("ElevenLabs error: {}", detail));
+            }
+            if let Some(msg) = raw.get("message").and_then(|m| m.as_str()) {
+                if raw.get("audio").is_none() {
+                    return Err(format!("ElevenLabs error: {}", msg));
+                }
+            }
         }
 
-        if resp.done {
+        let resp: ElevenLabsTtsResponse = serde_json::from_str(&text_data)
+            .map_err(|e| format!("WS parse error: {} | raw: {}", e, &text_data[..text_data.len().min(200)]))?;
+
+        if resp.is_final.unwrap_or(false) {
             eprintln!(
-                "[TTS:{}] done: {} chunks, {}KB in {}ms",
-                lang, chunk_count, total_bytes / 1024, tts_start.elapsed().as_millis()
+                "[TTS:{}] done: {} chunks, {}KB MP3 in {}ms",
+                lang, chunk_count, mp3_buf.len() / 1024, tts_start.elapsed().as_millis()
             );
             break;
         }
 
-        if let Some(data_b64) = resp.data {
-            let pcm_chunk = base64::Engine::decode(
+        if let Some(audio_b64) = resp.audio {
+            if audio_b64.is_empty() { continue; }
+            let mp3_chunk = base64::Engine::decode(
                 &base64::engine::general_purpose::STANDARD,
-                &data_b64,
+                &audio_b64,
             ).map_err(|e| format!("base64 decode error: {}", e))?;
 
             chunk_count += 1;
-
             if chunk_count == 1 {
                 eprintln!(
                     "[TTS:{}] TTFB {}ms ({}B first chunk)",
-                    lang, tts_start.elapsed().as_millis(), pcm_chunk.len()
+                    lang, tts_start.elapsed().as_millis(), mp3_chunk.len()
                 );
             }
 
-            total_bytes += pcm_chunk.len();
-
-            // Stream to RTMP immediately
-            if let Some(s) = streaming {
-                s.append_with_limit(&pcm_chunk, max_bytes);
-                if s.complete.load(std::sync::atomic::Ordering::Acquire) {
-                    eprintln!(
-                        "[TTS:{}] hit max_bytes ({}B) after {} chunks in {}ms",
-                        lang, max_bytes, chunk_count, tts_start.elapsed().as_millis()
-                    );
-                    break;
-                }
-            }
+            mp3_buf.extend_from_slice(&mp3_chunk);
         }
+    }
+
+    if mp3_buf.is_empty() {
+        eprintln!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", lang, tts_start.elapsed().as_millis());
+        return Ok(0);
+    }
+
+    // Decode accumulated MP3 → PCM s16le 44100Hz
+    let pcm = crate::ffmpeg::decode_mp3_to_pcm(&mp3_buf).await?;
+    let total_bytes = pcm.len();
+
+    if let Some(s) = streaming {
+        s.append_with_limit(&pcm, max_bytes);
     }
 
     Ok(total_bytes)
@@ -949,52 +937,49 @@ async fn do_tts_rest(
     text: &str,
     voice_id: &str,
     lang: &str,
-    emotion: &str,
-    speed: f64,
+    voice_settings: &serde_json::Value,
     max_bytes: usize,
     streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    model_id: &str,
 ) -> Result<usize, String> {
     let tts_body = serde_json::json!({
-        "model_id": "sonic-3",
-        "transcript": text,
-        "voice": { "mode": "id", "id": voice_id },
-        "output_format": {
-            "container": "raw",
-            "encoding": "pcm_s16le",
-            "sample_rate": 44100
-        },
-        "language": lang,
-        "generation_config": {
-            "speed": speed,
-            "emotion": emotion,
-        }
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": voice_settings,
+        "language_code": lang,
     });
 
-    eprintln!("[TTS:{}] REST fallback: requesting /tts/bytes", lang);
+    let url = format!(
+        "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format=mp3_44100_128",
+        voice_id
+    );
+
+    eprintln!("[TTS:{}] REST fallback", lang);
     let rest_start = Instant::now();
     let resp = client
-        .post("https://api.cartesia.ai/tts/bytes")
-        .header("X-API-Key", &*TTS_API_KEY)
-        .header("Cartesia-Version", "2025-04-16")
+        .post(&url)
+        .header("xi-api-key", &*TTS_API_KEY)
         .json(&tts_body)
         .send()
         .await
         .map_err(|e| format!("REST request error: {}", e))?;
-    eprintln!("[TTS:{}] REST response status={} in {}ms", lang, resp.status(), rest_start.elapsed().as_millis());
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Cartesia REST error {}: {}", status, body));
+        return Err(format!("ElevenLabs REST error {}: {}", status, body));
     }
 
-    let mut pcm = resp.bytes().await
+    let mp3 = resp.bytes().await
         .map(|b| b.to_vec())
         .map_err(|e| format!("REST body read error: {}", e))?;
 
-    if pcm.is_empty() {
-        return Err("Empty PCM from REST".to_string());
+    if mp3.is_empty() {
+        return Err("Empty response from REST".to_string());
     }
+
+    // Decode MP3 → PCM s16le 44100Hz
+    let mut pcm = crate::ffmpeg::decode_mp3_to_pcm(&mp3).await?;
 
     if pcm.len() > max_bytes {
         crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
@@ -1002,8 +987,8 @@ async fn do_tts_rest(
 
     let total = pcm.len();
     eprintln!(
-        "[TTS:{}] REST complete: {}KB in {}ms",
-        lang, total / 1024, rest_start.elapsed().as_millis()
+        "[TTS:{}] REST complete: {}KB MP3 -> {}KB PCM in {}ms",
+        lang, mp3.len() / 1024, total / 1024, rest_start.elapsed().as_millis()
     );
     if let Some(s) = streaming {
         s.append(&pcm);
@@ -1040,23 +1025,92 @@ fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
     wav
 }
 
-/// Clone voice via Cartesia API. Accepts raw PCM, converts to WAV, uploads.
-pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
+/// Path to persisted voice clone ID file.
+const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
+
+/// Load persisted voice clone ID from disk (if any).
+pub fn load_persisted_voice() -> Option<String> {
+    match std::fs::read_to_string(VOICE_CLONE_FILE) {
+        Ok(id) => {
+            let id = id.trim().to_string();
+            if id.is_empty() { return None; }
+            println!("[VOICE_CLONE] loaded persisted voice: {}", id);
+            Some(id)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Save voice clone ID to disk for persistence across sessions.
+fn persist_voice(voice_id: &str) {
+    if let Err(e) = std::fs::write(VOICE_CLONE_FILE, voice_id) {
+        eprintln!("[VOICE_CLONE] failed to persist voice_id: {}", e);
+    } else {
+        println!("[VOICE_CLONE] persisted voice_id={}", voice_id);
+    }
+}
+
+/// Clean up old brivva voices from ElevenLabs to free up voice slots.
+async fn cleanup_old_brivva_voices() {
+    let client = &*HTTP_CLIENT;
+    let resp = match client
+        .get("https://api.elevenlabs.io/v1/voices")
+        .header("xi-api-key", &*TTS_API_KEY)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("[VOICE_CLONE] list voices failed: {}", r.status());
+            return;
+        }
+        Err(e) => {
+            eprintln!("[VOICE_CLONE] list voices error: {}", e);
+            return;
+        }
+    };
+
+    #[derive(Deserialize)]
+    struct Voice { voice_id: String, name: String }
+    #[derive(Deserialize)]
+    struct VoiceList { voices: Vec<Voice> }
+
+    if let Ok(list) = resp.json::<VoiceList>().await {
+        let brivva_voices: Vec<_> = list.voices.iter()
+            .filter(|v| v.name.starts_with("brivva-"))
+            .collect();
+        if !brivva_voices.is_empty() {
+            eprintln!("[VOICE_CLONE] cleaning up {} old brivva voice(s)", brivva_voices.len());
+            for v in &brivva_voices {
+                eprintln!("[VOICE_CLONE] deleting old voice {} ({})", v.voice_id, v.name);
+                delete_cloned_voice(&v.voice_id).await;
+            }
+        }
+    }
+}
+
+/// Clone voice via ElevenLabs IVC (standalone — no session required).
+/// Returns the voice_id on success. Cleans up old brivva voices first.
+pub async fn clone_voice_standalone(pcm: Vec<u8>) -> Result<String, String> {
     let clone_start = Instant::now();
     let wav = pcm_to_wav(&pcm);
-    let sid_short = &session_id[..6.min(session_id.len())];
     eprintln!(
-        "[VOICE_CLONE] starting Cartesia clone: {}B PCM -> {}B WAV ({:.1}s audio)",
+        "[VOICE_CLONE] starting ElevenLabs IVC: {}B PCM -> {}B WAV ({:.1}s audio)",
         pcm.len(), wav.len(), pcm.len() as f64 / 88200.0
     );
 
+    // Clean up old clones first
+    if let Some(old_id) = load_persisted_voice() {
+        eprintln!("[VOICE_CLONE] replacing old clone {}", old_id);
+        delete_cloned_voice(&old_id).await;
+    }
+    cleanup_old_brivva_voices().await;
+
     let client = &*HTTP_CLIENT;
     let form = reqwest::multipart::Form::new()
-        .text("name", format!("brivva-{}", sid_short))
-        .text("language", "en")
-        .text("enhance", "false")
+        .text("name", "brivva-clone".to_string())
         .part(
-            "clip",
+            "files",
             reqwest::multipart::Part::bytes(wav)
                 .file_name("voice_sample.wav")
                 .mime_str("audio/wav")
@@ -1064,47 +1118,37 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
         );
 
     let resp = client
-        .post("https://api.cartesia.ai/voices/clone")
-        .header("X-API-Key", &*TTS_API_KEY)
-        .header("Cartesia-Version", "2025-04-16")
+        .post("https://api.elevenlabs.io/v1/voices/add")
+        .header("xi-api-key", &*TTS_API_KEY)
         .multipart(form)
         .send()
-        .await;
+        .await
+        .map_err(|e| format!("request error: {}", e))?;
 
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            #[derive(Deserialize)]
-            struct CloneResp { id: String }
-            match r.json::<CloneResp>().await {
-                Ok(parsed) => {
-                    println!("[VOICE_CLONE] Cartesia success! voice_id={} ({}ms)", parsed.id, clone_start.elapsed().as_millis());
-                    if let Some(mut session) = sessions.get_mut(session_id) {
-                        session.voice_clone_id = Some(parsed.id.clone());
-                        session.send_to_host(to_ws(&ServerMsg::VoiceReady {
-                            voice_id: parsed.id,
-                        }));
-                    }
-                }
-                Err(e) => eprintln!("[VOICE_CLONE] parse error: {}", e),
-            }
-        }
-        Ok(r) => {
-            let status = r.status();
-            let body = r.text().await.unwrap_or_default();
-            eprintln!("[VOICE_CLONE] Cartesia error {}: {}", status, body);
-        }
-        Err(e) => eprintln!("[VOICE_CLONE] request error: {}", e),
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        eprintln!("[VOICE_CLONE] ElevenLabs error {}: {}", status, body);
+        return Err(format!("ElevenLabs {}: {}", status, body));
     }
+
+    #[derive(Deserialize)]
+    struct CloneResp { voice_id: String }
+    let parsed = resp.json::<CloneResp>().await
+        .map_err(|e| format!("parse error: {}", e))?;
+
+    println!("[VOICE_CLONE] ElevenLabs success! voice_id={} ({}ms)", parsed.voice_id, clone_start.elapsed().as_millis());
+    persist_voice(&parsed.voice_id);
+    Ok(parsed.voice_id)
 }
 
-/// Delete a cloned voice from Cartesia on session close.
+/// Delete a cloned voice from ElevenLabs.
 pub async fn delete_cloned_voice(voice_id: &str) {
     let client = &*HTTP_CLIENT;
-    let url = format!("https://api.cartesia.ai/voices/{}", voice_id);
+    let url = format!("https://api.elevenlabs.io/v1/voices/{}", voice_id);
     match client
         .delete(&url)
-        .header("X-API-Key", &*TTS_API_KEY)
-        .header("Cartesia-Version", "2025-04-16")
+        .header("xi-api-key", &*TTS_API_KEY)
         .send()
         .await
     {

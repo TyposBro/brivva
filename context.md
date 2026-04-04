@@ -1,18 +1,4 @@
-# Brivva Project Context & User Profile (Apr 2, 2026)
-
-To reproduce this context, paste this file into a new chat and say: _"Act as my Founding Engineer collaborator. Here is the context on me and the Brivva project."_
-
----
-
-## User Profile: Azizbek Umidjonov
-
-- **Role:** Professional Software Engineer / Founding Engineer at Brivva.
-- **Education:** B.S. in Computer Science and Engineering.
-- **Expertise:** Frontend (Kotlin, Jetpack Compose, Flutter), Backend (Rust, Axum, Tokio), and Systems (Linux, NixOS, Docker).
-- **Focus:** Real-time audio processing, low-latency streaming pipelines, and AI-driven examination platforms.
-- **Status:** CTO role at Brivva, negotiating terms (profit-sharing vs employment). Building product on weekends while staying at StoneLab. Decision deferred until Sep 2026 (F-2-7 visa timeline).
-
----
+# Brivva Project Context (Apr 2, 2026)
 
 ## Project: Brivva (v14 — Desktop App, Apr 2 2026)
 
@@ -93,6 +79,9 @@ Compute cost: $0 — runs locally on desktop. No AWS infrastructure.
 - **Demo deadline:** In-person demo with Simon + MJ being scheduled for a weekend. Production target April 26.
 - **High stakes:** Each stream can generate up to $1M revenue. Zero tolerance for bugs or frame drops.
 - **Current status (Apr 4):** Desktop app fully built (v14). Simon checking with MJ on weekend demo time. Next: in-person demo with both CEOs.
+- **Simon's hands-on test (Apr 2):** Tested product live at Starbucks — spoke Japanese to camera as live commerce host, recorded video. Main complaint: TTS lag/freezing. Noted sentence chunking issue (2s vs 10s utterances need full sentence for translation). Production costs $2-3K per live show. Despite later saying "we don't need the tech" — he was already using it. Pushback was negotiation posturing.
+- **Priority for MJ demo:** Reduce end-to-end translation latency. ElevenLabs Flash v2.5 is staying (Cartesia Sonic 3 tested — low quality, low speed). The real bottleneck may be sentence chunking (STT waits 2-10s for full sentence before translating), not TTS speed. Fix: tune adaptive endpointing / utterance segmentation for shorter chunks.
+- **Revenue reality:** ₩6M per contract to Aziz, 10 contracts/year = ₩60M (below ₩90M salary posting). Salary route (MJ's preference) is financially better until volume scales. Don't quit StoneLab until 3+ months proven revenue.
 - **Long-term signal:** Simon said he wants to work with Aziz on other projects too, even if Brivva doesn't work out.
 
 ---

@@ -49,8 +49,10 @@ pub struct Session {
     pub source_lang: Lang,
     pub target_langs: Vec<Lang>,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
-    /// Cloned voice ID from Cartesia
+    /// Cloned voice ID (ElevenLabs IVC)
     pub voice_clone_id: Option<String>,
+    /// ElevenLabs TTS model: "eleven_turbo_v2_5" or "eleven_flash_v2_5"
+    pub tts_model: String,
     /// Translation tier: 1 = subtitles only, 2 = voice + subtitles
     pub tier: u8,
     /// FFmpeg RTMP manager for streaming to platforms
@@ -73,6 +75,7 @@ impl Session {
             target_langs,
             host_tx: None,
             voice_clone_id: None,
+            tts_model: "eleven_turbo_v2_5".to_string(),
             tier,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
@@ -143,12 +146,6 @@ pub enum ServerMsg {
         utterance_id: u64,
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
-    },
-
-    #[serde(rename = "voice:ready")]
-    VoiceReady {
-        #[serde(rename = "voiceId")]
-        voice_id: String,
     },
 
     #[serde(rename = "error")]

@@ -1,73 +1,66 @@
-//! Direct Deepgram Nova-3 integration.
+//! Gladia Solaria-1 real-time STT integration.
 //!
-//! Replaces the Python stt-wrapper: connects directly to Deepgram WebSocket,
-//! handles clause-boundary chunking, prosody analysis, and emotion classification.
-//! Eliminates the Python dependency — everything runs in the single Tauri binary.
+//! Two-step connection: POST /v2/live to create session, then connect WebSocket.
+//! Handles clause-boundary chunking, prosody analysis, and emotion classification.
 
 use std::time::{Duration, Instant};
 
-// ── Deepgram URL ──────────────────────────────────────────
-
-pub fn build_deepgram_url(
-    lang: &str,
-    sample_rate: u32,
-    endpointing: u32,
-    utterance_end_ms: u32,
-) -> String {
-    format!(
-        "wss://api.deepgram.com/v1/listen\
-         ?model=nova-3\
-         &encoding=linear16\
-         &sample_rate={sample_rate}\
-         &channels=1\
-         &language={lang}\
-         &punctuate=true\
-         &smart_format=true\
-         &interim_results=true\
-         &endpointing={endpointing}\
-         &vad_events=true\
-         &utterance_end_ms={utterance_end_ms}"
-    )
-}
-
-// ── Deepgram Response Types ───────────────────────────────
+// ── Gladia Response Types ────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
-pub struct DgResponse {
+pub struct GladiaMessage {
     #[serde(rename = "type", default)]
     pub msg_type: String,
     #[serde(default)]
-    pub channel: Option<DgChannel>,
+    pub data: Option<GladiaData>,
+    #[serde(default)]
+    pub error: Option<GladiaError>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GladiaData {
     #[serde(default)]
     pub is_final: bool,
     #[serde(default)]
-    pub speech_final: bool,
+    pub utterance: Option<GladiaUtterance>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GladiaUtterance {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GladiaError {
     #[serde(default)]
     pub message: String,
     #[serde(default)]
-    pub request_id: String,
+    pub status_code: u16,
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct DgChannel {
-    #[serde(default)]
-    pub alternatives: Vec<DgAlternative>,
+pub struct GladiaSession {
+    pub id: String,
+    pub url: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DgAlternative {
-    #[serde(default)]
-    pub transcript: String,
-}
-
-impl DgResponse {
-    /// Extract the transcript text from a Results message.
+impl GladiaMessage {
+    /// Extract the transcript text from a transcript message.
     pub fn transcript(&self) -> Option<String> {
-        self.channel
+        self.data
             .as_ref()
-            .and_then(|ch| ch.alternatives.first())
-            .map(|alt| alt.transcript.trim().to_string())
+            .and_then(|d| d.utterance.as_ref())
+            .map(|u| u.text.trim().to_string())
             .filter(|t| !t.is_empty())
+    }
+
+    pub fn is_final(&self) -> bool {
+        self.data.as_ref().map(|d| d.is_final).unwrap_or(false)
     }
 }
 
@@ -380,12 +373,13 @@ pub fn map_style(emotion: &str) -> (f64, f64, f64, f64) {
 
 // ── Adaptive Speed Classification ─────────────────────────
 
-pub fn classify_speaking_speed(avg_wpm: f32) -> (&'static str, u32, u32) {
+/// Returns (label, endpointing_secs, max_duration_secs) for Gladia.
+pub fn classify_speaking_speed(avg_wpm: f32) -> (&'static str, f64, f64) {
     if avg_wpm >= 180.0 {
-        ("fast", 800, 300)
+        ("fast", 0.20, 5.0)
     } else if avg_wpm < 120.0 {
-        ("slow", 2000, 500)
+        ("slow", 0.35, 10.0)
     } else {
-        ("normal", 1500, 400)
+        ("normal", 0.25, 5.0)
     }
 }

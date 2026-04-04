@@ -137,6 +137,8 @@ struct RtmpStream {
     stop_flag: Arc<AtomicBool>,
     /// How many times we've restarted this stream after a crash
     restart_count: u32,
+    /// Set to true by stderr reader when RTMP errors are detected
+    rtmp_error: Arc<AtomicBool>,
 }
 
 /// Manages all FFmpeg RTMP streams for a session.
@@ -162,7 +164,7 @@ const MAX_VIDEO_CHUNKS: usize = 600;
 /// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
 const DEFAULT_DELAY_MS: u64 = 5000;
 /// Max FFmpeg restart attempts per stream
-const MAX_FFMPEG_RESTARTS: u32 = 3;
+const MAX_FFMPEG_RESTARTS: u32 = 50;
 /// Delay between FFmpeg restart attempts
 const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
 /// Jitter warning threshold (100ms avoids log spam)
@@ -316,7 +318,33 @@ impl RtmpManager {
                         stream.rtmp_url.clone(),
                     ));
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // Process alive — check for RTMP errors flagged by stderr reader
+                    if stream.rtmp_error.load(Ordering::Acquire) {
+                        if stream.stop_flag.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        eprintln!(
+                            "[FFMPEG] RTMP connection error for lang={}, killing for restart",
+                            stream.lang
+                        );
+                        let _ = stream.child.kill();
+                        let _ = stream.child.wait();
+                        if stream.restart_count >= MAX_FFMPEG_RESTARTS {
+                            eprintln!(
+                                "[FFMPEG] Failed to restart after {} attempts for lang={}",
+                                MAX_FFMPEG_RESTARTS, stream.lang
+                            );
+                            stream.stop_flag.store(true, Ordering::Release);
+                            continue;
+                        }
+                        to_restart.push((
+                            id.clone(),
+                            stream.lang.clone(),
+                            stream.rtmp_url.clone(),
+                        ));
+                    }
+                }
                 Err(e) => {
                     eprintln!("[FFMPEG] Error checking process status for {}: {}", id, e);
                 }
@@ -426,6 +454,9 @@ impl RtmpManager {
             "-map".to_string(), "0:v".to_string(),
             "-map".to_string(), "1:a".to_string(),
             "-f".to_string(), "flv".to_string(),
+            // RTMP reconnect: retry on network drops instead of dying
+            "-flvflags".to_string(), "no_duration_filesize".to_string(),
+            "-rtmp_live".to_string(), "live".to_string(),
             rtmp_url.to_string(),
         ]);
 
@@ -443,6 +474,44 @@ impl RtmpManager {
         eprintln!("[FFMPEG:{}] spawned PID={}", stream_id, child.id());
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
+
+        // Track RTMP errors detected by stderr reader
+        let rtmp_error = Arc::new(AtomicBool::new(false));
+
+        // Drain FFmpeg stderr in background to prevent pipe buffer from filling up
+        // (which would block FFmpeg and stop audio/video processing)
+        if let Some(stderr) = child.stderr.take() {
+            let sid = stream_id.to_string();
+            let err_flag = rtmp_error.clone();
+            thread::Builder::new()
+                .name(format!("ffmpeg-stderr-{}", stream_id))
+                .spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) if !l.is_empty() => {
+                                eprintln!("[FFMPEG:{}] {}", sid, l);
+                                // Detect RTMP connection failures
+                                let lower = l.to_lowercase();
+                                if lower.contains("connection refused")
+                                    || lower.contains("connection reset")
+                                    || lower.contains("broken pipe")
+                                    || lower.contains("connection timed out")
+                                    || lower.contains("i/o error")
+                                    || lower.contains("error writing trailer")
+                                {
+                                    eprintln!("[FFMPEG:{}] RTMP error detected, flagging for restart", sid);
+                                    err_flag.store(true, Ordering::Release);
+                                }
+                            }
+                            Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                })
+                .ok();
+        }
 
         let audio_queue = existing_queue
             .unwrap_or_else(|| Arc::new(StdMutex::new(VecDeque::new())));
@@ -484,6 +553,7 @@ impl RtmpManager {
                 audio_queue,
                 stop_flag,
                 restart_count: 0,
+                rtmp_error,
             },
         );
 
@@ -527,6 +597,28 @@ impl RtmpManager {
             }
             let _ = std::fs::remove_file(&stream.audio_fifo);
         }
+    }
+
+    /// Restart all RTMP streams (stop + re-spawn with same config).
+    /// Used when YouTube drops the RTMP connection and needs a fresh start.
+    pub async fn restart_all(&mut self) {
+        let configs: Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)> =
+            self.streams.iter().map(|(id, s)| {
+                (id.clone(), s.lang.clone(), s.rtmp_url.clone(), s.audio_queue.clone())
+            }).collect();
+
+        if configs.is_empty() {
+            eprintln!("[RTMP] restart_all: no streams to restart");
+            return;
+        }
+
+        eprintln!("[RTMP] restarting {} stream(s)", configs.len());
+        self.stop_all().await;
+
+        for (id, lang, url, aq) in configs {
+            self.restart_stream(&id, &lang, &url, 0, aq);
+        }
+        eprintln!("[RTMP] restart complete");
     }
 }
 
