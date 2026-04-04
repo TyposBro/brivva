@@ -813,9 +813,14 @@ pub async fn start_stt(
             (uc, local_wpm_samples, local_adapted)
         });
 
+        let send_abort = send_task.abort_handle();
+        let recv_abort = recv_task.abort_handle();
         tokio::select! {
-            _ = send_task => {},
+            _ = send_task => {
+                recv_abort.abort();
+            },
             result = recv_task => {
+                send_abort.abort();
                 if let Ok((uc, wpm, adapt)) = result {
                     utterance_counter = uc;
                     wpm_samples = wpm;
@@ -831,6 +836,9 @@ pub async fn start_stt(
                     endpointing = new_endp;
                     max_duration = new_max_dur;
                 }
+            }
+            if let Ok(mut acc) = audio_acc.lock() {
+                acc.clear();
             }
             continue;
         }
