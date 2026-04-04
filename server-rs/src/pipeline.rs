@@ -3,8 +3,8 @@
 //! Host audio flows through:
 //! 1. Deepgram Nova-3 (direct WebSocket, no Python wrapper)
 //! 2. Google Cloud Translation API v2 — per target language, parallel
-//! 3. ElevenLabs TTS — streaming MP3 response (with optional cloned voice)
-//! 4. MP3 → PCM decode → queue to RTMP manager for synced playback
+//! 3. Cartesia Sonic 3 TTS — raw PCM output (with optional cloned voice)
+//! 4. PCM truncate+fadeout → queue to RTMP manager for synced playback
 //! 5. Source-language passthrough: host audio queued directly to RTMP (no TTS)
 
 use axum::extract::ws::Message;
@@ -26,40 +26,34 @@ static DEEPGRAM_API_KEY: LazyLock<String> = LazyLock::new(|| {
 static GOOGLE_TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default()
 });
-static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
+static CARTESIA_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("CARTESIA_API_KEY").unwrap_or_default()
+});
+/// Default Cartesia voice (multilingual — speaks all languages).
+/// Override with CARTESIA_DEFAULT_VOICE env var.
+static CARTESIA_DEFAULT_VOICE: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("CARTESIA_DEFAULT_VOICE")
+        .unwrap_or_else(|_| "694f9389-aac1-45b6-b726-9d9369183238".to_string())
 });
 
 // ── STT Style Params ─────────────────────────────────────
 
+/// TTS style parameters mapped from prosody/emotion analysis.
+/// Used by Cartesia Sonic 3's generation_config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleParams {
-    #[serde(default = "default_stability")]
-    pub stability: f64,
-    #[serde(default = "default_similarity")]
-    pub similarity_boost: f64,
-    #[serde(default)]
-    pub style: f64,
     #[serde(default = "default_speed")]
     pub speed: f64,
-    #[serde(default = "default_true")]
-    pub use_speaker_boost: bool,
+    #[serde(default = "default_emotion")]
+    pub emotion: String,
 }
 
-fn default_stability() -> f64 { 0.5 }
-fn default_similarity() -> f64 { 0.75 }
 fn default_speed() -> f64 { 1.0 }
-fn default_true() -> bool { true }
+fn default_emotion() -> String { "neutral".to_string() }
 
 impl Default for StyleParams {
     fn default() -> Self {
-        Self {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.0,
-            speed: 1.0,
-            use_speaker_boost: true,
-        }
+        Self { speed: 1.0, emotion: "neutral".to_string() }
     }
 }
 
@@ -289,7 +283,7 @@ pub async fn start_stt(
                             let word_count = transcript.split_whitespace().count();
                             crate::stt::compute_speaking_rate(&mut prosody, word_count);
                             let emotion = crate::stt::classify_emotion(&prosody);
-                            let (stability, similarity, style, speed) = crate::stt::map_style(emotion);
+                            let (_, _, _, speed) = crate::stt::map_style(emotion);
 
                             eprintln!(
                                 "[EMOTION] {} (energy={:.4} pitch_std={:.1} rate={}wpm)",
@@ -297,8 +291,8 @@ pub async fn start_stt(
                             );
 
                             let sp = StyleParams {
-                                stability, similarity_boost: similarity, style, speed,
-                                use_speaker_boost: true,
+                                speed,
+                                emotion: emotion.to_string(),
                             };
 
                             emit_final(
@@ -568,6 +562,8 @@ async fn run_pipeline(
     }
 }
 
+/// Cartesia Sonic 3 TTS — returns raw PCM s16le 44100Hz directly.
+/// No MP3 decode step needed (unlike ElevenLabs).
 async fn do_tts(
     client: &reqwest::Client,
     text: &str,
@@ -594,64 +590,69 @@ async fn do_tts(
 
     let voice_id = match voice_clone_id {
         Some(id) => id.to_string(),
-        None => lang.voice_id().to_string(),
+        None => CARTESIA_DEFAULT_VOICE.clone(),
     };
-    let url = format!(
-        "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
-        &voice_id
-    );
 
     let is_cloned = voice_clone_id.is_some();
-    let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
     println!(
-        "[TTS] voice={}{} model={} lang={} text='{}' [deadline={}ms]",
-        &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, lang, text,
+        "[TTS] cartesia voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
+        &voice_id[..8.min(voice_id.len())],
+        if is_cloned { " (cloned)" } else { "" },
+        lang, style_params.emotion, style_params.speed, text,
         tts_deadline.as_millis()
     );
 
+    // Map "serious" → "calm" for Cartesia (not in their emotion list)
+    let cartesia_emotion = match style_params.emotion.as_str() {
+        "serious" => "calm",
+        other => other,
+    };
+
     let tts_body = serde_json::json!({
-        "text": text,
-        "model_id": model_id,
-        "voice_settings": {
-            "stability": style_params.stability,
-            "similarity_boost": style_params.similarity_boost,
-            "style": style_params.style,
-            "use_speaker_boost": style_params.use_speaker_boost
+        "model_id": "sonic-3",
+        "transcript": text,
+        "voice": { "mode": "id", "id": voice_id },
+        "output_format": {
+            "container": "raw",
+            "encoding": "pcm_s16le",
+            "sample_rate": 44100
+        },
+        "language": lang.to_string(),
+        "generation_config": {
+            "speed": style_params.speed,
+            "emotion": cartesia_emotion,
         }
     });
 
     let lang_str = lang.to_string();
     let tts_result = tokio::time::timeout(tts_deadline, async {
-        let mut audio_buffer: Vec<u8> = Vec::new();
         let resp = client
-            .post(&url)
-            .header("xi-api-key", &*ELEVENLABS_API_KEY)
-            .header("Content-Type", "application/json")
+            .post("https://api.cartesia.ai/tts/bytes")
+            .header("X-API-Key", &*CARTESIA_API_KEY)
+            .header("Cartesia-Version", "2025-04-16")
             .json(&tts_body)
             .send()
             .await;
 
         match resp {
             Ok(r) if r.status().is_success() => {
-                let mut stream = r.bytes_stream();
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => audio_buffer.extend_from_slice(&chunk),
-                        Err(e) => {
-                            eprintln!("[TTS] stream error for {}: {}", lang_str, e);
-                            break;
-                        }
-                    }
-                }
+                r.bytes().await.map(|b| b.to_vec()).unwrap_or_default()
             }
-            Ok(r) => eprintln!("[TTS] error: {} - {:?}", r.status(), r.text().await),
-            Err(e) => eprintln!("[TTS] request error for {}: {}", lang_str, e),
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                eprintln!("[TTS] Cartesia error for {}: {} - {}", lang_str, status, body);
+                Vec::new()
+            }
+            Err(e) => {
+                eprintln!("[TTS] request error for {}: {}", lang_str, e);
+                Vec::new()
+            }
         }
-        audio_buffer
     })
     .await;
 
-    let audio_buffer = match tts_result {
+    let mut pcm = match tts_result {
         Ok(buf) if !buf.is_empty() => buf,
         Ok(_) => return,
         Err(_) => {
@@ -664,31 +665,25 @@ async fn do_tts(
     };
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
-    println!("[TTS] {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
+    println!("[TTS] {}KB in {}ms for {} (raw PCM)", pcm.len() / 1024, tts_ms, lang);
 
-    // Queue decoded PCM to RTMP
+    // Queue raw PCM directly to RTMP — no MP3 decode needed!
     let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
-        match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
-            Ok(mut pcm) => {
-                let utterance_dur = utterance_end.duration_since(utterance_start);
-                let max_dur = utterance_dur + Duration::from_millis(2000);
-                let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
-                if pcm.len() > max_bytes {
-                    crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-                }
-                let mgr = manager.lock().await;
-                mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
-                eprintln!("[RTMP] Queued audio for {} (pipeline: {}ms)", lang, tts_start.elapsed().as_millis());
-            }
-            Err(e) => eprintln!("[RTMP] MP3->PCM decode failed: {}", e),
+        let utterance_dur = utterance_end.duration_since(utterance_start);
+        let max_dur = utterance_dur + Duration::from_millis(2000);
+        let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
+        if pcm.len() > max_bytes {
+            crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
         }
+        let mgr = manager.lock().await;
+        mgr.queue_audio(&lang.to_string(), pcm.clone(), utterance_start);
+        eprintln!("[RTMP] Queued audio for {} (pipeline: {}ms)", lang, tts_start.elapsed().as_millis());
     }
 
-    // Send MP3 to host for monitoring
+    // Notify host
     if let Some(session) = sessions.get(session_id) {
         session.send_to_host(to_ws(&ServerMsg::TtsStart { lang: lang.to_string(), utterance_id }));
-        session.send_to_host(Message::Binary(audio_buffer.into()));
         session.send_to_host(to_ws(&ServerMsg::TtsEnd { lang: lang.to_string(), utterance_id, tts_ms }));
     }
 }
@@ -721,24 +716,29 @@ fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
     wav
 }
 
+/// Clone voice via Cartesia API. Accepts raw PCM, converts to WAV, uploads.
 pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
     let wav = pcm_to_wav(&pcm);
-    println!("[VOICE_CLONE] starting ({} bytes PCM)", pcm.len());
+    let sid_short = &session_id[..6.min(session_id.len())];
+    println!("[VOICE_CLONE] starting Cartesia clone ({} bytes PCM)", pcm.len());
 
     let client = reqwest::Client::new();
     let form = reqwest::multipart::Form::new()
-        .text("name", format!("brivva-{}", &session_id[..6.min(session_id.len())]))
+        .text("name", format!("brivva-{}", sid_short))
+        .text("language", "en")
+        .text("enhance", "false")
         .part(
-            "files",
+            "clip",
             reqwest::multipart::Part::bytes(wav)
-                .file_name("host_voice.wav")
+                .file_name("voice_sample.wav")
                 .mime_str("audio/wav")
                 .unwrap(),
         );
 
     let resp = client
-        .post("https://api.elevenlabs.io/v1/voices/add")
-        .header("xi-api-key", &*ELEVENLABS_API_KEY)
+        .post("https://api.cartesia.ai/voices/clone")
+        .header("X-API-Key", &*CARTESIA_API_KEY)
+        .header("Cartesia-Version", "2025-04-16")
         .multipart(form)
         .send()
         .await;
@@ -746,14 +746,14 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
     match resp {
         Ok(r) if r.status().is_success() => {
             #[derive(Deserialize)]
-            struct CloneResp { voice_id: String }
+            struct CloneResp { id: String }
             match r.json::<CloneResp>().await {
                 Ok(parsed) => {
-                    println!("[VOICE_CLONE] success! voice_id={}", parsed.voice_id);
+                    println!("[VOICE_CLONE] Cartesia success! voice_id={}", parsed.id);
                     if let Some(mut session) = sessions.get_mut(session_id) {
-                        session.voice_clone_id = Some(parsed.voice_id.clone());
+                        session.voice_clone_id = Some(parsed.id.clone());
                         session.send_to_host(to_ws(&ServerMsg::VoiceReady {
-                            voice_id: parsed.voice_id,
+                            voice_id: parsed.id,
                         }));
                     }
                 }
@@ -763,16 +763,23 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            eprintln!("[VOICE_CLONE] error {}: {}", status, body);
+            eprintln!("[VOICE_CLONE] Cartesia error {}: {}", status, body);
         }
         Err(e) => eprintln!("[VOICE_CLONE] request error: {}", e),
     }
 }
 
+/// Delete a cloned voice from Cartesia on session close.
 pub async fn delete_cloned_voice(voice_id: &str) {
     let client = reqwest::Client::new();
-    let url = format!("https://api.elevenlabs.io/v1/voices/{}", voice_id);
-    match client.delete(&url).header("xi-api-key", &*ELEVENLABS_API_KEY).send().await {
+    let url = format!("https://api.cartesia.ai/voices/{}", voice_id);
+    match client
+        .delete(&url)
+        .header("X-API-Key", &*CARTESIA_API_KEY)
+        .header("Cartesia-Version", "2025-04-16")
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => println!("[VOICE_CLONE] deleted {}", voice_id),
         Ok(r) => eprintln!("[VOICE_CLONE] delete error: {}", r.status()),
         Err(e) => eprintln!("[VOICE_CLONE] delete error: {}", e),

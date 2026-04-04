@@ -40,15 +40,6 @@ impl Lang {
         }
     }
 
-    /// ElevenLabs default voice ID for this language
-    pub fn voice_id(&self) -> &'static str {
-        match self {
-            Lang::En => "EXAVITQu4vr4xnSDxMaL",  // Sarah
-            Lang::Ja => "pFZP5JQG7iQjIQuC4Bku",  // Lily
-            Lang::Zh => "Xb7hH8MSUJpSbSDYk0k2",  // Alice
-            Lang::Ko => "cgSgspJ2msm6clMCkdW9",  // Jessica
-        }
-    }
 }
 
 // ── Session (replaces Room) ──────────────────────────────
