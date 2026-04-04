@@ -6,12 +6,14 @@ A desktop app that enables a single live commerce host to broadcast simultaneous
 
 The goal is to feel as close to a human simultaneous interpreter as possible — but with the host's own cloned voice instead of an interpreter's voice.
 
-## Current Pipeline
+## Current Pipeline (v15 — Progressive Chunking)
 
 ```
 Host speaks → Gladia STT (real-time transcription)
-           → Google Cloud Translation API v2 (~40ms)
-           → ElevenLabs Flash v2.5 TTS (voice-cloned audio, ~75ms TTFB)
+           → ProgressiveChunkDetector (clause-boundary splitting during speech)
+           → Google Cloud Translation API v2 (~130-376ms, context-aware with ||| separator)
+           → ElevenLabs Flash v2.5 TTS (voice-cloned, incremental MP3→PCM streaming)
+           → Single StreamingPcm accumulator per (utterance, language)
            → FFmpeg muxes translated audio + delayed video
            → RTMP push to platform
 ```
@@ -24,39 +26,52 @@ The bottleneck is **NOT** any single API call — it's **sentence chunking**. ST
 - Short phrase: "This is 50% off" → 2 seconds → fast
 - Long sentence: "This product was shipped from Colombia and sold out within one month of launch, and right now we're offering buy one get one free" → 8-10 seconds → viewer waits the entire time before hearing anything
 
-A human simultaneous interpreter starts translating after ~3-4 words (1-2 seconds), working with incomplete context and correcting as they go. Our system waits for a complete utterance (sentence boundary detected by STT), then translates the whole thing at once. This creates **2-10 second gaps** where the viewer sees the host speaking but hears nothing in their language.
+A human simultaneous interpreter starts translating after ~3-4 words (1-2 seconds), working with incomplete context and correcting as they go. Our v14 system waited for a complete utterance (sentence boundary detected by STT), then translated the whole thing at once. This created **2-10 second gaps**.
+
+## What We Built (v15)
+
+### Three-pronged attack on latency:
+
+**1. True Streaming TTS Decode** — Previously, `do_tts_ws` accumulated ALL MP3 chunks from ElevenLabs into a buffer, waited for `isFinal`, then batch-decoded to PCM. Now `IncrementalMp3Decoder` (long-lived FFmpeg subprocess) decodes each MP3 chunk as it arrives and appends to `StreamingPcm` immediately. Audio drain gets real PCM within ~75ms (TTFB) instead of waiting for full generation. **Saves 500-1500ms per utterance.**
+
+**2. Progressive Clause Chunking** — `ProgressiveChunkDetector` splits long utterances at clause boundaries during interim transcripts. Each chunk is translated and TTS'd independently. Language-adaptive thresholds: EN 1000ms/2000ms, JA/KO 800ms/2000ms. Context-aware translation (previous chunk prepended with `|||` separator). Handles Gladia's transcript revisions via normalized character matching (`derive_position`).
+
+**3. Single StreamingPcm Accumulator** — Multiple TTS chunks feed the same `StreamingPcm` buffer per (utterance, language). The audio drain loop in `ffmpeg.rs` needed **zero changes**. Inter-chunk silence (~75ms TTFB = 3-4 ticks) is imperceptible.
+
+### Expected improvement:
+- **Before** (8s utterance): ~13s total silence (8s speech + 5s delay)
+- **After** (same, 3 chunks): first audio at ~5.3s (2.3s chunk + 3s delay). **~7.7s improvement.**
 
 ## What Makes This Hard
 
-1. **Translation quality vs speed tradeoff** — Translating partial sentences produces grammatically broken or wrong output (especially for structurally different languages like Japanese/Korean where the verb comes last). But waiting for full sentences creates unacceptable lag.
+1. **Translation quality vs speed tradeoff** — Translating partial sentences produces grammatically broken output (especially SOV languages). Mitigated by context-aware translation.
 
-2. **Voice cloning constraint** — TTS generates audio for the complete translated text. You can't easily "stream" cloned voice word-by-word because prosody and intonation depend on the full sentence.
+2. **Voice cloning constraint** — TTS prosody depends on sentence context. Short chunks may sound less natural. Mitigated by using clause-level (not word-level) boundaries.
 
-3. **A/V sync** — Video is delayed by a fixed D seconds (jitter buffer). If translation takes longer than D, the audio either gets dropped (silence) or arrives late (sync slip). Variable-length utterances make D hard to tune.
+3. **A/V sync** — Fixed-delay jitter buffer (now 3s default, reduced from 5s). Multiple TTS chunks feed single StreamingPcm; audio drain writes silence during inter-chunk gaps.
 
-4. **Language asymmetry** — Japanese/Korean sentences can't be translated incrementally the way Spanish/French can from English, because the grammatical structure is fundamentally different (SOV vs SVO).
+4. **Language asymmetry** — SOV languages (JA/KO) get slightly longer min_duration (800ms) than SVO (EN 1000ms). Clause markers include verb-final patterns.
 
-5. **Live commerce context** — The host is demonstrating products, pointing at things, reacting to chat. Long delays make the translated stream feel disconnected from the visual action.
+5. **STT transcript instability** — Gladia revises interim text (adds punctuation, corrects words). `ProgressiveChunkDetector` uses `derive_position` with normalized character matching to handle revisions.
 
-## Current STT Setup
+## Strategic Pivot — Build vs Buy the Pipeline
 
-- Gladia (recently switched from Deepgram for faster transcription)
-- Adaptive endpointing: measures host WPM, adjusts utterance boundary detection
-- But endpointing is inherently a tradeoff: faster boundaries = more fragments = worse translation
+The industry is waking up to this exact problem. Several tools now handle semantic chunking and live translation natively:
+
+- **Alibaba Qwen3-LiveTranslate-Flash-Realtime** — unified WebSocket API with semantic unit prediction for SOV languages. Could replace Gladia + Google Translate.
+- **OpenAI Realtime API (`semantic_vad`)** — semantic endpointing that understands grammar, not just silence.
+- **Soniox v4** — STT with native semantic endpointing.
+- **Palabra AI / Pinch API** — end-to-end speech-to-speech translation in a single WebSocket.
+
+**Key insight: the translation pipeline is a commodity input, not the moat.** Brivva's value is the live commerce broadcasting experience — multi-platform RTMP muxing, A/V sync engineering, voice clone persistence, seller UX. If Palabra delivers <2s latency in one WebSocket, it replaces 60% of `pipeline.rs` and the entire `ProgressiveChunkDetector`.
+
+**Next step:** Evaluate Palabra/Qwen3 as drop-in replacements for Gladia+Google+ElevenLabs. Keep `ffmpeg.rs` (RTMP muxing, jitter buffer) intact — that's the real engineering no translation API touches.
 
 ## Constraints
 
 - Desktop app (Tauri + Rust), runs locally, no cloud GPU
-- ElevenLabs Flash v2.5 for TTS (staying — best quality+speed balance, Cartesia Sonic 3 tested and rejected)
-- Google Cloud Translation API v2 for translation (~40ms, not the bottleneck)
+- ElevenLabs Flash v2.5 for TTS (current — may be replaced by end-to-end API)
 - Must maintain voice cloning quality (host's voice, not generic TTS voice)
 - Target: **<3 second average end-to-end latency** (speech → translated audio on stream)
 - Must handle 4+ languages simultaneously
-
-## Open Questions
-
-- Strategies for reducing perceived latency without destroying translation quality
-- Whether incremental/streaming translation is viable for Korean/Japanese target languages
-- How human simultaneous interpreters handle this and what we can borrow
-- Whether "chunked progressive translation" (translate partial → refine → re-translate) is worth the complexity
-- Best practices for adaptive endpointing tuning
+- Default broadcast delay reduced from 5000ms to 3000ms
