@@ -20,7 +20,10 @@ futures-util = "0.3.32"
 reqwest = { version = "0.13.2", features = ["json", "stream", "multipart", "form"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+thiserror = "2"
 tokio = { version = "1.50.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 tower-http = { version = "0.6.8", features = ["cors"] }
 uuid = { version = "1.22.0", features = ["v4"] }

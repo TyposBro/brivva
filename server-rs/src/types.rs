@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
+use crate::constants::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
 use crate::ffmpeg::SharedRtmpManager;
 
 // ── Language ──────────────────────────────────────────────
@@ -76,13 +77,13 @@ impl Session {
             target_langs,
             host_tx: None,
             voice_clone_id: None,
-            tts_model: "eleven_turbo_v2_5".to_string(),
+            tts_model: DEFAULT_TTS_MODEL.to_string(),
             tier,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
             rtmp_stop: Arc::new(AtomicBool::new(false)),
             video_codec: None,
-            broadcast_delay_ms: 3000,
+            broadcast_delay_ms: DEFAULT_BROADCAST_DELAY_MS,
         }
     }
 

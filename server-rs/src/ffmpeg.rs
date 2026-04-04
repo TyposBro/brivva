@@ -47,18 +47,18 @@ static FFMPEG_BIN: LazyLock<String> = LazyLock::new(|| {
             // Tauri sidecar convention: ffmpeg-{target_triple}
             let sidecar = dir.join(SIDECAR_NAME);
             if sidecar.exists() {
-                eprintln!("[FFMPEG] Using bundled: {}", sidecar.display());
+                tracing::info!("[FFMPEG] Using bundled: {}", sidecar.display());
                 return sidecar.to_string_lossy().to_string();
             }
             // Plain name (manual placement)
             let plain = dir.join("ffmpeg");
             if plain.exists() {
-                eprintln!("[FFMPEG] Using bundled: {}", plain.display());
+                tracing::info!("[FFMPEG] Using bundled: {}", plain.display());
                 return plain.to_string_lossy().to_string();
             }
         }
     }
-    eprintln!("[FFMPEG] Using system ffmpeg from PATH");
+    tracing::info!("[FFMPEG] Using system ffmpeg from PATH");
     "ffmpeg".to_string()
 });
 
@@ -150,6 +150,9 @@ pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
     /// Delayed queue of encoded video chunks (timestamp, data)
     video_chunks: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
+    /// First video chunk from MediaRecorder (ftyp+moov init segment).
+    /// Replayed on restart so FFmpeg can parse the fMP4 container.
+    video_init_segment: Arc<StdMutex<Option<Vec<u8>>>>,
     /// Fixed broadcast delay applied to all streams
     broadcast_delay: Duration,
     /// Video codec from MediaRecorder ("h264" = passthrough, "vp8"/"vp9" = re-encode)
@@ -174,8 +177,10 @@ const JITTER_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 const JITTER_RECOVERY_THRESHOLD: Duration = Duration::from_millis(500);
 /// Fade-out duration in bytes: 50ms at 44100Hz mono 16-bit = 4410 bytes
 const FADE_OUT_BYTES: usize = 4410;
-/// Audio bytes per second: 44100Hz × 2 bytes/sample = 88200
-const BYTES_PER_SEC: f64 = 88200.0;
+/// Max ticks to write during jitter recovery (2s). Beyond this the stream is
+/// already broken; dumping megabytes of silence only crashes RTMP.
+const MAX_RECOVERY_TICKS: usize = 100;
+use crate::constants::BYTES_PER_SEC;
 
 impl RtmpManager {
     pub fn new() -> Self {
@@ -183,10 +188,11 @@ impl RtmpManager {
     }
 
     pub fn with_delay(delay_ms: u64) -> Self {
-        eprintln!("[SYNC] Broadcast delay: {}ms", delay_ms);
+        tracing::info!("[SYNC] Broadcast delay: {}ms", delay_ms);
         Self {
             streams: HashMap::new(),
             video_chunks: Arc::new(StdMutex::new(VecDeque::new())),
+            video_init_segment: Arc::new(StdMutex::new(None)),
             broadcast_delay: Duration::from_millis(delay_ms),
             video_codec: "vp8".to_string(),
         }
@@ -201,7 +207,7 @@ impl RtmpManager {
     /// "h264" = use `-c:v copy` (zero CPU), anything else = re-encode.
     pub fn set_video_codec(&mut self, codec: &str) {
         self.video_codec = codec.to_string();
-        eprintln!("[FFMPEG] Video codec set to: {} ({})",
+        tracing::info!("[FFMPEG] Video codec set to: {} ({})",
             codec, if codec == "h264" { "passthrough" } else { "re-encode" });
     }
 
@@ -213,7 +219,7 @@ impl RtmpManager {
         rtmp_url: &str,
     ) -> Result<(), String> {
         self.spawn_stream_inner(stream_id, lang, rtmp_url, None)?;
-        eprintln!(
+        tracing::info!(
             "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms, video+audio on dedicated OS threads]",
             stream_id, lang, rtmp_url, self.broadcast_delay.as_millis()
         );
@@ -223,20 +229,28 @@ impl RtmpManager {
     /// Buffer an encoded video chunk from MediaRecorder.
     /// Chunks are timestamped and released after the broadcast delay.
     pub fn push_video_chunk(&self, data: &[u8]) {
+        // Save first chunk as init segment (ftyp+moov) for restart recovery
+        {
+            let mut init = self.video_init_segment.lock().unwrap();
+            if init.is_none() {
+                tracing::debug!("[VIDEO] saved init segment ({}B)", data.len());
+                *init = Some(data.to_vec());
+            }
+        }
         let mut buf = self.video_chunks.lock().unwrap();
         buf.push_back((Instant::now(), data.to_vec()));
         let buf_len = buf.len();
         let mut dropped = 0;
         // Cap buffer at ~60s of chunks (assuming ~10 chunks/sec at 100ms intervals)
-        while buf.len() > 600 {
+        while buf.len() > MAX_VIDEO_CHUNKS {
             buf.pop_front();
             dropped += 1;
         }
         if dropped > 0 {
-            eprintln!("[VIDEO] buffer overflow: dropped {} old chunks (buf={})", dropped, buf_len);
+            tracing::warn!("[VIDEO] buffer overflow: dropped {} old chunks (buf={})", dropped, buf_len);
         }
         if buf_len % 50 == 0 {
-            eprintln!("[VIDEO] buffered chunk: {}B (buf_depth={})", data.len(), buf_len);
+            tracing::debug!("[VIDEO] buffered chunk: {}B (buf_depth={})", data.len(), buf_len);
         }
     }
 
@@ -253,14 +267,14 @@ impl RtmpManager {
                     pcm: pcm_arc,
                     complete,
                 });
-                eprintln!(
+                tracing::debug!(
                     "[AUDIO:{}] queued passthrough audio: {}KB ({:.1}s) queue_depth={}",
-                    lang, pcm_len / 1024, pcm_len as f64 / 88200.0, q.len()
+                    lang, pcm_len / 1024, pcm_len as f64 / BYTES_PER_SEC, q.len()
                 );
                 return;
             }
         }
-        eprintln!("[AUDIO] no stream found for lang={}, audio dropped", lang);
+        tracing::warn!("[AUDIO] no stream found for lang={}, audio dropped", lang);
     }
 
     /// Queue a streaming audio slot. Returns StreamingPcm that the TTS task
@@ -276,14 +290,14 @@ impl RtmpManager {
                     pcm: streaming.pcm.clone(),
                     complete: streaming.complete.clone(),
                 });
-                eprintln!(
+                tracing::debug!(
                     "[AUDIO:{}] queued streaming TTS slot, queue_depth={}",
                     lang, q.len()
                 );
                 return streaming;
             }
         }
-        eprintln!("[AUDIO] no stream found for lang={}, streaming slot orphaned", lang);
+        tracing::warn!("[AUDIO] no stream found for lang={}, streaming slot orphaned", lang);
         streaming
     }
 
@@ -300,12 +314,12 @@ impl RtmpManager {
                     if stream.stop_flag.load(Ordering::Acquire) {
                         continue;
                     }
-                    eprintln!(
+                    tracing::error!(
                         "[FFMPEG] Process crashed for lang={}, exit={}, restarting...",
                         stream.lang, code
                     );
                     if stream.restart_count >= MAX_FFMPEG_RESTARTS {
-                        eprintln!(
+                        tracing::error!(
                             "[FFMPEG] Failed to restart after {} attempts for lang={}",
                             MAX_FFMPEG_RESTARTS, stream.lang
                         );
@@ -324,14 +338,14 @@ impl RtmpManager {
                         if stream.stop_flag.load(Ordering::Acquire) {
                             continue;
                         }
-                        eprintln!(
+                        tracing::error!(
                             "[FFMPEG] RTMP connection error for lang={}, killing for restart",
                             stream.lang
                         );
                         let _ = stream.child.kill();
                         let _ = stream.child.wait();
                         if stream.restart_count >= MAX_FFMPEG_RESTARTS {
-                            eprintln!(
+                            tracing::error!(
                                 "[FFMPEG] Failed to restart after {} attempts for lang={}",
                                 MAX_FFMPEG_RESTARTS, stream.lang
                             );
@@ -346,7 +360,7 @@ impl RtmpManager {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[FFMPEG] Error checking process status for {}: {}", id, e);
+                    tracing::error!("[FFMPEG] Error checking process status for {}: {}", id, e);
                 }
             }
         }
@@ -382,13 +396,13 @@ impl RtmpManager {
                 if let Some(stream) = self.streams.get_mut(id) {
                     stream.restart_count = prev_count + 1;
                 }
-                eprintln!(
+                tracing::info!(
                     "[FFMPEG] Restarted stream {} ({}) attempt {}/{}",
                     id, lang, prev_count + 1, MAX_FFMPEG_RESTARTS
                 );
             }
             Err(e) => {
-                eprintln!(
+                tracing::error!(
                     "[FFMPEG] Restart failed for {} ({}): {}",
                     id, lang, e
                 );
@@ -410,7 +424,7 @@ impl RtmpManager {
 
         // Create named FIFO
         let _ = std::fs::remove_file(&audio_fifo);
-        eprintln!("[FFMPEG:{}] creating FIFO: {}", stream_id, audio_fifo);
+        tracing::info!("[FFMPEG:{}] creating FIFO: {}", stream_id, audio_fifo);
         std::process::Command::new("mkfifo")
             .arg(&audio_fifo)
             .output()
@@ -434,7 +448,7 @@ impl RtmpManager {
         // -c:v copy doesn't work with chunked WebM from MediaRecorder stdin.
         // ultrafast preset keeps CPU usage low since MediaRecorder already compressed.
         {
-            eprintln!("[FFMPEG] Encoding {} → H.264 (ultrafast)", self.video_codec);
+            tracing::info!("[FFMPEG] Encoding {} → H.264 (ultrafast)", self.video_codec);
             args.extend([
                 "-c:v".to_string(), "libx264".to_string(),
                 "-preset".to_string(), "ultrafast".to_string(),
@@ -460,7 +474,7 @@ impl RtmpManager {
             rtmp_url.to_string(),
         ]);
 
-        eprintln!(
+        tracing::info!(
             "[FFMPEG:{}] spawning: {} {}",
             stream_id, &*FFMPEG_BIN, args.join(" ")
         );
@@ -471,7 +485,7 @@ impl RtmpManager {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
-        eprintln!("[FFMPEG:{}] spawned PID={}", stream_id, child.id());
+        tracing::info!("[FFMPEG:{}] spawned PID={}", stream_id, child.id());
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
 
@@ -491,7 +505,7 @@ impl RtmpManager {
                     for line in reader.lines() {
                         match line {
                             Ok(l) if !l.is_empty() => {
-                                eprintln!("[FFMPEG:{}] {}", sid, l);
+                                tracing::warn!("[FFMPEG:{}] {}", sid, l);
                                 // Detect RTMP connection failures
                                 let lower = l.to_lowercase();
                                 if lower.contains("connection refused")
@@ -501,7 +515,7 @@ impl RtmpManager {
                                     || lower.contains("i/o error")
                                     || lower.contains("error writing trailer")
                                 {
-                                    eprintln!("[FFMPEG:{}] RTMP error detected, flagging for restart", sid);
+                                    tracing::error!("[FFMPEG:{}] RTMP error detected, flagging for restart", sid);
                                     err_flag.store(true, Ordering::Release);
                                 }
                             }
@@ -513,6 +527,7 @@ impl RtmpManager {
                 .ok();
         }
 
+        let is_restart = existing_queue.is_some();
         let audio_queue = existing_queue
             .unwrap_or_else(|| Arc::new(StdMutex::new(VecDeque::new())));
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -520,12 +535,13 @@ impl RtmpManager {
 
         // Spawn video drain thread — forwards delayed encoded chunks to FFmpeg stdin
         let video_chunk_buf = self.video_chunks.clone();
+        let video_init = self.video_init_segment.clone();
         let video_stop = stop_flag.clone();
         let video_sid = stream_id.to_string();
         let video_handle = thread::Builder::new()
             .name(format!("video-drain-{}", stream_id))
             .spawn(move || {
-                video_chunk_drain_loop(video_sid, video_chunk_buf, stdin, delay, video_stop);
+                video_chunk_drain_loop(video_sid, video_chunk_buf, video_init, is_restart, stdin, delay, video_stop);
             })
             .map_err(|e| format!("Video thread spawn failed: {}", e))?;
 
@@ -570,9 +586,9 @@ impl RtmpManager {
             match stream.child.kill() {
                 Ok(_) => {
                     let _ = stream.child.wait();
-                    eprintln!("[FFMPEG:{}] killed", id);
+                    tracing::info!("[FFMPEG:{}] killed", id);
                 }
-                Err(e) => eprintln!("[FFMPEG:{}] kill error: {}", id, e),
+                Err(e) => tracing::error!("[FFMPEG:{}] kill error: {}", id, e),
             }
             // Join drain threads with timeout — if a thread is stuck (e.g., blocked
             // on FIFO write after FFmpeg died in a weird state), don't hang cleanup.
@@ -589,9 +605,9 @@ impl RtmpManager {
                     .await;
                     match result {
                         Ok(Ok(Ok(()))) => {}
-                        Ok(Ok(Err(_))) => eprintln!("[FFMPEG:{}] {} thread panicked", id_clone, label),
-                        Ok(Err(_)) => eprintln!("[FFMPEG:{}] {} thread join cancelled", id_clone, label),
-                        Err(_) => eprintln!("[FFMPEG:{}] {} thread join timed out (3s), abandoning", id_clone, label),
+                        Ok(Ok(Err(_))) => tracing::error!("[FFMPEG:{}] {} thread panicked", id_clone, label),
+                        Ok(Err(_)) => tracing::warn!("[FFMPEG:{}] {} thread join cancelled", id_clone, label),
+                        Err(_) => tracing::warn!("[FFMPEG:{}] {} thread join timed out (3s), abandoning", id_clone, label),
                     }
                 }
             }
@@ -608,17 +624,17 @@ impl RtmpManager {
             }).collect();
 
         if configs.is_empty() {
-            eprintln!("[RTMP] restart_all: no streams to restart");
+            tracing::info!("[RTMP] restart_all: no streams to restart");
             return;
         }
 
-        eprintln!("[RTMP] restarting {} stream(s)", configs.len());
+        tracing::info!("[RTMP] restarting {} stream(s)", configs.len());
         self.stop_all().await;
 
         for (id, lang, url, aq) in configs {
             self.restart_stream(&id, &lang, &url, 0, aq);
         }
-        eprintln!("[RTMP] restart complete");
+        tracing::info!("[RTMP] restart complete");
     }
 }
 
@@ -632,13 +648,13 @@ pub fn spawn_health_monitor(
     stop_flag: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        eprintln!("[HEALTH] FFmpeg health monitor started (check every 2s)");
+        tracing::info!("[HEALTH] FFmpeg health monitor started (check every 2s)");
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         let mut check_count: u64 = 0;
         loop {
             interval.tick().await;
             if stop_flag.load(Ordering::Acquire) {
-                eprintln!("[HEALTH] stop signal received, exiting");
+                tracing::info!("[HEALTH] stop signal received, exiting");
                 break;
             }
             check_count += 1;
@@ -648,7 +664,7 @@ pub fn spawn_health_monitor(
                 mgr.detect_crashed()
             };
             if !crashed.is_empty() {
-                eprintln!("[HEALTH] check #{}: {} crashed stream(s) detected", check_count, crashed.len());
+                tracing::warn!("[HEALTH] check #{}: {} crashed stream(s) detected", check_count, crashed.len());
             }
             // Restart each crashed stream with async delay between attempts
             for (id, lang, rtmp_url, prev_count, audio_queue) in crashed {
@@ -674,6 +690,8 @@ pub fn spawn_health_monitor(
 fn video_chunk_drain_loop(
     stream_id: String,
     chunk_buffer: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
+    init_segment: Arc<StdMutex<Option<Vec<u8>>>>,
+    is_restart: bool,
     mut stdin: std::process::ChildStdin,
     delay: Duration,
     stop: Arc<AtomicBool>,
@@ -683,10 +701,39 @@ fn video_chunk_drain_loop(
     let mut total_bytes_written: u64 = 0;
     let drain_start = Instant::now();
 
-    eprintln!(
+    tracing::info!(
         "[VIDEO:{}] chunk drain thread started ({}ms delay)",
         stream_id, delay.as_millis()
     );
+
+    // On restart: replay the init segment so FFmpeg can parse the fMP4 container.
+    // Without this, mid-stream moof/mdat fragments cause "could not find trex" errors.
+    if is_restart {
+        let init = init_segment.lock().unwrap();
+        if let Some(ref seg) = *init {
+            tracing::info!("[VIDEO:{}] replaying init segment ({}B) for restart", stream_id, seg.len());
+            if stdin.write_all(seg).is_err() {
+                tracing::error!("[VIDEO:{}] write error replaying init segment, exiting", stream_id);
+                drop(stdin);
+                return;
+            }
+            total_bytes_written += seg.len() as u64;
+        } else {
+            tracing::warn!("[VIDEO:{}] restart but no init segment saved", stream_id);
+        }
+
+        // Flush stale chunks that are too old — they're from before the crash
+        // and their timestamps won't match the new FFmpeg timeline
+        let mut buf = chunk_buffer.lock().unwrap();
+        let now = Instant::now();
+        let stale_cutoff = now - delay - Duration::from_secs(1);
+        let before = buf.len();
+        buf.retain(|(ts, _)| *ts > stale_cutoff);
+        let dropped = before - buf.len();
+        if dropped > 0 {
+            tracing::warn!("[VIDEO:{}] flushed {} stale chunks on restart", stream_id, dropped);
+        }
+    }
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -712,7 +759,7 @@ fn video_chunk_drain_loop(
                     let data_len = data.len();
                     if stdin.write_all(&data).is_err() {
                         if !stop.load(Ordering::Acquire) {
-                            eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+                            tracing::error!("[VIDEO:{}] write error, exiting", stream_id);
                         }
                         drop(stdin);
                         return;
@@ -722,7 +769,7 @@ fn video_chunk_drain_loop(
 
                     // Periodic stats every 100 chunks (~10s at 10 chunks/sec)
                     if chunks_written % 100 == 0 {
-                        eprintln!(
+                        tracing::debug!(
                             "[VIDEO:{}] stats: {} chunks, {}KB written, {:.0}s elapsed",
                             stream_id, chunks_written, total_bytes_written / 1024,
                             drain_start.elapsed().as_secs_f64()
@@ -735,7 +782,7 @@ fn video_chunk_drain_loop(
     }
 
     drop(stdin);
-    eprintln!(
+    tracing::info!(
         "[VIDEO:{}] chunk drain thread exited after {} chunks ({}KB, {:.0}s)",
         stream_id, chunks_written, total_bytes_written / 1024, drain_start.elapsed().as_secs_f64()
     );
@@ -755,7 +802,7 @@ fn audio_drain_loop(
     stop: Arc<AtomicBool>,
 ) {
     // Open FIFO for writing (blocks until FFmpeg opens it for reading)
-    eprintln!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", stream_id);
+    tracing::info!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", stream_id);
     let mut fifo = match std::fs::OpenOptions::new()
         .write(true)
         .open(&fifo_path)
@@ -763,12 +810,12 @@ fn audio_drain_loop(
         Ok(f) => f,
         Err(e) => {
             if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
+                tracing::error!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
             }
             return;
         }
     };
-    eprintln!("[AUDIO:{}] FIFO opened", stream_id);
+    tracing::info!("[AUDIO:{}] FIFO opened", stream_id);
 
     let silence = vec![0u8; AUDIO_BYTES_PER_TICK];
     let mut active_audio: Option<ActiveAudio> = None;
@@ -781,7 +828,7 @@ fn audio_drain_loop(
     let mut total_bytes_written: u64 = 0;
     let mut jitter_warn_count: u64 = 0;
 
-    eprintln!(
+    tracing::info!(
         "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
         stream_id,
         delay.as_millis()
@@ -803,23 +850,81 @@ fn audio_drain_loop(
         let jitter = actual.saturating_duration_since(next_tick);
 
         if jitter > JITTER_RECOVERY_THRESHOLD && tick_count > 0 {
-            // Severe jitter: reset the tick anchor instead of trying to catch up.
-            // Catching up dumps a burst of audio into the FIFO that desynchronizes everything.
+            // Severe jitter: reset the tick anchor and write catch-up data to the FIFO.
+            //
+            // Previously this did `continue` without writing, which starved FFmpeg's
+            // audio FIFO. FFmpeg blocks on audio read when the FIFO is empty, which
+            // stalls the RTMP muxer entirely (both video AND audio stop), causing
+            // YouTube to pause/buffer. Writing silence (or any available audio data)
+            // keeps the FIFO fed so FFmpeg can keep muxing.
             let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
-            eprintln!(
-                "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, skipping ~{} ticks, resetting anchor",
-                stream_id, jitter.as_millis(), tick_count, skipped_ticks
-            );
+            // Cap burst size to avoid overwhelming RTMP with a multi-MB write.
+            // Skip the remaining ticks — we've already lost sync.
+            let write_ticks = (skipped_ticks as usize).min(MAX_RECOVERY_TICKS);
+            let catch_up_bytes = write_ticks * AUDIO_BYTES_PER_TICK;
+
+            // Build catch-up buffer: drain any active audio first, fill rest with silence
+            let mut catch_up = vec![0u8; catch_up_bytes];
+            let mut audio_used = 0usize;
+            let mut should_clear_active = false;
+
+            if let Some(ref mut active) = active_audio {
+                let guard = active.pcm.lock().unwrap();
+                let available = guard.len().saturating_sub(active.offset);
+                let to_copy = available.min(catch_up_bytes);
+                if to_copy > 0 {
+                    catch_up[..to_copy].copy_from_slice(&guard[active.offset..active.offset + to_copy]);
+                    active.offset += to_copy;
+                    audio_used = to_copy;
+                }
+                let is_complete = active.complete.load(Ordering::Acquire);
+                if active.offset >= guard.len() && is_complete {
+                    should_clear_active = true;
+                }
+            }
+
+            if should_clear_active {
+                if let Some(ref a) = active_audio {
+                    let total = a.pcm.lock().unwrap().len();
+                    tracing::debug!(
+                        "[AUDIO:{}] utterance finished during recovery: played {}B/{}B",
+                        stream_id, a.offset, total
+                    );
+                }
+                active_audio = None;
+            }
+
+            if write_ticks < skipped_ticks as usize {
+                tracing::warn!(
+                    "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} of {} ticks (capped, {}B audio + {}B silence), skipping {}",
+                    stream_id, jitter.as_millis(), tick_count, write_ticks, skipped_ticks,
+                    audio_used, catch_up_bytes.saturating_sub(audio_used),
+                    skipped_ticks as usize - write_ticks
+                );
+            } else {
+                tracing::warn!(
+                    "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} ticks ({}B audio + {}B silence)",
+                    stream_id, jitter.as_millis(), tick_count, write_ticks,
+                    audio_used, catch_up_bytes.saturating_sub(audio_used)
+                );
+            }
+
+            if fifo.write_all(&catch_up).is_err() {
+                if !stop.load(Ordering::Acquire) {
+                    tracing::error!("[AUDIO:{}] write error during recovery, exiting", stream_id);
+                }
+                break;
+            }
+
             next_tick = actual + AUDIO_TICK;
             tick_count += skipped_ticks as u64;
-            total_bytes_written += skipped_ticks as u64 * AUDIO_BYTES_PER_TICK as u64;
-            // Skip this tick (don't write anything — the silence was already "written" by the anchor reset)
+            total_bytes_written += catch_up_bytes as u64;
             continue;
         } else if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
             jitter_warn_count += 1;
             // Rate-limit: log every 25th warning, or the first one
             if jitter_warn_count == 1 || jitter_warn_count % 25 == 0 {
-                eprintln!(
+                tracing::warn!(
                     "[AUDIO:{}] jitter: tick {} was {}ms late (warning #{}, threshold={}ms)",
                     stream_id, tick_count, jitter.as_millis(), jitter_warn_count,
                     JITTER_WARN_THRESHOLD.as_millis()
@@ -842,7 +947,7 @@ fn audio_drain_loop(
                     let pcm_len = audio.pcm.lock().unwrap().len();
                     let is_complete = audio.complete.load(Ordering::Acquire);
                     let remaining = q.len();
-                    eprintln!(
+                    tracing::debug!(
                         "[AUDIO:{}] starting utterance: {}B available, complete={}, queue_depth={}",
                         stream_id, pcm_len, is_complete, remaining
                     );
@@ -891,7 +996,7 @@ fn audio_drain_loop(
             if let Some(ref a) = active_audio {
                 let total = a.pcm.lock().unwrap().len();
                 let played_ms = (a.offset as f64 / BYTES_PER_SEC * 1000.0) as u64;
-                eprintln!(
+                tracing::debug!(
                     "[AUDIO:{}] utterance done: played {}B/{}B ({}ms audio)",
                     stream_id, a.offset, total, played_ms
                 );
@@ -905,7 +1010,7 @@ fn audio_drain_loop(
 
         if write_result.is_err() {
             if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] write error, exiting", stream_id);
+                tracing::error!("[AUDIO:{}] write error, exiting", stream_id);
             }
             break;
         }
@@ -918,7 +1023,7 @@ fn audio_drain_loop(
                 (total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
             let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
             if drift_ms > 50 {
-                eprintln!(
+                tracing::warn!(
                     "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
                     stream_id, drift_ms, total_bytes_written, expected_bytes
                 );
@@ -927,7 +1032,7 @@ fn audio_drain_loop(
     }
 
     drop(fifo);
-    eprintln!(
+    tracing::info!(
         "[AUDIO:{}] drain thread exited after {} ticks",
         stream_id, tick_count
     );
@@ -973,7 +1078,7 @@ pub fn kill_orphan_ffmpeg() {
     {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[STARTUP] pgrep not available, skipping orphan cleanup: {}", e);
+            tracing::warn!("[STARTUP] pgrep not available, skipping orphan cleanup: {}", e);
             return;
         }
     };
@@ -987,7 +1092,7 @@ pub fn kill_orphan_ffmpeg() {
             if pid == my_pid {
                 continue;
             }
-            eprintln!("[STARTUP] killing orphan FFmpeg process (PID {})", pid);
+            tracing::info!("[STARTUP] killing orphan FFmpeg process (PID {})", pid);
             let _ = std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .output();
@@ -1001,22 +1106,22 @@ pub fn kill_orphan_ffmpeg() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with("brivva_audio_") {
                     let _ = std::fs::remove_file(entry.path());
-                    eprintln!("[STARTUP] removed stale FIFO: {}", name);
+                    tracing::info!("[STARTUP] removed stale FIFO: {}", name);
                 }
             }
         }
     }
 
     if killed > 0 {
-        eprintln!("[STARTUP] killed {} orphan FFmpeg process(es)", killed);
+        tracing::info!("[STARTUP] killed {} orphan FFmpeg process(es)", killed);
     } else {
-        eprintln!("[STARTUP] no orphan FFmpeg processes found");
+        tracing::info!("[STARTUP] no orphan FFmpeg processes found");
     }
 }
 
 /// Decode MP3 bytes to raw PCM s16le 44100Hz mono using FFmpeg subprocess
 pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
-    eprintln!("[FFMPEG] decode_mp3_to_pcm: {}B MP3 input", mp3.len());
+    tracing::debug!("[FFMPEG] decode_mp3_to_pcm: {}B MP3 input", mp3.len());
     let decode_start = Instant::now();
     let mut child = TokioCommand::new(&*FFMPEG_BIN)
         .args([
@@ -1042,10 +1147,10 @@ pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
     if output.stdout.is_empty() {
         return Err("Empty PCM output".to_string());
     }
-    eprintln!(
+    tracing::debug!(
         "[FFMPEG] decode_mp3_to_pcm: {}B MP3 -> {}B PCM ({:.1}s audio) in {}ms",
         mp3.len(), output.stdout.len(),
-        output.stdout.len() as f64 / 88200.0,
+        output.stdout.len() as f64 / BYTES_PER_SEC,
         decode_start.elapsed().as_millis()
     );
     Ok(output.stdout)
@@ -1131,10 +1236,10 @@ impl IncrementalMp3Decoder {
         }
         self.total_pcm_out += remaining.len();
 
-        eprintln!(
+        tracing::debug!(
             "[FFMPEG] IncrementalMp3Decoder: {}B MP3 -> {}B PCM ({:.1}s audio)",
             self.total_mp3_in, self.total_pcm_out,
-            self.total_pcm_out as f64 / 88200.0
+            self.total_pcm_out as f64 / BYTES_PER_SEC
         );
         Ok(remaining)
     }
