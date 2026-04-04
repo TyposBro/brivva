@@ -12,9 +12,9 @@ cd "$SCRIPT_DIR"
 # Ensure .env.local exists
 if [ ! -f .env.local ]; then
     echo "ERROR: .env.local not found. Create it with:"
-    echo "  DEEPGRAM_API_KEY=..."
-    echo "  GOOGLE_TRANSLATE_API_KEY=..."
-    echo "  ELEVENLABS_API_KEY=..."
+    echo "  STT_API_KEY=...         # Deepgram"
+    echo "  TRANSLATE_API_KEY=...   # Google Cloud Translation"
+    echo "  TTS_API_KEY=...         # Cartesia Sonic 3"
     exit 1
 fi
 

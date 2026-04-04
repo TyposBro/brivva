@@ -20,12 +20,15 @@ use crate::types::{Lang, Sessions, ServerMsg};
 
 // ── Service Keys ──────────────────────────────────────────
 
-static DEEPGRAM_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("DEEPGRAM_API_KEY").unwrap_or_default()
+/// STT provider API key (currently: Deepgram)
+static STT_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("STT_API_KEY").unwrap_or_default()
 });
-static GOOGLE_TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default()
+/// Translation provider API key (currently: Google Cloud Translation)
+static TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("TRANSLATE_API_KEY").unwrap_or_default()
 });
+/// TTS provider API key (currently: Cartesia Sonic 3)
 static TTS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("TTS_API_KEY").unwrap_or_default()
 });
@@ -120,8 +123,8 @@ pub async fn start_stt(
     let mut wpm_samples: Vec<u32> = Vec::new();
     let mut adapted = false;
 
-    if DEEPGRAM_API_KEY.is_empty() {
-        eprintln!("[STT] DEEPGRAM_API_KEY not set, STT disabled");
+    if STT_API_KEY.is_empty() {
+        eprintln!("[STT] STT_API_KEY not set, STT disabled");
         return;
     }
 
@@ -143,7 +146,7 @@ pub async fn start_stt(
                 Ok(mut req) => {
                     req.headers_mut().insert(
                         "Authorization",
-                        format!("Token {}", &*DEEPGRAM_API_KEY).parse().unwrap(),
+                        format!("Token {}", &*STT_API_KEY).parse().unwrap(),
                     );
                     req
                 }
@@ -497,7 +500,7 @@ async fn run_pipeline(
             let start = Instant::now();
             let url = format!(
                 "https://translation.googleapis.com/language/translate/v2?key={}",
-                &*GOOGLE_TRANSLATE_API_KEY
+                &*TRANSLATE_API_KEY
             );
             let translate_resp = client
                 .post(&url)
