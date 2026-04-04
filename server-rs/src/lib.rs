@@ -248,118 +248,7 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                     }
                 }
                 Message::Text(text) => {
-                    // Handle JSON messages
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        match json.get("type").and_then(|t| t.as_str()) {
-                            Some("video:codec") => {
-                                // Frontend reports MediaRecorder codec for FFmpeg passthrough
-                                if let Some(codec) = json.get("codec").and_then(|c| c.as_str()) {
-                                    tracing::info!("[WS:{}] video:codec = {}", sid, codec);
-                                    if let Some(mgr) = sessions_ref.get(&sid)
-                                        .and_then(|s| s.rtmp_manager.clone())
-                                    {
-                                        let mut locked = mgr.lock().await;
-                                        locked.set_video_codec(codec);
-                                    }
-                                    // Store for streams not yet started
-                                    if let Some(mut session) = sessions_ref.get_mut(&sid) {
-                                        session.video_codec = Some(codec.to_string());
-                                    }
-                                }
-                            }
-                            Some("rtmp:config") => {
-                                // Start RTMP streams per language
-                                if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
-                                    tracing::info!(
-                                        "[WS:{}] rtmp:config received: {} stream(s)",
-                                        sid, streams.len(),
-                                    );
-                                    let delay_ms = json.get("broadcastDelay")
-                                        .and_then(|d| d.as_u64())
-                                        .unwrap_or(5000);
-
-                                    // Store in session for TTS timeout calculation
-                                    if let Some(mut session) = sessions_ref.get_mut(&sid) {
-                                        session.broadcast_delay_ms = delay_ms;
-                                    }
-
-                                    let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
-
-                                    // Apply video codec if already reported
-                                    if let Some(codec) = sessions_ref.get(&sid)
-                                        .and_then(|s| s.video_codec.clone())
-                                    {
-                                        manager.set_video_codec(&codec);
-                                    }
-
-                                    let mut rtmp_langs = Vec::new();
-
-                                    for stream_cfg in streams {
-                                        if let (Some(lang), Some(url)) = (
-                                            stream_cfg.get("lang").and_then(|l| l.as_str()),
-                                            stream_cfg.get("url").and_then(|u| u.as_str()),
-                                        ) {
-                                            let stream_id = format!("{}_{}", &sid, lang);
-                                            match manager.start_stream(&stream_id, lang, url) {
-                                                Ok(_) => {
-                                                    if let Some(l) = Lang::from_str(lang) {
-                                                        rtmp_langs.push(l);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!("[RTMP] Failed to start {}: {}", lang, e);
-                                                    if let Some(session) = sessions_ref.get(&sid) {
-                                                        if let Some(err_msg) = to_ws_msg(&ServerMsg::Error {
-                                                            message: format!("RTMP failed for {}: {}", lang, e),
-                                                        }) {
-                                                            session.send_to_host(err_msg);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    let shared_mgr: ffmpeg::SharedRtmpManager =
-                                        Arc::new(tokio::sync::Mutex::new(manager));
-
-                                    // Start health monitor for crash recovery
-                                    let health_stop = sessions_ref.get(&sid)
-                                        .map(|s| s.rtmp_stop.clone())
-                                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-                                    ffmpeg::spawn_health_monitor(shared_mgr.clone(), health_stop);
-
-                                    // Store in session
-                                    if let Some(mut session) = sessions_ref.get_mut(&sid) {
-                                        session.rtmp_manager = Some(shared_mgr);
-                                        session.rtmp_langs = rtmp_langs.clone();
-                                    }
-
-                                    tracing::info!(
-                                        "[RTMP] Started {} stream(s): {:?}",
-                                        rtmp_langs.len(), rtmp_langs,
-                                    );
-                                }
-                            }
-                            Some("rtmp:restart") => {
-                                tracing::info!("[WS:{}] rtmp:restart requested", sid);
-                                let mgr = sessions_ref.get(&sid)
-                                    .and_then(|s| s.rtmp_manager.clone());
-                                if let Some(manager) = mgr {
-                                    let mut locked = manager.lock().await;
-                                    locked.restart_all().await;
-                                    if let Some(session) = sessions_ref.get(&sid) {
-                                        if let Some(msg) = to_ws_msg(&ServerMsg::Error {
-                                            message: "RTMP streams restarted".to_string(),
-                                        }) {
-                                            session.send_to_host(msg);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    handle_ws_text_message(&text, &sessions_ref, &sid).await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -388,4 +277,154 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
         // Voice clone persists across sessions -- don't delete on disconnect
     }
     tracing::info!("[WS] Session {} cleanup complete", session_id);
+}
+
+// -- Extracted WebSocket text message handlers --------------------
+
+/// Handle an incoming WebSocket text (JSON) message by dispatching to
+/// the appropriate sub-handler based on the `"type"` field.
+async fn handle_ws_text_message(
+    text: &str,
+    sessions: &Sessions,
+    session_id: &str,
+) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+        match json.get("type").and_then(|t| t.as_str()) {
+            Some("video:codec") => {
+                handle_video_codec(&json, sessions, session_id).await;
+            }
+            Some("rtmp:config") => {
+                handle_rtmp_config(&json, sessions, session_id).await;
+            }
+            Some("rtmp:restart") => {
+                handle_rtmp_restart(sessions, session_id).await;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Process a `video:codec` message — store the codec from the frontend's
+/// MediaRecorder and propagate it to an already-running RTMP manager.
+async fn handle_video_codec(
+    json: &serde_json::Value,
+    sessions: &Sessions,
+    session_id: &str,
+) {
+    if let Some(codec) = json.get("codec").and_then(|c| c.as_str()) {
+        tracing::info!("[WS:{}] video:codec = {}", session_id, codec);
+        if let Some(mgr) = sessions.get(session_id)
+            .and_then(|s| s.rtmp_manager.clone())
+        {
+            let mut locked = mgr.lock().await;
+            locked.set_video_codec(codec);
+        }
+        // Store for streams not yet started
+        if let Some(mut session) = sessions.get_mut(session_id) {
+            session.video_codec = Some(codec.to_string());
+        }
+    }
+}
+
+/// Process an `rtmp:config` message — create an `RtmpManager`, start each
+/// configured stream, launch the health monitor, and store everything in
+/// the session.
+async fn handle_rtmp_config(
+    json: &serde_json::Value,
+    sessions: &Sessions,
+    session_id: &str,
+) {
+    if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+        tracing::info!(
+            "[WS:{}] rtmp:config received: {} stream(s)",
+            session_id, streams.len(),
+        );
+        let delay_ms = json.get("broadcastDelay")
+            .and_then(|d| d.as_u64())
+            .unwrap_or(5000);
+
+        // Store in session for TTS timeout calculation
+        if let Some(mut session) = sessions.get_mut(session_id) {
+            session.broadcast_delay_ms = delay_ms;
+        }
+
+        let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
+
+        // Apply video codec if already reported
+        if let Some(codec) = sessions.get(session_id)
+            .and_then(|s| s.video_codec.clone())
+        {
+            manager.set_video_codec(&codec);
+        }
+
+        let mut rtmp_langs = Vec::new();
+
+        for stream_cfg in streams {
+            if let (Some(lang), Some(url)) = (
+                stream_cfg.get("lang").and_then(|l| l.as_str()),
+                stream_cfg.get("url").and_then(|u| u.as_str()),
+            ) {
+                let stream_id = format!("{}_{}", session_id, lang);
+                match manager.start_stream(&stream_id, lang, url) {
+                    Ok(_) => {
+                        if let Some(l) = Lang::from_str(lang) {
+                            rtmp_langs.push(l);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[RTMP] Failed to start {}: {}", lang, e);
+                        if let Some(session) = sessions.get(session_id) {
+                            if let Some(err_msg) = to_ws_msg(&ServerMsg::Error {
+                                message: format!("RTMP failed for {}: {}", lang, e),
+                            }) {
+                                session.send_to_host(err_msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let shared_mgr: ffmpeg::SharedRtmpManager =
+            Arc::new(tokio::sync::Mutex::new(manager));
+
+        // Start health monitor for crash recovery
+        let health_stop = sessions.get(session_id)
+            .map(|s| s.rtmp_stop.clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        ffmpeg::spawn_health_monitor(shared_mgr.clone(), health_stop);
+
+        // Store in session
+        if let Some(mut session) = sessions.get_mut(session_id) {
+            session.rtmp_manager = Some(shared_mgr);
+            session.rtmp_langs = rtmp_langs.clone();
+        }
+
+        tracing::info!(
+            "[RTMP] Started {} stream(s): {:?}",
+            rtmp_langs.len(), rtmp_langs,
+        );
+    }
+}
+
+/// Process an `rtmp:restart` message — restart all RTMP streams and
+/// notify the host.
+async fn handle_rtmp_restart(
+    sessions: &Sessions,
+    session_id: &str,
+) {
+    tracing::info!("[WS:{}] rtmp:restart requested", session_id);
+    let mgr = sessions.get(session_id)
+        .and_then(|s| s.rtmp_manager.clone());
+    if let Some(manager) = mgr {
+        let mut locked = manager.lock().await;
+        locked.restart_all().await;
+        if let Some(session) = sessions.get(session_id) {
+            if let Some(msg) = to_ws_msg(&ServerMsg::Error {
+                message: "RTMP streams restarted".to_string(),
+            }) {
+                session.send_to_host(msg);
+            }
+        }
+    }
 }
