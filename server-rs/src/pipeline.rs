@@ -113,6 +113,257 @@ fn emit_final(
     }
 }
 
+/// Spawn a chunked pipeline that processes sub-utterance chunks via an mpsc channel.
+/// One StreamingPcm per (utterance, language) — multiple TTS chunks feed the same buffer.
+fn spawn_chunked_pipeline(
+    sessions: &Sessions,
+    session_id: &str,
+    utterance_id: u64,
+    source_lang: &Lang,
+    style_params: StyleParams,
+) -> Option<mpsc::Sender<crate::types::ChunkEvent>> {
+    let session = sessions.get(session_id)?;
+    let active = session.active_langs();
+    let tier = session.tier;
+    let voice_clone_id = session.voice_clone_id.clone();
+    let tts_model = session.tts_model.clone();
+    let broadcast_delay_ms = session.broadcast_delay_ms;
+    drop(session); // release DashMap ref
+
+    if active.is_empty() {
+        return None;
+    }
+
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<crate::types::ChunkEvent>(6);
+    let sessions = sessions.clone();
+    let session_id = session_id.to_string();
+    let source_lang = source_lang.clone();
+
+    tokio::spawn(async move {
+        // Per-language streaming PCM handles (created on first chunk)
+        let mut lang_streaming: std::collections::HashMap<
+            String, crate::ffmpeg::StreamingPcm
+        > = std::collections::HashMap::new();
+
+        let pipeline_start = Instant::now();
+        let mut chunk_count: u16 = 0;
+
+        while let Some(chunk) = chunk_rx.recv().await {
+            chunk_count += 1;
+            let chunk_text = chunk.text.clone();
+            let chunk_idx = chunk.chunk_index;
+            let is_final = chunk.is_utterance_final;
+            let context = chunk.context.clone();
+            let utterance_start = chunk.utterance_start;
+            let _host_audio = chunk.host_audio;
+
+            eprintln!(
+                "[CHUNK] #{}.{} text='{}' final={} context={}",
+                utterance_id, chunk_idx,
+                &chunk_text[..chunk_text.len().min(60)],
+                is_final,
+                context.as_ref().map(|c| c.len()).unwrap_or(0)
+            );
+
+            // Process each language in parallel
+            let mut handles = Vec::new();
+
+            for lang in &active {
+                let lang_str = lang.to_string();
+
+                if lang == &source_lang {
+                    // Source-language passthrough is handled by the FINAL handler
+                    // via emit_final (which queues the complete host audio once).
+                    // Don't queue partial chunk audio here — it would create
+                    // multiple overlapping QueuedAudio entries.
+                    continue;
+                }
+
+                // Create StreamingPcm on first chunk for this language
+                if chunk_idx == 0 {
+                    let rtmp_mgr = sessions.get(&session_id).and_then(|s| s.rtmp_manager.clone());
+                    if let Some(manager) = rtmp_mgr {
+                        let mgr = manager.lock().await;
+                        let streaming = mgr.queue_streaming_audio(&lang_str, utterance_start);
+                        lang_streaming.insert(lang_str.clone(), streaming);
+                        eprintln!("[CHUNK] #{}.0 {} created StreamingPcm slot", utterance_id, lang_str);
+                    }
+
+                    // Notify host: TTS started
+                    if let Some(session) = sessions.get(&session_id) {
+                        session.send_to_host(to_ws(&ServerMsg::TtsStart {
+                            lang: lang_str.clone(), utterance_id,
+                        }));
+                    }
+                }
+
+                let text = chunk_text.clone();
+                let ctx = context.clone();
+                let source = source_lang.clone();
+                let target = lang.clone();
+                let sessions_c = sessions.clone();
+                let session_id_c = session_id.clone();
+                let voice_clone = voice_clone_id.clone();
+                let sp = style_params.clone();
+                let tts_model_c = tts_model.clone();
+                let streaming = lang_streaming.get(&lang_str).cloned();
+
+                // Note: no explicit backpressure — the per-chunk TTS deadline
+                // (broadcast_delay - 500ms) already prevents runaway generation.
+                // If TTS times out, the StreamingPcm just gets less data and the
+                // audio drain writes silence for the remainder.
+
+                handles.push(tokio::spawn(async move {
+                    let client = &*HTTP_CLIENT;
+
+                    // Translate with context
+                    let translate_start = Instant::now();
+                    let query_text = match &ctx {
+                        Some(c) if !c.is_empty() => format!("{} ||| {}", c, text),
+                        _ => text.clone(),
+                    };
+
+                    let url = format!(
+                        "https://translation.googleapis.com/language/translate/v2?key={}",
+                        &*TRANSLATE_API_KEY
+                    );
+                    let resp = client
+                        .post(&url)
+                        .json(&serde_json::json!({
+                            "q": query_text,
+                            "source": source.to_string(),
+                            "target": target.to_string(),
+                            "format": "text",
+                        }))
+                        .send()
+                        .await;
+
+                    let full_translation = match resp {
+                        Ok(r) if r.status().is_success() => {
+                            match r.json::<GoogleTranslateResponse>().await {
+                                Ok(r) => r.data.translations.into_iter().next()
+                                    .map(|t| t.translated_text)
+                                    .unwrap_or_default(),
+                                Err(e) => {
+                                    eprintln!("[TRANSLATE] chunk parse error for {}: {}", target, e);
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(r) => {
+                            eprintln!("[TRANSLATE] chunk error for {}: {}", target, r.status());
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("[TRANSLATE] chunk request error for {}: {}", target, e);
+                            return;
+                        }
+                    };
+
+                    // Strip context prefix from translation
+                    let translated_text = if ctx.is_some() {
+                        if let Some(pos) = full_translation.find("|||") {
+                            full_translation[pos + 3..].trim().to_string()
+                        } else {
+                            // Separator was translated away — use full output
+                            full_translation
+                        }
+                    } else {
+                        full_translation
+                    };
+
+                    let translate_ms = translate_start.elapsed().as_millis() as u64;
+                    eprintln!(
+                        "[TRANSLATE] chunk #{}.{} {} = '{}' ({}ms)",
+                        utterance_id, chunk_idx, target, translated_text, translate_ms
+                    );
+
+                    // Send chunk translation to frontend
+                    if let Some(session) = sessions_c.get(&session_id_c) {
+                        session.send_to_host(to_ws(&ServerMsg::ChunkTranslation {
+                            lang: target.to_string(),
+                            text: translated_text.clone(),
+                            utterance_id,
+                            chunk_index: chunk_idx,
+                            translate_ms,
+                        }));
+                    }
+
+                    // TTS (tier 2+ only)
+                    if tier >= 2 {
+                        if let Some(ref s) = streaming {
+                            let voice_id = voice_clone.as_deref()
+                                .unwrap_or(&*DEFAULT_VOICE);
+                            let lang_str = target.to_string();
+
+                            let (stability, similarity_boost, style, _) =
+                                crate::stt::map_style(&sp.emotion);
+                            let voice_settings = serde_json::json!({
+                                "stability": stability,
+                                "similarity_boost": similarity_boost,
+                                "style": style,
+                                "speed": sp.speed,
+                            });
+
+                            // Max bytes is for the ENTIRE utterance (all chunks share one
+                            // StreamingPcm). Use broadcast_delay + margin as total budget.
+                            let max_secs = (broadcast_delay_ms as f64 / 1000.0) + 5.0;
+                            let max_bytes = (max_secs * 88200.0) as usize;
+
+                            let tts_deadline = Duration::from_millis(
+                                broadcast_delay_ms.saturating_sub(500).min(10000)
+                            );
+
+                            match tokio::time::timeout(tts_deadline, do_tts_ws(
+                                &translated_text, voice_id, &lang_str,
+                                &voice_settings, max_bytes, Some(s), &tts_model_c,
+                            )).await {
+                                Ok(Ok(bytes)) => {
+                                    eprintln!(
+                                        "[TTS] chunk #{}.{} {} = {}KB PCM",
+                                        utterance_id, chunk_idx, target, bytes / 1024
+                                    );
+                                }
+                                Ok(Err(e)) => {
+                                    eprintln!("[TTS] chunk #{}.{} {} error: {}", utterance_id, chunk_idx, target, e);
+                                }
+                                Err(_) => {
+                                    eprintln!("[TTS] chunk #{}.{} {} TIMEOUT", utterance_id, chunk_idx, target);
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+
+            // Wait for all languages to finish this chunk before processing next
+            for h in handles {
+                let _ = h.await;
+            }
+        }
+
+        // Mark all streaming buffers as complete
+        for (lang_str, streaming) in &lang_streaming {
+            streaming.finish();
+            // Notify host: TTS ended
+            if let Some(session) = sessions.get(&session_id) {
+                session.send_to_host(to_ws(&ServerMsg::TtsEnd {
+                    lang: lang_str.clone(),
+                    utterance_id,
+                    tts_ms: pipeline_start.elapsed().as_millis() as u64,
+                }));
+            }
+        }
+
+        eprintln!(
+            "[CHUNK] #{} pipeline complete: {} chunks, {}ms total",
+            utterance_id, chunk_count, pipeline_start.elapsed().as_millis()
+        );
+    });
+
+    Some(chunk_tx)
+}
+
 const STT_RECONNECT_MAX: u32 = 5;
 const STT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -308,6 +559,10 @@ pub async fn start_stt(
         let mut uc = utterance_counter;
         let mut utterance_start: Option<Instant> = None;
         let mut chunk_detector = crate::stt::get_detector(&source_lang.to_string());
+        let mut progressive = crate::stt::ProgressiveChunkDetector::new(&source_lang.to_string());
+        let mut chunk_index: u16 = 0;
+        let mut chunk_pipeline_tx: Option<mpsc::Sender<crate::types::ChunkEvent>> = None;
+        let mut last_audio_byte_sent: usize = 0; // Track audio position for incremental extraction
 
         let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disc_flag = disconnected_unexpectedly.clone();
@@ -361,10 +616,6 @@ pub async fn start_stt(
 
                         if gm.is_final() {
                             // ── Final event ──
-                            uc += 1;
-                            let uid = uc;
-                            println!("[FINAL #{}] {}", uid, transcript);
-
                             let start = utterance_start.take().unwrap_or_else(Instant::now);
                             let host_audio: Vec<u8> = {
                                 let mut acc = acc_rx.lock().unwrap();
@@ -388,11 +639,68 @@ pub async fn start_stt(
                                 emotion: emotion.to_string(),
                             };
 
-                            emit_final(
-                                &sessions_ref, &sid, &transcript, uid,
-                                &source_lang_clone, Some(sp),
-                                start, host_audio,
-                            );
+                            // Flush remaining text as final chunk via progressive pipeline
+                            if let Some(ref tx) = chunk_pipeline_tx {
+                                // Use the same utterance ID that was assigned when the
+                                // chunked pipeline was spawned (don't increment uc again)
+                                let uid = uc;
+                                println!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, transcript, chunk_index);
+
+                                let flush_context = progressive.context().map(|s| s.to_string());
+                                if let Some(boundary) = progressive.flush(&transcript) {
+                                    let _ = tx.try_send(crate::types::ChunkEvent {
+                                        text: boundary.chunk_text,
+                                        chunk_index: chunk_index,
+                                        context: flush_context,
+                                        is_utterance_final: true,
+                                        utterance_id: uid,
+                                        utterance_start: start,
+                                        host_audio: host_audio.clone(),
+                                    });
+                                }
+                                // Drop the sender to signal pipeline completion
+                                chunk_pipeline_tx = None;
+                                // Send Final to frontend (chunked path — emit_final not called)
+                                if let Some(session) = sessions_ref.get(&sid) {
+                                    session.send_to_host(to_ws(&ServerMsg::Final {
+                                        transcript: transcript.clone(),
+                                        utterance_id: uid,
+                                    }));
+                                }
+                                // Source-language passthrough: queue full host audio once
+                                if let Some(session) = sessions_ref.get(&sid) {
+                                    if session.active_langs().contains(&source_lang_clone) {
+                                        if let Some(ref mgr) = session.rtmp_manager {
+                                            let mgr = mgr.clone();
+                                            let lang_str = source_lang_clone.to_string();
+                                            let mut pcm = host_audio.clone();
+                                            let max_bytes = ((host_audio.len() as f64 / 88200.0 + 2.0) * 88200.0) as usize;
+                                            if pcm.len() > max_bytes {
+                                                crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+                                            }
+                                            tokio::spawn(async move {
+                                                let locked = mgr.lock().await;
+                                                locked.queue_audio(&lang_str, pcm, start);
+                                            });
+                                        }
+                                    }
+                                }
+                            } else {
+                                // No progressive chunks — use legacy emit_final path
+                                uc += 1;
+                                let uid = uc;
+                                println!("[FINAL #{}] {}", uid, transcript);
+                                emit_final(
+                                    &sessions_ref, &sid, &transcript, uid,
+                                    &source_lang_clone, Some(sp.clone()),
+                                    start, host_audio.clone(),
+                                );
+                            }
+
+                            // Reset progressive state for next utterance
+                            progressive.reset();
+                            chunk_index = 0;
+                            last_audio_byte_sent = 0;
                             chunk_detector.reset();
 
                             // Adaptive endpointing: track WPM over first 5 finals
@@ -434,6 +742,7 @@ pub async fn start_stt(
                             if utterance_start.is_none() {
                                 utterance_start = Some(Instant::now());
                             }
+                            let start = utterance_start.unwrap();
                             println!("[INTERIM] {}", transcript);
 
                             if let Some(session) = sessions_ref.get(&sid) {
@@ -442,8 +751,49 @@ pub async fn start_stt(
                                 }));
                             }
 
-                            // Clause boundary check (no force-finalize with Gladia,
-                            // but max_duration timeout still tracked)
+                            // Progressive chunk detection: emit sub-utterance chunks
+                            // Capture context BEFORE check() — check() overwrites prev_chunk_text
+                            let pre_check_context = progressive.context().map(|s| s.to_string());
+                            if let Some(boundary) = progressive.check(&transcript) {
+                                let ctx = pre_check_context;
+
+                                // Spawn chunked pipeline on first chunk
+                                if chunk_pipeline_tx.is_none() {
+                                    uc += 1; // Pre-increment utterance ID for this utterance
+                                    let sp = StyleParams::default();
+                                    chunk_pipeline_tx = spawn_chunked_pipeline(
+                                        &sessions_ref, &sid, uc,
+                                        &source_lang_clone, sp,
+                                    );
+                                }
+
+                                if let Some(ref tx) = chunk_pipeline_tx {
+                                    // Extract incremental host audio for this chunk (non-overlapping)
+                                    let chunk_audio: Vec<u8> = {
+                                        let acc = acc_rx.lock().unwrap();
+                                        let total: Vec<u8> = acc.iter().flatten().cloned().collect();
+                                        let ratio = if transcript.is_empty() { 0.0 }
+                                            else { boundary.split_pos as f64 / transcript.len() as f64 };
+                                        let end_pos = ((total.len() as f64 * ratio) as usize) & !1;
+                                        let start_pos = last_audio_byte_sent.min(end_pos);
+                                        last_audio_byte_sent = end_pos;
+                                        total[start_pos..end_pos.min(total.len())].to_vec()
+                                    };
+
+                                    let _ = tx.try_send(crate::types::ChunkEvent {
+                                        text: boundary.chunk_text,
+                                        chunk_index: chunk_index,
+                                        context: ctx,
+                                        is_utterance_final: false,
+                                        utterance_id: uc,
+                                        utterance_start: start,
+                                        host_audio: chunk_audio,
+                                    });
+                                    chunk_index += 1;
+                                }
+                            }
+
+                            // Legacy detector still tracked for metrics
                             chunk_detector.check(&transcript);
                         }
                     }
@@ -855,9 +1205,12 @@ async fn do_tts_ws(
     ws.send(tungstenite::Message::Text(r#"{"text":""}"#.to_string().into()))
         .await.map_err(|e| format!("EOS send failed: {}", e))?;
 
-    // Read MP3 audio chunks until isFinal, accumulate for batch decode
-    let mut mp3_buf: Vec<u8> = Vec::new();
+    // Incremental MP3→PCM decode: each chunk decoded and streamed to RTMP immediately
+    let mut decoder = crate::ffmpeg::IncrementalMp3Decoder::new().await
+        .map_err(|e| format!("IncrementalMp3Decoder init failed: {}", e))?;
     let mut chunk_count: u32 = 0;
+    let mut total_pcm_bytes: usize = 0;
+    let mut got_audio = false;
 
     while let Some(msg_result) = ws.next().await {
         let msg = msg_result.map_err(|e| format!("WS read error: {}", e))?;
@@ -890,8 +1243,8 @@ async fn do_tts_ws(
 
         if resp.is_final.unwrap_or(false) {
             eprintln!(
-                "[TTS:{}] done: {} chunks, {}KB MP3 in {}ms",
-                lang, chunk_count, mp3_buf.len() / 1024, tts_start.elapsed().as_millis()
+                "[TTS:{}] done: {} chunks, {}KB PCM streamed in {}ms",
+                lang, chunk_count, total_pcm_bytes / 1024, tts_start.elapsed().as_millis()
             );
             break;
         }
@@ -906,29 +1259,41 @@ async fn do_tts_ws(
             chunk_count += 1;
             if chunk_count == 1 {
                 eprintln!(
-                    "[TTS:{}] TTFB {}ms ({}B first chunk)",
+                    "[TTS:{}] TTFB {}ms ({}B first MP3 chunk)",
                     lang, tts_start.elapsed().as_millis(), mp3_chunk.len()
                 );
             }
 
-            mp3_buf.extend_from_slice(&mp3_chunk);
+            // Incrementally decode MP3→PCM and stream to RTMP
+            let pcm_chunk = decoder.feed(&mp3_chunk).await
+                .map_err(|e| format!("Incremental decode failed: {}", e))?;
+            if !pcm_chunk.is_empty() {
+                got_audio = true;
+                total_pcm_bytes += pcm_chunk.len();
+                if let Some(s) = streaming {
+                    s.append_with_limit(&pcm_chunk, max_bytes);
+                }
+            }
         }
     }
 
-    if mp3_buf.is_empty() {
+    // Drain remaining PCM from the decoder
+    let remaining_pcm = decoder.finish().await
+        .map_err(|e| format!("Decoder finish failed: {}", e))?;
+    if !remaining_pcm.is_empty() {
+        got_audio = true;
+        total_pcm_bytes += remaining_pcm.len();
+        if let Some(s) = streaming {
+            s.append_with_limit(&remaining_pcm, max_bytes);
+        }
+    }
+
+    if !got_audio {
         eprintln!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", lang, tts_start.elapsed().as_millis());
         return Ok(0);
     }
 
-    // Decode accumulated MP3 → PCM s16le 44100Hz
-    let pcm = crate::ffmpeg::decode_mp3_to_pcm(&mp3_buf).await?;
-    let total_bytes = pcm.len();
-
-    if let Some(s) = streaming {
-        s.append_with_limit(&pcm, max_bytes);
-    }
-
-    Ok(total_bytes)
+    Ok(total_pcm_bytes)
 }
 
 /// REST fallback TTS — used when WebSocket connection fails.

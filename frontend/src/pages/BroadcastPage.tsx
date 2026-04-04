@@ -280,6 +280,27 @@ export default function BroadcastPage() {
           )
         );
         break;
+      case "chunk_translation":
+        // Progressive chunk: append to existing translation for this lang
+        setTranscripts((prev) => {
+          const exists = prev.some((t) => t.id === msg.utteranceId);
+          const list = exists
+            ? prev
+            : [...prev, { id: msg.utteranceId, text: "...", translations: {} }];
+          return list.map((t) => {
+            if (t.id !== msg.utteranceId) return t;
+            const existing = t.translations[msg.lang] || "";
+            const separator = existing && msg.chunkIndex > 0 ? " " : "";
+            return {
+              ...t,
+              translations: {
+                ...t.translations,
+                [msg.lang]: existing + separator + msg.text,
+              },
+            };
+          });
+        });
+        break;
       case "error":
         setErrors((prev) => [...prev, msg.message]);
         break;

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
@@ -81,7 +82,7 @@ impl Session {
             rtmp_langs: Vec::new(),
             rtmp_stop: Arc::new(AtomicBool::new(false)),
             video_codec: None,
-            broadcast_delay_ms: 5000,
+            broadcast_delay_ms: 3000,
         }
     }
 
@@ -103,6 +104,28 @@ impl Session {
 }
 
 pub type Sessions = Arc<DashMap<String, Session>>;
+
+// ── Progressive Chunk Types ─────────────────────────────────
+
+/// A sub-utterance chunk ready for translation + TTS.
+/// Emitted by ProgressiveChunkDetector when a clause boundary is found
+/// during interim transcripts, or when Gladia emits a final.
+pub struct ChunkEvent {
+    /// The chunk's text (substring of the full utterance)
+    pub text: String,
+    /// 0-based index within the current utterance
+    pub chunk_index: u16,
+    /// Previous chunk's source text (for context-aware translation)
+    pub context: Option<String>,
+    /// True only when Gladia emits its FINAL event (last chunk)
+    pub is_utterance_final: bool,
+    /// Parent utterance ID
+    pub utterance_id: u64,
+    /// When the host started speaking this utterance (for A/V sync play_at)
+    pub utterance_start: Instant,
+    /// Host PCM audio for this chunk (for passthrough on source lang)
+    pub host_audio: Vec<u8>,
+}
 
 // ── WebSocket Messages (server → client) ──────────────────
 
@@ -128,6 +151,19 @@ pub enum ServerMsg {
         text: String,
         #[serde(rename = "utteranceId")]
         utterance_id: u64,
+        #[serde(rename = "translateMs")]
+        translate_ms: u64,
+    },
+
+    /// Progressive chunk translation (arrives before full-sentence translation)
+    #[serde(rename = "chunk_translation")]
+    ChunkTranslation {
+        lang: String,
+        text: String,
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
+        #[serde(rename = "chunkIndex")]
+        chunk_index: u16,
         #[serde(rename = "translateMs")]
         translate_ms: u64,
     },

@@ -157,6 +157,8 @@ const JAPANESE_MARKERS: &[&str] = &[
     "そして ", "でも ", "だから ", "しかし ", "それから ",
     "ところが ", "それで ", "また ", "つまり ", "ただ ",
     "一方 ", "実は ", "ちなみに ",
+    // Live commerce patterns
+    "ですね、", "なんですけど、", "ということで、",
 ];
 
 const KOREAN_MARKERS: &[&str] = &[
@@ -211,6 +213,148 @@ pub fn get_detector(lang: &str) -> Box<dyn ChunkDetector> {
             max_duration: Duration::from_secs(3),
             started_at: None,
         }),
+    }
+}
+
+// ── Progressive Chunk Detection ──────────���───────────────
+//
+// Detects clause boundaries within ongoing speech (interims), emitting
+// sub-utterance chunks for progressive translation. Unlike ChunkDetector
+// which returns a bool for the entire utterance, this returns the split
+// position so that the pipeline can translate each chunk independently.
+
+/// A detected clause boundary within an interim transcript.
+pub struct ChunkBoundary {
+    /// Byte position in the transcript where the chunk ends (exclusive)
+    pub split_pos: usize,
+    /// The chunk text (from last emitted boundary to split_pos)
+    pub chunk_text: String,
+}
+
+pub struct ProgressiveChunkDetector {
+    lang: String,
+    markers: &'static [&'static str],
+    min_chars_after: usize,
+    min_duration: Duration,
+    max_duration: Duration,
+    /// Byte offset of the last emitted chunk boundary
+    last_emitted_pos: usize,
+    /// Text of the previously emitted chunk (for translation context)
+    prev_chunk_text: Option<String>,
+    /// When this utterance started (first interim received)
+    utterance_start: Option<Instant>,
+    /// When the last chunk was emitted
+    last_chunk_time: Option<Instant>,
+}
+
+impl ProgressiveChunkDetector {
+    pub fn new(lang: &str) -> Self {
+        let (markers, min_chars_after, min_duration, max_duration) = match lang {
+            "en" => (ENGLISH_MARKERS as &[&str], 3usize, Duration::from_millis(1000), Duration::from_millis(2000)),
+            "ja" => (JAPANESE_MARKERS as &[&str], 2, Duration::from_millis(800), Duration::from_millis(2000)),
+            "ko" => (KOREAN_MARKERS as &[&str], 2, Duration::from_millis(800), Duration::from_millis(2000)),
+            "zh" => (CHINESE_MARKERS as &[&str], 2, Duration::from_millis(800), Duration::from_millis(2000)),
+            _ => (&[] as &[&str], 3, Duration::from_millis(1000), Duration::from_millis(2000)),
+        };
+        Self {
+            lang: lang.to_string(),
+            markers,
+            min_chars_after,
+            min_duration,
+            max_duration,
+            last_emitted_pos: 0,
+            prev_chunk_text: None,
+            utterance_start: None,
+            last_chunk_time: None,
+        }
+    }
+
+    /// Start tracking a new utterance (call when first interim arrives).
+    pub fn start(&mut self) {
+        if self.utterance_start.is_none() {
+            self.utterance_start = Some(Instant::now());
+            self.last_chunk_time = Some(Instant::now());
+        }
+    }
+
+    /// Check the full interim transcript for a clause boundary after the last emitted position.
+    /// Returns Some(ChunkBoundary) if a chunk should be emitted.
+    pub fn check(&mut self, transcript: &str) -> Option<ChunkBoundary> {
+        self.start();
+
+        let since_last_chunk = self.last_chunk_time.unwrap().elapsed();
+        let new_text = &transcript[self.last_emitted_pos..];
+
+        // Not enough new text yet
+        if new_text.trim().is_empty() {
+            return None;
+        }
+
+        // Hard timeout: force split regardless of boundary
+        if since_last_chunk >= self.max_duration && new_text.trim().len() >= 4 {
+            return self.emit(transcript, transcript.len());
+        }
+
+        // Too early for a split
+        if since_last_chunk < self.min_duration {
+            return None;
+        }
+
+        // Look for clause boundary markers in the new text
+        let lower_new = new_text.to_lowercase();
+        for marker in self.markers {
+            let m = marker.to_lowercase();
+            if let Some(rel_pos) = lower_new.rfind(&m) {
+                let abs_pos = self.last_emitted_pos + rel_pos + marker.len();
+                // Ensure there's enough text after the marker (to avoid splitting mid-clause)
+                let after = transcript[abs_pos..].trim();
+                if after.len() >= self.min_chars_after {
+                    return self.emit(transcript, abs_pos);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Emit whatever text remains after the last boundary (call on Gladia FINAL).
+    pub fn flush(&mut self, transcript: &str) -> Option<ChunkBoundary> {
+        let remaining = transcript[self.last_emitted_pos..].trim();
+        if remaining.is_empty() {
+            return None;
+        }
+        self.emit(transcript, transcript.len())
+    }
+
+    /// Get the previous chunk's text for context-aware translation.
+    pub fn context(&self) -> Option<&str> {
+        self.prev_chunk_text.as_deref()
+    }
+
+    /// How many chunks have been emitted for this utterance.
+    pub fn chunk_count(&self) -> u16 {
+        // Counted by tracking prev_chunk_text changes; use a counter instead
+        // This is a simplified version — the pipeline tracks chunk_index externally
+        0
+    }
+
+    /// Reset for a new utterance.
+    pub fn reset(&mut self) {
+        self.last_emitted_pos = 0;
+        self.prev_chunk_text = None;
+        self.utterance_start = None;
+        self.last_chunk_time = None;
+    }
+
+    fn emit(&mut self, transcript: &str, split_pos: usize) -> Option<ChunkBoundary> {
+        let chunk_text = transcript[self.last_emitted_pos..split_pos].trim().to_string();
+        if chunk_text.is_empty() {
+            return None;
+        }
+        self.prev_chunk_text = Some(chunk_text.clone());
+        self.last_emitted_pos = split_pos;
+        self.last_chunk_time = Some(Instant::now());
+        Some(ChunkBoundary { split_pos, chunk_text })
     }
 }
 

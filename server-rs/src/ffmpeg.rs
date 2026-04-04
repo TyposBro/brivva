@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 
 // ── FFmpeg Binary Resolution ──────────────────────────────
@@ -162,7 +162,7 @@ const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// Max video chunks to buffer (~60s at 10 chunks/sec)
 const MAX_VIDEO_CHUNKS: usize = 600;
 /// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
-const DEFAULT_DELAY_MS: u64 = 5000;
+const DEFAULT_DELAY_MS: u64 = 3000;
 /// Max FFmpeg restart attempts per stream
 const MAX_FFMPEG_RESTARTS: u32 = 50;
 /// Delay between FFmpeg restart attempts
@@ -1049,4 +1049,101 @@ pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
         decode_start.elapsed().as_millis()
     );
     Ok(output.stdout)
+}
+
+// ── Incremental MP3 Decoder ─────────────────────────────
+//
+// Long-lived FFmpeg subprocess for streaming MP3→PCM decode.
+// Each `feed()` writes MP3 bytes to stdin and reads available PCM from stdout.
+// `finish()` closes stdin and drains remaining PCM.
+
+pub struct IncrementalMp3Decoder {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    total_mp3_in: usize,
+    total_pcm_out: usize,
+}
+
+impl IncrementalMp3Decoder {
+    pub async fn new() -> Result<Self, String> {
+        let mut child = TokioCommand::new(&*FFMPEG_BIN)
+            .args([
+                "-f", "mp3", "-i", "pipe:0",
+                "-f", "s16le", "-ar", "44100", "-ac", "1",
+                "pipe:1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("IncrementalMp3Decoder spawn failed: {}", e))?;
+
+        let stdin = child.stdin.take().ok_or("No stdin on decoder")?;
+        let stdout = child.stdout.take().ok_or("No stdout on decoder")?;
+
+        Ok(Self { child, stdin, stdout, total_mp3_in: 0, total_pcm_out: 0 })
+    }
+
+    /// Feed an MP3 chunk and read any available PCM output.
+    pub async fn feed(&mut self, mp3_chunk: &[u8]) -> Result<Vec<u8>, String> {
+        self.stdin
+            .write_all(mp3_chunk)
+            .await
+            .map_err(|e| format!("Decoder stdin write failed: {}", e))?;
+        self.total_mp3_in += mp3_chunk.len();
+
+        // Read whatever PCM is available (non-blocking with short timeout)
+        let pcm = self.read_available().await;
+        self.total_pcm_out += pcm.len();
+        Ok(pcm)
+    }
+
+    /// Close stdin and drain all remaining PCM.
+    pub async fn finish(mut self) -> Result<Vec<u8>, String> {
+        drop(self.stdin);
+
+        let mut remaining = Vec::new();
+        let mut buf = [0u8; 16384];
+        loop {
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                self.stdout.read(&mut buf),
+            ).await {
+                Ok(Ok(0)) => break,        // EOF
+                Ok(Ok(n)) => remaining.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,        // read error
+                Err(_) => break,            // timeout — no more data
+            }
+        }
+
+        let _ = self.child.kill().await;
+        self.total_pcm_out += remaining.len();
+
+        eprintln!(
+            "[FFMPEG] IncrementalMp3Decoder: {}B MP3 -> {}B PCM ({:.1}s audio)",
+            self.total_mp3_in, self.total_pcm_out,
+            self.total_pcm_out as f64 / 88200.0
+        );
+        Ok(remaining)
+    }
+
+    /// Try to read available PCM without blocking for too long.
+    async fn read_available(&mut self) -> Vec<u8> {
+        let mut result = Vec::new();
+        let mut buf = [0u8; 8192];
+        // Read in a tight loop with short timeouts to drain buffered output
+        loop {
+            match tokio::time::timeout(
+                Duration::from_millis(5),
+                self.stdout.read(&mut buf),
+            ).await {
+                Ok(Ok(0)) => break,        // EOF
+                Ok(Ok(n)) => result.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+                Err(_) => break,            // timeout — nothing more available right now
+            }
+        }
+        result
+    }
 }
