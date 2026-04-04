@@ -333,6 +333,377 @@ async fn create_gladia_session(
         .map_err(|e| format!("Gladia session parse error: {}", e))
 }
 
+// ── STT Helper Types ─────────────────────────────────────
+
+/// Mutable state carried across Gladia messages within one WS connection.
+struct SttState {
+    utterance_counter: u64,
+    utterance_start: Option<Instant>,
+    chunk_detector: Box<dyn crate::stt::ChunkDetector>,
+    progressive: crate::stt::ProgressiveChunkDetector,
+    chunk_index: u16,
+    chunk_pipeline_tx: Option<mpsc::Sender<crate::types::ChunkEvent>>,
+    last_audio_byte_sent: usize,
+    wpm_samples: Vec<u32>,
+    adapted: bool,
+    disconnected: bool,
+    needs_adaptive_reconnect: bool,
+    adaptive_params: Option<(f64, f64)>,
+}
+
+/// Control-flow signal returned by [`process_gladia_message`].
+enum MessageAction {
+    Continue,
+    Break,
+}
+
+// ── STT Helper Functions ─────────────────────────────────
+
+/// WebSocket stream type alias (avoids spelling out the full generic).
+type WsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+/// Try to create a Gladia live session and connect the WebSocket.
+///
+/// Returns the connected stream on success, or `None` if all attempts fail
+/// (in which case the caller should stop STT).
+async fn connect_gladia(
+    session_id: &str,
+    sessions: &Sessions,
+    source_lang: &Lang,
+    endpointing: f64,
+    max_duration: f64,
+    reconnect_count: u32,
+) -> Option<WsStream> {
+    let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
+    let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
+
+    for attempt in 1..=max_attempts {
+        if !sessions.contains_key(session_id) {
+            info!("[STT] Session {} gone, stopping", session_id);
+            return None;
+        }
+
+        // Step 1: Create Gladia session via POST
+        let gladia_session = match create_gladia_session(
+            &source_lang.to_string(), endpointing, max_duration,
+        ).await {
+            Ok(s) => s,
+            Err(e) => {
+                let delay = if reconnect_count == 0 {
+                    Duration::from_secs(3)
+                } else {
+                    reconnect_delay
+                };
+                error!("[STT] session create attempt {}/{} failed: {}", attempt, max_attempts, e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+
+        // Step 2: Connect WebSocket to returned URL
+        use tungstenite::client::IntoClientRequest;
+        let request = match gladia_session.url.into_client_request() {
+            Ok(req) => req,
+            Err(e) => {
+                error!("[STT] Failed to build WS request: {}", e);
+                return None;
+            }
+        };
+
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((stream, _)) => {
+                info!(
+                    "[STT] Connected to Gladia Solaria-1 (attempt {}, endpointing={:.2}s, max_dur={:.0}s, session={})",
+                    attempt, endpointing, max_duration, gladia_session.id
+                );
+                return Some(stream);
+            }
+            Err(e) => {
+                let delay = if reconnect_count == 0 {
+                    Duration::from_secs(3)
+                } else {
+                    reconnect_delay
+                };
+                error!("[STT] WS connect attempt {}/{} failed: {}", attempt, max_attempts, e);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    error!("[STT] Failed to connect after {} attempts", max_attempts);
+    None
+}
+
+/// Handle a final transcript from Gladia.
+///
+/// Flushes progressive chunks, emits the final event, queues source-language
+/// passthrough audio, runs adaptive endpointing analysis, and resets per-utterance
+/// state.
+async fn handle_final_transcript(
+    state: &mut SttState,
+    transcript: &str,
+    sessions: &Sessions,
+    session_id: &str,
+    source_lang: &Lang,
+    acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    sink: &Arc<tokio::sync::Mutex<
+        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
+    >>,
+) {
+    let start = state.utterance_start.take().unwrap_or_else(Instant::now);
+    let host_audio: Vec<u8> = {
+        let mut acc = acc_rx.lock().unwrap();
+        acc.drain(..).flatten().collect()
+    };
+
+    // Prosody -> emotion -> style params
+    let mut prosody = crate::stt::extract_prosody(&host_audio, 44100);
+    let word_count = transcript.split_whitespace().count();
+    crate::stt::compute_speaking_rate(&mut prosody, word_count);
+    let emotion = crate::stt::classify_emotion(&prosody);
+    let (_, _, _, speed) = crate::stt::map_style(emotion);
+
+    debug!(
+        "[EMOTION] {} (energy={:.4} pitch_std={:.1} rate={}wpm)",
+        emotion, prosody.energy_rms, prosody.pitch_std, prosody.speaking_rate_wpm
+    );
+
+    let sp = StyleParams {
+        speed,
+        emotion: emotion.to_string(),
+    };
+
+    // Flush remaining text as final chunk via progressive pipeline
+    if let Some(ref tx) = state.chunk_pipeline_tx {
+        // Use the same utterance ID that was assigned when the
+        // chunked pipeline was spawned (don't increment uc again)
+        let uid = state.utterance_counter;
+        info!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, transcript, state.chunk_index);
+
+        let flush_context = state.progressive.context().map(|s| s.to_string());
+        if let Some(boundary) = state.progressive.flush(transcript) {
+            if let Err(e) = tx.try_send(crate::types::ChunkEvent {
+                text: boundary.chunk_text,
+                chunk_index: state.chunk_index,
+                context: flush_context,
+                is_utterance_final: true,
+                utterance_id: uid,
+                utterance_start: start,
+                host_audio: host_audio.clone(),
+            }) {
+                error!("[CHUNK] #{} final chunk dropped: {}", uid, e);
+            }
+        }
+        // Drop the sender to signal pipeline completion
+        state.chunk_pipeline_tx = None;
+        // Send Final to frontend (chunked path -- emit_final not called)
+        if let Some(session) = sessions.get(session_id) {
+            session.send_to_host(to_ws(&ServerMsg::Final {
+                transcript: transcript.to_string(),
+                utterance_id: uid,
+            }));
+        }
+        // Source-language passthrough: queue full host audio once
+        if let Some(session) = sessions.get(session_id) {
+            if session.active_langs().contains(source_lang) {
+                if let Some(ref mgr) = session.rtmp_manager {
+                    let mgr = mgr.clone();
+                    let lang_str = source_lang.to_string();
+                    let mut pcm = host_audio.clone();
+                    let max_bytes = ((host_audio.len() as f64 / BYTES_PER_SEC + 2.0) * BYTES_PER_SEC) as usize;
+                    if pcm.len() > max_bytes {
+                        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+                    }
+                    tokio::spawn(async move {
+                        let locked = mgr.lock().await;
+                        locked.queue_audio(&lang_str, pcm, start);
+                    });
+                }
+            }
+        }
+    } else {
+        // No progressive chunks -- use legacy emit_final path
+        state.utterance_counter += 1;
+        let uid = state.utterance_counter;
+        info!("[FINAL #{}] {}", uid, transcript);
+        emit_final(
+            sessions, session_id, transcript, uid,
+            source_lang, Some(sp.clone()),
+            start, host_audio.clone(),
+        );
+    }
+
+    // Reset progressive state for next utterance
+    state.progressive.reset();
+    state.chunk_index = 0;
+    state.last_audio_byte_sent = 0;
+    state.chunk_detector.reset();
+
+    // Adaptive endpointing: track WPM over first 5 finals
+    if !state.adapted && prosody.speaking_rate_wpm > 0 && prosody.speaking_rate_wpm <= 500 {
+        state.wpm_samples.push(prosody.speaking_rate_wpm);
+        if state.wpm_samples.len() >= 5 {
+            let avg_wpm = state.wpm_samples.iter().sum::<u32>() as f32
+                / state.wpm_samples.len() as f32;
+            let (label, new_endp, new_max_dur) =
+                crate::stt::classify_speaking_speed(avg_wpm);
+            state.adapted = true;
+
+            if label != "normal" {
+                info!(
+                    "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, reconnecting (endpointing={:.2}s, max_dur={:.0}s)",
+                    avg_wpm, label, new_endp, new_max_dur
+                );
+                state.adaptive_params = Some((new_endp, new_max_dur));
+                state.needs_adaptive_reconnect = true;
+                state.disconnected = true;
+                // Send stop_recording to end session cleanly
+                let mut s = sink.lock().await;
+                let _ = s.send(tungstenite::Message::Text(
+                    r#"{"type":"stop_recording"}"#.to_string().into()
+                )).await;
+            } else {
+                info!(
+                    "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, keeping defaults",
+                    avg_wpm, label
+                );
+            }
+        }
+    }
+}
+
+/// Handle an interim (partial) transcript from Gladia.
+///
+/// Sends the interim to the frontend, runs progressive chunk detection,
+/// and spawns chunked pipelines as needed.
+async fn handle_interim_transcript(
+    state: &mut SttState,
+    transcript: &str,
+    sessions: &Sessions,
+    session_id: &str,
+    source_lang: &Lang,
+    acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) {
+    if state.utterance_start.is_none() {
+        state.utterance_start = Some(Instant::now());
+    }
+    let start = state.utterance_start.unwrap();
+    info!("[INTERIM] {}", transcript);
+
+    if let Some(session) = sessions.get(session_id) {
+        session.send_to_host(to_ws(&ServerMsg::Interim {
+            transcript: transcript.to_string(),
+        }));
+    }
+
+    // Progressive chunk detection: emit sub-utterance chunks
+    // Capture context BEFORE check() -- check() overwrites prev_chunk_text
+    let pre_check_context = state.progressive.context().map(|s| s.to_string());
+    if let Some(boundary) = state.progressive.check(transcript) {
+        let ctx = pre_check_context;
+
+        // Spawn chunked pipeline on first chunk
+        if state.chunk_pipeline_tx.is_none() {
+            state.utterance_counter += 1; // Pre-increment utterance ID for this utterance
+            let sp = StyleParams::default();
+            state.chunk_pipeline_tx = spawn_chunked_pipeline(
+                sessions, session_id, state.utterance_counter,
+                source_lang, sp,
+            );
+        }
+
+        if let Some(ref tx) = state.chunk_pipeline_tx {
+            // Extract incremental host audio for this chunk (non-overlapping)
+            let chunk_audio: Vec<u8> = {
+                let acc = acc_rx.lock().unwrap();
+                let total: Vec<u8> = acc.iter().flatten().cloned().collect();
+                let ratio = if transcript.is_empty() { 0.0 }
+                    else { boundary.split_pos as f64 / transcript.len() as f64 };
+                let end_pos = ((total.len() as f64 * ratio) as usize) & !1;
+                let start_pos = state.last_audio_byte_sent.min(end_pos);
+                state.last_audio_byte_sent = end_pos;
+                total[start_pos..end_pos.min(total.len())].to_vec()
+            };
+
+            if let Err(e) = tx.try_send(crate::types::ChunkEvent {
+                text: boundary.chunk_text,
+                chunk_index: state.chunk_index,
+                context: ctx,
+                is_utterance_final: false,
+                utterance_id: state.utterance_counter,
+                utterance_start: start,
+                host_audio: chunk_audio,
+            }) {
+                error!("[CHUNK] #{}.{} dropped (channel full): {}", state.utterance_counter, state.chunk_index, e);
+            }
+            state.chunk_index += 1;
+        }
+    }
+
+    // Legacy detector still tracked for metrics
+    state.chunk_detector.check(transcript);
+}
+
+/// Process a single parsed Gladia message and return a control-flow signal.
+async fn process_gladia_message(
+    gm: crate::stt::GladiaMessage,
+    state: &mut SttState,
+    sessions: &Sessions,
+    session_id: &str,
+    source_lang: &Lang,
+    acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    sink: &Arc<tokio::sync::Mutex<
+        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
+    >>,
+) -> MessageAction {
+    if !sessions.contains_key(session_id) {
+        return MessageAction::Break;
+    }
+
+    // Handle errors from any message
+    if let Some(ref err) = gm.error {
+        error!("[STT] Gladia error {}: {}", err.status_code, err.message);
+        state.disconnected = true;
+        return MessageAction::Break;
+    }
+
+    match gm.msg_type.as_str() {
+        "transcript" => {
+            let transcript = match gm.transcript() {
+                Some(t) => t,
+                None => return MessageAction::Continue,
+            };
+
+            if gm.is_final() {
+                handle_final_transcript(
+                    state, &transcript, sessions, session_id,
+                    source_lang, acc_rx, sink,
+                ).await;
+                // If adaptive reconnect was triggered, break
+                if state.needs_adaptive_reconnect {
+                    return MessageAction::Break;
+                }
+            } else {
+                handle_interim_transcript(
+                    state, &transcript, sessions, session_id,
+                    source_lang, acc_rx,
+                ).await;
+            }
+        }
+        "speech_start" => {
+            debug!("[STT] VAD: speech started");
+        }
+        "speech_end" => {
+            debug!("[STT] VAD: speech ended");
+        }
+        _ => {}
+    }
+
+    MessageAction::Continue
+}
+
 pub async fn start_stt(
     session_id: String,
     sessions: Sessions,
@@ -361,69 +732,13 @@ pub async fn start_stt(
     }
 
     loop {
-        let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
-        let mut ws_stream = None;
-
-        for attempt in 1..=max_attempts {
-            if !sessions.contains_key(&session_id) {
-                info!("[STT] Session {} gone, stopping", session_id);
-                return;
-            }
-
-            // Step 1: Create Gladia session via POST
-            let gladia_session = match create_gladia_session(
-                &source_lang.to_string(), endpointing, max_duration,
-            ).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let delay = if reconnect_count == 0 {
-                        Duration::from_secs(3)
-                    } else {
-                        reconnect_delay
-                    };
-                    error!("[STT] session create attempt {}/{} failed: {}", attempt, max_attempts, e);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-            };
-
-            // Step 2: Connect WebSocket to returned URL
-            use tungstenite::client::IntoClientRequest;
-            let request = match gladia_session.url.into_client_request() {
-                Ok(req) => req,
-                Err(e) => {
-                    error!("[STT] Failed to build WS request: {}", e);
-                    return;
-                }
-            };
-
-            match tokio_tungstenite::connect_async(request).await {
-                Ok((stream, _)) => {
-                    info!(
-                        "[STT] Connected to Gladia Solaria-1 (attempt {}, endpointing={:.2}s, max_dur={:.0}s, session={})",
-                        attempt, endpointing, max_duration, gladia_session.id
-                    );
-                    ws_stream = Some(stream);
-                    break;
-                }
-                Err(e) => {
-                    let delay = if reconnect_count == 0 {
-                        Duration::from_secs(3)
-                    } else {
-                        reconnect_delay
-                    };
-                    error!("[STT] WS connect attempt {}/{} failed: {}", attempt, max_attempts, e);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        let ws_stream = match ws_stream {
+        // ── Connect to Gladia ──────────────────────────────
+        let ws_stream = match connect_gladia(
+            &session_id, &sessions, &source_lang,
+            endpointing, max_duration, reconnect_count,
+        ).await {
             Some(s) => s,
-            None => {
-                error!("[STT] Failed to connect after {} attempts", max_attempts);
-                return;
-            }
+            None => return,
         };
 
         let (stt_sink, mut stt_stream) = ws_stream.split();
@@ -471,23 +786,21 @@ pub async fn start_stt(
         let sid = session_id.clone();
         let source_lang_clone = source_lang.clone();
         let acc_rx = audio_acc.clone();
-        let mut uc = utterance_counter;
-        let mut utterance_start: Option<Instant> = None;
-        let mut chunk_detector = crate::stt::get_detector(&source_lang.to_string());
-        let mut progressive = crate::stt::ProgressiveChunkDetector::new(&source_lang.to_string());
-        let mut chunk_index: u16 = 0;
-        let mut chunk_pipeline_tx: Option<mpsc::Sender<crate::types::ChunkEvent>> = None;
-        let mut last_audio_byte_sent: usize = 0; // Track audio position for incremental extraction
 
-        let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let disc_flag = disconnected_unexpectedly.clone();
-
-        let mut local_wpm_samples = wpm_samples.clone();
-        let mut local_adapted = adapted;
-        let needs_adaptive_reconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let adaptive_flag = needs_adaptive_reconnect.clone();
-        let adaptive_endpointing = Arc::new(std::sync::Mutex::new(None::<(f64, f64)>));
-        let adaptive_params = adaptive_endpointing.clone();
+        let mut state = SttState {
+            utterance_counter,
+            utterance_start: None,
+            chunk_detector: crate::stt::get_detector(&source_lang.to_string()),
+            progressive: crate::stt::ProgressiveChunkDetector::new(&source_lang.to_string()),
+            chunk_index: 0,
+            chunk_pipeline_tx: None,
+            last_audio_byte_sent: 0,
+            wpm_samples: wpm_samples.clone(),
+            adapted,
+            disconnected: false,
+            needs_adaptive_reconnect: false,
+            adaptive_params: None,
+        };
 
         let recv_task = tokio::spawn(async move {
             while let Some(msg_result) = stt_stream.next().await {
@@ -495,7 +808,7 @@ pub async fn start_stt(
                     Ok(m) => m,
                     Err(e) => {
                         error!("[STT] read error: {}", e);
-                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
+                        state.disconnected = true;
                         break;
                     }
                 };
@@ -511,221 +824,15 @@ pub async fn start_stt(
                     Err(_) => continue,
                 };
 
-                if !sessions_ref.contains_key(&sid) {
-                    break;
-                }
-
-                // Handle errors from any message
-                if let Some(ref err) = gm.error {
-                    error!("[STT] Gladia error {}: {}", err.status_code, err.message);
-                    disc_flag.store(true, std::sync::atomic::Ordering::Release);
-                    break;
-                }
-
-                match gm.msg_type.as_str() {
-                    "transcript" => {
-                        let transcript = match gm.transcript() {
-                            Some(t) => t,
-                            None => continue,
-                        };
-
-                        if gm.is_final() {
-                            // -- Final event --
-                            let start = utterance_start.take().unwrap_or_else(Instant::now);
-                            let host_audio: Vec<u8> = {
-                                let mut acc = acc_rx.lock().unwrap();
-                                acc.drain(..).flatten().collect()
-                            };
-
-                            // Prosody -> emotion -> style params
-                            let mut prosody = crate::stt::extract_prosody(&host_audio, 44100);
-                            let word_count = transcript.split_whitespace().count();
-                            crate::stt::compute_speaking_rate(&mut prosody, word_count);
-                            let emotion = crate::stt::classify_emotion(&prosody);
-                            let (_, _, _, speed) = crate::stt::map_style(emotion);
-
-                            debug!(
-                                "[EMOTION] {} (energy={:.4} pitch_std={:.1} rate={}wpm)",
-                                emotion, prosody.energy_rms, prosody.pitch_std, prosody.speaking_rate_wpm
-                            );
-
-                            let sp = StyleParams {
-                                speed,
-                                emotion: emotion.to_string(),
-                            };
-
-                            // Flush remaining text as final chunk via progressive pipeline
-                            if let Some(ref tx) = chunk_pipeline_tx {
-                                // Use the same utterance ID that was assigned when the
-                                // chunked pipeline was spawned (don't increment uc again)
-                                let uid = uc;
-                                info!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, transcript, chunk_index);
-
-                                let flush_context = progressive.context().map(|s| s.to_string());
-                                if let Some(boundary) = progressive.flush(&transcript) {
-                                    if let Err(e) = tx.try_send(crate::types::ChunkEvent {
-                                        text: boundary.chunk_text,
-                                        chunk_index,
-                                        context: flush_context,
-                                        is_utterance_final: true,
-                                        utterance_id: uid,
-                                        utterance_start: start,
-                                        host_audio: host_audio.clone(),
-                                    }) {
-                                        error!("[CHUNK] #{} final chunk dropped: {}", uid, e);
-                                    }
-                                }
-                                // Drop the sender to signal pipeline completion
-                                chunk_pipeline_tx = None;
-                                // Send Final to frontend (chunked path -- emit_final not called)
-                                if let Some(session) = sessions_ref.get(&sid) {
-                                    session.send_to_host(to_ws(&ServerMsg::Final {
-                                        transcript: transcript.clone(),
-                                        utterance_id: uid,
-                                    }));
-                                }
-                                // Source-language passthrough: queue full host audio once
-                                if let Some(session) = sessions_ref.get(&sid) {
-                                    if session.active_langs().contains(&source_lang_clone) {
-                                        if let Some(ref mgr) = session.rtmp_manager {
-                                            let mgr = mgr.clone();
-                                            let lang_str = source_lang_clone.to_string();
-                                            let mut pcm = host_audio.clone();
-                                            let max_bytes = ((host_audio.len() as f64 / BYTES_PER_SEC + 2.0) * BYTES_PER_SEC) as usize;
-                                            if pcm.len() > max_bytes {
-                                                crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-                                            }
-                                            tokio::spawn(async move {
-                                                let locked = mgr.lock().await;
-                                                locked.queue_audio(&lang_str, pcm, start);
-                                            });
-                                        }
-                                    }
-                                }
-                            } else {
-                                // No progressive chunks -- use legacy emit_final path
-                                uc += 1;
-                                let uid = uc;
-                                info!("[FINAL #{}] {}", uid, transcript);
-                                emit_final(
-                                    &sessions_ref, &sid, &transcript, uid,
-                                    &source_lang_clone, Some(sp.clone()),
-                                    start, host_audio.clone(),
-                                );
-                            }
-
-                            // Reset progressive state for next utterance
-                            progressive.reset();
-                            chunk_index = 0;
-                            last_audio_byte_sent = 0;
-                            chunk_detector.reset();
-
-                            // Adaptive endpointing: track WPM over first 5 finals
-                            if !local_adapted && prosody.speaking_rate_wpm > 0 && prosody.speaking_rate_wpm <= 500 {
-                                local_wpm_samples.push(prosody.speaking_rate_wpm);
-                                if local_wpm_samples.len() >= 5 {
-                                    let avg_wpm = local_wpm_samples.iter().sum::<u32>() as f32
-                                        / local_wpm_samples.len() as f32;
-                                    let (label, new_endp, new_max_dur) =
-                                        crate::stt::classify_speaking_speed(avg_wpm);
-                                    local_adapted = true;
-
-                                    if label != "normal" {
-                                        info!(
-                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, reconnecting (endpointing={:.2}s, max_dur={:.0}s)",
-                                            avg_wpm, label, new_endp, new_max_dur
-                                        );
-                                        if let Ok(mut params) = adaptive_params.lock() {
-                                            *params = Some((new_endp, new_max_dur));
-                                        }
-                                        adaptive_flag.store(true, std::sync::atomic::Ordering::Release);
-                                        disc_flag.store(true, std::sync::atomic::Ordering::Release);
-                                        // Send stop_recording to end session cleanly
-                                        let mut sink = sink_for_ctrl.lock().await;
-                                        let _ = sink.send(tungstenite::Message::Text(
-                                            r#"{"type":"stop_recording"}"#.to_string().into()
-                                        )).await;
-                                        break;
-                                    } else {
-                                        info!(
-                                            "[ADAPTIVE] Avg WPM: {:.0}, classified: {}, keeping defaults",
-                                            avg_wpm, label
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            // -- Interim (partial) event --
-                            if utterance_start.is_none() {
-                                utterance_start = Some(Instant::now());
-                            }
-                            let start = utterance_start.unwrap();
-                            info!("[INTERIM] {}", transcript);
-
-                            if let Some(session) = sessions_ref.get(&sid) {
-                                session.send_to_host(to_ws(&ServerMsg::Interim {
-                                    transcript: transcript.clone(),
-                                }));
-                            }
-
-                            // Progressive chunk detection: emit sub-utterance chunks
-                            // Capture context BEFORE check() -- check() overwrites prev_chunk_text
-                            let pre_check_context = progressive.context().map(|s| s.to_string());
-                            if let Some(boundary) = progressive.check(&transcript) {
-                                let ctx = pre_check_context;
-
-                                // Spawn chunked pipeline on first chunk
-                                if chunk_pipeline_tx.is_none() {
-                                    uc += 1; // Pre-increment utterance ID for this utterance
-                                    let sp = StyleParams::default();
-                                    chunk_pipeline_tx = spawn_chunked_pipeline(
-                                        &sessions_ref, &sid, uc,
-                                        &source_lang_clone, sp,
-                                    );
-                                }
-
-                                if let Some(ref tx) = chunk_pipeline_tx {
-                                    // Extract incremental host audio for this chunk (non-overlapping)
-                                    let chunk_audio: Vec<u8> = {
-                                        let acc = acc_rx.lock().unwrap();
-                                        let total: Vec<u8> = acc.iter().flatten().cloned().collect();
-                                        let ratio = if transcript.is_empty() { 0.0 }
-                                            else { boundary.split_pos as f64 / transcript.len() as f64 };
-                                        let end_pos = ((total.len() as f64 * ratio) as usize) & !1;
-                                        let start_pos = last_audio_byte_sent.min(end_pos);
-                                        last_audio_byte_sent = end_pos;
-                                        total[start_pos..end_pos.min(total.len())].to_vec()
-                                    };
-
-                                    if let Err(e) = tx.try_send(crate::types::ChunkEvent {
-                                        text: boundary.chunk_text,
-                                        chunk_index,
-                                        context: ctx,
-                                        is_utterance_final: false,
-                                        utterance_id: uc,
-                                        utterance_start: start,
-                                        host_audio: chunk_audio,
-                                    }) {
-                                        error!("[CHUNK] #{}.{} dropped (channel full): {}", uc, chunk_index, e);
-                                    }
-                                    chunk_index += 1;
-                                }
-                            }
-
-                            // Legacy detector still tracked for metrics
-                            chunk_detector.check(&transcript);
-                        }
-                    }
-                    "speech_start" => {
-                        debug!("[STT] VAD: speech started");
-                    }
-                    "speech_end" => {
-                        debug!("[STT] VAD: speech ended");
-                    }
-                    _ => {}
+                match process_gladia_message(
+                    gm, &mut state, &sessions_ref, &sid,
+                    &source_lang_clone, &acc_rx, &sink_for_ctrl,
+                ).await {
+                    MessageAction::Continue => {}
+                    MessageAction::Break => break,
                 }
             }
-            (uc, local_wpm_samples, local_adapted)
+            state
         });
 
         let send_abort = send_task.abort_handle();
@@ -736,31 +843,30 @@ pub async fn start_stt(
             },
             result = recv_task => {
                 send_abort.abort();
-                if let Ok((uc, wpm, adapt)) = result {
-                    utterance_counter = uc;
-                    wpm_samples = wpm;
-                    adapted = adapt;
+                if let Ok(st) = result {
+                    utterance_counter = st.utterance_counter;
+                    wpm_samples = st.wpm_samples;
+                    adapted = st.adapted;
+
+                    // Check for adaptive reconnect
+                    if st.needs_adaptive_reconnect {
+                        if let Some((new_endp, new_max_dur)) = st.adaptive_params {
+                            endpointing = new_endp;
+                            max_duration = new_max_dur;
+                        }
+                        if let Ok(mut acc) = audio_acc.lock() {
+                            acc.clear();
+                        }
+                        continue;
+                    }
+
+                    if !st.disconnected {
+                        break;
+                    }
                 }
             },
         }
 
-        // Check for adaptive reconnect (creates new Gladia session with adjusted params)
-        if needs_adaptive_reconnect.load(std::sync::atomic::Ordering::Acquire) {
-            if let Ok(params) = adaptive_endpointing.lock() {
-                if let Some((new_endp, new_max_dur)) = *params {
-                    endpointing = new_endp;
-                    max_duration = new_max_dur;
-                }
-            }
-            if let Ok(mut acc) = audio_acc.lock() {
-                acc.clear();
-            }
-            continue;
-        }
-
-        if !disconnected_unexpectedly.load(std::sync::atomic::Ordering::Acquire) {
-            break;
-        }
         if !sessions.contains_key(&session_id) {
             break;
         }
