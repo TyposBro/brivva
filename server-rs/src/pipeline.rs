@@ -914,6 +914,3 @@ pub(crate) fn to_ws(msg: &ServerMsg) -> Message {
     Message::Text(serde_json::to_string(msg).unwrap().into())
 }
 
-// Re-export TTS functions that lib.rs currently calls via `pipeline::`.
-// The lib.rs agent will update these paths to `tts::` directly.
-pub use crate::tts::{load_persisted_voice, clone_voice_standalone, delete_cloned_voice};

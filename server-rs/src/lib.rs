@@ -4,6 +4,7 @@ pub mod ffmpeg;
 pub mod stt;
 pub mod translation;
 pub mod tts;
+pub mod voice_clone;
 mod pipeline;
 mod types;
 
@@ -94,7 +95,7 @@ struct VoiceStatus {
 
 /// GET /api/voice -- check if a persisted voice clone exists.
 async fn voice_status_handler() -> Json<VoiceStatus> {
-    let voice_id = pipeline::load_persisted_voice();
+    let voice_id = voice_clone::load_persisted_voice();
     Json(VoiceStatus { active: voice_id.is_some(), voice_id })
 }
 
@@ -109,7 +110,7 @@ async fn voice_clone_handler(body: Bytes) -> Result<Json<VoiceStatus>, (StatusCo
         body.len() as f64 / BYTES_PER_SEC,
     );
 
-    let voice_id = pipeline::clone_voice_standalone(body.to_vec()).await
+    let voice_id = voice_clone::clone_voice_standalone(body.to_vec()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(VoiceStatus { active: true, voice_id: Some(voice_id) }))
@@ -117,8 +118,8 @@ async fn voice_clone_handler(body: Bytes) -> Result<Json<VoiceStatus>, (StatusCo
 
 /// DELETE /api/voice -- delete the persisted voice clone.
 async fn voice_delete_handler() -> StatusCode {
-    if let Some(voice_id) = pipeline::load_persisted_voice() {
-        pipeline::delete_cloned_voice(&voice_id).await;
+    if let Some(voice_id) = voice_clone::load_persisted_voice() {
+        voice_clone::delete_cloned_voice(&voice_id).await;
         let _ = std::fs::remove_file(VOICE_CLONE_FILE);
         tracing::info!("[API] voice clone deleted: {}", voice_id);
     }
@@ -185,7 +186,7 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
     let mut session = Session::new(session_id.clone(), source_lang.clone(), target_langs, tier);
     session.tts_model = tts_model;
     session.host_tx = Some(host_tx);
-    if let Some(vid) = pipeline::load_persisted_voice() {
+    if let Some(vid) = voice_clone::load_persisted_voice() {
         session.voice_clone_id = Some(vid);
     }
     sessions.insert(session_id.clone(), session);
