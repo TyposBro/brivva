@@ -291,26 +291,28 @@ export default function BroadcastPage() {
     wsRef.current = ws;
 
     ws.onmessage = handleWsMessage;
+
+    // Wait for connection — show error only if connect fails
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject();
+      });
+    } catch {
+      setErrors((prev) => [...prev, "Cannot connect — is the backend running on localhost:3000?"]);
+      wsRef.current = null;
+      return;
+    }
+
+    // Connected — set up runtime handlers (no misleading "backend running?" errors)
     ws.onclose = (e) => {
-      if (isLive && e.code !== 1000) {
-        setErrors((prev) => [...prev, `Connection lost (code ${e.code}). Stop and restart to reconnect.`]);
+      if (e.code !== 1000) {
+        setErrors((prev) => [...prev, `Connection lost (code ${e.code}). Restart to reconnect.`]);
       }
       setIsLive(false);
       setSessionId(null);
     };
-    ws.onerror = () => {
-      setErrors((prev) => [...prev, "WebSocket error — is the backend running on localhost:3000?"]);
-    };
-
-    await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      // Override onerror during connect to reject the promise
-      const origError = ws.onerror;
-      ws.onerror = (e) => { origError?.call(ws, e as Event); reject(e); };
-    }).catch(() => {
-      setIsLive(false);
-      return;
-    });
+    ws.onerror = () => {}; // onclose handles all runtime errors
 
     // Send RTMP config if any URLs are set
     const streams = Object.entries(rtmpUrls)
