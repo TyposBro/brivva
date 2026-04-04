@@ -1086,15 +1086,20 @@ impl IncrementalMp3Decoder {
     }
 
     /// Feed an MP3 chunk and read any available PCM output.
+    /// Pre-drains stdout before writing to prevent pipe buffer deadlock.
     pub async fn feed(&mut self, mp3_chunk: &[u8]) -> Result<Vec<u8>, String> {
+        // Pre-drain stdout to free pipe buffer space, preventing deadlock
+        // when FFmpeg's decoded output exceeds the pipe buffer (64KB).
+        let mut pcm = self.read_available().await;
+
         self.stdin
             .write_all(mp3_chunk)
             .await
             .map_err(|e| format!("Decoder stdin write failed: {}", e))?;
         self.total_mp3_in += mp3_chunk.len();
 
-        // Read whatever PCM is available (non-blocking with short timeout)
-        let pcm = self.read_available().await;
+        // Read decoded PCM produced from this chunk
+        pcm.extend(self.read_available().await);
         self.total_pcm_out += pcm.len();
         Ok(pcm)
     }
@@ -1103,21 +1108,27 @@ impl IncrementalMp3Decoder {
     pub async fn finish(mut self) -> Result<Vec<u8>, String> {
         drop(self.stdin);
 
+        // Wait for FFmpeg to finish processing and write all remaining output.
+        // Use a longer timeout (500ms) since FFmpeg may need to flush internal buffers.
         let mut remaining = Vec::new();
         let mut buf = [0u8; 16384];
         loop {
             match tokio::time::timeout(
-                Duration::from_millis(200),
+                Duration::from_millis(500),
                 self.stdout.read(&mut buf),
             ).await {
-                Ok(Ok(0)) => break,        // EOF
+                Ok(Ok(0)) => break,        // EOF — FFmpeg closed stdout cleanly
                 Ok(Ok(n)) => remaining.extend_from_slice(&buf[..n]),
                 Ok(Err(_)) => break,        // read error
-                Err(_) => break,            // timeout — no more data
+                Err(_) => break,            // timeout — assume no more data
             }
         }
 
-        let _ = self.child.kill().await;
+        // Wait for FFmpeg to exit gracefully before force-killing
+        match tokio::time::timeout(Duration::from_millis(100), self.child.wait()).await {
+            Ok(_) => {}
+            Err(_) => { let _ = self.child.kill().await; }
+        }
         self.total_pcm_out += remaining.len();
 
         eprintln!(

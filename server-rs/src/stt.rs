@@ -237,8 +237,9 @@ pub struct ProgressiveChunkDetector {
     min_chars_after: usize,
     min_duration: Duration,
     max_duration: Duration,
-    /// Byte offset of the last emitted chunk boundary
-    last_emitted_pos: usize,
+    /// Concatenated text of all emitted chunks so far (used to re-derive position
+    /// on each call, resilient to Gladia revising interim transcripts)
+    emitted_text: String,
     /// Text of the previously emitted chunk (for translation context)
     prev_chunk_text: Option<String>,
     /// When this utterance started (first interim received)
@@ -262,7 +263,7 @@ impl ProgressiveChunkDetector {
             min_chars_after,
             min_duration,
             max_duration,
-            last_emitted_pos: 0,
+            emitted_text: String::new(),
             prev_chunk_text: None,
             utterance_start: None,
             last_chunk_time: None,
@@ -277,13 +278,62 @@ impl ProgressiveChunkDetector {
         }
     }
 
+    /// Find where previously emitted text ends in the current transcript.
+    /// Handles Gladia revising text (adding commas, correcting words) by
+    /// searching for the emitted text or falling back to a normalized match.
+    fn derive_position(&self, transcript: &str) -> usize {
+        if self.emitted_text.is_empty() {
+            return 0;
+        }
+        // Exact match — fast path
+        if transcript.starts_with(&self.emitted_text) {
+            return self.emitted_text.len();
+        }
+        // Gladia adds punctuation between interims — try normalized matching.
+        // Strip punctuation/whitespace and match character-by-character.
+        let emitted_norm: String = self.emitted_text.chars()
+            .filter(|c| !c.is_ascii_punctuation() && !c.is_whitespace())
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        let mut matched = 0;
+        let mut transcript_pos = 0;
+        for ch in transcript.chars() {
+            if matched >= emitted_norm.len() {
+                break;
+            }
+            let norm_ch: String = ch.to_lowercase().collect();
+            if !ch.is_ascii_punctuation() && !ch.is_whitespace() {
+                if emitted_norm[matched..].starts_with(&norm_ch) {
+                    matched += norm_ch.len();
+                }
+            }
+            transcript_pos += ch.len_utf8();
+        }
+        // If we matched most of the emitted text, use this position
+        if matched >= emitted_norm.len() * 80 / 100 {
+            transcript_pos
+        } else {
+            // Can't find our emitted text — transcript was heavily revised.
+            // Return 0 so the whole transcript is treated as new text,
+            // but we won't emit (min_duration check will prevent re-emission).
+            0
+        }
+    }
+
     /// Check the full interim transcript for a clause boundary after the last emitted position.
     /// Returns Some(ChunkBoundary) if a chunk should be emitted.
     pub fn check(&mut self, transcript: &str) -> Option<ChunkBoundary> {
         self.start();
 
         let since_last_chunk = self.last_chunk_time.unwrap().elapsed();
-        let new_text = &transcript[self.last_emitted_pos..];
+        let emitted_pos = self.derive_position(transcript);
+
+        // Guard against position beyond transcript length
+        if emitted_pos >= transcript.len() {
+            return None;
+        }
+
+        let new_text = &transcript[emitted_pos..];
 
         // Not enough new text yet
         if new_text.trim().is_empty() {
@@ -291,8 +341,8 @@ impl ProgressiveChunkDetector {
         }
 
         // Hard timeout: force split regardless of boundary
-        if since_last_chunk >= self.max_duration && new_text.trim().len() >= 4 {
-            return self.emit(transcript, transcript.len());
+        if since_last_chunk >= self.max_duration && new_text.trim().chars().count() >= 4 {
+            return self.emit(transcript, emitted_pos, transcript.len());
         }
 
         // Too early for a split
@@ -305,11 +355,12 @@ impl ProgressiveChunkDetector {
         for marker in self.markers {
             let m = marker.to_lowercase();
             if let Some(rel_pos) = lower_new.rfind(&m) {
-                let abs_pos = self.last_emitted_pos + rel_pos + marker.len();
-                // Ensure there's enough text after the marker (to avoid splitting mid-clause)
-                let after = transcript[abs_pos..].trim();
-                if after.len() >= self.min_chars_after {
-                    return self.emit(transcript, abs_pos);
+                let abs_pos = emitted_pos + rel_pos + m.len();
+                if abs_pos <= transcript.len() {
+                    let after = transcript[abs_pos..].trim();
+                    if after.chars().count() >= self.min_chars_after {
+                        return self.emit(transcript, emitted_pos, abs_pos);
+                    }
                 }
             }
         }
@@ -319,11 +370,15 @@ impl ProgressiveChunkDetector {
 
     /// Emit whatever text remains after the last boundary (call on Gladia FINAL).
     pub fn flush(&mut self, transcript: &str) -> Option<ChunkBoundary> {
-        let remaining = transcript[self.last_emitted_pos..].trim();
+        let emitted_pos = self.derive_position(transcript);
+        if emitted_pos >= transcript.len() {
+            return None;
+        }
+        let remaining = transcript[emitted_pos..].trim();
         if remaining.is_empty() {
             return None;
         }
-        self.emit(transcript, transcript.len())
+        self.emit(transcript, emitted_pos, transcript.len())
     }
 
     /// Get the previous chunk's text for context-aware translation.
@@ -340,19 +395,21 @@ impl ProgressiveChunkDetector {
 
     /// Reset for a new utterance.
     pub fn reset(&mut self) {
-        self.last_emitted_pos = 0;
+        self.emitted_text.clear();
         self.prev_chunk_text = None;
         self.utterance_start = None;
         self.last_chunk_time = None;
     }
 
-    fn emit(&mut self, transcript: &str, split_pos: usize) -> Option<ChunkBoundary> {
-        let chunk_text = transcript[self.last_emitted_pos..split_pos].trim().to_string();
+    fn emit(&mut self, transcript: &str, emitted_pos: usize, split_pos: usize) -> Option<ChunkBoundary> {
+        let chunk_text = transcript[emitted_pos..split_pos].trim().to_string();
         if chunk_text.is_empty() {
             return None;
         }
         self.prev_chunk_text = Some(chunk_text.clone());
-        self.last_emitted_pos = split_pos;
+        // Accumulate the raw text up to split_pos (not just the chunk) so that
+        // derive_position can find it in revised transcripts
+        self.emitted_text = transcript[..split_pos].to_string();
         self.last_chunk_time = Some(Instant::now());
         Some(ChunkBoundary { split_pos, chunk_text })
     }

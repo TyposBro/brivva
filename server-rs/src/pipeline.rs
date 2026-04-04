@@ -648,7 +648,7 @@ pub async fn start_stt(
 
                                 let flush_context = progressive.context().map(|s| s.to_string());
                                 if let Some(boundary) = progressive.flush(&transcript) {
-                                    let _ = tx.try_send(crate::types::ChunkEvent {
+                                    if let Err(e) = tx.try_send(crate::types::ChunkEvent {
                                         text: boundary.chunk_text,
                                         chunk_index: chunk_index,
                                         context: flush_context,
@@ -656,7 +656,9 @@ pub async fn start_stt(
                                         utterance_id: uid,
                                         utterance_start: start,
                                         host_audio: host_audio.clone(),
-                                    });
+                                    }) {
+                                        eprintln!("[CHUNK] #{} final chunk dropped: {}", uid, e);
+                                    }
                                 }
                                 // Drop the sender to signal pipeline completion
                                 chunk_pipeline_tx = None;
@@ -780,7 +782,7 @@ pub async fn start_stt(
                                         total[start_pos..end_pos.min(total.len())].to_vec()
                                     };
 
-                                    let _ = tx.try_send(crate::types::ChunkEvent {
+                                    if let Err(e) = tx.try_send(crate::types::ChunkEvent {
                                         text: boundary.chunk_text,
                                         chunk_index: chunk_index,
                                         context: ctx,
@@ -788,7 +790,9 @@ pub async fn start_stt(
                                         utterance_id: uc,
                                         utterance_start: start,
                                         host_audio: chunk_audio,
-                                    });
+                                    }) {
+                                        eprintln!("[CHUNK] #{}.{} dropped (channel full): {}", uc, chunk_index, e);
+                                    }
                                     chunk_index += 1;
                                 }
                             }
@@ -842,6 +846,11 @@ pub async fn start_stt(
         if reconnect_count > STT_RECONNECT_MAX {
             eprintln!("[STT] Exceeded max reconnects, giving up");
             break;
+        }
+        // Clear stale audio from the accumulator to prevent it contaminating
+        // the next utterance after reconnect
+        if let Ok(mut acc) = audio_acc.lock() {
+            acc.clear();
         }
         tokio::time::sleep(STT_RECONNECT_DELAY).await;
     }
