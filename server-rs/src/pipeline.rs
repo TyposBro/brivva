@@ -39,6 +39,14 @@ static CARTESIA_DEFAULT_VOICE: LazyLock<String> = LazyLock::new(|| {
         .unwrap_or_else(|_| "694f9389-aac1-45b6-b726-9d9369183238".to_string())
 });
 
+/// Shared HTTP client — reused across all pipeline requests.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .build()
+        .unwrap()
+});
+
 // ── STT Style Params ─────────────────────────────────────
 
 /// TTS style parameters mapped from prosody/emotion analysis.
@@ -73,6 +81,7 @@ fn emit_final(
     host_audio: Vec<u8>,
 ) {
     let utterance_end = Instant::now();
+    let utterance_dur = utterance_end.duration_since(utterance_start);
 
     if let Some(session) = sessions.get(session_id) {
         let final_msg = to_ws(&ServerMsg::Final {
@@ -84,7 +93,12 @@ fn emit_final(
         let active = session.active_langs();
         let sp = style_params.unwrap_or_default();
         let tier = session.tier;
-        println!("[PIPELINE] active langs: {:?} tier={}", active, tier);
+        eprintln!(
+            "[PIPELINE] #{} active langs: {:?} tier={} utterance_dur={}ms host_audio={}B ({:.1}s) text_len={}",
+            uid, active, tier, utterance_dur.as_millis(),
+            host_audio.len(), host_audio.len() as f64 / 88200.0,
+            transcript.len()
+        );
         if !active.is_empty() {
             let sessions_clone = sessions.clone();
             let sid = session_id.to_string();
@@ -195,18 +209,31 @@ pub async fn start_stt(
         let acc_tx = audio_acc.clone();
         let audio_rx_clone = audio_rx.clone();
         let sink_for_audio = stt_sink.clone();
+        let sid_audio = session_id.clone();
         let send_task = tokio::spawn(async move {
             let mut rx = audio_rx_clone.lock().await;
+            let mut chunk_count: u64 = 0;
+            let mut total_bytes: u64 = 0;
             while let Some(data) = rx.recv().await {
+                chunk_count += 1;
+                total_bytes += data.len() as u64;
+                if chunk_count % 100 == 0 {
+                    eprintln!(
+                        "[STT:{}] forwarded {} audio chunks ({}KB total) to Deepgram",
+                        sid_audio, chunk_count, total_bytes / 1024
+                    );
+                }
                 if let Ok(mut acc) = acc_tx.lock() {
                     acc.push(data.clone());
                 }
                 let mut sink = sink_for_audio.lock().await;
                 if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+                    eprintln!("[STT:{}] Deepgram sink write error, stopping audio forward", sid_audio);
                     break;
                 }
             }
             // Send CloseStream on shutdown
+            eprintln!("[STT:{}] sending CloseStream to Deepgram (total: {} chunks, {}KB)", sid_audio, chunk_count, total_bytes / 1024);
             let mut sink = sink_for_audio.lock().await;
             let _ = sink.send(tungstenite::Message::Text(
                 r#"{"type":"CloseStream"}"#.to_string().into()
@@ -452,10 +479,18 @@ async fn run_pipeline(
     utterance_end: Instant,
     host_audio: Vec<u8>,
 ) {
-    let client = reqwest::Client::new();
+    let pipeline_start = Instant::now();
+    let client = &*HTTP_CLIENT;
     let mut handles = Vec::new();
 
     let voice_clone_id = sessions.get(session_id).and_then(|s| s.voice_clone_id.clone());
+    eprintln!(
+        "[PIPELINE] #{} starting: '{}' -> {:?} (voice_clone={}) delay_since_utterance_start={}ms",
+        utterance_id, &transcript[..transcript.len().min(60)],
+        target_langs.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+        voice_clone_id.as_deref().unwrap_or("none"),
+        utterance_start.elapsed().as_millis()
+    );
 
     for lang in target_langs {
         if lang == source_lang {
@@ -489,7 +524,7 @@ async fn run_pipeline(
         let transcript = transcript.to_string();
         let source = source_lang.clone();
         let target = lang.clone();
-        let client = client.clone();
+        let client = client.clone(); // reqwest::Client clone is cheap (Arc internally)
         let sessions = sessions.clone();
         let session_id = session_id.to_string();
         let voice_clone_id = voice_clone_id.clone();
@@ -497,6 +532,11 @@ async fn run_pipeline(
 
         handles.push(tokio::spawn(async move {
             // 1. Translate
+            let step_start = Instant::now();
+            eprintln!(
+                "[TRANSLATE] #{} {} -> {}: '{}' ({} chars)",
+                utterance_id, source, target, &transcript[..transcript.len().min(80)], transcript.len()
+            );
             let start = Instant::now();
             let url = format!(
                 "https://translation.googleapis.com/language/translate/v2?key={}",
@@ -551,11 +591,24 @@ async fn run_pipeline(
 
             // 3. TTS (only for tier 2+)
             if tier >= 2 {
+                eprintln!(
+                    "[PIPELINE] #{} {} starting TTS (translate took {}ms, total pipeline elapsed {}ms)",
+                    utterance_id, target, translate_ms, step_start.elapsed().as_millis()
+                );
                 do_tts(
                     &client, &translated_text, utterance_id, &target,
                     &sessions, &session_id, voice_clone_id.as_deref(), &sp,
                     utterance_start, utterance_end,
                 ).await;
+                eprintln!(
+                    "[PIPELINE] #{} {} complete (total {}ms since pipeline start)",
+                    utterance_id, target, step_start.elapsed().as_millis()
+                );
+            } else {
+                eprintln!(
+                    "[PIPELINE] #{} {} tier={}, skipping TTS",
+                    utterance_id, target, tier
+                );
             }
         }));
     }
@@ -563,10 +616,32 @@ async fn run_pipeline(
     for handle in handles {
         let _ = handle.await;
     }
+    eprintln!(
+        "[PIPELINE] #{} all langs done (total {}ms since pipeline start, {}ms since utterance start)",
+        utterance_id, pipeline_start.elapsed().as_millis(), utterance_start.elapsed().as_millis()
+    );
 }
 
-/// Cartesia Sonic 3 TTS — returns raw PCM s16le 44100Hz directly.
-/// No MP3 decode step needed (unlike ElevenLabs).
+// ── Cartesia WebSocket TTS Response Types ────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct CartesiaTtsResponse {
+    #[serde(default)]
+    status_code: u16,
+    #[serde(default)]
+    done: bool,
+    #[serde(default, rename = "type")]
+    msg_type: String,
+    #[serde(default)]
+    data: Option<String>, // base64-encoded PCM chunk
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Cartesia Sonic 3 TTS — WebSocket streaming for 40ms TTFB.
+/// Streams raw PCM s16le 44100Hz chunks directly to RTMP as they arrive.
+/// Falls back to REST /tts/bytes if WebSocket connection fails.
 async fn do_tts(
     client: &reqwest::Client,
     text: &str,
@@ -581,12 +656,11 @@ async fn do_tts(
 ) {
     let tts_start = Instant::now();
 
+    let broadcast_delay_ms = sessions.get(session_id)
+        .map(|s| s.broadcast_delay_ms)
+        .unwrap_or(5000);
     let tts_deadline = {
-        let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5000);
-        let sync_deadline = Duration::from_millis(delay_ms.saturating_sub(500));
+        let sync_deadline = Duration::from_millis(broadcast_delay_ms.saturating_sub(500));
         let hard_cap = Duration::from_secs(10);
         sync_deadline.min(hard_cap)
     };
@@ -597,20 +671,289 @@ async fn do_tts(
     };
 
     let is_cloned = voice_clone_id.is_some();
+    let lang_str = lang.to_string();
     println!(
-        "[TTS] cartesia voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
+        "[TTS] cartesia WS voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
         &voice_id[..8.min(voice_id.len())],
         if is_cloned { " (cloned)" } else { "" },
         lang, style_params.emotion, style_params.speed, text,
         tts_deadline.as_millis()
     );
 
-    // Map "serious" → "calm" for Cartesia (not in their emotion list)
+    // Map "serious" → "calm" for Cartesia
     let cartesia_emotion = match style_params.emotion.as_str() {
         "serious" => "calm",
         other => other,
     };
 
+    // Calculate max PCM bytes for this utterance (duration + 2s tolerance)
+    let utterance_dur = utterance_end.duration_since(utterance_start);
+    let max_dur = utterance_dur + Duration::from_millis(2000);
+    let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
+
+    // Queue streaming audio slot to RTMP immediately (before TTS starts)
+    let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
+    let streaming = if let Some(ref manager) = rtmp_mgr {
+        let mgr = manager.lock().await;
+        let s = mgr.queue_streaming_audio(&lang_str, utterance_start);
+        eprintln!(
+            "[TTS] #{} {} queued streaming audio slot to RTMP (max_bytes={}B = {:.1}s)",
+            utterance_id, lang_str, max_bytes, max_bytes as f64 / 88200.0
+        );
+        Some(s)
+    } else {
+        eprintln!("[TTS] #{} {} no RTMP manager, audio won't be streamed", utterance_id, lang_str);
+        None
+    };
+
+    // Notify host: TTS started
+    if let Some(session) = sessions.get(session_id) {
+        session.send_to_host(to_ws(&ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id }));
+    }
+
+    // Try WebSocket streaming first, fall back to REST
+    eprintln!(
+        "[TTS] #{} {} connecting Cartesia WS (deadline={}ms, emotion={}, speed={:.2})",
+        utterance_id, lang_str, tts_deadline.as_millis(), cartesia_emotion, style_params.speed
+    );
+    let tts_result = tokio::time::timeout(tts_deadline, async {
+        match do_tts_ws(
+            text, &voice_id, &lang_str, cartesia_emotion, style_params.speed,
+            max_bytes, streaming.as_ref(),
+        ).await {
+            Ok(total_bytes) => Ok(total_bytes),
+            Err(ws_err) => {
+                eprintln!("[TTS] #{} {} WebSocket failed: {}, falling back to REST", utterance_id, lang_str, ws_err);
+                do_tts_rest(
+                    client, text, &voice_id, &lang_str, cartesia_emotion, style_params.speed,
+                    max_bytes, streaming.as_ref(),
+                ).await
+            }
+        }
+    }).await;
+
+    // Ensure streaming is marked complete on any exit path
+    if let Some(ref s) = streaming {
+        s.finish();
+    }
+
+    let tts_ms = tts_start.elapsed().as_millis() as u64;
+    match tts_result {
+        Ok(Ok(total_bytes)) => {
+            println!("[TTS] {}KB in {}ms for {} (streaming PCM)", total_bytes / 1024, tts_ms, lang);
+        }
+        Ok(Err(e)) => {
+            eprintln!("[TTS] Failed for {}: {} ({}ms)", lang, e, tts_ms);
+        }
+        Err(_) => {
+            eprintln!(
+                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms",
+                utterance_id, lang, tts_deadline.as_millis()
+            );
+        }
+    }
+
+    // Notify host: TTS ended
+    if let Some(session) = sessions.get(session_id) {
+        session.send_to_host(to_ws(&ServerMsg::TtsEnd { lang: lang_str, utterance_id, tts_ms }));
+    }
+}
+
+// ── Cartesia WebSocket Connection Pool ────────────────────
+//
+// Reuses WebSocket connections to avoid ~300ms overhead of
+// DNS + TCP + TLS + WS upgrade on each utterance.
+
+type TtsWs = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+>;
+
+static TTS_WS_POOL: LazyLock<tokio::sync::Mutex<Vec<TtsWs>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(Vec::new()));
+
+async fn connect_cartesia_ws() -> Result<TtsWs, String> {
+    use tungstenite::client::IntoClientRequest;
+
+    let connect_start = Instant::now();
+    let url = format!(
+        "wss://api.cartesia.ai/tts/websocket?api_key={}&cartesia_version=2025-04-16",
+        &*TTS_API_KEY
+    );
+    let request = url.into_client_request()
+        .map_err(|e| format!("WS request build failed: {}", e))?;
+    let (ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|e| format!("WS connect failed: {}", e))?;
+    eprintln!("[TTS-POOL] New Cartesia WS in {}ms", connect_start.elapsed().as_millis());
+    Ok(ws)
+}
+
+async fn get_pooled_ws() -> Result<TtsWs, String> {
+    let mut pool = TTS_WS_POOL.lock().await;
+    if let Some(ws) = pool.pop() {
+        let remaining = pool.len();
+        drop(pool);
+        eprintln!("[TTS-POOL] Reusing pooled connection (pool_remaining={})", remaining);
+        return Ok(ws);
+    }
+    drop(pool);
+    connect_cartesia_ws().await
+}
+
+async fn return_ws_to_pool(ws: TtsWs) {
+    let mut pool = TTS_WS_POOL.lock().await;
+    if pool.len() < 4 {
+        let new_size = pool.len() + 1;
+        pool.push(ws);
+        eprintln!("[TTS-POOL] Returned to pool (pool_size={})", new_size);
+    }
+}
+
+/// WebSocket streaming TTS with connection pooling.
+/// Reuses connections for lower TTFB on subsequent requests.
+async fn do_tts_ws(
+    text: &str,
+    voice_id: &str,
+    lang: &str,
+    emotion: &str,
+    speed: f64,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+) -> Result<usize, String> {
+    let mut ws = get_pooled_ws().await?;
+
+    match do_tts_on_ws(&mut ws, text, voice_id, lang, emotion, speed, max_bytes, streaming).await {
+        Ok(total) => {
+            return_ws_to_pool(ws).await;
+            Ok(total)
+        }
+        Err(e) => {
+            eprintln!("[TTS:{}] Pooled WS failed: {}, retrying fresh", lang, e);
+            let mut ws = connect_cartesia_ws().await?;
+            let result = do_tts_on_ws(&mut ws, text, voice_id, lang, emotion, speed, max_bytes, streaming).await;
+            if result.is_ok() {
+                return_ws_to_pool(ws).await;
+            }
+            result
+        }
+    }
+}
+
+/// Execute a single TTS request on an existing WebSocket connection.
+async fn do_tts_on_ws(
+    ws: &mut TtsWs,
+    text: &str,
+    voice_id: &str,
+    lang: &str,
+    emotion: &str,
+    speed: f64,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+) -> Result<usize, String> {
+    use futures_util::{SinkExt, StreamExt};
+
+    let context_id = uuid::Uuid::new_v4().to_string();
+    let tts_start = Instant::now();
+
+    let tts_request = serde_json::json!({
+        "context_id": context_id,
+        "model_id": "sonic-3",
+        "transcript": text,
+        "voice": { "mode": "id", "id": voice_id },
+        "output_format": {
+            "container": "raw",
+            "encoding": "pcm_s16le",
+            "sample_rate": 44100
+        },
+        "language": lang,
+        "generation_config": {
+            "speed": speed,
+            "emotion": emotion,
+        }
+    });
+
+    ws.send(tungstenite::Message::Text(
+        serde_json::to_string(&tts_request).unwrap().into()
+    ))
+    .await
+    .map_err(|e| format!("WS send failed: {}", e))?;
+
+    eprintln!("[TTS:{}] request sent, waiting for chunks...", lang);
+
+    let mut total_bytes: usize = 0;
+    let mut chunk_count: u32 = 0;
+
+    while let Some(msg_result) = ws.next().await {
+        let msg = msg_result.map_err(|e| format!("WS read error: {}", e))?;
+
+        let text_data = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            tungstenite::Message::Close(_) => {
+                return Err("WS closed unexpectedly".to_string());
+            }
+            _ => continue,
+        };
+
+        let resp: CartesiaTtsResponse = serde_json::from_str(&text_data)
+            .map_err(|e| format!("WS parse error: {}", e))?;
+
+        if let Some(err) = resp.error {
+            return Err(format!("Cartesia error: {}", err));
+        }
+
+        if resp.done {
+            eprintln!(
+                "[TTS:{}] done: {} chunks, {}KB in {}ms",
+                lang, chunk_count, total_bytes / 1024, tts_start.elapsed().as_millis()
+            );
+            break;
+        }
+
+        if let Some(data_b64) = resp.data {
+            let pcm_chunk = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &data_b64,
+            ).map_err(|e| format!("base64 decode error: {}", e))?;
+
+            chunk_count += 1;
+
+            if chunk_count == 1 {
+                eprintln!(
+                    "[TTS:{}] TTFB {}ms ({}B first chunk)",
+                    lang, tts_start.elapsed().as_millis(), pcm_chunk.len()
+                );
+            }
+
+            total_bytes += pcm_chunk.len();
+
+            // Stream to RTMP immediately
+            if let Some(s) = streaming {
+                s.append_with_limit(&pcm_chunk, max_bytes);
+                if s.complete.load(std::sync::atomic::Ordering::Acquire) {
+                    eprintln!(
+                        "[TTS:{}] hit max_bytes ({}B) after {} chunks in {}ms",
+                        lang, max_bytes, chunk_count, tts_start.elapsed().as_millis()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(total_bytes)
+}
+
+/// REST fallback TTS — used when WebSocket connection fails.
+async fn do_tts_rest(
+    client: &reqwest::Client,
+    text: &str,
+    voice_id: &str,
+    lang: &str,
+    emotion: &str,
+    speed: f64,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+) -> Result<usize, String> {
     let tts_body = serde_json::json!({
         "model_id": "sonic-3",
         "transcript": text,
@@ -620,75 +963,53 @@ async fn do_tts(
             "encoding": "pcm_s16le",
             "sample_rate": 44100
         },
-        "language": lang.to_string(),
+        "language": lang,
         "generation_config": {
-            "speed": style_params.speed,
-            "emotion": cartesia_emotion,
+            "speed": speed,
+            "emotion": emotion,
         }
     });
 
-    let lang_str = lang.to_string();
-    let tts_result = tokio::time::timeout(tts_deadline, async {
-        let resp = client
-            .post("https://api.cartesia.ai/tts/bytes")
-            .header("X-API-Key", &*TTS_API_KEY)
-            .header("Cartesia-Version", "2025-04-16")
-            .json(&tts_body)
-            .send()
-            .await;
+    eprintln!("[TTS:{}] REST fallback: requesting /tts/bytes", lang);
+    let rest_start = Instant::now();
+    let resp = client
+        .post("https://api.cartesia.ai/tts/bytes")
+        .header("X-API-Key", &*TTS_API_KEY)
+        .header("Cartesia-Version", "2025-04-16")
+        .json(&tts_body)
+        .send()
+        .await
+        .map_err(|e| format!("REST request error: {}", e))?;
+    eprintln!("[TTS:{}] REST response status={} in {}ms", lang, resp.status(), rest_start.elapsed().as_millis());
 
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                r.bytes().await.map(|b| b.to_vec()).unwrap_or_default()
-            }
-            Ok(r) => {
-                let status = r.status();
-                let body = r.text().await.unwrap_or_default();
-                eprintln!("[TTS] Cartesia error for {}: {} - {}", lang_str, status, body);
-                Vec::new()
-            }
-            Err(e) => {
-                eprintln!("[TTS] request error for {}: {}", lang_str, e);
-                Vec::new()
-            }
-        }
-    })
-    .await;
-
-    let mut pcm = match tts_result {
-        Ok(buf) if !buf.is_empty() => buf,
-        Ok(_) => return,
-        Err(_) => {
-            eprintln!(
-                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms",
-                utterance_id, lang, tts_deadline.as_millis()
-            );
-            return;
-        }
-    };
-
-    let tts_ms = tts_start.elapsed().as_millis() as u64;
-    println!("[TTS] {}KB in {}ms for {} (raw PCM)", pcm.len() / 1024, tts_ms, lang);
-
-    // Queue raw PCM directly to RTMP — no MP3 decode needed!
-    let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
-    if let Some(manager) = rtmp_mgr {
-        let utterance_dur = utterance_end.duration_since(utterance_start);
-        let max_dur = utterance_dur + Duration::from_millis(2000);
-        let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
-        if pcm.len() > max_bytes {
-            crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-        }
-        let mgr = manager.lock().await;
-        mgr.queue_audio(&lang.to_string(), pcm.clone(), utterance_start);
-        eprintln!("[RTMP] Queued audio for {} (pipeline: {}ms)", lang, tts_start.elapsed().as_millis());
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Cartesia REST error {}: {}", status, body));
     }
 
-    // Notify host
-    if let Some(session) = sessions.get(session_id) {
-        session.send_to_host(to_ws(&ServerMsg::TtsStart { lang: lang.to_string(), utterance_id }));
-        session.send_to_host(to_ws(&ServerMsg::TtsEnd { lang: lang.to_string(), utterance_id, tts_ms }));
+    let mut pcm = resp.bytes().await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("REST body read error: {}", e))?;
+
+    if pcm.is_empty() {
+        return Err("Empty PCM from REST".to_string());
     }
+
+    if pcm.len() > max_bytes {
+        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+    }
+
+    let total = pcm.len();
+    eprintln!(
+        "[TTS:{}] REST complete: {}KB in {}ms",
+        lang, total / 1024, rest_start.elapsed().as_millis()
+    );
+    if let Some(s) = streaming {
+        s.append(&pcm);
+    }
+
+    Ok(total)
 }
 
 // ── Voice Cloning ────────────────────────────────────────
@@ -721,11 +1042,15 @@ fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
 
 /// Clone voice via Cartesia API. Accepts raw PCM, converts to WAV, uploads.
 pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
+    let clone_start = Instant::now();
     let wav = pcm_to_wav(&pcm);
     let sid_short = &session_id[..6.min(session_id.len())];
-    println!("[VOICE_CLONE] starting Cartesia clone ({} bytes PCM)", pcm.len());
+    eprintln!(
+        "[VOICE_CLONE] starting Cartesia clone: {}B PCM -> {}B WAV ({:.1}s audio)",
+        pcm.len(), wav.len(), pcm.len() as f64 / 88200.0
+    );
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let form = reqwest::multipart::Form::new()
         .text("name", format!("brivva-{}", sid_short))
         .text("language", "en")
@@ -752,7 +1077,7 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
             struct CloneResp { id: String }
             match r.json::<CloneResp>().await {
                 Ok(parsed) => {
-                    println!("[VOICE_CLONE] Cartesia success! voice_id={}", parsed.id);
+                    println!("[VOICE_CLONE] Cartesia success! voice_id={} ({}ms)", parsed.id, clone_start.elapsed().as_millis());
                     if let Some(mut session) = sessions.get_mut(session_id) {
                         session.voice_clone_id = Some(parsed.id.clone());
                         session.send_to_host(to_ws(&ServerMsg::VoiceReady {
@@ -774,7 +1099,7 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
 
 /// Delete a cloned voice from Cartesia on session close.
 pub async fn delete_cloned_voice(voice_id: &str) {
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let url = format!("https://api.cartesia.ai/voices/{}", voice_id);
     match client
         .delete(&url)

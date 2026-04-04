@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:3000 ws://localhost:3000 https://*.deepgram.com https://*.googleapis.com https://*.elevenlabs.io; media-src 'self' blob:; img-src 'self' data: blob:"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:3000 ws://localhost:3000 https://*.deepgram.com https://*.googleapis.com https://*.cartesia.ai wss://*.cartesia.ai; media-src 'self' blob:; img-src 'self' data: blob:"
     }
   },
   "bundle": {

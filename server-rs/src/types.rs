@@ -49,7 +49,7 @@ pub struct Session {
     pub source_lang: Lang,
     pub target_langs: Vec<Lang>,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
-    /// Cloned voice ID from ElevenLabs
+    /// Cloned voice ID from Cartesia
     pub voice_clone_id: Option<String>,
     /// Translation tier: 1 = subtitles only, 2 = voice + subtitles
     pub tier: u8,
@@ -61,6 +61,8 @@ pub struct Session {
     pub rtmp_stop: Arc<AtomicBool>,
     /// Video codec from MediaRecorder ("h264" or "vp8")
     pub video_codec: Option<String>,
+    /// Broadcast delay in milliseconds (sent from frontend, used by RTMP + TTS timeout)
+    pub broadcast_delay_ms: u64,
 }
 
 impl Session {
@@ -76,6 +78,7 @@ impl Session {
             rtmp_langs: Vec::new(),
             rtmp_stop: Arc::new(AtomicBool::new(false)),
             video_codec: None,
+            broadcast_delay_ms: 5000,
         }
     }
 

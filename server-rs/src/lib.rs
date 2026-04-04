@@ -139,10 +139,12 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                     match data[0] {
                         0x01 => {
                             // Audio PCM (tagged)
+                            eprintln!("[WS:{}] audio chunk: {}B", sid, data.len() - 1);
                             let _ = audio_tx.send(data[1..].to_vec());
                         }
                         0x02 => {
                             // Encoded video chunk from MediaRecorder
+                            eprintln!("[WS:{}] video chunk: {}B", sid, data.len() - 1);
                             let mgr = sessions_ref.get(&sid)
                                 .and_then(|s| s.rtmp_manager.clone());
                             if let Some(manager) = mgr {
@@ -150,8 +152,9 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                                 locked.push_video_chunk(&data[1..]);
                             }
                         }
-                        _ => {
+                        tag => {
                             // Legacy: untagged = raw audio
+                            eprintln!("[WS:{}] unknown tag 0x{:02x}, treating as audio: {}B", sid, tag, data.len());
                             let _ = audio_tx.send(data.to_vec());
                         }
                     }
@@ -161,22 +164,27 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                         match json.get("type").and_then(|t| t.as_str()) {
                             Some("voice:sample") => {
+                                eprintln!("[WS:{}] received voice:sample", sid);
                                 if let Some(audio_b64) = json.get("audio").and_then(|a| a.as_str()) {
                                     if let Ok(pcm) = base64::Engine::decode(
                                         &base64::engine::general_purpose::STANDARD,
                                         audio_b64,
                                     ) {
+                                        eprintln!("[WS:{}] voice sample decoded: {}B PCM ({:.1}s at 44.1kHz)", sid, pcm.len(), pcm.len() as f64 / 88200.0);
                                         let sessions_clone = sessions_ref.clone();
                                         let sid_clone = sid.clone();
                                         tokio::spawn(async move {
                                             pipeline::clone_voice(pcm, &sessions_clone, &sid_clone).await;
                                         });
+                                    } else {
+                                        eprintln!("[WS:{}] voice:sample base64 decode failed", sid);
                                     }
                                 }
                             }
                             Some("video:codec") => {
                                 // Frontend reports MediaRecorder codec for FFmpeg passthrough
                                 if let Some(codec) = json.get("codec").and_then(|c| c.as_str()) {
+                                    eprintln!("[WS:{}] video:codec = {}", sid, codec);
                                     if let Some(mgr) = sessions_ref.get(&sid)
                                         .and_then(|s| s.rtmp_manager.clone())
                                     {
@@ -192,13 +200,17 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
                             Some("rtmp:config") => {
                                 // Start RTMP streams per language
                                 if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
-                                    // Accept optional broadcastDelay from frontend
-                                    if let Some(delay) = json.get("broadcastDelay").and_then(|d| d.as_u64()) {
-                                        // SAFETY: single-threaded at this point, no concurrent env reads
-                                        unsafe { std::env::set_var("BROADCAST_DELAY_MS", delay.to_string()); }
+                                    eprintln!("[WS:{}] rtmp:config received: {} stream(s)", sid, streams.len());
+                                    let delay_ms = json.get("broadcastDelay")
+                                        .and_then(|d| d.as_u64())
+                                        .unwrap_or(5000);
+
+                                    // Store in session for TTS timeout calculation
+                                    if let Some(mut session) = sessions_ref.get_mut(&sid) {
+                                        session.broadcast_delay_ms = delay_ms;
                                     }
 
-                                    let mut manager = ffmpeg::RtmpManager::new();
+                                    let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
 
                                     // Apply video codec if already reported
                                     if let Some(codec) = sessions_ref.get(&sid)
@@ -269,19 +281,24 @@ async fn handle_socket(socket: WebSocket, query: WsQuery, sessions: Sessions) {
     }
 
     // Cleanup
-    println!("[WS] Session {} ended", session_id);
+    println!("[WS] Session {} ending — starting cleanup", session_id);
     if let Some((_, session)) = sessions.remove(&session_id) {
         // Stop RTMP streams and health monitor
+        eprintln!("[WS:{}] signaling RTMP stop", session_id);
         session.rtmp_stop.store(true, Ordering::Release);
         if let Some(mgr) = session.rtmp_manager {
+            eprintln!("[WS:{}] stopping all RTMP streams", session_id);
             let mut locked = mgr.lock().await;
             locked.stop_all().await;
+            eprintln!("[WS:{}] all RTMP streams stopped", session_id);
         }
         // Delete cloned voice
         if let Some(voice_id) = session.voice_clone_id {
+            eprintln!("[WS:{}] deleting cloned voice {}", session_id, voice_id);
             tokio::spawn(async move {
                 pipeline::delete_cloned_voice(&voice_id).await;
             });
         }
     }
+    println!("[WS] Session {} cleanup complete", session_id);
 }

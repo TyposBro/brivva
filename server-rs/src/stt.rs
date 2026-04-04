@@ -224,7 +224,7 @@ pub fn get_detector(lang: &str) -> Box<dyn ChunkDetector> {
 // ── Prosody Extraction ────────────────────────────────────
 //
 // Extracts pitch, energy, and pause density from raw PCM audio.
-// Used to classify emotion and map to ElevenLabs voice settings.
+// Used to classify emotion and map to TTS voice style parameters.
 
 pub struct Prosody {
     pub pitch_mean: f32,
@@ -364,7 +364,7 @@ pub fn classify_emotion(prosody: &Prosody) -> &'static str {
 
 // ── Style Param Mapping ───────────────────────────────────
 //
-// Maps emotion to ElevenLabs voice_settings.
+// Maps emotion to TTS voice style parameters.
 // Returns (stability, similarity_boost, style, speed).
 
 pub fn map_style(emotion: &str) -> (f64, f64, f64, f64) {
