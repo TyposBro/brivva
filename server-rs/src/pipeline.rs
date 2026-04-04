@@ -26,8 +26,8 @@ static DEEPGRAM_API_KEY: LazyLock<String> = LazyLock::new(|| {
 static GOOGLE_TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("GOOGLE_TRANSLATE_API_KEY").unwrap_or_default()
 });
-static CARTESIA_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("CARTESIA_API_KEY").unwrap_or_default()
+static TTS_API_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("TTS_API_KEY").unwrap_or_default()
 });
 /// Default Cartesia voice (multilingual — speaks all languages).
 /// Override with CARTESIA_DEFAULT_VOICE env var.
@@ -628,7 +628,7 @@ async fn do_tts(
     let tts_result = tokio::time::timeout(tts_deadline, async {
         let resp = client
             .post("https://api.cartesia.ai/tts/bytes")
-            .header("X-API-Key", &*CARTESIA_API_KEY)
+            .header("X-API-Key", &*TTS_API_KEY)
             .header("Cartesia-Version", "2025-04-16")
             .json(&tts_body)
             .send()
@@ -737,7 +737,7 @@ pub async fn clone_voice(pcm: Vec<u8>, sessions: &Sessions, session_id: &str) {
 
     let resp = client
         .post("https://api.cartesia.ai/voices/clone")
-        .header("X-API-Key", &*CARTESIA_API_KEY)
+        .header("X-API-Key", &*TTS_API_KEY)
         .header("Cartesia-Version", "2025-04-16")
         .multipart(form)
         .send()
@@ -775,7 +775,7 @@ pub async fn delete_cloned_voice(voice_id: &str) {
     let url = format!("https://api.cartesia.ai/voices/{}", voice_id);
     match client
         .delete(&url)
-        .header("X-API-Key", &*CARTESIA_API_KEY)
+        .header("X-API-Key", &*TTS_API_KEY)
         .header("Cartesia-Version", "2025-04-16")
         .send()
         .await

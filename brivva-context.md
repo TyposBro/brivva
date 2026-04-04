@@ -37,12 +37,12 @@ To reproduce this context, paste this file into a new chat and say: _"Act as my 
 Per-stream API cost: ~$1.24 (2-hour session: Deepgram $0.52 + Google Translate $0.72).
 Compute cost: $0 — runs locally on desktop. No AWS infrastructure.
 
-| Service | Pricing | 5 sessions/mo | 30 sessions/mo | 100 sessions/mo |
-|---------|---------|---------------|----------------|-----------------|
-| Deepgram Nova-3 | $0.0043/min | $2.60 | $15.60 | $52 |
-| Google Translate | $20/M chars (500K free) | $0 | $7.80 | $52 |
-| ElevenLabs TTS | Plan-based | $5 | $22 | $99 |
-| **Total** | | **~$8** | **~$45** | **~$203** |
+| Service          | Pricing                 | 5 sessions/mo | 30 sessions/mo | 100 sessions/mo |
+| ---------------- | ----------------------- | ------------- | -------------- | --------------- |
+| Deepgram Nova-3  | $0.0043/min             | $2.60         | $15.60         | $52             |
+| Google Translate | $20/M chars (500K free) | $0            | $7.80          | $52             |
+| ElevenLabs TTS   | Plan-based              | $5            | $22            | $99             |
+| **Total**        |                         | **~$8**       | **~$45**       | **~$203**       |
 
 ### Key Design Decisions & Lessons Learned
 
@@ -74,23 +74,26 @@ Compute cost: $0 — runs locally on desktop. No AWS infrastructure.
 
 ### Not Yet Implemented
 
-| Priority | Task | Details |
-|----------|------|---------|
-| **P0** | **Production testing** | Test on Coupang, Rakuten, YouTube with real merchant accounts |
-| **P1** | **Lipsync (Tiers 3-4)** | Real-time and post-processed lipsync. Stretch goal |
-| **P1** | **TTS Provider Evaluation** | Cartesia Sonic 3 (40ms TTFB) and Fish Audio (80% cheaper) |
-| P2 | **macOS code signing** | Need Apple Developer account ($99/year) |
-| P2 | **Platform partnerships** | Japanese/Chinese entities for Douyin/TikTok |
+| Priority | Task                        | Details                                                       |
+| -------- | --------------------------- | ------------------------------------------------------------- |
+| **P0**   | **Production testing**      | Test on Coupang, Rakuten, YouTube with real merchant accounts |
+| **P1**   | **Lipsync (Tiers 3-4)**     | Real-time and post-processed lipsync. Stretch goal            |
+| **P1**   | **TTS Provider Evaluation** | Cartesia Sonic 3 (40ms TTFB) and Fish Audio (80% cheaper)     |
+| P2       | **macOS code signing**      | Need Apple Developer account ($99/year)                       |
+| P2       | **Platform partnerships**   | Japanese/Chinese entities for Douyin/TikTok                   |
 
 ---
 
 ## Business Context & Timeline
 
-- **Partnership:** Pivoted from employment to profit-sharing/CTO arrangement with Simon. 30% Aziz / 70% Brivva split proposed. Decision deferred until Sep 2026.
-- **Revenue model:** $3-4K per live stream per language. Existing contracts ~₩100M.
+- **Partnership:** Pivoted from employment to profit-sharing/CTO arrangement. CEOs disagree: MJ wants salary (no profit share), Simon wants profit split. Decision deferred until Sep 2026.
+- **Revenue model:** ₩100M per contract (total, before client cut). Client takes a cut (varies per contract), then costs (~₩18M for influencer/crew/studio), then profit split. Aziz's 30% depends on client cut — ₩9.6M-₩15.6M per contract.
 - **Competitive landscape:** Prism (Naver-owned) is direct competitor. Brivva's desktop app approach bypasses Naver dependency.
-- **Demo deadline:** April 30, 2026 — ship working demo to Simon.
+- **Lipsync roadmap:** Simon says tech not ready for 6mo-1yr. Plan: ship Options 1 & 2 now, A/B test all 4 tiers when lipsync matures. Simon built a crappy lipsync demo with Claude Code — tech is accessible but quality isn't there.
+- **Demo deadline:** In-person demo with Simon + MJ being scheduled for a weekend. Production target April 26.
 - **High stakes:** Each stream can generate up to $1M revenue. Zero tolerance for bugs or frame drops.
+- **Current status (Apr 4):** Desktop app fully built (v14). Simon checking with MJ on weekend demo time. Next: in-person demo with both CEOs.
+- **Long-term signal:** Simon said he wants to work with Aziz on other projects too, even if Brivva doesn't work out.
 
 ---
 
