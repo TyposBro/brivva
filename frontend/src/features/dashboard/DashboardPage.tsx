@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Settings2, ChevronDown, Youtube } from "lucide-react";
-import { LANGS } from "../../shared/platforms";
+import { Settings2 } from "lucide-react";
 import { deleteVoice } from "../../shared/api";
 import { getUserId } from "../../shared/helpers/user-id";
 
@@ -14,6 +13,8 @@ import { PlatformPicker } from "./components/PlatformPicker";
 import { DestinationCard } from "./components/DestinationCard";
 import { SessionList } from "./components/SessionList";
 import { GoLiveButton } from "./components/GoLiveButton";
+import { TitleRow } from "./components/TitleRow";
+import { YouTubePrivacy } from "./components/YouTubePrivacy";
 
 export default function DashboardPage() {
   const navigate = useNavigate();
@@ -143,72 +144,6 @@ export default function DashboardPage() {
 
         <SessionList sessions={sessions} onSessionClick={(id) => navigate(`/session/${id}`)} />
       </main>
-    </div>
-  );
-}
-
-function TitleRow({
-  title,
-  sourceLang,
-  onTitleChange,
-  onLangChange,
-}: {
-  title: string;
-  sourceLang: string;
-  onTitleChange: (v: string) => void;
-  onLangChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex gap-3">
-      <input
-        className="flex-1 min-w-0 bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label outline-none"
-        placeholder="Session title"
-        value={title}
-        onChange={(e) => onTitleChange(e.target.value)}
-      />
-      <div className="relative shrink-0">
-        <select
-          className="appearance-none bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label focus:ring-2 focus:ring-primary/50 transition-all outline-none pr-9 cursor-pointer"
-          value={sourceLang}
-          onChange={(e) => onLangChange(e.target.value)}
-        >
-          {LANGS.map((l) => (
-            <option key={l.code} value={l.code}>
-              {l.flag} {l.label}
-            </option>
-          ))}
-        </select>
-        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant pointer-events-none" />
-      </div>
-    </div>
-  );
-}
-
-function YouTubePrivacy({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-3 bg-surface-container-low rounded-xl px-4 py-3">
-      <Youtube className="w-4 h-4 text-[#ff0000]" />
-      <span className="text-on-surface-variant text-xs font-label flex-1">
-        YouTube privacy
-      </span>
-      <div className="relative">
-        <select
-          className="appearance-none bg-surface-container-highest border-none rounded-lg px-3 py-1.5 text-on-surface font-label text-sm focus:ring-2 focus:ring-primary/50 outline-none pr-7 cursor-pointer"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          <option value="public">Public</option>
-          <option value="unlisted">Unlisted</option>
-          <option value="private">Private</option>
-        </select>
-        <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-on-surface-variant pointer-events-none" />
-      </div>
     </div>
   );
 }

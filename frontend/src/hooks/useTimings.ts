@@ -83,15 +83,11 @@ export function useTimings() {
     setTimings((prev) => [timing, ...prev.slice(0, MAX_TIMINGS - 1)]);
   }, []);
 
-  const finalize = useCallback((_uid: string, _lipsyncMs: number) => {
-    // No-op: kept for interface compatibility, tts_end now finalizes directly
-  }, []);
-
   const reset = useCallback(() => {
     setTimings([]);
     pending.current.clear();
     interimStartedAt.current = null;
   }, []);
 
-  return { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize, reset };
+  return { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, reset };
 }

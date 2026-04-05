@@ -1,8 +1,9 @@
-import { useRef, useCallback, useEffect, useState, useMemo } from "react";
+import { useRef, useCallback, useMemo } from "react";
 import { useBroadcastConfig } from "./hooks/useBroadcastConfig";
 import { useWebcam } from "./hooks/useWebcam";
 import { useVoiceClone } from "./hooks/useVoiceClone";
 import { useBroadcastSocket } from "./hooks/useBroadcastSocket";
+import { useMediaDevices } from "./hooks/useMediaDevices";
 import { TierSelector } from "./components/TierSelector";
 import { LanguageConfig } from "./components/LanguageConfig";
 import { RtmpDestinations } from "./components/RtmpDestinations";
@@ -10,10 +11,13 @@ import { BroadcastSettings } from "./components/BroadcastSettings";
 import { VoiceCloning } from "./components/VoiceCloning";
 import { LiveTranscript } from "./components/LiveTranscript";
 import { BroadcastControls } from "./components/BroadcastControls";
+import { BroadcastHeader } from "./components/BroadcastHeader";
+import { ErrorBanners } from "./components/ErrorBanners";
+import { InfoFooter } from "./components/InfoFooter";
 
 export default function BroadcastPage() {
   const { config, update } = useBroadcastConfig();
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const devices = useMediaDevices();
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const { startWebcam, stopWebcam } = useWebcam(videoRef);
@@ -33,17 +37,6 @@ export default function BroadcastPage() {
   const { isLive, sessionId, interim, transcripts, errors, wsRef, start, stop, addError, dismissError } = useBroadcastSocket(socketParams);
 
   const { isCloning, cloneProgress, voiceReady, setVoiceReady, cloneVoice } = useVoiceClone(addError);
-
-  // Enumerate media devices on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-        stream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      setDevices(await navigator.mediaDevices.enumerateDevices());
-    })();
-  }, []);
 
   const handleSourceChange = useCallback((code: string) => {
     update("sourceLang", code);
@@ -75,7 +68,7 @@ export default function BroadcastPage() {
   return (
     <div className="min-h-screen bg-background text-on-surface p-6">
       <div className="max-w-3xl mx-auto space-y-6">
-        <Header sessionId={sessionId} />
+        <BroadcastHeader sessionId={sessionId} />
         <ErrorBanners errors={errors} onDismiss={dismissError} />
         <TierSelector tier={config.tier} isLive={isLive} onTierChange={(t) => update("tier", t)} />
         <LanguageConfig sourceLang={config.sourceLang} targetLangs={config.targetLangs} isLive={isLive} onSourceChange={handleSourceChange} onTargetToggle={handleTargetToggle} />
@@ -87,37 +80,6 @@ export default function BroadcastPage() {
         {isLive && <LiveTranscript transcripts={transcripts} interim={interim} />}
         <InfoFooter tier={config.tier} hasRtmpStreams={hasRtmpStreams} />
       </div>
-    </div>
-  );
-}
-
-function Header({ sessionId }: { sessionId: string | null }) {
-  return (
-    <div className="flex items-center justify-between">
-      <h1 className="font-headline text-2xl font-bold text-primary">Brivva</h1>
-      {sessionId && <span className="text-xs font-mono text-outline">Session: {sessionId}</span>}
-    </div>
-  );
-}
-
-function ErrorBanners({ errors, onDismiss }: { errors: string[]; onDismiss: (i: number) => void }) {
-  return (
-    <>
-      {errors.map((err, i) => (
-        <div key={i} className="flex items-center justify-between bg-error-container text-on-error-container rounded-lg px-4 py-2 text-sm">
-          <span>{err}</span>
-          <button onClick={() => onDismiss(i)} className="ml-4 text-on-error-container/60 hover:text-on-error-container text-lg leading-none">x</button>
-        </div>
-      ))}
-    </>
-  );
-}
-
-function InfoFooter({ tier, hasRtmpStreams }: { tier: number; hasRtmpStreams: boolean }) {
-  return (
-    <div className="text-xs text-outline space-y-1">
-      <p>Option {tier}: {tier === 1 ? "Subtitles only — original audio passes through" : "Translated voice + subtitles — each language gets AI-generated voice audio"}</p>
-      <p>{hasRtmpStreams ? "Webcam video + translated audio muxed via FFmpeg and pushed to RTMP destinations." : "Audio-only mode. Add RTMP destinations above to enable video streaming."}</p>
     </div>
   );
 }

@@ -7,6 +7,7 @@ const TARGET_MS = 300;
 const DEFAULT_MAX_MS = 3000;
 const MIN_MAX_MS = 1000;
 const MAX_TARGET_PCT = 99;
+const GAP_CRITICAL_THRESHOLD = 5;
 
 const COLORS = {
   stt: "#38bdf8",
@@ -55,7 +56,7 @@ export function LatencyDashboard({ timings }: Props) {
               Gap:{" "}
               <strong
                 className={cn(
-                  Number(stats.gap) >= 5 ? "text-error" : "text-[#f59e0b]"
+                  Number(stats.gap) >= GAP_CRITICAL_THRESHOLD ? "text-error" : "text-[#f59e0b]"
                 )}
               >
                 {stats.gap}x
@@ -113,94 +114,66 @@ function computeMaxMs(timings: UtteranceTiming[]): number {
 
 // --- sub-components ---
 
-function TimingRow({
-  timing: t,
-  index,
-  maxMs,
-  targetPct,
-}: {
+function TimingRow({ timing: t, index, maxMs, targetPct }: {
   timing: UtteranceTiming;
   index: number;
   maxMs: number;
   targetPct: number;
 }) {
-  const sttW = (t.sttMs / maxMs) * 100;
-  const transW = (t.translateMs / maxMs) * 100;
-  const ttsW = (t.ttsMs / maxMs) * 100;
-  const lipsyncW = (t.lipsyncMs / maxMs) * 100;
-  const overW = (t.overheadMs / maxMs) * 100;
-
   return (
     <div className="space-y-0.5">
       <div className="flex items-center gap-2">
         <span className="text-[10px] font-mono text-on-surface-variant w-6 text-right">
           #{index}
         </span>
-        <div className="flex-1 relative h-5 bg-surface-container-highest rounded overflow-hidden">
-          <div className="flex h-full">
-            {sttW > 0 && (
-              <div
-                className="h-full"
-                style={{ width: `${sttW}%`, background: COLORS.stt }}
-              />
-            )}
-            <div
-              className="h-full"
-              style={{ width: `${transW}%`, background: COLORS.translate }}
-            />
-            <div
-              className="h-full"
-              style={{ width: `${ttsW}%`, background: COLORS.tts }}
-            />
-            {lipsyncW > 0 && (
-              <div
-                className="h-full"
-                style={{ width: `${lipsyncW}%`, background: COLORS.lipsync }}
-              />
-            )}
-            <div
-              className="h-full"
-              style={{ width: `${overW}%`, background: COLORS.overhead }}
-            />
-          </div>
-          {/* Target marker */}
-          <div
-            className="absolute top-0 bottom-0 w-px bg-success/60"
-            style={{ left: `${targetPct}%` }}
-          />
-        </div>
+        <TimingBar timing={t} maxMs={maxMs} targetPct={targetPct} />
         <span className="text-[10px] font-mono text-on-surface-variant w-16 text-right">
           {t.totalMs.toLocaleString()}ms
         </span>
       </div>
-      <div className="flex items-center gap-3 pl-8 text-[9px] font-label text-on-surface-variant">
-        {t.sttMs > 0 && (
-          <LegendDot
-            color={COLORS.stt}
-            label={`${t.sttMs.toLocaleString()}ms`}
-          />
+      <TimingDetails timing={t} />
+    </div>
+  );
+}
+
+function buildSegments(t: UtteranceTiming, maxMs: number) {
+  return [
+    { key: "stt", width: (t.sttMs / maxMs) * 100, color: COLORS.stt },
+    { key: "translate", width: (t.translateMs / maxMs) * 100, color: COLORS.translate },
+    { key: "tts", width: (t.ttsMs / maxMs) * 100, color: COLORS.tts },
+    { key: "lipsync", width: (t.lipsyncMs / maxMs) * 100, color: COLORS.lipsync },
+    { key: "overhead", width: (t.overheadMs / maxMs) * 100, color: COLORS.overhead },
+  ];
+}
+
+function TimingBar({ timing: t, maxMs, targetPct }: {
+  timing: UtteranceTiming;
+  maxMs: number;
+  targetPct: number;
+}) {
+  const segments = buildSegments(t, maxMs);
+
+  return (
+    <div className="flex-1 relative h-5 bg-surface-container-highest rounded overflow-hidden">
+      <div className="flex h-full">
+        {segments.map(({ key, width, color }) =>
+          width > 0 ? <div key={key} className="h-full" style={{ width: `${width}%`, background: color }} /> : null
         )}
-        <LegendDot
-          color={COLORS.translate}
-          label={`${t.translateMs.toLocaleString()}ms`}
-        />
-        <LegendDot
-          color={COLORS.tts}
-          label={`${t.ttsMs.toLocaleString()}ms`}
-        />
-        {t.lipsyncMs > 0 && (
-          <LegendDot
-            color={COLORS.lipsync}
-            label={`${t.lipsyncMs.toLocaleString()}ms`}
-          />
-        )}
-        <span className="text-on-surface-variant/50">
-          +{t.overheadMs.toLocaleString()}ms
-        </span>
-        <span className="text-on-surface-variant/40 truncate max-w-[200px]">
-          "{t.text}"
-        </span>
       </div>
+      <div className="absolute top-0 bottom-0 w-px bg-success/60" style={{ left: `${targetPct}%` }} />
+    </div>
+  );
+}
+
+function TimingDetails({ timing: t }: { timing: UtteranceTiming }) {
+  return (
+    <div className="flex items-center gap-3 pl-8 text-[9px] font-label text-on-surface-variant">
+      {t.sttMs > 0 && <LegendDot color={COLORS.stt} label={`${t.sttMs.toLocaleString()}ms`} />}
+      <LegendDot color={COLORS.translate} label={`${t.translateMs.toLocaleString()}ms`} />
+      <LegendDot color={COLORS.tts} label={`${t.ttsMs.toLocaleString()}ms`} />
+      {t.lipsyncMs > 0 && <LegendDot color={COLORS.lipsync} label={`${t.lipsyncMs.toLocaleString()}ms`} />}
+      <span className="text-on-surface-variant/50">+{t.overheadMs.toLocaleString()}ms</span>
+      <span className="text-on-surface-variant/40 truncate max-w-[200px]">"{t.text}"</span>
     </div>
   );
 }

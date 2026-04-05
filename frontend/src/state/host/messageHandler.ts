@@ -9,7 +9,6 @@ type Stopwatch = {
   recordStt: (uid: string, ms: number) => void;
   recordTranslate: (uid: string, ms: number) => void;
   recordTts: (uid: string, ms: number) => void;
-  finalize: (uid: string, lipsyncMs: number) => void;
 };
 
 export function createMessageHandler(
@@ -53,10 +52,6 @@ export function createMessageHandler(
 
       case "tts_end":
         stopwatch.recordTts(String(msg.utteranceId), msg.ttsMs as number);
-        break;
-
-      case "video_end":
-        stopwatch.finalize(String(msg.utteranceId), msg.lipsyncMs as number);
         break;
 
       case "voice:ready":

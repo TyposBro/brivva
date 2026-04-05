@@ -4,6 +4,7 @@ import { cn } from "../../../lib/cn";
 import { PLATFORMS, PLATFORM_LANG, LANGS, langFlag, langLabel } from "../../../shared/platforms";
 import { PlatformIcon } from "../../../shared/components/PlatformIcon";
 import type { PlatformCredential } from "../../../shared/api";
+import type { Platform } from "../../../shared/platforms";
 import type { Destination } from "../types";
 
 type Props = {
@@ -18,22 +19,16 @@ export function DestinationCard({ dest, sourceLang, savedCreds, onUpdate, onRemo
   const platform = PLATFORMS.find((p) => p.id === dest.platform);
   if (!platform) return null;
 
-  const fixedLang = PLATFORM_LANG[dest.platform];
   const needsConfig = !platform.auto;
-  const hasConfig = !!(dest.rtmp_url || dest.stream_key);
   const hasSavedCreds = !!savedCreds[dest.platform];
-
   const [expanded, setExpanded] = useState(() => !!(needsConfig && !hasSavedCreds));
 
   return (
     <div className="bg-surface-container-low rounded-xl overflow-hidden">
       <CardHeader
         dest={dest}
-        platformLabel={platform.label}
-        fixedLang={fixedLang}
+        platform={platform}
         sourceLang={sourceLang}
-        needsConfig={needsConfig}
-        hasConfig={hasConfig}
         hasSavedCreds={hasSavedCreds}
         expanded={expanded}
         onToggle={() => setExpanded(!expanded)}
@@ -54,11 +49,8 @@ export function DestinationCard({ dest, sourceLang, savedCreds, onUpdate, onRemo
 
 function CardHeader({
   dest,
-  platformLabel,
-  fixedLang,
+  platform,
   sourceLang,
-  needsConfig,
-  hasConfig,
   hasSavedCreds,
   expanded,
   onToggle,
@@ -66,53 +58,29 @@ function CardHeader({
   onRemove,
 }: {
   dest: Destination;
-  platformLabel: string;
-  fixedLang: string | null;
+  platform: Platform;
   sourceLang: string;
-  needsConfig: boolean;
-  hasConfig: boolean;
   hasSavedCreds: boolean;
   expanded: boolean;
   onToggle: () => void;
   onUpdate: (patch: Partial<Destination>) => void;
   onRemove: () => void;
 }) {
+  const fixedLang = PLATFORM_LANG[dest.platform];
+  const needsConfig = !platform.auto;
+  const hasConfig = !!(dest.rtmp_url || dest.stream_key);
+
   return (
     <div className="flex items-center gap-3 px-4 py-3">
       <PlatformIcon id={dest.platform} className="w-4 h-4 text-primary" />
       <span className="font-label font-bold text-on-surface text-sm flex-1 truncate">
-        {platformLabel}
+        {platform.label}
       </span>
 
-      <LangSelector
-        dest={dest}
-        fixedLang={fixedLang}
-        sourceLang={sourceLang}
-        onUpdate={onUpdate}
-      />
+      <LangSelector dest={dest} fixedLang={fixedLang} sourceLang={sourceLang} onUpdate={onUpdate} />
 
-      {needsConfig && (
-        <span
-          className={cn(
-            "w-2 h-2 rounded-full shrink-0",
-            hasConfig || hasSavedCreds ? "bg-success" : "bg-error/60",
-          )}
-          title={hasConfig || hasSavedCreds ? "Configured" : "Needs stream key"}
-        />
-      )}
-
-      {needsConfig && (
-        <button
-          className="text-on-surface-variant hover:text-on-surface p-1 transition-colors"
-          onClick={onToggle}
-        >
-          {expanded ? (
-            <ChevronDown className="w-3.5 h-3.5" />
-          ) : (
-            <ChevronRight className="w-3.5 h-3.5" />
-          )}
-        </button>
-      )}
+      {needsConfig && <ConfigIndicator configured={hasConfig || hasSavedCreds} />}
+      {needsConfig && <ExpandToggle expanded={expanded} onToggle={onToggle} />}
 
       <button
         className="text-on-surface-variant hover:text-error transition-colors p-1"
@@ -121,6 +89,30 @@ function CardHeader({
         <X className="w-3.5 h-3.5" />
       </button>
     </div>
+  );
+}
+
+function ConfigIndicator({ configured }: { configured: boolean }) {
+  return (
+    <span
+      className={cn(
+        "w-2 h-2 rounded-full shrink-0",
+        configured ? "bg-success" : "bg-error/60",
+      )}
+      title={configured ? "Configured" : "Needs stream key"}
+    />
+  );
+}
+
+function ExpandToggle({ expanded, onToggle }: { expanded: boolean; onToggle: () => void }) {
+  const Icon = expanded ? ChevronDown : ChevronRight;
+  return (
+    <button
+      className="text-on-surface-variant hover:text-on-surface p-1 transition-colors"
+      onClick={onToggle}
+    >
+      <Icon className="w-3.5 h-3.5" />
+    </button>
   );
 }
 
@@ -168,7 +160,7 @@ function ConfigSection({
   onUpdate,
 }: {
   dest: Destination;
-  platform: { label: string; settingsUrl: string; help: string; keyOnly: boolean };
+  platform: Platform;
   hasSavedCreds: boolean;
   onUpdate: (patch: Partial<Destination>) => void;
 }) {

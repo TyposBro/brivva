@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Radio, Square, Copy, Loader2 } from "lucide-react";
-import { cn } from "../../lib/cn";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import type { Session, StreamInfo } from "../../shared/api";
 import { getSession, deleteSession } from "../../shared/api";
-import { langLabel } from "../../shared/platforms";
 import { StreamCard } from "./components/StreamCard";
+import { SessionInfo } from "./components/SessionInfo";
+import { SessionActions } from "./components/SessionActions";
 
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
@@ -66,10 +66,7 @@ export default function SessionPage() {
     );
   }
 
-  const targetLangs: string[] = (() => {
-    try { return JSON.parse(session.target_langs); }
-    catch { return []; }
-  })();
+  const targetLangs = parseTargetLangs(session.target_langs);
   const isLive = session.status === "live";
 
   return (
@@ -121,110 +118,10 @@ export default function SessionPage() {
   );
 }
 
-function SessionInfo({
-  session,
-  targetLangs,
-}: {
-  session: Session;
-  targetLangs: string[];
-}) {
-  return (
-    <section>
-      <div className="flex items-center gap-4 mb-2">
-        <h2 className="font-headline font-bold text-3xl tracking-tight text-on-surface">
-          {session.title}
-        </h2>
-        <span
-          className={cn(
-            "text-[10px] font-label font-bold uppercase tracking-widest px-2 py-0.5 rounded",
-            session.status === "live"
-              ? "text-success bg-success/10"
-              : session.status === "ended"
-                ? "text-on-surface-variant bg-surface-container-highest"
-                : "text-primary bg-primary/10",
-          )}
-        >
-          {session.status}
-        </span>
-      </div>
-      <div className="flex gap-4 text-on-surface-variant text-sm font-label">
-        <span>
-          Source:{" "}
-          <span className="text-on-surface">{langLabel(session.source_lang)}</span>
-        </span>
-        <span>
-          Targets:{" "}
-          <span className="text-on-surface">
-            {targetLangs.map((l) => langLabel(l)).join(", ")}
-          </span>
-        </span>
-      </div>
-    </section>
-  );
-}
-
-function SessionActions({
-  session,
-  isLive,
-  ending,
-  onEnd,
-  onNavigate,
-}: {
-  session: Session;
-  isLive: boolean;
-  ending: boolean;
-  onEnd: () => void;
-  onNavigate: (path: string) => void;
-}) {
-  return (
-    <section className="flex flex-col sm:flex-row gap-3">
-      {isLive && !session.room_id && (
-        <button
-          className="monolith-gradient text-white px-8 py-3 rounded-xl font-headline font-extrabold hover:scale-[0.98] transition-all shadow-xl flex items-center justify-center gap-2"
-          onClick={() =>
-            onNavigate(`/host?sessionId=${session.id}&sourceLang=${session.source_lang}`)
-          }
-        >
-          <Radio className="w-5 h-5" />
-          Start Broadcasting
-        </button>
-      )}
-
-      {isLive && session.room_id && (
-        <div className="flex items-center gap-3 bg-surface-container-low px-5 py-3 rounded-xl">
-          <span className="text-on-surface-variant text-sm font-label">
-            Room Code:
-          </span>
-          <code className="text-primary font-mono font-bold text-lg">
-            {session.room_id}
-          </code>
-          <button
-            className="text-on-surface-variant hover:text-primary transition-colors"
-            onClick={() => navigator.clipboard.writeText(session.room_id ?? "")}
-          >
-            <Copy className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {isLive && (
-        <button
-          className="bg-error-container text-on-error-container px-6 py-3 rounded-xl font-headline font-bold hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
-          onClick={onEnd}
-          disabled={ending}
-        >
-          <Square className="w-4 h-4" />
-          {ending ? "Ending..." : "End Session"}
-        </button>
-      )}
-
-      <button
-        className="bg-surface-container-high hover:bg-surface-bright text-on-surface px-6 py-3 rounded-xl font-headline font-bold transition-colors flex items-center justify-center gap-2"
-        onClick={() => onNavigate("/dashboard")}
-      >
-        <ArrowLeft className="w-4 h-4" />
-        Back to Dashboard
-      </button>
-    </section>
-  );
+function parseTargetLangs(raw: string): string[] {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
 }

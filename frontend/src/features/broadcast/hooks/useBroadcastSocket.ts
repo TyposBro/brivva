@@ -44,48 +44,16 @@ export function useBroadcastSocket(params: SocketParams) {
   }, [addError]);
 
   const start = useCallback(async () => {
-    const { sourceLang, targetLangs, tier, ttsModel, audioDeviceId, rtmpUrls, broadcastDelay, onStartWebcam } = params;
-    const available = targetLangs.filter((l) => l !== sourceLang);
+    const available = getAvailableTargets(params.sourceLang, params.targetLangs);
     if (available.length === 0) return;
 
-    const wsUrl = `${API_BASE.replace(/^http/, "ws")}/ws?sourceLang=${sourceLang}&targetLangs=${available.join(",")}&tier=${tier}&ttsModel=${ttsModel}`;
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = "arraybuffer";
+    const ws = await connectWebSocket(params, available, handleMessage, addError);
+    if (!ws) return;
+
     wsRef.current = ws;
-    ws.onmessage = handleMessage;
-
-    try {
-      await waitForOpen(ws);
-    } catch {
-      addError("Cannot connect — is the backend running?");
-      wsRef.current = null;
-      return;
-    }
-
-    ws.onclose = (ev) => {
-      if (ev.code !== 1000) addError(`Connection lost (code ${ev.code}). Restart to reconnect.`);
-      setIsLive(false);
-      setSessionId(null);
-    };
-    ws.onerror = () => {};
-
-    const streams = Object.entries(rtmpUrls)
-      .filter(([, url]) => url.trim())
-      .map(([lang, url]) => ({ lang, url: url.trim() }));
-
-    if (streams.length > 0) {
-      await onStartWebcam(ws);
-      ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay }));
-    }
-
-    await audioRef.current.start((buffer) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        const tagged = new Uint8Array(buffer.byteLength + 1);
-        tagged[0] = AUDIO_TAG;
-        tagged.set(new Uint8Array(buffer), 1);
-        ws.send(tagged.buffer);
-      }
-    }, audioDeviceId || undefined);
+    wireCloseHandler(ws, addError, setIsLive, setSessionId);
+    await configureRtmpStreams(ws, params);
+    await startAudioCapture(ws, audioRef.current, params.audioDeviceId);
 
     setIsLive(true);
     setTranscripts([]);
@@ -106,6 +74,72 @@ export function useBroadcastSocket(params: SocketParams) {
   }, []);
 
   return { isLive, sessionId, interim, transcripts, errors, wsRef, start, stop, addError, dismissError };
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+function getAvailableTargets(sourceLang: string, targetLangs: string[]): string[] {
+  return targetLangs.filter((l) => l !== sourceLang);
+}
+
+function buildWsUrl(sourceLang: string, targets: string[], tier: TranslationTier, ttsModel: string): string {
+  const base = API_BASE.replace(/^http/, "ws");
+  return `${base}/ws?sourceLang=${sourceLang}&targetLangs=${targets.join(",")}&tier=${tier}&ttsModel=${ttsModel}`;
+}
+
+async function connectWebSocket(
+  params: SocketParams,
+  targets: string[],
+  onMessage: (e: MessageEvent) => void,
+  onError: (msg: string) => void,
+): Promise<WebSocket | null> {
+  const url = buildWsUrl(params.sourceLang, targets, params.tier, params.ttsModel);
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = onMessage;
+
+  try {
+    await waitForOpen(ws);
+    return ws;
+  } catch {
+    onError("Cannot connect — is the backend running?");
+    return null;
+  }
+}
+
+function wireCloseHandler(
+  ws: WebSocket,
+  addError: (msg: string) => void,
+  setIsLive: (v: boolean) => void,
+  setSessionId: (v: string | null) => void,
+): void {
+  ws.onclose = (ev) => {
+    if (ev.code !== 1000) addError(`Connection lost (code ${ev.code}). Restart to reconnect.`);
+    setIsLive(false);
+    setSessionId(null);
+  };
+  ws.onerror = () => {};
+}
+
+async function configureRtmpStreams(ws: WebSocket, params: SocketParams): Promise<void> {
+  const streams = Object.entries(params.rtmpUrls)
+    .filter(([, url]) => url.trim())
+    .map(([lang, url]) => ({ lang, url: url.trim() }));
+
+  if (streams.length === 0) return;
+
+  await params.onStartWebcam(ws);
+  ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay: params.broadcastDelay }));
+}
+
+async function startAudioCapture(ws: WebSocket, audio: AudioPipeline, deviceId: string): Promise<void> {
+  await audio.start((buffer) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const tagged = new Uint8Array(buffer.byteLength + 1);
+    tagged[0] = AUDIO_TAG;
+    tagged.set(new Uint8Array(buffer), 1);
+    ws.send(tagged.buffer);
+  }, deviceId || undefined);
 }
 
 // ── Message handlers ─────────────────────────────────────

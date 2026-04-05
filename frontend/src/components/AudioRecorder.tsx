@@ -32,8 +32,8 @@ export function AudioRecorder({
     <div className="flex flex-col items-center gap-4">
       <canvas
         ref={canvasRef}
-        width={600}
-        height={80}
+        width={CANVAS_WIDTH}
+        height={CANVAS_HEIGHT}
         className={cn(
           "w-full max-w-[600px] h-20 rounded-xl transition-opacity",
           isRecording ? "opacity-100" : "opacity-40"
@@ -64,6 +64,9 @@ export function AudioRecorder({
 
 // --- waveform rendering ---
 
+const CANVAS_WIDTH = 600;
+const CANVAS_HEIGHT = 80;
+const CANVAS_BG = "#131313";
 const BAR_WIDTH_SCALE = 2.5;
 const BAR_GAP = 1;
 const BAR_HEIGHT_SCALE = 0.9;
@@ -75,7 +78,7 @@ const LIGHTNESS = 60;
 
 function clearCanvas(canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#131313";
+  ctx.fillStyle = CANVAS_BG;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -103,7 +106,7 @@ function drawBars(
   data: Uint8Array,
   length: number
 ) {
-  ctx.fillStyle = "#131313";
+  ctx.fillStyle = CANVAS_BG;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const barWidth = (canvas.width / length) * BAR_WIDTH_SCALE;
