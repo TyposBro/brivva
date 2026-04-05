@@ -1,5 +1,6 @@
 //! ElevenLabs WebSocket streaming TTS.
 
+use std::ops::ControlFlow;
 use std::time::Instant;
 use tracing::{debug, warn};
 
@@ -20,27 +21,47 @@ pub async fn do_tts_ws(
     send_bos(&mut ws, voice_settings).await?;
     send_text_and_eos(&mut ws, text).await?;
 
-    let (total_pcm_bytes, got_audio) = receive_and_decode_chunks(&mut ws, lang, max_bytes, streaming, &tts_start).await?;
+    let (total, got_audio) = receive_and_decode_chunks(&mut ws, lang, max_bytes, streaming, &tts_start).await?;
 
     if !got_audio {
         warn!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", lang, tts_start.elapsed().as_millis());
     }
 
-    Ok(total_pcm_bytes)
+    Ok(total)
 }
+
+// ── Types ───
 
 type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+struct ChunkState {
+    chunk_count: u32,
+    total_pcm_bytes: usize,
+    got_audio: bool,
+}
+
+impl ChunkState {
+    fn new() -> Self {
+        Self { chunk_count: 0, total_pcm_bytes: 0, got_audio: false }
+    }
+
+    fn accumulate(&mut self, pcm: &[u8]) {
+        if !pcm.is_empty() {
+            self.got_audio = true;
+            self.total_pcm_bytes += pcm.len();
+        }
+    }
+}
+
+// ── Connection ───
+
 async fn connect_elevenlabs(voice_id: &str, model_id: &str, lang: &str) -> Result<WsStream, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let connect_start = Instant::now();
-    let url = format!(
-        "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128&language_code={}",
-        voice_id, model_id, lang
-    );
+    let url = build_ws_url(voice_id, model_id, lang);
     let request = url.into_client_request()
         .map_err(|e| format!("WS request build failed: {}", e))?;
     let (ws, _) = tokio_tungstenite::connect_async(request)
@@ -49,6 +70,15 @@ async fn connect_elevenlabs(voice_id: &str, model_id: &str, lang: &str) -> Resul
     debug!("[TTS:{}] connected in {}ms", lang, connect_start.elapsed().as_millis());
     Ok(ws)
 }
+
+fn build_ws_url(voice_id: &str, model_id: &str, lang: &str) -> String {
+    format!(
+        "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128&language_code={}",
+        voice_id, model_id, lang
+    )
+}
+
+// ── Sending ───
 
 async fn send_bos(ws: &mut WsStream, voice_settings: &serde_json::Value) -> Result<(), String> {
     use futures_util::SinkExt;
@@ -73,6 +103,8 @@ async fn send_text_and_eos(ws: &mut WsStream, text: &str) -> Result<(), String> 
         .await.map_err(|e| format!("EOS send failed: {}", e))
 }
 
+// ── Receiving & decoding ───
+
 async fn receive_and_decode_chunks(
     ws: &mut WsStream,
     lang: &str,
@@ -80,75 +112,157 @@ async fn receive_and_decode_chunks(
     streaming: Option<&crate::ffmpeg::StreamingPcm>,
     tts_start: &Instant,
 ) -> Result<(usize, bool), String> {
-    use futures_util::StreamExt;
-
     let mut decoder = crate::ffmpeg::IncrementalMp3Decoder::new().await
         .map_err(|e| format!("IncrementalMp3Decoder init failed: {}", e))?;
-    let mut chunk_count: u32 = 0;
-    let mut total_pcm_bytes: usize = 0;
-    let mut got_audio = false;
+    let mut state = ChunkState::new();
+
+    receive_loop(ws, &mut decoder, &mut state, lang, max_bytes, streaming, tts_start).await?;
+    drain_remaining(&mut state, decoder, max_bytes, streaming).await?;
+
+    Ok((state.total_pcm_bytes, state.got_audio))
+}
+
+async fn receive_loop(
+    ws: &mut WsStream,
+    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
+    state: &mut ChunkState,
+    lang: &str,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    tts_start: &Instant,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
 
     while let Some(msg_result) = ws.next().await {
         let msg = msg_result.map_err(|e| format!("WS read error: {}", e))?;
-
-        let text_data = match msg {
-            tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
-            tokio_tungstenite::tungstenite::Message::Close(frame) => {
-                let reason = frame.map(|f| format!("code={} reason='{}'", f.code, f.reason))
-                    .unwrap_or_else(|| "no frame".to_string());
-                debug!("[TTS:{}] WS closed by server: {}", lang, reason);
-                break;
-            }
-            _ => continue,
-        };
-
-        check_elevenlabs_error(&text_data)?;
-
-        let resp: ElevenLabsTtsResponse = serde_json::from_str(&text_data)
-            .map_err(|e| format!("WS parse error: {} | raw: {}", e, &text_data[..text_data.len().min(200)]))?;
-
-        if resp.is_final.unwrap_or(false) {
-            debug!("[TTS:{}] done: {} chunks, {}KB PCM in {}ms", lang, chunk_count, total_pcm_bytes / 1024, tts_start.elapsed().as_millis());
-            break;
-        }
-
-        if let Some(audio_b64) = resp.audio {
-            if audio_b64.is_empty() { continue; }
-            let (pcm_bytes, _is_first) = decode_audio_chunk(&mut decoder, &audio_b64, &mut chunk_count, lang, tts_start).await?;
-            if !pcm_bytes.is_empty() {
-                got_audio = true;
-                total_pcm_bytes += pcm_bytes.len();
-                if let Some(s) = streaming {
-                    s.append_with_limit(&pcm_bytes, max_bytes);
-                }
-            }
-        }
-    }
-
-    let remaining = drain_decoder(decoder).await?;
-    if !remaining.is_empty() {
-        got_audio = true;
-        total_pcm_bytes += remaining.len();
-        if let Some(s) = streaming {
-            s.append_with_limit(&remaining, max_bytes);
-        }
-    }
-
-    Ok((total_pcm_bytes, got_audio))
-}
-
-fn check_elevenlabs_error(text_data: &str) -> Result<(), String> {
-    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(text_data) {
-        if let Some(detail) = raw.get("detail") {
-            return Err(format!("ElevenLabs error: {}", detail));
-        }
-        if let Some(msg) = raw.get("message").and_then(|m| m.as_str())
-            && raw.get("audio").is_none() {
-                return Err(format!("ElevenLabs error: {}", msg));
-            }
+        let flow = process_ws_message(msg, decoder, state, lang, max_bytes, streaming, tts_start).await?;
+        if flow.is_break() { break; }
     }
     Ok(())
 }
+
+async fn process_ws_message(
+    msg: tokio_tungstenite::tungstenite::Message,
+    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
+    state: &mut ChunkState,
+    lang: &str,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    tts_start: &Instant,
+) -> Result<ControlFlow<()>, String> {
+    let text_data = match extract_text_payload(msg, lang)? {
+        Some(t) => t,
+        None => return Ok(ControlFlow::Continue(())),
+    };
+
+    check_elevenlabs_error(&text_data)?;
+    let resp = parse_response(&text_data)?;
+
+    if is_final(&resp, state, lang, tts_start) {
+        return Ok(ControlFlow::Break(()));
+    }
+
+    handle_audio_chunk(&resp, decoder, state, lang, max_bytes, streaming, tts_start).await?;
+    Ok(ControlFlow::Continue(()))
+}
+
+fn extract_text_payload(
+    msg: tokio_tungstenite::tungstenite::Message,
+    lang: &str,
+) -> Result<Option<String>, String> {
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Text(t) => Ok(Some(t.to_string())),
+        tokio_tungstenite::tungstenite::Message::Close(frame) => {
+            let reason = frame.map(|f| format!("code={} reason='{}'", f.code, f.reason))
+                .unwrap_or_else(|| "no frame".to_string());
+            debug!("[TTS:{}] WS closed by server: {}", lang, reason);
+            Ok(None)
+        }
+        _ => Ok(Some(String::new())),
+    }
+}
+
+fn parse_response(text_data: &str) -> Result<ElevenLabsTtsResponse, String> {
+    serde_json::from_str(text_data)
+        .map_err(|e| format!("WS parse error: {} | raw: {}", e, &text_data[..text_data.len().min(200)]))
+}
+
+fn is_final(resp: &ElevenLabsTtsResponse, state: &ChunkState, lang: &str, tts_start: &Instant) -> bool {
+    if resp.is_final.unwrap_or(false) {
+        debug!("[TTS:{}] done: {} chunks, {}KB PCM in {}ms", lang, state.chunk_count, state.total_pcm_bytes / 1024, tts_start.elapsed().as_millis());
+        return true;
+    }
+    false
+}
+
+async fn handle_audio_chunk(
+    resp: &ElevenLabsTtsResponse,
+    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
+    state: &mut ChunkState,
+    lang: &str,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    tts_start: &Instant,
+) -> Result<(), String> {
+    let audio_b64 = match resp.audio.as_deref() {
+        Some(b) if !b.is_empty() => b,
+        _ => return Ok(()),
+    };
+
+    let (pcm, _is_first) = decode_audio_chunk(decoder, audio_b64, &mut state.chunk_count, lang, tts_start).await?;
+    state.accumulate(&pcm);
+    append_to_stream(&pcm, max_bytes, streaming);
+    Ok(())
+}
+
+fn append_to_stream(pcm: &[u8], max_bytes: usize, streaming: Option<&crate::ffmpeg::StreamingPcm>) {
+    if !pcm.is_empty() {
+        if let Some(s) = streaming {
+            s.append_with_limit(pcm, max_bytes);
+        }
+    }
+}
+
+async fn drain_remaining(
+    state: &mut ChunkState,
+    decoder: crate::ffmpeg::IncrementalMp3Decoder,
+    max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+) -> Result<(), String> {
+    let remaining = drain_decoder(decoder).await?;
+    state.accumulate(&remaining);
+    append_to_stream(&remaining, max_bytes, streaming);
+    Ok(())
+}
+
+// ── Error checking ───
+
+fn check_elevenlabs_error(text_data: &str) -> Result<(), String> {
+    if text_data.is_empty() { return Ok(()); }
+    let raw = match serde_json::from_str::<serde_json::Value>(text_data) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    check_detail_field(&raw)?;
+    check_message_field(&raw)
+}
+
+fn check_detail_field(raw: &serde_json::Value) -> Result<(), String> {
+    if let Some(detail) = raw.get("detail") {
+        return Err(format!("ElevenLabs error: {}", detail));
+    }
+    Ok(())
+}
+
+fn check_message_field(raw: &serde_json::Value) -> Result<(), String> {
+    if let Some(msg) = raw.get("message").and_then(|m| m.as_str())
+        && raw.get("audio").is_none() {
+            return Err(format!("ElevenLabs error: {}", msg));
+        }
+    Ok(())
+}
+
+// ── Decode helpers ───
 
 async fn decode_audio_chunk(
     decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,

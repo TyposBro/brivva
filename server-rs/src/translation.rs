@@ -22,6 +22,8 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
+// ── Public API ───────────────────────────────────────────
+
 /// Translate text with optional context prefix (for chunk-aware translation).
 /// Context is prepended as "context ||| text" and stripped from the result.
 /// Returns (translated_text, elapsed_ms).
@@ -31,18 +33,32 @@ pub async fn translate(
     source: &Lang,
     target: &Lang,
 ) -> Result<(String, u64), String> {
-    // Build query with context prefix if provided
-    let query_text = match context {
+    let has_context = context.is_some_and(|c| !c.is_empty());
+    let query_text = build_query_text(text, context);
+    let start = Instant::now();
+
+    let full_translation = send_translate_request(&query_text, source, target).await?;
+    let translated_text = strip_context_prefix(&full_translation, has_context);
+
+    Ok((translated_text, start.elapsed().as_millis() as u64))
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+fn build_query_text(text: &str, context: Option<&str>) -> String {
+    match context {
         Some(c) if !c.is_empty() => format!("{} ||| {}", c, text),
         _ => text.to_string(),
-    };
+    }
+}
 
-    let url = format!(
-        "https://translation.googleapis.com/language/translate/v2?key={}",
-        &*TRANSLATE_API_KEY
-    );
+async fn send_translate_request(
+    query_text: &str,
+    source: &Lang,
+    target: &Lang,
+) -> Result<String, String> {
+    let url = translate_url();
 
-    let start = Instant::now();
     let resp = crate::HTTP_CLIENT
         .post(&url)
         .json(&serde_json::json!({
@@ -52,36 +68,52 @@ pub async fn translate(
             "format": "text",
         }))
         .send()
-        .await;
+        .await
+        .map_err(|e| format!("request error for {}: {}", target, e))?;
 
-    let full_translation = match resp {
-        Ok(r) if r.status().is_success() => {
-            match r.json::<GoogleTranslateResponse>().await {
-                Ok(r) => r.data.translations.into_iter().next()
-                    .map(|t| t.translated_text)
-                    .unwrap_or_default(),
-                Err(e) => return Err(format!("parse error for {}: {}", target, e)),
-            }
-        }
-        Ok(r) => {
-            let status = r.status();
-            let body = r.text().await.unwrap_or_default();
-            return Err(format!("error for {}: {} - {}", target, status, body));
-        }
-        Err(e) => return Err(format!("request error for {}: {}", target, e)),
-    };
+    parse_translate_response(resp, target).await
+}
 
-    // Strip context prefix from translation
-    let translated_text = if context.is_some() {
-        if let Some(pos) = full_translation.find("|||") {
-            full_translation[pos + 3..].trim().to_string()
-        } else {
-            full_translation
-        }
-    } else {
-        full_translation
-    };
+fn translate_url() -> String {
+    format!(
+        "https://translation.googleapis.com/language/translate/v2?key={}",
+        &*TRANSLATE_API_KEY
+    )
+}
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    Ok((translated_text, elapsed_ms))
+async fn parse_translate_response(
+    resp: reqwest::Response,
+    target: &Lang,
+) -> Result<String, String> {
+    if !resp.status().is_success() {
+        return Err(format_http_error(resp, target).await);
+    }
+    extract_translation(resp, target).await
+}
+
+async fn extract_translation(resp: reqwest::Response, target: &Lang) -> Result<String, String> {
+    resp.json::<GoogleTranslateResponse>()
+        .await
+        .map(|r| {
+            r.data.translations.into_iter().next()
+                .map(|t| t.translated_text)
+                .unwrap_or_default()
+        })
+        .map_err(|e| format!("parse error for {}: {}", target, e))
+}
+
+async fn format_http_error(resp: reqwest::Response, target: &Lang) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    format!("error for {}: {} - {}", target, status, body)
+}
+
+fn strip_context_prefix(text: &str, had_context: bool) -> String {
+    if !had_context {
+        return text.to_string();
+    }
+    match text.find("|||") {
+        Some(pos) => text[pos + 3..].trim().to_string(),
+        None => text.to_string(),
+    }
 }

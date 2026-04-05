@@ -3,7 +3,7 @@ use tracing::{info, error, debug};
 
 use crate::constants::BYTES_PER_SEC;
 use crate::stt::config::PASSTHROUGH_PADDING_SECS;
-use crate::tts::StyleParams;
+use crate::tts::{StyleParams, TtsRequest};
 use crate::types::{Lang, Sessions, ServerMsg};
 
 use super::to_ws;
@@ -24,13 +24,13 @@ pub(super) async fn run_pipeline(
     host_audio: Vec<u8>,
 ) {
     let pipeline_start = Instant::now();
-    let (voice_clone_id, tts_model) = read_session_config(sessions, session_id);
+    let config = read_pipeline_config(sessions, session_id);
 
-    log_pipeline_start(utterance_id, transcript, target_langs, &voice_clone_id, utterance_start);
+    log_pipeline_start(utterance_id, transcript, target_langs, &config.voice_clone_id, utterance_start);
 
     let handles = spawn_all_lang_tasks(
         transcript, utterance_id, source_lang, target_langs,
-        sessions, session_id, &voice_clone_id, &tts_model,
+        sessions, session_id, &config,
         style_params, tier, utterance_start, utterance_end, &host_audio,
     );
 
@@ -42,6 +42,26 @@ pub(super) async fn run_pipeline(
     );
 }
 
+// ── Config ───
+
+struct PipelineConfig {
+    voice_clone_id: Option<String>,
+    tts_model: String,
+}
+
+fn read_pipeline_config(sessions: &Sessions, session_id: &str) -> PipelineConfig {
+    match sessions.get(session_id) {
+        Some(s) => PipelineConfig {
+            voice_clone_id: s.voice_clone_id.clone(),
+            tts_model: s.tts_model.clone(),
+        },
+        None => PipelineConfig {
+            voice_clone_id: None,
+            tts_model: crate::constants::DEFAULT_TTS_MODEL.to_string(),
+        },
+    }
+}
+
 // ── Spawning ───
 
 fn spawn_all_lang_tasks(
@@ -51,8 +71,7 @@ fn spawn_all_lang_tasks(
     target_langs: &[Lang],
     sessions: &Sessions,
     session_id: &str,
-    voice_clone_id: &Option<String>,
-    tts_model: &str,
+    config: &PipelineConfig,
     style_params: &StyleParams,
     tier: u8,
     utterance_start: Instant,
@@ -76,8 +95,7 @@ fn spawn_all_lang_tasks(
         handles.push(spawn_translate_and_tts(
             transcript, utterance_id, source_lang, lang,
             client.clone(), sessions.clone(), session_id,
-            voice_clone_id.clone(), tts_model, style_params,
-            tier, utterance_start, utterance_end,
+            config, style_params, tier, utterance_start, utterance_end,
         ));
     }
 
@@ -121,8 +139,7 @@ fn spawn_translate_and_tts(
     client: reqwest::Client,
     sessions: Sessions,
     session_id: &str,
-    voice_clone_id: Option<String>,
-    tts_model: &str,
+    config: &PipelineConfig,
     style_params: &StyleParams,
     tier: u8,
     utterance_start: Instant,
@@ -133,36 +150,30 @@ fn spawn_translate_and_tts(
     let target = target_lang.clone();
     let session_id = session_id.to_string();
     let sp = style_params.clone();
-    let tts_model = tts_model.to_string();
+    let voice_clone_id = config.voice_clone_id.clone();
+    let tts_model = config.tts_model.clone();
 
     tokio::spawn(async move {
         let step_start = Instant::now();
         log_translate_start(utterance_id, &source, &target, &transcript);
 
-        let (translated_text, translate_ms) = match translate(&transcript, &source, &target, utterance_id).await {
+        let (translated, ms) = match translate(&transcript, &source, &target, utterance_id).await {
             Some(result) => result,
             None => return,
         };
 
-        info!("[TRANSLATE] {} -> {} = '{}' ({}ms)", source, target, translated_text, translate_ms);
-        send_translation_to_host(&sessions, &session_id, &target, &translated_text, utterance_id, translate_ms);
+        info!("[TRANSLATE] {} -> {} = '{}' ({}ms)", source, target, translated, ms);
+        send_translation_to_host(&sessions, &session_id, &target, &translated, utterance_id, ms);
 
         run_tts_if_eligible(
-            tier, &client, &translated_text, utterance_id, &target,
+            tier, &client, &translated, utterance_id, &target,
             &sessions, &session_id, voice_clone_id.as_deref(), &sp,
-            utterance_start, utterance_end, &tts_model, step_start, translate_ms,
+            utterance_start, utterance_end, &tts_model, step_start, ms,
         ).await;
     })
 }
 
 // ── Helpers ───
-
-fn read_session_config(sessions: &Sessions, session_id: &str) -> (Option<String>, String) {
-    match sessions.get(session_id) {
-        Some(s) => (s.voice_clone_id.clone(), s.tts_model.clone()),
-        None => (None, crate::constants::DEFAULT_TTS_MODEL.to_string()),
-    }
-}
 
 fn truncate_if_too_long(pcm: &mut Vec<u8>, utterance_start: Instant, utterance_end: Instant) {
     let utterance_dur = utterance_end.duration_since(utterance_start);
@@ -222,11 +233,17 @@ async fn run_tts_if_eligible(
             "[PIPELINE] #{} {} starting TTS (translate took {}ms, total pipeline elapsed {}ms)",
             utterance_id, target, translate_ms, step_start.elapsed().as_millis()
         );
-        crate::tts::do_tts(
-            client, translated_text, utterance_id, target,
-            sessions, session_id, voice_clone_id, style_params,
-            utterance_start, utterance_end, tts_model,
-        ).await;
+        let req = TtsRequest {
+            text: translated_text,
+            utterance_id,
+            lang: target,
+            voice_clone_id,
+            style_params,
+            utterance_start,
+            utterance_end,
+            tts_model,
+        };
+        crate::tts::do_tts(client, &req, sessions, session_id).await;
         debug!(
             "[PIPELINE] #{} {} complete (total {}ms since pipeline start)",
             utterance_id, target, step_start.elapsed().as_millis()
@@ -238,6 +255,8 @@ async fn run_tts_if_eligible(
         );
     }
 }
+
+// ── Logging ───
 
 fn log_pipeline_start(
     utterance_id: u64,

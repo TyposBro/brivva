@@ -24,118 +24,291 @@ struct ActiveAudio {
     offset: usize,
 }
 
-enum WriteResult {
-    Ok,
-    Error,
-}
-
-enum JitterAction {
-    Recovery,
-}
-
 enum JitterLevel {
     Recovery(Duration),
     Warn(Duration),
     Normal,
 }
 
-fn handle_jitter_recovery(
-    stream_id: &str,
-    active_audio: &mut Option<ActiveAudio>,
-    jitter: Duration,
+/// Holds all mutable state for the audio drain loop.
+///
+/// Methods on this struct replace free functions that previously took 8-10 params.
+struct DrainState {
+    stream_id: String,
+    fifo: std::fs::File,
+    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    stop: Arc<AtomicBool>,
+    delay: Duration,
+    silence: Vec<u8>,
+    active_audio: Option<ActiveAudio>,
     tick_count: u64,
-    fifo: &mut std::fs::File,
-    stop: &AtomicBool,
-    next_tick: &mut Instant,
-    total_bytes_written: &mut u64,
-) -> (JitterAction, WriteResult) {
-    let actual = *next_tick + jitter;
-    let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
-    // Cap burst size to avoid overwhelming RTMP with a multi-MB write.
-    // Skip the remaining ticks — we've already lost sync.
-    let write_ticks = (skipped_ticks as usize).min(MAX_RECOVERY_TICKS);
-    let catch_up_bytes = write_ticks * AUDIO_BYTES_PER_TICK;
-
-    // Build catch-up buffer: drain any active audio first, fill rest with silence
-    let mut catch_up = vec![0u8; catch_up_bytes];
-    let mut audio_used = 0usize;
-    let mut should_clear_active = false;
-
-    if let Some(active) = active_audio.as_mut() {
-        let guard = active.pcm.lock().unwrap();
-        let available = guard.len().saturating_sub(active.offset);
-        let to_copy = available.min(catch_up_bytes);
-        if to_copy > 0 {
-            catch_up[..to_copy].copy_from_slice(&guard[active.offset..active.offset + to_copy]);
-            active.offset += to_copy;
-            audio_used = to_copy;
-        }
-        let is_complete = active.complete.load(Ordering::Acquire);
-        if active.offset >= guard.len() && is_complete {
-            should_clear_active = true;
-        }
-    }
-
-    if should_clear_active {
-        log_utterance_done(stream_id, active_audio, "during recovery");
-        *active_audio = None;
-    }
-
-    if write_ticks < skipped_ticks as usize {
-        tracing::warn!(
-            "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} of {} ticks (capped, {}B audio + {}B silence), skipping {}",
-            stream_id, jitter.as_millis(), tick_count, write_ticks, skipped_ticks,
-            audio_used, catch_up_bytes.saturating_sub(audio_used),
-            skipped_ticks as usize - write_ticks
-        );
-    } else {
-        tracing::warn!(
-            "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} ticks ({}B audio + {}B silence)",
-            stream_id, jitter.as_millis(), tick_count, write_ticks,
-            audio_used, catch_up_bytes.saturating_sub(audio_used)
-        );
-    }
-
-    if fifo.write_all(&catch_up).is_err() {
-        if !stop.load(Ordering::Acquire) {
-            tracing::error!("[AUDIO:{}] write error during recovery, exiting", stream_id);
-        }
-        return (JitterAction::Recovery, WriteResult::Error);
-    }
-
-    *next_tick = actual + AUDIO_TICK;
-    *total_bytes_written += catch_up_bytes as u64;
-    (JitterAction::Recovery, WriteResult::Ok)
+    next_tick: Instant,
+    start_time: Instant,
+    total_bytes_written: u64,
+    jitter_warn_count: u64,
 }
 
-fn try_start_next_utterance(
-    stream_id: &str,
-    active_audio: &mut Option<ActiveAudio>,
-    audio_queue: &StdMutex<VecDeque<QueuedAudio>>,
-    target_ts: Instant,
-) {
-    if active_audio.is_some() {
-        return;
+impl DrainState {
+    /// Main drain loop: check stop → sleep → classify jitter → handle.
+    fn run(&mut self) {
+        tracing::info!(
+            "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
+            self.stream_id,
+            self.delay.as_millis()
+        );
+
+        loop {
+            if self.stop.load(Ordering::Acquire) {
+                break;
+            }
+
+            let now = Instant::now();
+            if self.next_tick > now {
+                thread::sleep(self.next_tick - now);
+            }
+
+            let actual = Instant::now();
+            let jitter = actual.saturating_duration_since(self.next_tick);
+
+            match classify_jitter(jitter, self.tick_count) {
+                JitterLevel::Recovery(jitter) => {
+                    if self.handle_recovery(jitter) {
+                        break;
+                    }
+                    continue;
+                }
+                JitterLevel::Warn(jitter) => {
+                    self.log_jitter_warn(jitter);
+                }
+                JitterLevel::Normal => {}
+            }
+
+            self.next_tick += AUDIO_TICK;
+            self.tick_count += 1;
+
+            if self.process_tick(actual) {
+                break;
+            }
+        }
+
+        drop(std::mem::replace(
+            &mut self.fifo,
+            // This is never used — we're about to return from audio_drain_loop.
+            // We need to move `self.fifo` out so its Drop runs, but struct fields
+            // can't be partially moved. Replace with /dev/null as a dummy.
+            std::fs::File::open("/dev/null").unwrap(),
+        ));
+        tracing::info!(
+            "[AUDIO:{}] drain thread exited after {} ticks",
+            self.stream_id, self.tick_count
+        );
     }
-    let mut q = audio_queue.lock().unwrap();
-    if let Some(front) = q.front()
-        && target_ts >= front.play_at {
+
+    /// Process a normal tick: start utterance → drain audio → write → drift check.
+    /// Returns `true` if the loop should break (write error).
+    fn process_tick(&mut self, actual: Instant) -> bool {
+        let target_ts = actual - self.delay;
+        self.try_start_next_utterance(target_ts);
+
+        let (data, should_clear) = drain_tick_audio(&mut self.active_audio, &self.silence);
+
+        if should_clear {
+            self.log_utterance_done("");
+            self.active_audio = None;
+        }
+
+        if self.write_fifo(&data) {
+            return true;
+        }
+
+        self.total_bytes_written += AUDIO_BYTES_PER_TICK as u64;
+        self.check_drift();
+        false
+    }
+
+    /// Handle severe jitter: write catch-up data and reset tick anchor.
+    /// Returns `true` if the loop should break (write error).
+    fn handle_recovery(&mut self, jitter: Duration) -> bool {
+        let actual = self.next_tick + jitter;
+        let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
+        let write_ticks = (skipped_ticks as usize).min(MAX_RECOVERY_TICKS);
+        let catch_up_bytes = write_ticks * AUDIO_BYTES_PER_TICK;
+
+        let (buffer, audio_used) = self.build_catchup_buffer(catch_up_bytes);
+        self.log_recovery(jitter, write_ticks, skipped_ticks, audio_used, catch_up_bytes);
+
+        let should_break = self.write_catchup_and_advance(&buffer, actual);
+        self.tick_count += skipped_ticks as u64;
+        should_break
+    }
+
+    /// Build catch-up buffer: drain any active audio first, fill rest with silence.
+    fn build_catchup_buffer(&mut self, catch_up_bytes: usize) -> (Vec<u8>, usize) {
+        let mut buffer = vec![0u8; catch_up_bytes];
+        let mut audio_used = 0usize;
+        let mut should_clear = false;
+
+        if let Some(active) = self.active_audio.as_mut() {
+            let guard = active.pcm.lock().unwrap();
+            let available = guard.len().saturating_sub(active.offset);
+            let to_copy = available.min(catch_up_bytes);
+            if to_copy > 0 {
+                buffer[..to_copy]
+                    .copy_from_slice(&guard[active.offset..active.offset + to_copy]);
+                active.offset += to_copy;
+                audio_used = to_copy;
+            }
+            let is_complete = active.complete.load(Ordering::Acquire);
+            if active.offset >= guard.len() && is_complete {
+                should_clear = true;
+            }
+        }
+
+        if should_clear {
+            self.log_utterance_done("during recovery");
+            self.active_audio = None;
+        }
+
+        (buffer, audio_used)
+    }
+
+    /// Write catch-up buffer and advance the tick anchor.
+    /// Returns `true` if the loop should break (write error).
+    fn write_catchup_and_advance(&mut self, buffer: &[u8], actual: Instant) -> bool {
+        if self.fifo.write_all(buffer).is_err() {
+            if !self.stop.load(Ordering::Acquire) {
+                tracing::error!(
+                    "[AUDIO:{}] write error during recovery, exiting",
+                    self.stream_id
+                );
+            }
+            return true;
+        }
+
+        self.next_tick = actual + AUDIO_TICK;
+        self.total_bytes_written += buffer.len() as u64;
+        false
+    }
+
+    /// Log recovery details (capped vs uncapped).
+    fn log_recovery(
+        &self,
+        jitter: Duration,
+        write_ticks: usize,
+        skipped_ticks: u128,
+        audio_used: usize,
+        catch_up_bytes: usize,
+    ) {
+        let silence_bytes = catch_up_bytes.saturating_sub(audio_used);
+        if write_ticks < skipped_ticks as usize {
+            tracing::warn!(
+                "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} of {} ticks (capped, {}B audio + {}B silence), skipping {}",
+                self.stream_id, jitter.as_millis(), self.tick_count, write_ticks, skipped_ticks,
+                audio_used, silence_bytes,
+                skipped_ticks as usize - write_ticks
+            );
+        } else {
+            tracing::warn!(
+                "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} ticks ({}B audio + {}B silence)",
+                self.stream_id, jitter.as_millis(), self.tick_count, write_ticks,
+                audio_used, silence_bytes
+            );
+        }
+    }
+
+    /// Try to pop next utterance from queue if ready.
+    fn try_start_next_utterance(&mut self, target_ts: Instant) {
+        if self.active_audio.is_some() {
+            return;
+        }
+        let mut q = self.audio_queue.lock().unwrap();
+        if let Some(front) = q.front()
+            && target_ts >= front.play_at
+        {
             let audio = q.pop_front().unwrap();
             let pcm_len = audio.pcm.lock().unwrap().len();
             let is_complete = audio.complete.load(Ordering::Acquire);
             let remaining = q.len();
             tracing::debug!(
                 "[AUDIO:{}] starting utterance: {}B available, complete={}, queue_depth={}",
-                stream_id, pcm_len, is_complete, remaining
+                self.stream_id, pcm_len, is_complete, remaining
             );
-            *active_audio = Some(ActiveAudio {
+            self.active_audio = Some(ActiveAudio {
                 pcm: audio.pcm,
                 complete: audio.complete,
                 offset: 0,
             });
         }
+    }
+
+    /// Write data to the FIFO. Returns `true` on error (caller should break).
+    fn write_fifo(&mut self, data: &[u8]) -> bool {
+        if self.fifo.write_all(data).is_err() {
+            if !self.stop.load(Ordering::Acquire) {
+                tracing::error!("[AUDIO:{}] write error, exiting", self.stream_id);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Periodic drift check (every ~5 seconds = 250 ticks at 20ms).
+    fn check_drift(&self) {
+        if !self.tick_count.is_multiple_of(DRIFT_CHECK_INTERVAL_TICKS) {
+            return;
+        }
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let expected_bytes = (elapsed * BYTES_PER_SEC) as u64;
+        let drift_bytes =
+            (self.total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
+        let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
+        if drift_ms > DRIFT_WARN_THRESHOLD_MS {
+            tracing::warn!(
+                "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
+                self.stream_id, drift_ms, self.total_bytes_written, expected_bytes
+            );
+        }
+    }
+
+    /// Rate-limited jitter warning log.
+    fn log_jitter_warn(&mut self, jitter: Duration) {
+        self.jitter_warn_count += 1;
+        if self.jitter_warn_count == 1
+            || self.jitter_warn_count.is_multiple_of(JITTER_WARN_LOG_INTERVAL)
+        {
+            tracing::warn!(
+                "[AUDIO:{}] jitter: tick {} was {}ms late (warning #{}, threshold={}ms)",
+                self.stream_id, self.tick_count, jitter.as_millis(), self.jitter_warn_count,
+                JITTER_WARN_THRESHOLD.as_millis()
+            );
+        }
+    }
+
+    /// Log that the current utterance finished.
+    fn log_utterance_done(&self, context: &str) {
+        if let Some(a) = self.active_audio.as_ref() {
+            let total = a.pcm.lock().unwrap().len();
+            let played_ms = (a.offset as f64 / BYTES_PER_SEC * 1000.0) as u64;
+            tracing::debug!(
+                "[AUDIO:{}] utterance finished {}: played {}B/{}B ({}ms audio)",
+                self.stream_id, context, a.offset, total, played_ms
+            );
+        }
+    }
 }
 
+/// Classify jitter level based on threshold constants.
+fn classify_jitter(jitter: Duration, tick_count: u64) -> JitterLevel {
+    if jitter > JITTER_RECOVERY_THRESHOLD && tick_count > 0 {
+        JitterLevel::Recovery(jitter)
+    } else if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
+        JitterLevel::Warn(jitter)
+    } else {
+        JitterLevel::Normal
+    }
+}
+
+/// Drain one tick of audio from the active utterance, or produce silence.
 fn drain_tick_audio(
     active_audio: &mut Option<ActiveAudio>,
     silence: &[u8],
@@ -157,7 +330,6 @@ fn drain_tick_audio(
         (data, done)
     } else if is_complete {
         if available > 0 {
-            // Last partial chunk — pad with silence
             let mut chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
             chunk[..available].copy_from_slice(&guard[active.offset..]);
             (chunk, true)
@@ -168,115 +340,6 @@ fn drain_tick_audio(
         // TTS still streaming, not enough data yet — write silence this tick
         (silence.to_vec(), false)
     }
-}
-
-fn log_utterance_done(stream_id: &str, active_audio: &Option<ActiveAudio>, context: &str) {
-    if let Some(a) = active_audio.as_ref() {
-        let total = a.pcm.lock().unwrap().len();
-        let played_ms = (a.offset as f64 / BYTES_PER_SEC * 1000.0) as u64;
-        tracing::debug!(
-            "[AUDIO:{}] utterance finished {}: played {}B/{}B ({}ms audio)",
-            stream_id, context, a.offset, total, played_ms
-        );
-    }
-}
-
-fn write_fifo(
-    stream_id: &str,
-    fifo: &mut std::fs::File,
-    data: &[u8],
-    stop: &AtomicBool,
-) -> WriteResult {
-    if fifo.write_all(data).is_err() {
-        if !stop.load(Ordering::Acquire) {
-            tracing::error!("[AUDIO:{}] write error, exiting", stream_id);
-        }
-        return WriteResult::Error;
-    }
-    WriteResult::Ok
-}
-
-fn check_drift(
-    stream_id: &str,
-    tick_count: u64,
-    start_time: Instant,
-    total_bytes_written: u64,
-) {
-    if !tick_count.is_multiple_of(DRIFT_CHECK_INTERVAL_TICKS) {
-        return;
-    }
-    // Periodic drift check (every ~5 seconds = 250 ticks at 20ms)
-    let elapsed = start_time.elapsed().as_secs_f64();
-    let expected_bytes = (elapsed * BYTES_PER_SEC) as u64;
-    let drift_bytes =
-        (total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
-    let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
-    if drift_ms > DRIFT_WARN_THRESHOLD_MS {
-        tracing::warn!(
-            "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
-            stream_id, drift_ms, total_bytes_written, expected_bytes
-        );
-    }
-}
-
-fn classify_jitter(jitter: Duration, tick_count: u64) -> JitterLevel {
-    if jitter > JITTER_RECOVERY_THRESHOLD && tick_count > 0 {
-        JitterLevel::Recovery(jitter)
-    } else if jitter > JITTER_WARN_THRESHOLD && tick_count > 0 {
-        JitterLevel::Warn(jitter)
-    } else {
-        JitterLevel::Normal
-    }
-}
-
-fn handle_jitter_warn(
-    stream_id: &str,
-    jitter: Duration,
-    tick_count: u64,
-    jitter_warn_count: &mut u64,
-) {
-    *jitter_warn_count += 1;
-    // Rate-limit: log every 25th warning, or the first one
-    if *jitter_warn_count == 1 || (*jitter_warn_count).is_multiple_of(JITTER_WARN_LOG_INTERVAL) {
-        tracing::warn!(
-            "[AUDIO:{}] jitter: tick {} was {}ms late (warning #{}, threshold={}ms)",
-            stream_id, tick_count, jitter.as_millis(), *jitter_warn_count,
-            JITTER_WARN_THRESHOLD.as_millis()
-        );
-    }
-}
-
-fn process_normal_tick(
-    stream_id: &str,
-    active_audio: &mut Option<ActiveAudio>,
-    audio_queue: &StdMutex<VecDeque<QueuedAudio>>,
-    silence: &[u8],
-    fifo: &mut std::fs::File,
-    stop: &AtomicBool,
-    target_ts: Instant,
-    tick_count: u64,
-    start_time: Instant,
-    total_bytes_written: &mut u64,
-) -> WriteResult {
-    try_start_next_utterance(stream_id, active_audio, audio_queue, target_ts);
-
-    let (data_to_write, should_clear) = drain_tick_audio(active_audio, silence);
-
-    if should_clear {
-        log_utterance_done(stream_id, active_audio, "");
-        *active_audio = None;
-    }
-
-    let result = write_fifo(stream_id, fifo, &data_to_write, stop);
-    if matches!(result, WriteResult::Error) {
-        return result;
-    }
-
-    *total_bytes_written += AUDIO_BYTES_PER_TICK as u64;
-
-    check_drift(stream_id, tick_count, start_time, *total_bytes_written);
-
-    WriteResult::Ok
 }
 
 // ── Audio Drain Thread ─────────────────────────────────────
@@ -292,113 +355,47 @@ pub(crate) fn audio_drain_loop(
     delay: Duration,
     stop: Arc<AtomicBool>,
 ) {
-    // Open FIFO for writing (blocks until FFmpeg opens it for reading)
+    let fifo = match open_fifo(&stream_id, &fifo_path, &stop) {
+        Some(f) => f,
+        None => return,
+    };
+
+    let now = Instant::now();
+    let mut state = DrainState {
+        stream_id,
+        fifo,
+        audio_queue,
+        stop,
+        delay,
+        silence: vec![0u8; AUDIO_BYTES_PER_TICK],
+        active_audio: None,
+        tick_count: 0,
+        next_tick: now + AUDIO_TICK,
+        start_time: now,
+        total_bytes_written: 0,
+        jitter_warn_count: 0,
+    };
+
+    state.run();
+}
+
+/// Open FIFO for writing (blocks until FFmpeg opens it for reading).
+fn open_fifo(
+    stream_id: &str,
+    fifo_path: &str,
+    stop: &AtomicBool,
+) -> Option<std::fs::File> {
     tracing::info!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", stream_id);
-    let mut fifo = match std::fs::OpenOptions::new()
-        .write(true)
-        .open(&fifo_path)
-    {
-        Ok(f) => f,
+    match std::fs::OpenOptions::new().write(true).open(fifo_path) {
+        Ok(f) => {
+            tracing::info!("[AUDIO:{}] FIFO opened", stream_id);
+            Some(f)
+        }
         Err(e) => {
             if !stop.load(Ordering::Acquire) {
                 tracing::error!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
             }
-            return;
-        }
-    };
-    tracing::info!("[AUDIO:{}] FIFO opened", stream_id);
-
-    let silence = vec![0u8; AUDIO_BYTES_PER_TICK];
-    let mut active_audio: Option<ActiveAudio> = None;
-    let mut tick_count: u64 = 0;
-    // Reset tick anchor AFTER FIFO opens (FIFO open blocks on FFmpeg startup)
-    let mut next_tick = Instant::now() + AUDIO_TICK;
-
-    // Cumulative sample tracking for drift detection
-    let start_time = Instant::now();
-    let mut total_bytes_written: u64 = 0;
-    let mut jitter_warn_count: u64 = 0;
-
-    tracing::info!(
-        "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
-        stream_id,
-        delay.as_millis()
-    );
-
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-
-        // Sleep until next tick
-        let now = Instant::now();
-        if next_tick > now {
-            thread::sleep(next_tick - now);
-        }
-
-        let actual = Instant::now();
-        let jitter = actual.saturating_duration_since(next_tick);
-
-        match classify_jitter(jitter, tick_count) {
-            JitterLevel::Recovery(jitter) => {
-                // Severe jitter: reset the tick anchor and write catch-up data to the FIFO.
-                //
-                // Previously this did `continue` without writing, which starved FFmpeg's
-                // audio FIFO. FFmpeg blocks on audio read when the FIFO is empty, which
-                // stalls the RTMP muxer entirely (both video AND audio stop), causing
-                // YouTube to pause/buffer. Writing silence (or any available audio data)
-                // keeps the FIFO fed so FFmpeg can keep muxing.
-                let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
-                let (_, write_result) = handle_jitter_recovery(
-                    &stream_id,
-                    &mut active_audio,
-                    jitter,
-                    tick_count,
-                    &mut fifo,
-                    &stop,
-                    &mut next_tick,
-                    &mut total_bytes_written,
-                );
-                if matches!(write_result, WriteResult::Error) {
-                    break;
-                }
-                tick_count += skipped_ticks as u64;
-                continue;
-            }
-            JitterLevel::Warn(jitter) => {
-                handle_jitter_warn(&stream_id, jitter, tick_count, &mut jitter_warn_count);
-            }
-            JitterLevel::Normal => {}
-        }
-
-        // Anchor next tick to prevent drift accumulation
-        next_tick += AUDIO_TICK;
-        tick_count += 1;
-
-        let target_ts = actual - delay;
-
-        if matches!(
-            process_normal_tick(
-                &stream_id,
-                &mut active_audio,
-                &audio_queue,
-                &silence,
-                &mut fifo,
-                &stop,
-                target_ts,
-                tick_count,
-                start_time,
-                &mut total_bytes_written,
-            ),
-            WriteResult::Error
-        ) {
-            break;
+            None
         }
     }
-
-    drop(fifo);
-    tracing::info!(
-        "[AUDIO:{}] drain thread exited after {} ticks",
-        stream_id, tick_count
-    );
 }

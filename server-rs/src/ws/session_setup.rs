@@ -9,32 +9,19 @@ use crate::voice_clone;
 
 use super::WsQuery;
 
+// ── Public API ──────────────────────────────────────────────────────────────
+
 pub fn create_session(query: &WsQuery, sessions: &Sessions) -> Option<(String, Lang)> {
     let source_lang = Lang::from_str(&query.source_lang).unwrap_or(Lang::En);
-    let target_langs: Vec<Lang> = query
-        .target_langs
-        .split(',')
-        .filter_map(|s| Lang::from_str(s.trim()))
-        .collect();
-
+    let target_langs = parse_target_langs(&query.target_langs);
     if target_langs.is_empty() {
         tracing::warn!("[WS] No valid target languages, closing");
         return None;
     }
 
     let session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    let tts_model = resolve_tts_model(&query.tts_model);
-
-    tracing::info!(
-        "[WS] Session {} started: {} -> {:?} (tier {}, tts={})",
-        session_id, source_lang, target_langs, query.tier, tts_model,
-    );
-
-    let mut session = Session::new(session_id.clone(), source_lang.clone(), target_langs, query.tier);
-    session.tts_model = tts_model;
-    if let Some(vid) = voice_clone::load_persisted_voice() {
-        session.voice_clone_id = Some(vid);
-    }
+    log_session_start(&session_id, &source_lang, &target_langs, query);
+    let session = build_session(&session_id, &source_lang, target_langs, query);
     sessions.insert(session_id.clone(), session);
 
     Some((session_id, source_lang))
@@ -58,6 +45,36 @@ pub fn spawn_stt_pipeline(
     tokio::spawn(async move {
         crate::pipeline::start_stt(sid, sessions_clone, sl, audio_rx).await;
     });
+}
+
+// ── create_session helpers ──────────────────────────────────────────────────
+
+fn parse_target_langs(raw: &str) -> Vec<Lang> {
+    raw.split(',')
+        .filter_map(|s| Lang::from_str(s.trim()))
+        .collect()
+}
+
+fn log_session_start(session_id: &str, source_lang: &Lang, target_langs: &[Lang], query: &WsQuery) {
+    let tts_model = resolve_tts_model(&query.tts_model);
+    tracing::info!(
+        "[WS] Session {} started: {} -> {:?} (tier {}, tts={})",
+        session_id, source_lang, target_langs, query.tier, tts_model,
+    );
+}
+
+fn build_session(session_id: &str, source_lang: &Lang, target_langs: Vec<Lang>, query: &WsQuery) -> Session {
+    let tts_model = resolve_tts_model(&query.tts_model);
+    let mut session = Session::new(session_id.to_string(), source_lang.clone(), target_langs, query.tier);
+    session.tts_model = tts_model;
+    apply_persisted_voice(&mut session);
+    session
+}
+
+fn apply_persisted_voice(session: &mut Session) {
+    if let Some(vid) = voice_clone::load_persisted_voice() {
+        session.voice_clone_id = Some(vid);
+    }
 }
 
 fn resolve_tts_model(model: &str) -> String {
