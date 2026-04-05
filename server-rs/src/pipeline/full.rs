@@ -1,14 +1,31 @@
 use std::time::{Duration, Instant};
 use tracing::{info, error, debug};
 
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 use crate::stt::config::PASSTHROUGH_PADDING_SECS;
 use crate::tts::{StyleParams, TtsRequest};
-use crate::types::{Lang, Sessions, ServerMsg};
+use crate::core::types::{Lang, Sessions, ServerMsg};
 
 use super::to_ws;
 
-// ── Context ───
+// ── Public request struct ───
+
+/// All inputs for a full-utterance translation pipeline, bundled into one struct.
+pub(crate) struct PipelineRequest {
+    pub transcript: String,
+    pub utterance_id: u64,
+    pub source_lang: Lang,
+    pub target_langs: Vec<Lang>,
+    pub sessions: Sessions,
+    pub session_id: String,
+    pub style_params: StyleParams,
+    pub tier: u8,
+    pub utterance_start: Instant,
+    pub utterance_end: Instant,
+    pub host_audio: Vec<u8>,
+}
+
+// ── Internal context ───
 
 /// Shared state for the legacy full-utterance pipeline. Cloned at
 /// `tokio::spawn` boundaries instead of cloning 8+ individual fields.
@@ -26,27 +43,29 @@ struct PipelineCtx {
     utterance_end: Instant,
 }
 
+/// Owned per-language task for `tokio::spawn` boundaries.
+struct LangTask {
+    ctx: PipelineCtx,
+    transcript: String,
+    target: Lang,
+}
+
+/// Translation output paired with timing.
+struct TranslationOutput {
+    text: String,
+    ms: u64,
+    step_start: Instant,
+}
+
 // ── Translation Pipeline (legacy full-utterance path) ───
 
-pub(super) async fn run_pipeline(
-    transcript: &str,
-    utterance_id: u64,
-    source_lang: &Lang,
-    target_langs: &[Lang],
-    sessions: &Sessions,
-    session_id: &str,
-    style_params: &StyleParams,
-    tier: u8,
-    utterance_start: Instant,
-    utterance_end: Instant,
-    host_audio: Vec<u8>,
-) {
+pub(crate) async fn run_pipeline(req: PipelineRequest) {
     let pipeline_start = Instant::now();
-    let ctx = build_ctx(sessions, session_id, utterance_id, source_lang, style_params, tier, utterance_start, utterance_end);
+    let ctx = build_ctx(&req);
 
-    log_pipeline_start(&ctx, transcript, target_langs);
+    log_pipeline_start(&ctx, &req);
 
-    let handles = spawn_all_lang_tasks(&ctx, transcript, target_langs, &host_audio);
+    let handles = spawn_all_lang_tasks(&ctx, &req);
     await_all(handles).await;
 
     log_pipeline_complete(&ctx, pipeline_start);
@@ -54,36 +73,27 @@ pub(super) async fn run_pipeline(
 
 // ── Context Construction ───
 
-fn build_ctx(
-    sessions: &Sessions,
-    session_id: &str,
-    utterance_id: u64,
-    source_lang: &Lang,
-    style_params: &StyleParams,
-    tier: u8,
-    utterance_start: Instant,
-    utterance_end: Instant,
-) -> PipelineCtx {
-    let (voice_clone_id, tts_model) = read_voice_config(sessions, session_id);
+fn build_ctx(req: &PipelineRequest) -> PipelineCtx {
+    let (voice_clone_id, tts_model) = read_voice_config(&req.sessions, &req.session_id);
 
     PipelineCtx {
-        sessions: sessions.clone(),
-        session_id: session_id.to_string(),
-        utterance_id,
-        source_lang: source_lang.clone(),
-        style_params: style_params.clone(),
-        tier,
+        sessions: req.sessions.clone(),
+        session_id: req.session_id.clone(),
+        utterance_id: req.utterance_id,
+        source_lang: req.source_lang.clone(),
+        style_params: req.style_params.clone(),
+        tier: req.tier,
         voice_clone_id,
         tts_model,
-        utterance_start,
-        utterance_end,
+        utterance_start: req.utterance_start,
+        utterance_end: req.utterance_end,
     }
 }
 
 fn read_voice_config(sessions: &Sessions, session_id: &str) -> (Option<String>, String) {
     match sessions.get(session_id) {
         Some(s) => (s.voice_clone_id.clone(), s.tts_model.clone()),
-        None => (None, crate::constants::DEFAULT_TTS_MODEL.to_string()),
+        None => (None, crate::core::config::DEFAULT_TTS_MODEL.to_string()),
     }
 }
 
@@ -91,17 +101,20 @@ fn read_voice_config(sessions: &Sessions, session_id: &str) -> (Option<String>, 
 
 fn spawn_all_lang_tasks(
     ctx: &PipelineCtx,
-    transcript: &str,
-    target_langs: &[Lang],
-    host_audio: &[u8],
+    req: &PipelineRequest,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
 
-    for lang in target_langs {
+    for lang in &req.target_langs {
         if lang == &ctx.source_lang {
-            handles.extend(spawn_source_passthrough(ctx, lang, host_audio));
+            handles.extend(spawn_source_passthrough(ctx, lang, &req.host_audio));
         } else {
-            handles.push(spawn_translate_and_tts(ctx, transcript, lang));
+            let task = LangTask {
+                ctx: ctx.clone(),
+                transcript: req.transcript.clone(),
+                target: lang.clone(),
+            };
+            handles.push(spawn_translate_and_tts(task));
         }
     }
 
@@ -130,61 +143,46 @@ fn spawn_source_passthrough(
     }))
 }
 
-fn spawn_translate_and_tts(
-    ctx: &PipelineCtx,
-    transcript: &str,
-    target_lang: &Lang,
-) -> tokio::task::JoinHandle<()> {
-    let ctx = ctx.clone();
-    let transcript = transcript.to_string();
-    let target = target_lang.clone();
+fn spawn_translate_and_tts(task: LangTask) -> tokio::task::JoinHandle<()> {
     let client = crate::HTTP_CLIENT.clone();
-
     tokio::spawn(async move {
-        run_translate_then_tts(&ctx, &client, &transcript, &target).await;
+        run_translate_then_tts(&task, &client).await;
     })
 }
 
 // ── Translate + TTS Task ───
 
-async fn run_translate_then_tts(
-    ctx: &PipelineCtx,
-    client: &reqwest::Client,
-    transcript: &str,
-    target: &Lang,
-) {
+async fn run_translate_then_tts(task: &LangTask, client: &reqwest::Client) {
     let step_start = Instant::now();
-    log_translate_start(ctx.utterance_id, &ctx.source_lang, target, transcript);
+    log_translate_start(task);
 
-    let (translated, ms) = match translate(transcript, &ctx.source_lang, target, ctx.utterance_id).await {
-        Some(result) => result,
+    let output = match translate_for_task(task).await {
+        Some(out) => TranslationOutput { text: out.0, ms: out.1, step_start },
         None => return,
     };
 
-    log_translate_result(&ctx.source_lang, target, &translated, ms);
-    send_translation_to_host(ctx, target, &translated, ms);
-    run_tts_if_eligible(ctx, client, &translated, target, step_start, ms).await;
+    log_translate_result(task, &output);
+    send_translation_to_host(task, &output);
+    run_tts_if_eligible(task, client, &output).await;
 }
 
 // ── TTS ───
 
 async fn run_tts_if_eligible(
-    ctx: &PipelineCtx,
+    task: &LangTask,
     client: &reqwest::Client,
-    translated: &str,
-    target: &Lang,
-    step_start: Instant,
-    translate_ms: u64,
+    output: &TranslationOutput,
 ) {
+    let ctx = &task.ctx;
     if ctx.tier < 2 {
-        log_tts_skipped(ctx, target);
+        log_tts_skipped(ctx, &task.target);
         return;
     }
 
-    log_tts_start(ctx, target, translate_ms, step_start);
-    let req = build_tts_request(ctx, translated, target);
+    log_tts_start(task, output);
+    let req = build_tts_request(ctx, &output.text, &task.target);
     crate::tts::do_tts(client, &req, &ctx.sessions, &ctx.session_id).await;
-    log_tts_complete(ctx, target, step_start);
+    log_tts_complete(task, output.step_start);
 }
 
 fn build_tts_request<'a>(ctx: &'a PipelineCtx, text: &'a str, lang: &'a Lang) -> TtsRequest<'a> {
@@ -207,27 +205,28 @@ fn truncate_if_too_long(pcm: &mut Vec<u8>, utterance_start: Instant, utterance_e
     let max_dur = utterance_dur + Duration::from_secs_f64(PASSTHROUGH_PADDING_SECS);
     let max_bytes = (max_dur.as_secs_f64() * BYTES_PER_SEC) as usize;
     if pcm.len() > max_bytes {
-        crate::ffmpeg::truncate_with_fadeout(pcm, max_bytes);
+        crate::streaming::truncate_with_fadeout(pcm, max_bytes);
     }
 }
 
-async fn translate(transcript: &str, source: &Lang, target: &Lang, utterance_id: u64) -> Option<(String, u64)> {
-    match crate::translation::translate(transcript, None, source, target).await {
+async fn translate_for_task(task: &LangTask) -> Option<(String, u64)> {
+    match crate::translation::translate(&task.transcript, None, &task.ctx.source_lang, &task.target).await {
         Ok((t, ms)) => Some((t, ms)),
         Err(e) => {
-            error!("[TRANSLATE] #{} {}: {}", utterance_id, target, e);
+            error!("[TRANSLATE] #{} {}: {}", task.ctx.utterance_id, task.target, e);
             None
         }
     }
 }
 
-fn send_translation_to_host(ctx: &PipelineCtx, target: &Lang, translated_text: &str, translate_ms: u64) {
+fn send_translation_to_host(task: &LangTask, output: &TranslationOutput) {
+    let ctx = &task.ctx;
     if let Some(session) = ctx.sessions.get(&ctx.session_id) {
         session.send_to_host(to_ws(&ServerMsg::Translation {
-            lang: target.to_string(),
-            text: translated_text.to_string(),
+            lang: task.target.to_string(),
+            text: output.text.clone(),
             utterance_id: ctx.utterance_id,
-            translate_ms,
+            translate_ms: output.ms,
         }));
     }
 }
@@ -240,11 +239,11 @@ async fn await_all(handles: Vec<tokio::task::JoinHandle<()>>) {
 
 // ── Logging ───
 
-fn log_pipeline_start(ctx: &PipelineCtx, transcript: &str, target_langs: &[Lang]) {
+fn log_pipeline_start(ctx: &PipelineCtx, req: &PipelineRequest) {
     info!(
         "[PIPELINE] #{} starting: '{}' -> {:?} (voice_clone={}) delay_since_utterance_start={}ms",
-        ctx.utterance_id, &transcript[..transcript.len().min(60)],
-        target_langs.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+        ctx.utterance_id, &req.transcript[..req.transcript.len().min(60)],
+        req.target_langs.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
         ctx.voice_clone_id.as_deref().unwrap_or("none"),
         ctx.utterance_start.elapsed().as_millis()
     );
@@ -257,28 +256,30 @@ fn log_pipeline_complete(ctx: &PipelineCtx, pipeline_start: Instant) {
     );
 }
 
-fn log_translate_start(utterance_id: u64, source: &Lang, target: &Lang, transcript: &str) {
+fn log_translate_start(task: &LangTask) {
+    let ctx = &task.ctx;
     debug!(
         "[TRANSLATE] #{} {} -> {}: '{}' ({} chars)",
-        utterance_id, source, target, &transcript[..transcript.len().min(80)], transcript.len()
+        ctx.utterance_id, ctx.source_lang, task.target,
+        &task.transcript[..task.transcript.len().min(80)], task.transcript.len()
     );
 }
 
-fn log_translate_result(source: &Lang, target: &Lang, translated: &str, ms: u64) {
-    info!("[TRANSLATE] {} -> {} = '{}' ({}ms)", source, target, translated, ms);
+fn log_translate_result(task: &LangTask, output: &TranslationOutput) {
+    info!("[TRANSLATE] {} -> {} = '{}' ({}ms)", task.ctx.source_lang, task.target, output.text, output.ms);
 }
 
-fn log_tts_start(ctx: &PipelineCtx, target: &Lang, translate_ms: u64, step_start: Instant) {
+fn log_tts_start(task: &LangTask, output: &TranslationOutput) {
     debug!(
         "[PIPELINE] #{} {} starting TTS (translate took {}ms, total pipeline elapsed {}ms)",
-        ctx.utterance_id, target, translate_ms, step_start.elapsed().as_millis()
+        task.ctx.utterance_id, task.target, output.ms, output.step_start.elapsed().as_millis()
     );
 }
 
-fn log_tts_complete(ctx: &PipelineCtx, target: &Lang, step_start: Instant) {
+fn log_tts_complete(task: &LangTask, step_start: Instant) {
     debug!(
         "[PIPELINE] #{} {} complete (total {}ms since pipeline start)",
-        ctx.utterance_id, target, step_start.elapsed().as_millis()
+        task.ctx.utterance_id, task.target, step_start.elapsed().as_millis()
     );
 }
 

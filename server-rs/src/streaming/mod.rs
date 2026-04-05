@@ -18,13 +18,13 @@ pub mod audio_drain;
 pub mod decoder;
 mod process;
 mod types;
-mod stream;
+mod manager;
 
 // Re-export public API
 pub use decoder::IncrementalMp3Decoder;
 pub use process::{kill_orphan_ffmpeg, decode_mp3_to_pcm};
 pub use types::{StreamingPcm, truncate_with_fadeout};
-pub use stream::{RtmpManager, SharedRtmpManager, spawn_health_monitor};
+pub use manager::{RtmpManager, SharedRtmpManager, spawn_health_monitor};
 
 // Re-export crate-internal items used by submodules (audio_drain, video_drain, decoder)
 pub(crate) use process::FFMPEG_BIN;

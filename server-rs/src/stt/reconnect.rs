@@ -7,14 +7,14 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use tracing::error;
 
-use crate::constants::STT_RECONNECT_DELAY_SECS;
+use crate::core::config::STT_RECONNECT_DELAY_SECS;
 use crate::stt::config::{DEFAULT_ENDPOINTING_SECS, DEFAULT_MAX_DURATION_SECS};
-use crate::types::{Lang, Sessions};
+use crate::core::types::{Lang, Sessions};
 
-use super::state::{ExitReason, SttState, MessageAction, WsStream};
-use super::connection::connect_gladia;
-use super::message_handler::process_gladia_message;
-use super::audio_forwarder::forward_audio_to_gladia;
+use super::state::{ExitReason, SttState, SttCarryOver, SttContext, MessageAction, WsStream};
+use super::connection::{connect_gladia, ConnectionConfig, ConnectSession};
+use super::handler::process_gladia_message;
+use super::audio_forwarder::{forward_audio_to_gladia, AudioForwardEnv};
 
 // ── Types ────────────────────────────────────────────────
 
@@ -53,39 +53,54 @@ enum ReconnectDecision {
     Stop,
 }
 
-// ── Public API ───────────────────────────────────────────
-
-pub async fn start_stt(
+/// Immutable parts of start_stt shared across the entire session lifetime.
+struct SessionEnv {
     session_id: String,
     sessions: Sessions,
     source_lang: Lang,
-    audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
-    if super::super::STT_API_KEY.is_empty() {
+    audio_rx: AudioRx,
+    audio_acc: AudioAcc,
+}
+
+// ── Public API ───────────────────────────────────────────
+
+/// All inputs needed to start an STT pipeline for a session.
+pub struct SttStartRequest {
+    pub session_id: String,
+    pub sessions: Sessions,
+    pub source_lang: Lang,
+    pub audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+pub async fn start_stt(req: SttStartRequest) {
+    if super::STT_API_KEY.is_empty() {
         error!("[STT] STT_API_KEY not set, STT disabled");
         return;
     }
 
-    let audio_rx: AudioRx = Arc::new(tokio::sync::Mutex::new(audio_rx));
-    let audio_acc: AudioAcc = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let env = SessionEnv {
+        session_id: req.session_id,
+        sessions: req.sessions,
+        source_lang: req.source_lang,
+        audio_rx: Arc::new(tokio::sync::Mutex::new(req.audio_rx)),
+        audio_acc: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
     let mut state = LoopState::new();
     let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
 
     loop {
-        let result = run_one_connection(
-            &session_id, &sessions, &source_lang, &audio_rx, &audio_acc, &state,
-        ).await;
+        let result = run_one_connection(&env, &state).await;
 
-        match handle_connection_result(result, &mut state, &audio_acc) {
+        match handle_connection_result(result, &mut state, &env.audio_acc) {
             ReconnectDecision::AdaptiveReconnect => continue,
             ReconnectDecision::Stop => break,
             ReconnectDecision::StandardReconnect => {}
         }
 
-        if !should_reconnect(&session_id, &sessions, &mut state) {
+        if !should_reconnect(&env, &mut state) {
             break;
         }
-        clear_accumulator(&audio_acc);
+        clear_accumulator(&env.audio_acc);
         tokio::time::sleep(reconnect_delay).await;
     }
 }
@@ -93,84 +108,64 @@ pub async fn start_stt(
 // ── Connection lifecycle ─────────────────────────────────
 
 async fn run_one_connection(
-    session_id: &str,
-    sessions: &Sessions,
-    source_lang: &Lang,
-    audio_rx: &AudioRx,
-    audio_acc: &AudioAcc,
+    env: &SessionEnv,
     loop_state: &LoopState,
 ) -> Option<SttState> {
-    let ws_stream = connect_gladia(
-        session_id, sessions, source_lang,
-        loop_state.endpointing, loop_state.max_duration, loop_state.reconnect_count,
-    ).await?;
+    let config = ConnectionConfig {
+        endpointing: loop_state.endpointing,
+        max_duration: loop_state.max_duration,
+        reconnect_count: loop_state.reconnect_count,
+    };
+    let sess = ConnectSession {
+        session_id: &env.session_id,
+        sessions: &env.sessions,
+        source_lang: &env.source_lang,
+    };
+
+    let ws_stream = connect_gladia(&sess, &config).await?;
 
     let (stt_sink, stt_stream) = ws_stream.split();
     let stt_sink: WsSink = Arc::new(tokio::sync::Mutex::new(stt_sink));
 
-    let send_task = spawn_send_task(audio_rx, &stt_sink, audio_acc, session_id);
-    let recv_task = spawn_recv_task(
-        stt_stream, stt_sink.clone(), sessions, session_id, source_lang, audio_acc, loop_state,
-    );
+    let ctx = SttContext {
+        sessions: env.sessions.clone(),
+        session_id: env.session_id.clone(),
+        source_lang: env.source_lang.clone(),
+        audio_acc: env.audio_acc.clone(),
+        sink: stt_sink.clone(),
+    };
+
+    let send_task = spawn_send_task(&env.audio_rx, &ctx);
+    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state);
 
     await_tasks(send_task, recv_task).await
 }
 
-fn spawn_send_task(
-    audio_rx: &AudioRx,
-    stt_sink: &WsSink,
-    audio_acc: &AudioAcc,
-    session_id: &str,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(forward_audio_to_gladia(
-        audio_rx.clone(), stt_sink.clone(), audio_acc.clone(), session_id.to_string(),
-    ))
-}
-
-struct RecvTaskArgs {
-    sessions: Sessions,
-    session_id: String,
-    source_lang: Lang,
-    audio_acc: AudioAcc,
-    lang_str: String,
-    utterance_counter: u64,
-    wpm_samples: Vec<u32>,
-    adapted: bool,
-}
-
-fn build_recv_args(
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    audio_acc: &AudioAcc,
-    loop_state: &LoopState,
-) -> RecvTaskArgs {
-    RecvTaskArgs {
-        sessions: sessions.clone(),
-        session_id: session_id.to_string(),
-        source_lang: source_lang.clone(),
-        audio_acc: audio_acc.clone(),
-        lang_str: source_lang.to_string(),
-        utterance_counter: loop_state.utterance_counter,
-        wpm_samples: loop_state.wpm_samples.clone(),
-        adapted: loop_state.adapted,
-    }
+fn spawn_send_task(audio_rx: &AudioRx, ctx: &SttContext) -> tokio::task::JoinHandle<()> {
+    let env = AudioForwardEnv {
+        audio_rx: audio_rx.clone(),
+        sink: ctx.sink.clone(),
+        accumulator: ctx.audio_acc.clone(),
+        session_id: ctx.session_id.clone(),
+    };
+    tokio::spawn(forward_audio_to_gladia(env))
 }
 
 fn spawn_recv_task(
     mut stt_stream: WsRecvStream,
-    sink_for_ctrl: WsSink,
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    audio_acc: &AudioAcc,
+    ctx: SttContext,
     loop_state: &LoopState,
 ) -> tokio::task::JoinHandle<SttState> {
-    let args = build_recv_args(sessions, session_id, source_lang, audio_acc, loop_state);
+    let lang_str = ctx.source_lang.to_string();
+    let carry = SttCarryOver {
+        utterance_counter: loop_state.utterance_counter,
+        wpm_samples: loop_state.wpm_samples.clone(),
+        adapted: loop_state.adapted,
+    };
 
     tokio::spawn(async move {
-        let mut state = SttState::new(&args.lang_str, args.utterance_counter, args.wpm_samples, args.adapted);
-        recv_loop(&mut state, &mut stt_stream, &args.sessions, &args.session_id, &args.source_lang, &args.audio_acc, &sink_for_ctrl).await;
+        let mut state = SttState::new(&lang_str, carry);
+        recv_loop(&mut state, &mut stt_stream, &ctx).await;
         state
     })
 }
@@ -178,14 +173,10 @@ fn spawn_recv_task(
 async fn recv_loop(
     state: &mut SttState,
     stt_stream: &mut WsRecvStream,
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    audio_acc: &AudioAcc,
-    sink: &WsSink,
+    ctx: &SttContext,
 ) {
     while let Some(msg_result) = stt_stream.next().await {
-        match handle_ws_message(msg_result, state, sessions, session_id, source_lang, audio_acc, sink).await {
+        match handle_ws_message(msg_result, state, ctx).await {
             MessageAction::Continue => {}
             MessageAction::Break => break,
         }
@@ -195,11 +186,7 @@ async fn recv_loop(
 async fn handle_ws_message(
     msg_result: Result<tungstenite::Message, tungstenite::Error>,
     state: &mut SttState,
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    audio_acc: &AudioAcc,
-    sink: &WsSink,
+    ctx: &SttContext,
 ) -> MessageAction {
     let msg = match msg_result {
         Ok(m) => m,
@@ -216,7 +203,7 @@ async fn handle_ws_message(
         Err(_) => return MessageAction::Continue,
     };
 
-    process_gladia_message(gm, state, sessions, session_id, source_lang, audio_acc, sink).await
+    process_gladia_message(gm, state, ctx).await
 }
 
 fn extract_text(msg: tungstenite::Message) -> Option<String> {
@@ -271,13 +258,13 @@ fn apply_stt_state(st: &SttState, loop_state: &mut LoopState) {
     loop_state.adapted = st.adapted;
 }
 
-fn should_reconnect(session_id: &str, sessions: &Sessions, loop_state: &mut LoopState) -> bool {
-    if !sessions.contains_key(session_id) {
+fn should_reconnect(env: &SessionEnv, loop_state: &mut LoopState) -> bool {
+    if !env.sessions.contains_key(&env.session_id) {
         return false;
     }
 
     loop_state.reconnect_count += 1;
-    if loop_state.reconnect_count > crate::constants::STT_RECONNECT_MAX {
+    if loop_state.reconnect_count > crate::core::config::STT_RECONNECT_MAX {
         error!("[STT] Exceeded max reconnects, giving up");
         return false;
     }

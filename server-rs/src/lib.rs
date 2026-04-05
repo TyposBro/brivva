@@ -1,13 +1,10 @@
-pub mod constants;
-pub mod error;
-pub mod ffmpeg;
+pub mod core;
+pub mod streaming;
 pub mod stt;
 pub mod translation;
 pub mod tts;
 pub mod voice_clone;
-pub mod audio;
 mod pipeline;
-mod types;
 mod ws;
 mod api;
 
@@ -17,8 +14,8 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use constants::{MAX_BODY_SIZE, SERVER_ADDR};
-use types::Sessions;
+use core::config::{MAX_BODY_SIZE, SERVER_ADDR};
+use core::types::Sessions;
 
 pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -29,7 +26,7 @@ pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 pub async fn run_server() {
     load_env();
-    ffmpeg::kill_orphan_ffmpeg();
+    streaming::kill_orphan_ffmpeg();
 
     let sessions: Sessions = Arc::new(DashMap::new());
     let app = build_router(sessions);

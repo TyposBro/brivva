@@ -1,49 +1,73 @@
 //! Handle final transcripts from Gladia.
 
-use std::sync::Arc;
 use std::time::Instant;
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite;
 use tracing::{info, error, debug};
 
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 use crate::stt::config::{ADAPTIVE_SAMPLE_COUNT, MAX_VALID_WPM, PASSTHROUGH_PADDING_SECS};
 use crate::tts::StyleParams;
-use crate::types::{Lang, Sessions, ServerMsg};
+use crate::core::types::{Lang, ServerMsg};
 
-use super::state::{ExitReason, SttState, WsStream};
+use super::state::{ExitReason, SttState, SttContext};
+
+// ── Context structs ─────────────────────────────────────────────────────────
+
+/// Everything needed to emit a final utterance to clients.
+struct FinalUtterance {
+    transcript: String,
+    utterance_id: u64,
+    style_params: StyleParams,
+    utterance_start: Instant,
+    host_audio: Vec<u8>,
+}
+
+/// Input for spawning the full-utterance translation pipeline.
+pub(crate) struct PipelineInput {
+    pub text: String,
+    pub utterance_id: u64,
+    pub source_lang: Lang,
+    pub style_params: StyleParams,
+    pub utterance_start: Instant,
+    pub host_audio: Vec<u8>,
+    pub active: Vec<Lang>,
+    pub tier: u8,
+}
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 pub(super) async fn handle_final_transcript(
     state: &mut SttState,
     transcript: &str,
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
-    sink: &Arc<tokio::sync::Mutex<
-        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
-    >>,
+    ctx: &SttContext,
 ) {
     let start = state.utterance_start.take().unwrap_or_else(Instant::now);
-    let host_audio = drain_host_audio(acc_rx);
+    let host_audio = drain_host_audio(ctx);
     let sp = analyze_prosody_and_style(transcript, &host_audio);
 
+    let utterance = FinalUtterance {
+        transcript: transcript.to_string(),
+        utterance_id: 0, // filled per path
+        style_params: sp,
+        utterance_start: start,
+        host_audio,
+    };
+
     if state.chunk_pipeline_tx.is_some() {
-        finalize_chunked_utterance(state, transcript, &sp, start, &host_audio, sessions, session_id, source_lang);
+        finalize_chunked_utterance(state, &utterance, ctx);
     } else {
-        finalize_legacy_utterance(state, transcript, sp, start, host_audio.clone(), sessions, session_id, source_lang);
+        finalize_legacy_utterance(state, &utterance, ctx);
     }
 
     state.reset_utterance();
-    check_adaptive_endpointing(state, &host_audio, sink).await;
+    check_adaptive_endpointing(state, &utterance.host_audio, ctx).await;
 }
 
 // ── Audio drain ─────────────────────────────────────────────────────────────
 
-fn drain_host_audio(acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>) -> Vec<u8> {
-    let mut acc = acc_rx.lock().unwrap();
+fn drain_host_audio(ctx: &SttContext) -> Vec<u8> {
+    let mut acc = ctx.audio_acc.lock().unwrap();
     acc.drain(..).flatten().collect()
 }
 
@@ -57,7 +81,7 @@ fn analyze_prosody_and_style(transcript: &str, host_audio: &[u8]) -> StyleParams
 }
 
 fn compute_prosody(host_audio: &[u8], transcript: &str) -> crate::stt::Prosody {
-    let mut prosody = crate::stt::extract_prosody(host_audio, crate::constants::SAMPLE_RATE);
+    let mut prosody = crate::stt::extract_prosody(host_audio, crate::core::config::SAMPLE_RATE);
     let word_count = transcript.split_whitespace().count();
     crate::stt::compute_speaking_rate(&mut prosody, word_count);
     prosody
@@ -79,45 +103,35 @@ fn style_from_emotion(emotion: &str) -> StyleParams {
 
 fn finalize_chunked_utterance(
     state: &mut SttState,
-    transcript: &str,
-    _sp: &StyleParams,
-    start: Instant,
-    host_audio: &[u8],
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
+    utterance: &FinalUtterance,
+    ctx: &SttContext,
 ) {
     let uid = state.utterance_counter;
-    info!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, transcript, state.chunk_index);
+    info!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, utterance.transcript, state.chunk_index);
 
-    flush_final_chunk(state, transcript, uid, start, host_audio);
+    flush_final_chunk(state, utterance);
     state.chunk_pipeline_tx = None;
-    send_final_to_host(sessions, session_id, transcript, uid);
-    queue_source_passthrough(sessions, session_id, source_lang, host_audio, start);
+    send_final_to_host(ctx, &utterance.transcript, uid);
+    queue_source_passthrough(ctx, utterance);
 }
 
-fn flush_final_chunk(
-    state: &mut SttState,
-    transcript: &str,
-    uid: u64,
-    start: Instant,
-    host_audio: &[u8],
-) {
+fn flush_final_chunk(state: &mut SttState, utterance: &FinalUtterance) {
     let tx = match &state.chunk_pipeline_tx {
         Some(tx) => tx,
         None => return,
     };
 
+    let uid = state.utterance_counter;
     let flush_context = state.progressive.context().map(|s| s.to_string());
-    if let Some(boundary) = state.progressive.flush(transcript)
-        && let Err(e) = tx.try_send(crate::types::ChunkEvent {
+    if let Some(boundary) = state.progressive.flush(&utterance.transcript)
+        && let Err(e) = tx.try_send(crate::core::types::ChunkEvent {
             text: boundary.chunk_text,
             chunk_index: state.chunk_index,
             context: flush_context,
             is_utterance_final: true,
             utterance_id: uid,
-            utterance_start: start,
-            host_audio: host_audio.to_vec(),
+            utterance_start: utterance.utterance_start,
+            host_audio: utterance.host_audio.clone(),
         }) {
             error!("[CHUNK] #{} final chunk dropped: {}", uid, e);
         }
@@ -127,49 +141,54 @@ fn flush_final_chunk(
 
 fn finalize_legacy_utterance(
     state: &mut SttState,
-    transcript: &str,
-    sp: StyleParams,
-    start: Instant,
-    host_audio: Vec<u8>,
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
+    utterance: &FinalUtterance,
+    ctx: &SttContext,
 ) {
     state.utterance_counter += 1;
     let uid = state.utterance_counter;
-    info!("[FINAL #{}] {}", uid, transcript);
-    emit_final(sessions, session_id, transcript, uid, source_lang, Some(sp), start, host_audio);
+    info!("[FINAL #{}] {}", uid, utterance.transcript);
+
+    let utt = FinalUtterance {
+        transcript: utterance.transcript.clone(),
+        utterance_id: uid,
+        style_params: utterance.style_params.clone(),
+        utterance_start: utterance.utterance_start,
+        host_audio: utterance.host_audio.clone(),
+    };
+
+    emit_final(&utt, ctx);
 }
 
 // ── emit_final ──────────────────────────────────────────────────────────────
 
-fn emit_final(
-    sessions: &Sessions,
-    session_id: &str,
-    transcript: &str,
-    uid: u64,
-    source_lang: &Lang,
-    style_params: Option<StyleParams>,
-    utterance_start: Instant,
-    host_audio: Vec<u8>,
-) {
-    let session = match sessions.get(session_id) {
+fn emit_final(utterance: &FinalUtterance, ctx: &SttContext) {
+    let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
         None => return,
     };
 
-    send_final_msg(&session, transcript, uid);
-    let (active, tier) = read_pipeline_params(&session, uid, utterance_start, &host_audio);
+    send_final_msg(&session, &utterance.transcript, utterance.utterance_id);
+    let (active, tier) = read_pipeline_params(&session, utterance);
     drop(session);
 
     if active.is_empty() { return; }
 
-    let sp = style_params.unwrap_or_default();
-    spawn_pipeline(sessions, session_id, transcript, uid, source_lang, sp, utterance_start, host_audio, active, tier);
+    let input = PipelineInput {
+        text: utterance.transcript.clone(),
+        utterance_id: utterance.utterance_id,
+        source_lang: ctx.source_lang.clone(),
+        style_params: utterance.style_params.clone(),
+        utterance_start: utterance.utterance_start,
+        host_audio: utterance.host_audio.clone(),
+        active,
+        tier,
+    };
+
+    spawn_pipeline(input, ctx);
 }
 
 fn send_final_msg(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::types::Session>,
+    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
     transcript: &str,
     uid: u64,
 ) {
@@ -180,79 +199,69 @@ fn send_final_msg(
 }
 
 fn read_pipeline_params(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::types::Session>,
-    uid: u64,
-    utterance_start: Instant,
-    host_audio: &[u8],
+    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
+    utterance: &FinalUtterance,
 ) -> (Vec<Lang>, u8) {
     let active = session.active_langs();
     let tier = session.tier;
-    let utterance_dur = Instant::now().duration_since(utterance_start);
+    let utterance_dur = Instant::now().duration_since(utterance.utterance_start);
 
     info!(
         "[PIPELINE] #{} active langs: {:?} tier={} utterance_dur={}ms host_audio={}B ({:.1}s)",
-        uid, active, tier, utterance_dur.as_millis(),
-        host_audio.len(), host_audio.len() as f64 / BYTES_PER_SEC,
+        utterance.utterance_id, active, tier, utterance_dur.as_millis(),
+        utterance.host_audio.len(), utterance.host_audio.len() as f64 / BYTES_PER_SEC,
     );
 
     (active, tier)
 }
 
-fn spawn_pipeline(
-    sessions: &Sessions,
-    session_id: &str,
-    transcript: &str,
-    uid: u64,
-    source_lang: &Lang,
-    sp: StyleParams,
-    utterance_start: Instant,
-    host_audio: Vec<u8>,
-    active: Vec<Lang>,
-    tier: u8,
-) {
+fn spawn_pipeline(input: PipelineInput, ctx: &SttContext) {
     let utterance_end = Instant::now();
-    let sessions_clone = sessions.clone();
-    let sid = session_id.to_string();
-    let src = source_lang.clone();
-    let text = transcript.to_string();
+    let sessions_clone = ctx.sessions.clone();
+    let sid = ctx.session_id.clone();
 
     tokio::spawn(async move {
-        crate::pipeline::tts::run_pipeline(
-            &text, uid, &src, &active, &sessions_clone, &sid, &sp, tier,
-            utterance_start, utterance_end, host_audio,
-        ).await;
+        let req = crate::pipeline::full::PipelineRequest {
+            transcript: input.text,
+            utterance_id: input.utterance_id,
+            source_lang: input.source_lang,
+            target_langs: input.active,
+            sessions: sessions_clone,
+            session_id: sid,
+            style_params: input.style_params,
+            tier: input.tier,
+            utterance_start: input.utterance_start,
+            utterance_end,
+            host_audio: input.host_audio,
+        };
+        crate::pipeline::full::run_pipeline(req).await;
     });
 }
 
 // ── Host messaging ──────────────────────────────────────────────────────────
 
-fn send_final_to_host(sessions: &Sessions, session_id: &str, transcript: &str, uid: u64) {
-    if let Some(session) = sessions.get(session_id) {
+fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
         send_final_msg(&session, transcript, uid);
     }
 }
 
 // ── Source passthrough ──────────────────────────────────────────────────────
 
-fn queue_source_passthrough(
-    sessions: &Sessions,
-    session_id: &str,
-    source_lang: &Lang,
-    host_audio: &[u8],
-    start: Instant,
-) {
-    let session = match sessions.get(session_id) {
+fn queue_source_passthrough(ctx: &SttContext, utterance: &FinalUtterance) {
+    let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
         None => return,
     };
-    if !session.active_langs().contains(source_lang) { return; }
+    if !session.active_langs().contains(&ctx.source_lang) { return; }
     let mgr = match session.rtmp_manager.clone() {
         Some(m) => m,
         None => return,
     };
 
-    let lang_str = source_lang.to_string();
-    let pcm = truncate_passthrough_audio(host_audio);
+    let lang_str = ctx.source_lang.to_string();
+    let start = utterance.utterance_start;
+    let pcm = truncate_passthrough_audio(&utterance.host_audio);
     tokio::spawn(async move {
         let locked = mgr.lock().await;
         locked.queue_audio(&lang_str, pcm, start);
@@ -263,7 +272,7 @@ fn truncate_passthrough_audio(host_audio: &[u8]) -> Vec<u8> {
     let mut pcm = host_audio.to_vec();
     let max_bytes = ((host_audio.len() as f64 / BYTES_PER_SEC + PASSTHROUGH_PADDING_SECS) * BYTES_PER_SEC) as usize;
     if pcm.len() > max_bytes {
-        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+        crate::streaming::truncate_with_fadeout(&mut pcm, max_bytes);
     }
     pcm
 }
@@ -273,16 +282,14 @@ fn truncate_passthrough_audio(host_audio: &[u8]) -> Vec<u8> {
 async fn check_adaptive_endpointing(
     state: &mut SttState,
     host_audio: &[u8],
-    sink: &Arc<tokio::sync::Mutex<
-        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
-    >>,
+    ctx: &SttContext,
 ) {
-    let prosody = crate::stt::extract_prosody(host_audio, crate::constants::SAMPLE_RATE);
+    let prosody = crate::stt::extract_prosody(host_audio, crate::core::config::SAMPLE_RATE);
     if should_skip_adaptive(state, &prosody) { return; }
 
     state.wpm_samples.push(prosody.speaking_rate_wpm);
-    if let Some((label, new_endp, new_max_dur)) = compute_adaptive_params(state) {
-        apply_adaptive_result(state, &label, new_endp, new_max_dur, sink).await;
+    if let Some(result) = compute_adaptive_params(state) {
+        apply_adaptive_result(state, result, ctx).await;
     }
 }
 
@@ -292,55 +299,55 @@ fn should_skip_adaptive(state: &SttState, prosody: &crate::stt::Prosody) -> bool
         || prosody.speaking_rate_wpm > MAX_VALID_WPM
 }
 
-fn compute_adaptive_params(state: &SttState) -> Option<(String, f64, f64)> {
+/// Result of adaptive speech-rate analysis.
+struct AdaptiveResult {
+    label: String,
+    endpointing: f64,
+    max_duration: f64,
+}
+
+fn compute_adaptive_params(state: &SttState) -> Option<AdaptiveResult> {
     if state.wpm_samples.len() < ADAPTIVE_SAMPLE_COUNT { return None; }
 
     let avg_wpm = state.wpm_samples.iter().sum::<u32>() as f32 / state.wpm_samples.len() as f32;
     let (label, new_endp, new_max_dur) = crate::stt::classify_speaking_speed(avg_wpm);
-    Some((label.to_string(), new_endp, new_max_dur))
+    Some(AdaptiveResult { label: label.to_string(), endpointing: new_endp, max_duration: new_max_dur })
 }
 
 async fn apply_adaptive_result(
     state: &mut SttState,
-    label: &str,
-    new_endp: f64,
-    new_max_dur: f64,
-    sink: &Arc<tokio::sync::Mutex<
-        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
-    >>,
+    result: AdaptiveResult,
+    ctx: &SttContext,
 ) {
     state.adapted = true;
 
-    if label == "normal" {
-        info!("[ADAPTIVE] Avg classified: {}, keeping defaults", label);
+    if result.label == "normal" {
+        info!("[ADAPTIVE] Avg classified: {}, keeping defaults", result.label);
         return;
     }
 
-    log_adaptive_reconnect(label, new_endp, new_max_dur);
-    trigger_adaptive_reconnect(state, new_endp, new_max_dur, sink).await;
+    log_adaptive_reconnect(&result);
+    trigger_adaptive_reconnect(state, &result, ctx).await;
 }
 
-fn log_adaptive_reconnect(label: &str, new_endp: f64, new_max_dur: f64) {
+fn log_adaptive_reconnect(result: &AdaptiveResult) {
     info!(
         "[ADAPTIVE] classified: {}, reconnecting (endpointing={:.2}s, max_dur={:.0}s)",
-        label, new_endp, new_max_dur
+        result.label, result.endpointing, result.max_duration
     );
 }
 
 async fn trigger_adaptive_reconnect(
     state: &mut SttState,
-    new_endp: f64,
-    new_max_dur: f64,
-    sink: &Arc<tokio::sync::Mutex<
-        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
-    >>,
+    result: &AdaptiveResult,
+    ctx: &SttContext,
 ) {
     state.exit_reason = ExitReason::AdaptiveReconnect {
-        endpointing: new_endp,
-        max_duration: new_max_dur,
+        endpointing: result.endpointing,
+        max_duration: result.max_duration,
     };
 
-    let mut s = sink.lock().await;
+    let mut s = ctx.sink.lock().await;
     let _ = s.send(tungstenite::Message::Text(
         r#"{"type":"stop_recording"}"#.to_string().into()
     )).await;

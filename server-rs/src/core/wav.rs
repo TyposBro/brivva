@@ -1,6 +1,6 @@
 //! PCM to WAV conversion utility.
 
-use crate::constants::{SAMPLE_RATE, BITS_PER_SAMPLE, CHANNELS};
+use crate::core::config::{SAMPLE_RATE, BITS_PER_SAMPLE, CHANNELS};
 
 pub fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
     let byte_rate = SAMPLE_RATE * (BITS_PER_SAMPLE as u32 / 8) * CHANNELS as u32;

@@ -1,7 +1,7 @@
 //! Persistence for voice clone IDs.
 
 use tracing::{info, error};
-use crate::constants::VOICE_CLONE_FILE;
+use crate::core::config::VOICE_CLONE_FILE;
 
 pub fn load_persisted_voice() -> Option<String> {
     match std::fs::read_to_string(VOICE_CLONE_FILE) {

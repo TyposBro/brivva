@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 use super::FFMPEG_BIN;
 
 // ── Incremental MP3 Decoder ─────────────────────────────

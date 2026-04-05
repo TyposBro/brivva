@@ -4,7 +4,7 @@
 //! used by both the chunked and legacy pipeline paths.
 
 use std::time::{Duration, Instant};
-use crate::constants::{BYTES_PER_SEC, TTS_DEADLINE_CAP_MS, TTS_DEADLINE_MARGIN_MS};
+use crate::core::config::{BYTES_PER_SEC, TTS_DEADLINE_CAP_MS, TTS_DEADLINE_MARGIN_MS};
 
 /// Compute the TTS deadline from broadcast delay.
 /// Returns the lesser of (delay - margin) and the hard cap.

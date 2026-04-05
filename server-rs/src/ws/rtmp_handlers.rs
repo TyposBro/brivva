@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::constants::DEFAULT_BROADCAST_DELAY_MS;
-use crate::types::{Lang, Sessions, ServerMsg};
-use crate::ffmpeg;
+use crate::core::config::DEFAULT_BROADCAST_DELAY_MS;
+use crate::core::types::{Lang, Sessions, ServerMsg};
+use crate::streaming;
 
 use super::to_ws_msg;
 
@@ -67,7 +67,7 @@ fn store_broadcast_delay(sessions: &Sessions, session_id: &str, delay_ms: u64) {
     }
 }
 
-fn apply_existing_codec(sessions: &Sessions, session_id: &str, manager: &mut ffmpeg::RtmpManager) {
+fn apply_existing_codec(sessions: &Sessions, session_id: &str, manager: &mut streaming::RtmpManager) {
     if let Some(codec) = sessions.get(session_id).and_then(|s| s.video_codec.clone()) {
         manager.set_video_codec(&codec);
     }
@@ -77,22 +77,22 @@ fn parse_broadcast_delay(json: &serde_json::Value) -> u64 {
     json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(DEFAULT_BROADCAST_DELAY_MS)
 }
 
-fn create_and_configure_manager(sessions: &Sessions, session_id: &str, delay_ms: u64) -> ffmpeg::RtmpManager {
+fn create_and_configure_manager(sessions: &Sessions, session_id: &str, delay_ms: u64) -> streaming::RtmpManager {
     store_broadcast_delay(sessions, session_id, delay_ms);
-    let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
+    let mut manager = streaming::RtmpManager::with_delay(delay_ms);
     apply_existing_codec(sessions, session_id, &mut manager);
     manager
 }
 
-fn setup_health_monitoring(sessions: &Sessions, session_id: &str, mgr: ffmpeg::SharedRtmpManager) {
+fn setup_health_monitoring(sessions: &Sessions, session_id: &str, mgr: streaming::SharedRtmpManager) {
     let health_stop = sessions.get(session_id)
         .map(|s| s.rtmp_stop.clone())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-    ffmpeg::spawn_health_monitor(mgr, health_stop);
+    streaming::spawn_health_monitor(mgr, health_stop);
 }
 
 fn start_all_streams(
-    manager: &mut ffmpeg::RtmpManager,
+    manager: &mut streaming::RtmpManager,
     streams: &[serde_json::Value],
     sessions: &Sessions,
     session_id: &str,
@@ -101,7 +101,7 @@ fn start_all_streams(
 }
 
 fn try_start_stream(
-    manager: &mut ffmpeg::RtmpManager,
+    manager: &mut streaming::RtmpManager,
     cfg: &serde_json::Value,
     sessions: &Sessions,
     session_id: &str,
@@ -119,7 +119,7 @@ fn try_start_stream(
     }
 }
 
-fn store_rtmp_state(sessions: &Sessions, session_id: &str, mgr: ffmpeg::SharedRtmpManager, langs: &[Lang]) {
+fn store_rtmp_state(sessions: &Sessions, session_id: &str, mgr: streaming::SharedRtmpManager, langs: &[Lang]) {
     if let Some(mut session) = sessions.get_mut(session_id) {
         session.rtmp_manager = Some(mgr);
         session.rtmp_langs = langs.to_vec();

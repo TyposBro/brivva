@@ -2,17 +2,17 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{info, error, debug};
 
-use crate::constants::{CHUNK_PIPELINE_CAPACITY, STREAMING_BUDGET_PADDING_SECS};
+use crate::core::config::{CHUNK_PIPELINE_CAPACITY, STREAMING_BUDGET_PADDING_SECS};
 use crate::tts::{StyleParams, DEFAULT_VOICE};
-use crate::types::{Lang, Sessions, ServerMsg};
+use crate::core::types::{Lang, Sessions, ServerMsg};
 
 use super::to_ws;
 
 // ---------------------------------------------------------------------------
-// Context structs (eliminate all `too_many_arguments`)
+// Context structs
 // ---------------------------------------------------------------------------
 
-/// Everything a pipeline function needs — passed by reference instead of 10+
+/// Everything a pipeline function needs -- passed by reference instead of 10+
 /// separate parameters.
 #[derive(Clone)]
 struct PipelineContext {
@@ -28,6 +28,17 @@ struct PipelineContext {
     style_params: StyleParams,
 }
 
+/// Input for spawning a chunked pipeline.
+pub(crate) struct ChunkPipelineRequest {
+    pub sessions: Sessions,
+    pub session_id: String,
+    pub utterance_id: u64,
+    pub source_lang: Lang,
+    pub style_params: StyleParams,
+}
+
+type StreamingMap = std::collections::HashMap<String, crate::streaming::StreamingPcm>;
+
 /// Owned bundle for `tokio::spawn` boundaries where references cannot cross.
 struct ChunkTask {
     ctx: PipelineContext,
@@ -35,7 +46,13 @@ struct ChunkTask {
     context: Option<String>,
     chunk_idx: u16,
     target: Lang,
-    streaming: Option<crate::ffmpeg::StreamingPcm>,
+    streaming: Option<crate::streaming::StreamingPcm>,
+}
+
+/// Result of translating a chunk.
+struct TranslationResult {
+    text: String,
+    translate_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -43,16 +60,12 @@ struct ChunkTask {
 // ---------------------------------------------------------------------------
 
 /// Spawn a chunked pipeline that processes sub-utterance chunks via an mpsc channel.
-/// One StreamingPcm per (utterance, language) — multiple TTS chunks feed the same buffer.
-pub(super) fn spawn_chunked_pipeline(
-    sessions: &Sessions,
-    session_id: &str,
-    utterance_id: u64,
-    source_lang: &Lang,
-    style_params: StyleParams,
-) -> Option<mpsc::Sender<crate::types::ChunkEvent>> {
-    let ctx = build_pipeline_context(sessions, session_id, utterance_id, source_lang, style_params)?;
-    let (chunk_tx, chunk_rx) = mpsc::channel::<crate::types::ChunkEvent>(CHUNK_PIPELINE_CAPACITY);
+/// One StreamingPcm per (utterance, language) -- multiple TTS chunks feed the same buffer.
+pub(crate) fn spawn_chunked_pipeline(
+    req: ChunkPipelineRequest,
+) -> Option<mpsc::Sender<crate::core::types::ChunkEvent>> {
+    let ctx = build_pipeline_context(&req)?;
+    let (chunk_tx, chunk_rx) = mpsc::channel::<crate::core::types::ChunkEvent>(CHUNK_PIPELINE_CAPACITY);
 
     tokio::spawn(async move {
         run_pipeline_loop(chunk_rx, &ctx).await;
@@ -65,14 +78,8 @@ pub(super) fn spawn_chunked_pipeline(
 // Context construction
 // ---------------------------------------------------------------------------
 
-fn build_pipeline_context(
-    sessions: &Sessions,
-    session_id: &str,
-    utterance_id: u64,
-    source_lang: &Lang,
-    style_params: StyleParams,
-) -> Option<PipelineContext> {
-    let session = sessions.get(session_id)?;
+fn build_pipeline_context(req: &ChunkPipelineRequest) -> Option<PipelineContext> {
+    let session = req.sessions.get(&req.session_id)?;
     let active = session.active_langs();
 
     if active.is_empty() {
@@ -80,16 +87,16 @@ fn build_pipeline_context(
     }
 
     let ctx = PipelineContext {
-        sessions: sessions.clone(),
-        session_id: session_id.to_string(),
-        utterance_id,
-        source_lang: source_lang.clone(),
+        sessions: req.sessions.clone(),
+        session_id: req.session_id.clone(),
+        utterance_id: req.utterance_id,
+        source_lang: req.source_lang.clone(),
         active: active.clone(),
         tier: session.tier,
         voice_clone_id: session.voice_clone_id.clone(),
         tts_model: session.tts_model.clone(),
         broadcast_delay_ms: session.broadcast_delay_ms,
-        style_params,
+        style_params: req.style_params.clone(),
     };
     drop(session); // release DashMap ref
 
@@ -101,11 +108,11 @@ fn build_pipeline_context(
 // ---------------------------------------------------------------------------
 
 async fn run_pipeline_loop(
-    mut chunk_rx: mpsc::Receiver<crate::types::ChunkEvent>,
+    mut chunk_rx: mpsc::Receiver<crate::core::types::ChunkEvent>,
     ctx: &PipelineContext,
 ) {
     let mut lang_streaming: std::collections::HashMap<
-        String, crate::ffmpeg::StreamingPcm
+        String, crate::streaming::StreamingPcm
     > = std::collections::HashMap::new();
 
     let pipeline_start = Instant::now();
@@ -128,14 +135,11 @@ async fn run_pipeline_loop(
 // ---------------------------------------------------------------------------
 
 async fn process_chunk(
-    chunk: &crate::types::ChunkEvent,
+    chunk: &crate::core::types::ChunkEvent,
     ctx: &PipelineContext,
-    lang_streaming: &mut std::collections::HashMap<String, crate::ffmpeg::StreamingPcm>,
+    lang_streaming: &mut StreamingMap,
 ) {
-    let chunk_idx = chunk.chunk_index;
-    let is_final = chunk.is_utterance_final;
-
-    log_chunk_received(ctx.utterance_id, chunk_idx, &chunk.text, is_final, &chunk.context);
+    log_chunk_received(ctx.utterance_id, chunk);
 
     let mut handles = Vec::new();
 
@@ -146,8 +150,10 @@ async fn process_chunk(
 
         let lang_str = lang.to_string();
 
-        if chunk_idx == 0 {
-            create_streaming_slot(ctx, &lang_str, chunk.utterance_start, lang_streaming).await;
+        if chunk.chunk_index == 0 {
+            if let Some(streaming) = create_streaming_pcm(ctx, &lang_str, chunk.utterance_start).await {
+                lang_streaming.insert(lang_str.clone(), streaming);
+            }
             notify_tts_start(ctx, &lang_str);
         }
 
@@ -155,7 +161,7 @@ async fn process_chunk(
             ctx: ctx.clone(),
             text: chunk.text.clone(),
             context: chunk.context.clone(),
-            chunk_idx,
+            chunk_idx: chunk.chunk_index,
             target: lang.clone(),
             streaming: lang_streaming.get(&lang_str).cloned(),
         };
@@ -168,19 +174,13 @@ async fn process_chunk(
     }
 }
 
-fn log_chunk_received(
-    utterance_id: u64,
-    chunk_idx: u16,
-    text: &str,
-    is_final: bool,
-    context: &Option<String>,
-) {
+fn log_chunk_received(utterance_id: u64, chunk: &crate::core::types::ChunkEvent) {
     debug!(
         "[CHUNK] #{}.{} text='{}' final={} context={}",
-        utterance_id, chunk_idx,
-        &text[..text.len().min(60)],
-        is_final,
-        context.as_ref().map(|c| c.len()).unwrap_or(0)
+        utterance_id, chunk.chunk_index,
+        &chunk.text[..chunk.text.len().min(60)],
+        chunk.is_utterance_final,
+        chunk.context.as_ref().map(|c| c.len()).unwrap_or(0)
     );
 }
 
@@ -188,19 +188,16 @@ fn log_chunk_received(
 // Streaming slot creation + notifications
 // ---------------------------------------------------------------------------
 
-async fn create_streaming_slot(
+async fn create_streaming_pcm(
     ctx: &PipelineContext,
     lang_str: &str,
     utterance_start: Instant,
-    lang_streaming: &mut std::collections::HashMap<String, crate::ffmpeg::StreamingPcm>,
-) {
-    let rtmp_mgr = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone());
-    if let Some(manager) = rtmp_mgr {
-        let mgr = manager.lock().await;
-        let streaming = mgr.queue_streaming_audio(lang_str, utterance_start);
-        lang_streaming.insert(lang_str.to_string(), streaming);
-        debug!("[CHUNK] #{}.0 {} created StreamingPcm slot", ctx.utterance_id, lang_str);
-    }
+) -> Option<crate::streaming::StreamingPcm> {
+    let rtmp_mgr = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone())?;
+    let mgr = rtmp_mgr.lock().await;
+    let streaming = mgr.queue_streaming_audio(lang_str, utterance_start);
+    debug!("[CHUNK] #{}.0 {} created StreamingPcm slot", ctx.utterance_id, lang_str);
+    Some(streaming)
 }
 
 fn notify_tts_start(ctx: &PipelineContext, lang_str: &str) {
@@ -222,21 +219,16 @@ fn spawn_translate_and_synthesize(task: ChunkTask) -> tokio::task::JoinHandle<()
 }
 
 async fn translate_and_synthesize_chunk(task: &ChunkTask) {
-    let ctx = &task.ctx;
-
-    let (translated_text, translate_ms) = match translate_chunk(
-        &task.text, task.context.as_deref(), ctx.utterance_id,
-        task.chunk_idx, &ctx.source_lang, &task.target,
-    ).await {
-        Some(result) => result,
+    let result = match translate_chunk(task).await {
+        Some(r) => r,
         None => return,
     };
 
-    send_chunk_translation(ctx, &task.target, &translated_text, task.chunk_idx, translate_ms);
+    send_chunk_translation(task, &result);
 
-    if ctx.tier >= 2 {
+    if task.ctx.tier >= 2 {
         if let Some(ref s) = task.streaming {
-            synthesize_chunk(ctx, &translated_text, task.chunk_idx, &task.target, s).await;
+            synthesize_chunk(task, &result.text, s).await;
         }
     }
 }
@@ -245,43 +237,32 @@ async fn translate_and_synthesize_chunk(task: &ChunkTask) {
 // Translation
 // ---------------------------------------------------------------------------
 
-async fn translate_chunk(
-    text: &str,
-    context: Option<&str>,
-    utterance_id: u64,
-    chunk_idx: u16,
-    source: &Lang,
-    target: &Lang,
-) -> Option<(String, u64)> {
-    match crate::translation::translate(text, context, source, target).await {
+async fn translate_chunk(task: &ChunkTask) -> Option<TranslationResult> {
+    let ctx = &task.ctx;
+    match crate::translation::translate(&task.text, task.context.as_deref(), &ctx.source_lang, &task.target).await {
         Ok((translated, ms)) => {
             debug!(
                 "[TRANSLATE] chunk #{}.{} {} = '{}' ({}ms)",
-                utterance_id, chunk_idx, target, translated, ms
+                ctx.utterance_id, task.chunk_idx, task.target, translated, ms
             );
-            Some((translated, ms))
+            Some(TranslationResult { text: translated, translate_ms: ms })
         }
         Err(e) => {
-            error!("[TRANSLATE] chunk #{}.{} {}: {}", utterance_id, chunk_idx, target, e);
+            error!("[TRANSLATE] chunk #{}.{} {}: {}", ctx.utterance_id, task.chunk_idx, task.target, e);
             None
         }
     }
 }
 
-fn send_chunk_translation(
-    ctx: &PipelineContext,
-    target: &Lang,
-    translated_text: &str,
-    chunk_idx: u16,
-    translate_ms: u64,
-) {
+fn send_chunk_translation(task: &ChunkTask, result: &TranslationResult) {
+    let ctx = &task.ctx;
     if let Some(session) = ctx.sessions.get(&ctx.session_id) {
         session.send_to_host(to_ws(&ServerMsg::ChunkTranslation {
-            lang: target.to_string(),
-            text: translated_text.to_string(),
+            lang: task.target.to_string(),
+            text: result.text.clone(),
             utterance_id: ctx.utterance_id,
-            chunk_index: chunk_idx,
-            translate_ms,
+            chunk_index: task.chunk_idx,
+            translate_ms: result.translate_ms,
         }));
     }
 }
@@ -291,14 +272,13 @@ fn send_chunk_translation(
 // ---------------------------------------------------------------------------
 
 async fn synthesize_chunk(
-    ctx: &PipelineContext,
+    task: &ChunkTask,
     translated_text: &str,
-    chunk_idx: u16,
-    target: &Lang,
-    streaming: &crate::ffmpeg::StreamingPcm,
+    streaming: &crate::streaming::StreamingPcm,
 ) {
+    let ctx = &task.ctx;
     let voice_id = ctx.voice_clone_id.as_deref().unwrap_or(&*DEFAULT_VOICE);
-    let lang_str = target.to_string();
+    let lang_str = task.target.to_string();
     let voice_settings = crate::tts::VoiceStyle::from_emotion(&ctx.style_params.emotion)
         .to_voice_settings(ctx.style_params.speed);
     let max_bytes = crate::pipeline::budget::compute_streaming_max_bytes(
@@ -306,18 +286,25 @@ async fn synthesize_chunk(
     );
     let tts_deadline = crate::pipeline::budget::compute_tts_deadline(ctx.broadcast_delay_ms);
 
-    match tokio::time::timeout(tts_deadline, crate::tts::do_tts_ws(
-        translated_text, voice_id, &lang_str,
-        &voice_settings, max_bytes, Some(streaming), &ctx.tts_model,
-    )).await {
+    let synth_req = crate::tts::SynthesisRequest {
+        text: translated_text,
+        voice_id,
+        lang: &lang_str,
+        voice_settings: &voice_settings,
+        max_bytes,
+        streaming: Some(streaming),
+        model_id: &ctx.tts_model,
+    };
+
+    match tokio::time::timeout(tts_deadline, crate::tts::do_tts_ws(&synth_req)).await {
         Ok(Ok(bytes)) => {
-            debug!("[TTS] chunk #{}.{} {} = {}KB PCM", ctx.utterance_id, chunk_idx, target, bytes / 1024);
+            debug!("[TTS] chunk #{}.{} {} = {}KB PCM", ctx.utterance_id, task.chunk_idx, task.target, bytes / 1024);
         }
         Ok(Err(e)) => {
-            error!("[TTS] chunk #{}.{} {} error: {}", ctx.utterance_id, chunk_idx, target, e);
+            error!("[TTS] chunk #{}.{} {} error: {}", ctx.utterance_id, task.chunk_idx, task.target, e);
         }
         Err(_) => {
-            error!("[TTS] chunk #{}.{} {} TIMEOUT", ctx.utterance_id, chunk_idx, target);
+            error!("[TTS] chunk #{}.{} {} TIMEOUT", ctx.utterance_id, task.chunk_idx, task.target);
         }
     }
 }
@@ -327,7 +314,7 @@ async fn synthesize_chunk(
 // ---------------------------------------------------------------------------
 
 fn complete_pipeline(
-    lang_streaming: &std::collections::HashMap<String, crate::ffmpeg::StreamingPcm>,
+    lang_streaming: &StreamingMap,
     ctx: &PipelineContext,
     pipeline_start: &Instant,
 ) {

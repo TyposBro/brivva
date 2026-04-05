@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
 
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 
 // ── FFmpeg Binary Resolution ──────────────────────────────
 //

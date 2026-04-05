@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 use std::time::Instant;
-use crate::types::Lang;
+use crate::core::types::Lang;
 
 static TRANSLATE_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("TRANSLATE_API_KEY").unwrap_or_default()

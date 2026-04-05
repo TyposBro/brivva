@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-use crate::constants::DEFAULT_VOICE_ID;
+use crate::core::config::DEFAULT_VOICE_ID;
 
 /// TTS provider API key (ElevenLabs)
 pub static TTS_API_KEY: LazyLock<String> = LazyLock::new(|| {

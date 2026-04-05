@@ -5,7 +5,7 @@ pub mod elevenlabs;
 
 use std::time::Instant;
 use tracing::{info, warn};
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 
 // Re-export for existing callers
 pub use persistence::load_persisted_voice;
@@ -35,7 +35,7 @@ async fn clone_with(cloner: &impl VoiceCloner, pcm: Vec<u8>) -> Result<String, S
 }
 
 fn encode_pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
-    let wav = crate::audio::wav::pcm_to_wav(pcm);
+    let wav = crate::core::audio::pcm_to_wav(pcm);
     info!(
         "[VOICE_CLONE] starting ElevenLabs IVC: {}B PCM -> {}B WAV ({:.1}s audio)",
         pcm.len(), wav.len(), pcm.len() as f64 / BYTES_PER_SEC

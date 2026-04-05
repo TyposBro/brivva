@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 use super::process::FFMPEG_BIN;
 use super::types::{
     StreamingPcm, QueuedAudio,
@@ -32,6 +32,51 @@ struct RtmpStream {
     restart_count: u32,
     /// Set to true by stderr reader when RTMP errors are detected
     rtmp_error: Arc<AtomicBool>,
+}
+
+// ── Parameter structs (keep every function ≤ 2 params) ────
+
+/// Identifies a stream: id + language + RTMP destination.
+pub(crate) struct StreamConfig {
+    pub(crate) stream_id: String,
+    pub(crate) lang: String,
+    pub(crate) rtmp_url: String,
+}
+
+/// Newly-spawned FFmpeg process and its drain thread handles.
+struct NewStream {
+    child: std::process::Child,
+    video_handle: thread::JoinHandle<()>,
+    audio_handle: thread::JoinHandle<()>,
+    audio_fifo: String,
+    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    stop_flag: Arc<AtomicBool>,
+    rtmp_error: Arc<AtomicBool>,
+}
+
+/// State carried across a restart: previous attempt count + reusable audio queue.
+pub(crate) struct RestartState {
+    pub(crate) prev_count: u32,
+    pub(crate) audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+}
+
+/// Everything needed to spawn the video + audio drain threads.
+struct DrainSetup {
+    stream_id: String,
+    is_restart: bool,
+    stdin: std::process::ChildStdin,
+    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    audio_fifo: String,
+    stop_flag: Arc<AtomicBool>,
+}
+
+/// Config for the free-function audio drain thread spawner.
+struct AudioDrainSetup {
+    stream_id: String,
+    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    fifo_path: String,
+    delay: Duration,
+    stop: Arc<AtomicBool>,
 }
 
 // ── RtmpManager ───────────────────────────────────────────
@@ -98,7 +143,12 @@ impl RtmpManager {
         lang: &str,
         rtmp_url: &str,
     ) -> Result<(), String> {
-        self.spawn_stream_inner(stream_id, lang, rtmp_url, None)?;
+        let config = StreamConfig {
+            stream_id: stream_id.to_string(),
+            lang: lang.to_string(),
+            rtmp_url: rtmp_url.to_string(),
+        };
+        self.spawn_stream_inner(&config, None)?;
         tracing::info!(
             "[FFMPEG] Started RTMP stream {} ({}) → {} [delay={}ms, video+audio on dedicated OS threads]",
             stream_id, lang, rtmp_url, self.broadcast_delay.as_millis()
@@ -167,9 +217,9 @@ impl RtmpManager {
     }
 
     /// Check all FFmpeg processes for crashes. Returns a list of streams that need
-    /// restarting (id, lang, rtmp_url, prev_restart_count, audio_queue).
+    /// restarting (config + restart state).
     /// The caller is responsible for waiting between retries (to avoid blocking the runtime).
-    pub(crate) fn detect_crashed(&mut self) -> Vec<(String, String, String, u32, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
+    pub(crate) fn detect_crashed(&mut self) -> Vec<(StreamConfig, RestartState)> {
         let to_restart = self.collect_crashed_streams();
         self.cleanup_crashed_streams(to_restart)
     }
@@ -177,26 +227,23 @@ impl RtmpManager {
     /// Restart a single stream after a crash. Called after an async delay.
     pub(crate) fn restart_stream(
         &mut self,
-        id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        prev_count: u32,
-        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+        config: &StreamConfig,
+        state: RestartState,
     ) {
-        match self.spawn_stream_inner(id, lang, rtmp_url, Some(audio_queue)) {
+        match self.spawn_stream_inner(config, Some(state.audio_queue)) {
             Ok(()) => {
-                if let Some(stream) = self.streams.get_mut(id) {
-                    stream.restart_count = prev_count + 1;
+                if let Some(stream) = self.streams.get_mut(&config.stream_id) {
+                    stream.restart_count = state.prev_count + 1;
                 }
                 tracing::info!(
                     "[FFMPEG] Restarted stream {} ({}) attempt {}/{}",
-                    id, lang, prev_count + 1, MAX_FFMPEG_RESTARTS
+                    config.stream_id, config.lang, state.prev_count + 1, MAX_FFMPEG_RESTARTS
                 );
             }
             Err(e) => {
                 tracing::error!(
                     "[FFMPEG] Restart failed for {} ({}): {}",
-                    id, lang, e
+                    config.stream_id, config.lang, e
                 );
             }
         }
@@ -216,7 +263,7 @@ impl RtmpManager {
     /// Restart all RTMP streams (stop + re-spawn with same config).
     /// Used when YouTube drops the RTMP connection and needs a fresh start.
     pub async fn restart_all(&mut self) {
-        let configs = self.collect_stream_configs();
+        let configs = self.collect_stream_configs_for_restart();
         if configs.is_empty() {
             tracing::info!("[RTMP] restart_all: no streams to restart");
             return;
@@ -236,20 +283,30 @@ impl RtmpManager {
     /// so pending audio isn't lost.
     fn spawn_stream_inner(
         &mut self,
-        stream_id: &str,
-        lang: &str,
-        rtmp_url: &str,
+        config: &StreamConfig,
         existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
     ) -> Result<(), String> {
-        let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(stream_id, rtmp_url)?;
+        let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(&config.stream_id, &config.rtmp_url)?;
         let (audio_queue, stop_flag, is_restart) = prepare_stream_state(existing_queue);
-        let (video_handle, audio_handle) = self.spawn_drain_threads(
-            stream_id, is_restart, stdin, &audio_queue, &audio_fifo, &stop_flag,
-        )?;
-        self.register_stream(
-            stream_id, lang, rtmp_url, child, video_handle, audio_handle,
-            audio_fifo, audio_queue, stop_flag, rtmp_error,
-        );
+        let setup = DrainSetup {
+            stream_id: config.stream_id.clone(),
+            is_restart,
+            stdin,
+            audio_queue: audio_queue.clone(),
+            audio_fifo: audio_fifo.clone(),
+            stop_flag: stop_flag.clone(),
+        };
+        let (video_handle, audio_handle) = self.spawn_drain_threads(setup)?;
+        let new_stream = NewStream {
+            child,
+            video_handle,
+            audio_handle,
+            audio_fifo,
+            audio_queue,
+            stop_flag,
+            rtmp_error,
+        };
+        self.register_stream(config, new_stream);
         Ok(())
     }
 
@@ -268,46 +325,47 @@ impl RtmpManager {
     /// Spawn video and audio drain threads.
     fn spawn_drain_threads(
         &self,
-        stream_id: &str,
-        is_restart: bool,
-        stdin: std::process::ChildStdin,
-        audio_queue: &Arc<StdMutex<VecDeque<QueuedAudio>>>,
-        audio_fifo: &str,
-        stop_flag: &Arc<AtomicBool>,
+        setup: DrainSetup,
     ) -> Result<(thread::JoinHandle<()>, thread::JoinHandle<()>), String> {
-        let video_handle = self.spawn_video_drain(stream_id, is_restart, stdin, stop_flag)?;
-        let audio_handle = spawn_audio_drain(stream_id, audio_queue, audio_fifo, self.broadcast_delay, stop_flag)?;
+        let video_config = video_drain::VideoDrainConfig {
+            stream_id: setup.stream_id.clone(),
+            chunk_buffer: self.video_chunks.clone(),
+            init_segment: self.video_init_segment.clone(),
+            is_restart: setup.is_restart,
+            delay: self.broadcast_delay,
+            stop: setup.stop_flag.clone(),
+        };
+        let video_handle = self.spawn_video_drain(video_config, setup.stdin)?;
+        let audio_setup = AudioDrainSetup {
+            stream_id: setup.stream_id,
+            audio_queue: setup.audio_queue,
+            fifo_path: setup.audio_fifo,
+            delay: self.broadcast_delay,
+            stop: setup.stop_flag,
+        };
+        let audio_handle = spawn_audio_drain(audio_setup)?;
         Ok((video_handle, audio_handle))
     }
 
     /// Insert the fully-built RtmpStream into the manager's stream map.
-    #[allow(clippy::too_many_arguments)]
     fn register_stream(
         &mut self,
-        stream_id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        child: std::process::Child,
-        video_handle: thread::JoinHandle<()>,
-        audio_handle: thread::JoinHandle<()>,
-        audio_fifo: String,
-        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
-        stop_flag: Arc<AtomicBool>,
-        rtmp_error: Arc<AtomicBool>,
+        config: &StreamConfig,
+        stream: NewStream,
     ) {
         self.streams.insert(
-            stream_id.to_string(),
+            config.stream_id.clone(),
             RtmpStream {
-                child,
-                video_handle: Some(video_handle),
-                audio_handle: Some(audio_handle),
-                audio_fifo,
-                lang: lang.to_string(),
-                rtmp_url: rtmp_url.to_string(),
-                audio_queue,
-                stop_flag,
+                child: stream.child,
+                video_handle: Some(stream.video_handle),
+                audio_handle: Some(stream.audio_handle),
+                audio_fifo: stream.audio_fifo,
+                lang: config.lang.clone(),
+                rtmp_url: config.rtmp_url.clone(),
+                audio_queue: stream.audio_queue,
+                stop_flag: stream.stop_flag,
                 restart_count: 0,
-                rtmp_error,
+                rtmp_error: stream.rtmp_error,
             },
         );
     }
@@ -369,20 +427,14 @@ impl RtmpManager {
     /// Spawn the video drain thread that forwards delayed chunks to FFmpeg stdin.
     fn spawn_video_drain(
         &self,
-        stream_id: &str,
-        is_restart: bool,
+        config: video_drain::VideoDrainConfig,
         stdin: std::process::ChildStdin,
-        stop_flag: &Arc<AtomicBool>,
     ) -> Result<thread::JoinHandle<()>, String> {
-        let video_chunk_buf = self.video_chunks.clone();
-        let video_init = self.video_init_segment.clone();
-        let video_stop = stop_flag.clone();
-        let video_sid = stream_id.to_string();
-        let delay = self.broadcast_delay;
+        let thread_name = format!("video-drain-{}", config.stream_id);
         thread::Builder::new()
-            .name(format!("video-drain-{}", stream_id))
+            .name(thread_name)
             .spawn(move || {
-                video_drain::video_chunk_drain_loop(video_sid, video_chunk_buf, video_init, is_restart, stdin, delay, video_stop);
+                video_drain::video_chunk_drain_loop(config, stdin);
             })
             .map_err(|e| format!("Video thread spawn failed: {}", e))
     }
@@ -423,28 +475,39 @@ impl RtmpManager {
     fn cleanup_crashed_streams(
         &mut self,
         to_restart: Vec<(String, String, String)>,
-    ) -> Vec<(String, String, String, u32, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
+    ) -> Vec<(StreamConfig, RestartState)> {
         to_restart
             .into_iter()
             .filter_map(|(id, lang, rtmp_url)| {
                 let mut old = self.streams.remove(&id)?;
                 let (prev_count, audio_queue) = cleanup_single_stream(&mut old);
-                Some((id, lang, rtmp_url, prev_count, audio_queue))
+                let config = StreamConfig { stream_id: id, lang, rtmp_url };
+                let state = RestartState { prev_count, audio_queue };
+                Some((config, state))
             })
             .collect()
     }
 
     /// Snapshot each stream's config for restart_all.
-    fn collect_stream_configs(&self) -> Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
+    fn collect_stream_configs_for_restart(&self) -> Vec<(StreamConfig, RestartState)> {
         self.streams.iter().map(|(id, s)| {
-            (id.clone(), s.lang.clone(), s.rtmp_url.clone(), s.audio_queue.clone())
+            let config = StreamConfig {
+                stream_id: id.clone(),
+                lang: s.lang.clone(),
+                rtmp_url: s.rtmp_url.clone(),
+            };
+            let state = RestartState {
+                prev_count: 0,
+                audio_queue: s.audio_queue.clone(),
+            };
+            (config, state)
         }).collect()
     }
 
     /// Re-spawn all streams from saved configs (after stop_all).
-    fn respawn_all(&mut self, configs: Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)>) {
-        for (id, lang, url, aq) in configs {
-            self.restart_stream(&id, &lang, &url, 0, aq);
+    fn respawn_all(&mut self, configs: Vec<(StreamConfig, RestartState)>) {
+        for (config, state) in configs {
+            self.restart_stream(&config, state);
         }
     }
 
@@ -575,21 +638,19 @@ fn is_rtmp_connection_error(line: &str) -> bool {
 }
 
 /// Spawn the audio drain thread that writes PCM to the FIFO.
-fn spawn_audio_drain(
-    stream_id: &str,
-    audio_queue: &Arc<StdMutex<VecDeque<QueuedAudio>>>,
-    audio_fifo: &str,
-    delay: Duration,
-    stop_flag: &Arc<AtomicBool>,
-) -> Result<thread::JoinHandle<()>, String> {
-    let aq = audio_queue.clone();
-    let stop = stop_flag.clone();
-    let sid = stream_id.to_string();
-    let fifo = audio_fifo.to_string();
+fn spawn_audio_drain(setup: AudioDrainSetup) -> Result<thread::JoinHandle<()>, String> {
+    let thread_name = format!("audio-drain-{}", setup.stream_id);
+    let config = audio_drain::AudioDrainConfig {
+        stream_id: setup.stream_id,
+        audio_queue: setup.audio_queue,
+        fifo_path: setup.fifo_path,
+        delay: setup.delay,
+        stop: setup.stop,
+    };
     thread::Builder::new()
-        .name(format!("audio-drain-{}", stream_id))
+        .name(thread_name)
         .spawn(move || {
-            audio_drain::audio_drain_loop(sid, aq, fifo, delay, stop);
+            audio_drain::audio_drain_loop(config);
         })
         .map_err(|e| format!("Audio thread spawn failed: {}", e))
 }
@@ -720,26 +781,23 @@ impl HealthMonitor {
         if !crashed.is_empty() {
             tracing::warn!("[HEALTH] check #{}: {} crashed stream(s) detected", check_count, crashed.len());
         }
-        for (id, lang, rtmp_url, prev_count, audio_queue) in crashed {
-            self.restart_one(&id, &lang, &rtmp_url, prev_count, audio_queue).await;
+        for (config, state) in crashed {
+            self.restart_one(config, state).await;
         }
     }
 
     /// Wait the restart delay, then restart a single crashed stream.
     async fn restart_one(
         &self,
-        id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        prev_count: u32,
-        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+        config: StreamConfig,
+        state: RestartState,
     ) {
         tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
         if self.stop_flag.load(Ordering::Acquire) {
             return;
         }
         let mut mgr = self.manager.lock().await;
-        mgr.restart_stream(id, lang, rtmp_url, prev_count, audio_queue);
+        mgr.restart_stream(&config, state);
     }
 }
 

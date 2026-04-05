@@ -3,22 +3,17 @@
 use tracing::debug;
 
 use super::config::TTS_API_KEY;
+use super::SynthesisRequest;
 
 pub async fn do_tts_rest(
     client: &reqwest::Client,
-    text: &str,
-    voice_id: &str,
-    lang: &str,
-    voice_settings: &serde_json::Value,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    model_id: &str,
+    req: &SynthesisRequest<'_>,
 ) -> Result<usize, String> {
-    let mp3 = send_tts_request(client, text, voice_id, lang, voice_settings, model_id).await?;
-    let pcm = decode_and_truncate(&mp3, max_bytes).await?;
+    let mp3 = send_tts_request(client, req).await?;
+    let pcm = decode_and_truncate(&mp3, req.max_bytes).await?;
 
-    log_rest_complete(lang, mp3.len(), pcm.len());
-    append_to_stream(&pcm, streaming);
+    log_rest_complete(req.lang, mp3.len(), pcm.len());
+    append_to_stream(&pcm, req.streaming);
     Ok(pcm.len())
 }
 
@@ -26,26 +21,22 @@ pub async fn do_tts_rest(
 
 async fn send_tts_request(
     client: &reqwest::Client,
-    text: &str,
-    voice_id: &str,
-    lang: &str,
-    voice_settings: &serde_json::Value,
-    model_id: &str,
+    req: &SynthesisRequest<'_>,
 ) -> Result<Vec<u8>, String> {
-    let body = build_tts_body(text, model_id, voice_settings, lang);
-    let url = build_rest_url(voice_id);
-    debug!("[TTS:{}] REST fallback", lang);
+    let body = build_tts_body(req);
+    let url = build_rest_url(req.voice_id);
+    debug!("[TTS:{}] REST fallback", req.lang);
 
     let resp = post_request(client, &url, &body).await?;
     check_response(resp).await
 }
 
-fn build_tts_body(text: &str, model_id: &str, voice_settings: &serde_json::Value, lang: &str) -> serde_json::Value {
+fn build_tts_body(req: &SynthesisRequest<'_>) -> serde_json::Value {
     serde_json::json!({
-        "text": text,
-        "model_id": model_id,
-        "voice_settings": voice_settings,
-        "language_code": lang,
+        "text": req.text,
+        "model_id": req.model_id,
+        "voice_settings": req.voice_settings,
+        "language_code": req.lang,
     })
 }
 
@@ -91,14 +82,14 @@ async fn read_response_bytes(resp: reqwest::Response) -> Result<Vec<u8>, String>
 // ── PCM processing ───
 
 async fn decode_and_truncate(mp3: &[u8], max_bytes: usize) -> Result<Vec<u8>, String> {
-    let mut pcm = crate::ffmpeg::decode_mp3_to_pcm(mp3).await?;
+    let mut pcm = crate::streaming::decode_mp3_to_pcm(mp3).await?;
     if pcm.len() > max_bytes {
-        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+        crate::streaming::truncate_with_fadeout(&mut pcm, max_bytes);
     }
     Ok(pcm)
 }
 
-fn append_to_stream(pcm: &[u8], streaming: Option<&crate::ffmpeg::StreamingPcm>) {
+fn append_to_stream(pcm: &[u8], streaming: Option<&crate::streaming::StreamingPcm>) {
     if let Some(s) = streaming {
         s.append(pcm);
     }

@@ -5,26 +5,25 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 use super::config::{TTS_API_KEY, ElevenLabsTtsResponse, CHUNK_LENGTH_SCHEDULE};
+use super::SynthesisRequest;
 
-pub async fn do_tts_ws(
-    text: &str,
-    voice_id: &str,
-    lang: &str,
-    voice_settings: &serde_json::Value,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    model_id: &str,
-) -> Result<usize, String> {
-    let mut ws = connect_elevenlabs(voice_id, model_id, lang).await?;
+pub async fn do_tts_ws(req: &SynthesisRequest<'_>) -> Result<usize, String> {
+    let mut ws = connect_elevenlabs(req).await?;
     let tts_start = Instant::now();
 
-    send_bos(&mut ws, voice_settings).await?;
-    send_text_and_eos(&mut ws, text).await?;
+    send_bos(&mut ws, req.voice_settings).await?;
+    send_text_and_eos(&mut ws, req.text).await?;
 
-    let (total, got_audio) = receive_and_decode_chunks(&mut ws, lang, max_bytes, streaming, &tts_start).await?;
+    let recv_ctx = WsRecvContext {
+        lang: req.lang,
+        max_bytes: req.max_bytes,
+        streaming: req.streaming,
+        tts_start: &tts_start,
+    };
+    let (total, got_audio) = receive_and_decode_chunks(&mut ws, &recv_ctx).await?;
 
     if !got_audio {
-        warn!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", lang, tts_start.elapsed().as_millis());
+        warn!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", req.lang, tts_start.elapsed().as_millis());
     }
 
     Ok(total)
@@ -35,6 +34,18 @@ pub async fn do_tts_ws(
 type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
+
+struct WsRecvContext<'a> {
+    lang: &'a str,
+    max_bytes: usize,
+    streaming: Option<&'a crate::streaming::StreamingPcm>,
+    tts_start: &'a Instant,
+}
+
+struct DecodeState {
+    decoder: Option<crate::streaming::IncrementalMp3Decoder>,
+    chunk_state: ChunkState,
+}
 
 struct ChunkState {
     chunk_count: u32,
@@ -57,24 +68,24 @@ impl ChunkState {
 
 // ── Connection ───
 
-async fn connect_elevenlabs(voice_id: &str, model_id: &str, lang: &str) -> Result<WsStream, String> {
+async fn connect_elevenlabs(req: &SynthesisRequest<'_>) -> Result<WsStream, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let connect_start = Instant::now();
-    let url = build_ws_url(voice_id, model_id, lang);
+    let url = build_ws_url(req);
     let request = url.into_client_request()
         .map_err(|e| format!("WS request build failed: {}", e))?;
     let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| format!("WS connect failed: {}", e))?;
-    debug!("[TTS:{}] connected in {}ms", lang, connect_start.elapsed().as_millis());
+    debug!("[TTS:{}] connected in {}ms", req.lang, connect_start.elapsed().as_millis());
     Ok(ws)
 }
 
-fn build_ws_url(voice_id: &str, model_id: &str, lang: &str) -> String {
+fn build_ws_url(req: &SynthesisRequest<'_>) -> String {
     format!(
         "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128&language_code={}",
-        voice_id, model_id, lang
+        req.voice_id, req.model_id, req.lang
     )
 }
 
@@ -107,35 +118,31 @@ async fn send_text_and_eos(ws: &mut WsStream, text: &str) -> Result<(), String> 
 
 async fn receive_and_decode_chunks(
     ws: &mut WsStream,
-    lang: &str,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    tts_start: &Instant,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<(usize, bool), String> {
-    let mut decoder = crate::ffmpeg::IncrementalMp3Decoder::new().await
+    let decoder = crate::streaming::IncrementalMp3Decoder::new().await
         .map_err(|e| format!("IncrementalMp3Decoder init failed: {}", e))?;
-    let mut state = ChunkState::new();
+    let mut decode = DecodeState {
+        decoder: Some(decoder),
+        chunk_state: ChunkState::new(),
+    };
 
-    receive_loop(ws, &mut decoder, &mut state, lang, max_bytes, streaming, tts_start).await?;
-    drain_remaining(&mut state, decoder, max_bytes, streaming).await?;
+    receive_loop(ws, &mut decode, recv_ctx).await?;
+    drain_remaining(&mut decode, recv_ctx).await?;
 
-    Ok((state.total_pcm_bytes, state.got_audio))
+    Ok((decode.chunk_state.total_pcm_bytes, decode.chunk_state.got_audio))
 }
 
 async fn receive_loop(
     ws: &mut WsStream,
-    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
-    state: &mut ChunkState,
-    lang: &str,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    tts_start: &Instant,
+    decode: &mut DecodeState,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<(), String> {
     use futures_util::StreamExt;
 
     while let Some(msg_result) = ws.next().await {
         let msg = msg_result.map_err(|e| format!("WS read error: {}", e))?;
-        let flow = process_ws_message(msg, decoder, state, lang, max_bytes, streaming, tts_start).await?;
+        let flow = process_ws_message(msg, decode, recv_ctx).await?;
         if flow.is_break() { break; }
     }
     Ok(())
@@ -143,25 +150,21 @@ async fn receive_loop(
 
 async fn process_ws_message(
     msg: tokio_tungstenite::tungstenite::Message,
-    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
-    state: &mut ChunkState,
-    lang: &str,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    tts_start: &Instant,
+    decode: &mut DecodeState,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<ControlFlow<()>, String> {
-    let text_data = match extract_text_payload(msg, lang)? {
+    let text_data = match extract_text_payload(msg, recv_ctx.lang)? {
         Some(t) => t,
         None => return Ok(ControlFlow::Continue(())),
     };
 
     let resp = validate_and_parse(&text_data)?;
 
-    if is_final(&resp, state, lang, tts_start) {
+    if is_final(&resp, &decode.chunk_state, recv_ctx) {
         return Ok(ControlFlow::Break(()));
     }
 
-    handle_audio_chunk(&resp, decoder, state, lang, max_bytes, streaming, tts_start).await?;
+    handle_audio_chunk(&resp, decode, recv_ctx).await?;
     Ok(ControlFlow::Continue(()))
 }
 
@@ -191,9 +194,9 @@ fn parse_response(text_data: &str) -> Result<ElevenLabsTtsResponse, String> {
         .map_err(|e| format!("WS parse error: {} | raw: {}", e, &text_data[..text_data.len().min(200)]))
 }
 
-fn is_final(resp: &ElevenLabsTtsResponse, state: &ChunkState, lang: &str, tts_start: &Instant) -> bool {
+fn is_final(resp: &ElevenLabsTtsResponse, state: &ChunkState, recv_ctx: &WsRecvContext<'_>) -> bool {
     if resp.is_final.unwrap_or(false) {
-        debug!("[TTS:{}] done: {} chunks, {}KB PCM in {}ms", lang, state.chunk_count, state.total_pcm_bytes / 1024, tts_start.elapsed().as_millis());
+        debug!("[TTS:{}] done: {} chunks, {}KB PCM in {}ms", recv_ctx.lang, state.chunk_count, state.total_pcm_bytes / 1024, recv_ctx.tts_start.elapsed().as_millis());
         return true;
     }
     false
@@ -201,41 +204,37 @@ fn is_final(resp: &ElevenLabsTtsResponse, state: &ChunkState, lang: &str, tts_st
 
 async fn handle_audio_chunk(
     resp: &ElevenLabsTtsResponse,
-    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
-    state: &mut ChunkState,
-    lang: &str,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
-    tts_start: &Instant,
+    decode: &mut DecodeState,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<(), String> {
     let audio_b64 = match resp.audio.as_deref() {
         Some(b) if !b.is_empty() => b,
         _ => return Ok(()),
     };
 
-    let (pcm, _is_first) = decode_audio_chunk(decoder, audio_b64, &mut state.chunk_count, lang, tts_start).await?;
-    state.accumulate(&pcm);
-    append_to_stream(&pcm, max_bytes, streaming);
+    let (pcm, _is_first) = decode_audio_chunk(decode, audio_b64, recv_ctx).await?;
+    decode.chunk_state.accumulate(&pcm);
+    append_to_stream(&pcm, recv_ctx);
     Ok(())
 }
 
-fn append_to_stream(pcm: &[u8], max_bytes: usize, streaming: Option<&crate::ffmpeg::StreamingPcm>) {
+fn append_to_stream(pcm: &[u8], recv_ctx: &WsRecvContext<'_>) {
     if !pcm.is_empty() {
-        if let Some(s) = streaming {
-            s.append_with_limit(pcm, max_bytes);
+        if let Some(s) = recv_ctx.streaming {
+            s.append_with_limit(pcm, recv_ctx.max_bytes);
         }
     }
 }
 
 async fn drain_remaining(
-    state: &mut ChunkState,
-    decoder: crate::ffmpeg::IncrementalMp3Decoder,
-    max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>,
+    decode: &mut DecodeState,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<(), String> {
+    let decoder = decode.decoder.take()
+        .ok_or_else(|| "Decoder already consumed".to_string())?;
     let remaining = drain_decoder(decoder).await?;
-    state.accumulate(&remaining);
-    append_to_stream(&remaining, max_bytes, streaming);
+    decode.chunk_state.accumulate(&remaining);
+    append_to_stream(&remaining, recv_ctx);
     Ok(())
 }
 
@@ -269,16 +268,16 @@ fn check_message_field(raw: &serde_json::Value) -> Result<(), String> {
 // ── Decode helpers ───
 
 async fn decode_audio_chunk(
-    decoder: &mut crate::ffmpeg::IncrementalMp3Decoder,
+    decode: &mut DecodeState,
     audio_b64: &str,
-    chunk_count: &mut u32,
-    lang: &str,
-    tts_start: &Instant,
+    recv_ctx: &WsRecvContext<'_>,
 ) -> Result<(Vec<u8>, bool), String> {
     let mp3_chunk = decode_base64(audio_b64)?;
-    let is_first = advance_chunk_counter(chunk_count);
-    log_ttfb_if_first(is_first, lang, tts_start, mp3_chunk.len());
+    let is_first = advance_chunk_counter(&mut decode.chunk_state.chunk_count);
+    log_ttfb_if_first(is_first, recv_ctx.lang, recv_ctx.tts_start, mp3_chunk.len());
 
+    let decoder = decode.decoder.as_mut()
+        .ok_or_else(|| "Decoder already consumed".to_string())?;
     let pcm_chunk = decoder.feed(&mp3_chunk).await
         .map_err(|e| format!("Incremental decode failed: {}", e))?;
     Ok((pcm_chunk, is_first))
@@ -300,7 +299,7 @@ fn log_ttfb_if_first(is_first: bool, lang: &str, tts_start: &Instant, mp3_len: u
     }
 }
 
-async fn drain_decoder(decoder: crate::ffmpeg::IncrementalMp3Decoder) -> Result<Vec<u8>, String> {
+async fn drain_decoder(decoder: crate::streaming::IncrementalMp3Decoder) -> Result<Vec<u8>, String> {
     decoder.finish().await
         .map_err(|e| format!("Decoder finish failed: {}", e))
 }

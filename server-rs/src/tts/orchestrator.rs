@@ -3,11 +3,12 @@
 use std::time::Instant;
 use tracing::{info, error, debug};
 
-use crate::constants::{BYTES_PER_SEC, DEFAULT_BROADCAST_DELAY_MS};
+use crate::core::config::{BYTES_PER_SEC, DEFAULT_BROADCAST_DELAY_MS};
 use crate::pipeline::budget::{compute_tts_deadline, compute_max_pcm_bytes};
-use crate::types::{Lang, Sessions, ServerMsg};
+use crate::core::types::{Lang, Sessions, ServerMsg};
 use super::config::{StyleParams, DEFAULT_VOICE};
 use super::voice_settings::VoiceStyle;
+use super::SynthesisRequest;
 
 /// All parameters needed for a single TTS invocation.
 pub struct TtsRequest<'a> {
@@ -38,9 +39,18 @@ pub async fn do_tts(
     log_streaming_slot(req.utterance_id, &lang_str, ctx.max_bytes, &streaming);
     notify_host(sessions, session_id, ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id: req.utterance_id });
 
-    let tts_result = execute_tts_with_fallback(client, req, &ctx, &lang_str, &streaming).await;
+    let synth_req = build_synthesis_request(req, &ctx, &lang_str, &streaming);
+    let tts_result = execute_tts_with_fallback(client, &synth_req, &ctx).await;
 
-    finalize(streaming, tts_start, &tts_result, &lang_str, req.utterance_id, &ctx.tts_deadline);
+    let outcome = TtsOutcome {
+        streaming,
+        tts_start,
+        tts_result: &tts_result,
+        lang_str: &lang_str,
+        utterance_id: req.utterance_id,
+        deadline: &ctx.tts_deadline,
+    };
+    finalize(&outcome);
     notify_host(sessions, session_id, ServerMsg::TtsEnd { lang: lang_str, utterance_id: req.utterance_id, tts_ms: tts_start.elapsed().as_millis() as u64 });
 }
 
@@ -59,32 +69,25 @@ impl ElevenLabsSynthesizer {
 
 impl super::Synthesizer for ElevenLabsSynthesizer {
     async fn synthesize(
-        &self, text: &str, voice_id: &str, lang: &str,
-        voice_settings: &serde_json::Value, max_bytes: usize,
-        streaming: Option<&crate::ffmpeg::StreamingPcm>, model_id: &str,
+        &self,
+        req: &SynthesisRequest<'_>,
     ) -> Result<usize, String> {
-        let ws_result = super::ws::do_tts_ws(
-            text, voice_id, lang, voice_settings, max_bytes, streaming, model_id,
-        ).await;
+        let ws_result = super::ws::do_tts_ws(req).await;
         match ws_result {
             Ok(bytes) => Ok(bytes),
-            Err(ws_err) => fallback_to_rest(
-                &self.client, text, voice_id, lang, voice_settings,
-                max_bytes, streaming, model_id, &ws_err,
-            ).await,
+            Err(ws_err) => {
+                tracing::warn!("[TTS] WS failed: {}, falling back to REST", ws_err);
+                fallback_to_rest(&self.client, req).await
+            }
         }
     }
 }
 
 async fn fallback_to_rest(
-    client: &reqwest::Client, text: &str, voice_id: &str, lang: &str,
-    voice_settings: &serde_json::Value, max_bytes: usize,
-    streaming: Option<&crate::ffmpeg::StreamingPcm>, model_id: &str, ws_err: &str,
+    client: &reqwest::Client,
+    req: &SynthesisRequest<'_>,
 ) -> Result<usize, String> {
-    tracing::warn!("[TTS] WS failed: {}, falling back to REST", ws_err);
-    super::rest::do_tts_rest(
-        client, text, voice_id, lang, voice_settings, max_bytes, streaming, model_id,
-    ).await
+    super::rest::do_tts_rest(client, req).await
 }
 
 // ── Internal types ───
@@ -94,6 +97,15 @@ struct TtsContext {
     voice_settings: serde_json::Value,
     max_bytes: usize,
     tts_deadline: std::time::Duration,
+}
+
+struct TtsOutcome<'a> {
+    streaming: Option<crate::streaming::StreamingPcm>,
+    tts_start: Instant,
+    tts_result: &'a Result<Result<usize, String>, tokio::time::error::Elapsed>,
+    lang_str: &'a str,
+    utterance_id: u64,
+    deadline: &'a std::time::Duration,
 }
 
 // ── Orchestration helpers ───
@@ -114,43 +126,46 @@ fn read_broadcast_delay(sessions: &Sessions, session_id: &str) -> u64 {
         .unwrap_or(DEFAULT_BROADCAST_DELAY_MS)
 }
 
+fn build_synthesis_request<'a>(
+    req: &'a TtsRequest<'_>,
+    ctx: &'a TtsContext,
+    lang_str: &'a str,
+    streaming: &'a Option<crate::streaming::StreamingPcm>,
+) -> SynthesisRequest<'a> {
+    SynthesisRequest {
+        text: req.text,
+        voice_id: &ctx.voice_id,
+        lang: lang_str,
+        voice_settings: &ctx.voice_settings,
+        max_bytes: ctx.max_bytes,
+        streaming: streaming.as_ref(),
+        model_id: req.tts_model,
+    }
+}
+
 async fn execute_tts_with_fallback(
     client: &reqwest::Client,
-    req: &TtsRequest<'_>,
+    synth_req: &SynthesisRequest<'_>,
     ctx: &TtsContext,
-    lang_str: &str,
-    streaming: &Option<crate::ffmpeg::StreamingPcm>,
 ) -> Result<Result<usize, String>, tokio::time::error::Elapsed> {
     let synth = ElevenLabsSynthesizer::new(client.clone());
-    run_with_deadline(&synth, req, ctx, lang_str, streaming).await
+    run_with_deadline(&synth, synth_req, ctx).await
 }
 
 async fn run_with_deadline(
     synth: &impl super::Synthesizer,
-    req: &TtsRequest<'_>,
+    synth_req: &SynthesisRequest<'_>,
     ctx: &TtsContext,
-    lang_str: &str,
-    streaming: &Option<crate::ffmpeg::StreamingPcm>,
 ) -> Result<Result<usize, String>, tokio::time::error::Elapsed> {
     tokio::time::timeout(ctx.tts_deadline, async {
-        synth.synthesize(
-            req.text, &ctx.voice_id, lang_str, &ctx.voice_settings,
-            ctx.max_bytes, streaming.as_ref(), req.tts_model,
-        ).await
+        synth.synthesize(synth_req).await
     }).await
 }
 
-fn finalize(
-    streaming: Option<crate::ffmpeg::StreamingPcm>,
-    tts_start: Instant,
-    tts_result: &Result<Result<usize, String>, tokio::time::error::Elapsed>,
-    lang_str: &str,
-    utterance_id: u64,
-    deadline: &std::time::Duration,
-) {
-    if let Some(ref s) = streaming { s.finish(); }
-    let tts_ms = tts_start.elapsed().as_millis() as u64;
-    log_tts_result(tts_result, lang_str, utterance_id, tts_ms, deadline);
+fn finalize(outcome: &TtsOutcome<'_>) {
+    if let Some(ref s) = outcome.streaming { s.finish(); }
+    let tts_ms = outcome.tts_start.elapsed().as_millis() as u64;
+    log_tts_result(outcome, tts_ms);
 }
 
 // ── Voice selection ───
@@ -173,13 +188,13 @@ async fn allocate_rtmp_slot(
     session_id: &str,
     lang: &str,
     utterance_start: Instant,
-) -> Option<crate::ffmpeg::StreamingPcm> {
+) -> Option<crate::streaming::StreamingPcm> {
     let rtmp_mgr = sessions.get(session_id)?.rtmp_manager.clone()?;
     let mgr = rtmp_mgr.lock().await;
     Some(mgr.queue_streaming_audio(lang, utterance_start))
 }
 
-fn log_streaming_slot(utterance_id: u64, lang: &str, max_bytes: usize, streaming: &Option<crate::ffmpeg::StreamingPcm>) {
+fn log_streaming_slot(utterance_id: u64, lang: &str, max_bytes: usize, streaming: &Option<crate::streaming::StreamingPcm>) {
     if streaming.is_some() {
         debug!("[TTS] #{} {} queued streaming slot (max={}B={:.1}s)", utterance_id, lang, max_bytes, max_bytes as f64 / BYTES_PER_SEC);
     }
@@ -205,16 +220,10 @@ fn log_tts_start(req: &TtsRequest<'_>, ctx: &TtsContext) {
     );
 }
 
-fn log_tts_result(
-    result: &Result<Result<usize, String>, tokio::time::error::Elapsed>,
-    lang: &str,
-    utterance_id: u64,
-    tts_ms: u64,
-    deadline: &std::time::Duration,
-) {
-    match result {
-        Ok(Ok(total_bytes)) => info!("[TTS] {}KB in {}ms for {} (streaming PCM)", total_bytes / 1024, tts_ms, lang),
-        Ok(Err(e)) => error!("[TTS] Failed for {}: {} ({}ms)", lang, e, tts_ms),
-        Err(_) => error!("[TTS] TIMEOUT: utterance {} for {} exceeded {}ms", utterance_id, lang, deadline.as_millis()),
+fn log_tts_result(outcome: &TtsOutcome<'_>, tts_ms: u64) {
+    match outcome.tts_result {
+        Ok(Ok(total_bytes)) => info!("[TTS] {}KB in {}ms for {} (streaming PCM)", total_bytes / 1024, tts_ms, outcome.lang_str),
+        Ok(Err(e)) => error!("[TTS] Failed for {}: {} ({}ms)", outcome.lang_str, e, tts_ms),
+        Err(_) => error!("[TTS] TIMEOUT: utterance {} for {} exceeded {}ms", outcome.utterance_id, outcome.lang_str, outcome.deadline.as_millis()),
     }
 }

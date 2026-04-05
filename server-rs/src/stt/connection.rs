@@ -4,40 +4,50 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite;
 use tracing::{info, error};
 
-use crate::constants::{SAMPLE_RATE, STT_RECONNECT_MAX, STT_RECONNECT_DELAY_SECS};
+use crate::core::config::{SAMPLE_RATE, STT_RECONNECT_MAX, STT_RECONNECT_DELAY_SECS};
 use crate::stt::config::INITIAL_CONNECT_MAX_ATTEMPTS;
-use crate::types::{Lang, Sessions};
+use crate::core::types::{Lang, Sessions};
 
 use super::state::WsStream;
 
+/// Configuration for a Gladia connection attempt.
+pub(super) struct ConnectionConfig {
+    pub endpointing: f64,
+    pub max_duration: f64,
+    pub reconnect_count: u32,
+}
+
+/// Session-level identity needed to check liveness during connect retries.
+pub(super) struct ConnectSession<'a> {
+    pub session_id: &'a str,
+    pub sessions: &'a Sessions,
+    pub source_lang: &'a Lang,
+}
+
 /// Try to create a Gladia live session and connect the WebSocket.
 pub(super) async fn connect_gladia(
-    session_id: &str,
-    sessions: &Sessions,
-    source_lang: &Lang,
-    endpointing: f64,
-    max_duration: f64,
-    reconnect_count: u32,
+    sess: &ConnectSession<'_>,
+    config: &ConnectionConfig,
 ) -> Option<WsStream> {
-    let max_attempts = if reconnect_count == 0 { INITIAL_CONNECT_MAX_ATTEMPTS } else { STT_RECONNECT_MAX };
+    let max_attempts = if config.reconnect_count == 0 { INITIAL_CONNECT_MAX_ATTEMPTS } else { STT_RECONNECT_MAX };
     let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
 
     for attempt in 1..=max_attempts {
-        if !sessions.contains_key(session_id) {
-            info!("[STT] Session {} gone, stopping", session_id);
+        if !sess.sessions.contains_key(sess.session_id) {
+            info!("[STT] Session {} gone, stopping", sess.session_id);
             return None;
         }
 
-        match try_connect(source_lang, endpointing, max_duration, reconnect_count).await {
+        match try_connect(sess.source_lang, config).await {
             Ok((stream, gladia_id)) => {
                 info!(
                     "[STT] Connected to Gladia Solaria-1 (attempt {}, endpointing={:.2}s, max_dur={:.0}s, session={})",
-                    attempt, endpointing, max_duration, gladia_id
+                    attempt, config.endpointing, config.max_duration, gladia_id
                 );
                 return Some(stream);
             }
             Err(e) => {
-                let delay = if reconnect_count == 0 { Duration::from_secs(3) } else { reconnect_delay };
+                let delay = if config.reconnect_count == 0 { Duration::from_secs(3) } else { reconnect_delay };
                 error!("[STT] attempt {}/{} failed: {}", attempt, max_attempts, e);
                 tokio::time::sleep(delay).await;
             }
@@ -50,21 +60,18 @@ pub(super) async fn connect_gladia(
 
 async fn try_connect(
     source_lang: &Lang,
-    endpointing: f64,
-    max_duration: f64,
-    _reconnect_count: u32,
+    config: &ConnectionConfig,
 ) -> Result<(WsStream, String), String> {
-    let session = create_gladia_session(&source_lang.to_string(), endpointing, max_duration).await?;
+    let session = create_gladia_session(&source_lang.to_string(), config).await?;
     let stream = connect_websocket(&session.url).await?;
     Ok((stream, session.id))
 }
 
 async fn create_gladia_session(
     lang: &str,
-    endpointing: f64,
-    max_duration: f64,
+    config: &ConnectionConfig,
 ) -> Result<crate::stt::GladiaSession, String> {
-    let body = build_session_body(lang, endpointing, max_duration);
+    let body = build_session_body(lang, config);
     let resp = post_gladia_session(&body).await?;
     check_response_status(&resp)?;
     parse_session_response(resp).await
@@ -74,7 +81,7 @@ async fn post_gladia_session(body: &serde_json::Value) -> Result<reqwest::Respon
     crate::HTTP_CLIENT
         .post("https://api.gladia.io/v2/live")
         .header("Content-Type", "application/json")
-        .header("x-gladia-key", &*super::super::STT_API_KEY)
+        .header("x-gladia-key", &*super::STT_API_KEY)
         .json(body)
         .send()
         .await
@@ -92,14 +99,14 @@ async fn parse_session_response(resp: reqwest::Response) -> Result<crate::stt::G
         .map_err(|e| format!("Gladia session parse error: {}", e))
 }
 
-fn build_session_body(lang: &str, endpointing: f64, max_duration: f64) -> serde_json::Value {
+fn build_session_body(lang: &str, config: &ConnectionConfig) -> serde_json::Value {
     serde_json::json!({
         "encoding": "wav/pcm",
         "bit_depth": 16,
         "sample_rate": SAMPLE_RATE,
         "channels": 1,
-        "endpointing": endpointing,
-        "maximum_duration_without_endpointing": max_duration,
+        "endpointing": config.endpointing,
+        "maximum_duration_without_endpointing": config.max_duration,
         "language_config": {
             "languages": [lang],
             "code_switching": true

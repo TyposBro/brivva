@@ -4,8 +4,8 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
-use crate::constants::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
-use crate::ffmpeg::SharedRtmpManager;
+use crate::core::config::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
+use crate::streaming::SharedRtmpManager;
 use super::lang::Lang;
 
 pub struct Session {

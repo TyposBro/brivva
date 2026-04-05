@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use crate::types::{Sessions, ServerMsg};
+use crate::core::types::{Sessions, ServerMsg};
 
 /// Serialize a ServerMsg to a WebSocket text message.
 fn to_ws_msg(msg: &ServerMsg) -> Option<Message> {

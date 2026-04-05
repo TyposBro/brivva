@@ -3,8 +3,8 @@
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
-use crate::constants::DEFAULT_TTS_MODEL;
-use crate::types::{Lang, Session, Sessions};
+use crate::core::config::DEFAULT_TTS_MODEL;
+use crate::core::types::{Lang, Session, Sessions};
 use crate::voice_clone;
 
 use super::WsQuery;
@@ -39,11 +39,14 @@ pub fn spawn_stt_pipeline(
     source_lang: &Lang,
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    let sessions_clone = sessions.clone();
-    let sid = session_id.to_string();
-    let sl = source_lang.clone();
+    let req = crate::stt::SttStartRequest {
+        session_id: session_id.to_string(),
+        sessions: sessions.clone(),
+        source_lang: source_lang.clone(),
+        audio_rx,
+    };
     tokio::spawn(async move {
-        crate::pipeline::start_stt(sid, sessions_clone, sl, audio_rx).await;
+        crate::stt::start_stt(req).await;
     });
 }
 

@@ -13,17 +13,22 @@ pub use ws::do_tts_ws;
 pub use rest::do_tts_rest;
 pub use voice_settings::VoiceStyle;
 
+/// All parameters for a single TTS synthesis call.
+pub struct SynthesisRequest<'a> {
+    pub text: &'a str,
+    pub voice_id: &'a str,
+    pub lang: &'a str,
+    pub voice_settings: &'a serde_json::Value,
+    pub max_bytes: usize,
+    pub streaming: Option<&'a crate::streaming::StreamingPcm>,
+    pub model_id: &'a str,
+}
+
 /// Abstraction over TTS providers.
 /// Implementations: ElevenLabs WebSocket streaming + REST fallback.
 pub trait Synthesizer: Send + Sync {
     fn synthesize(
         &self,
-        text: &str,
-        voice_id: &str,
-        lang: &str,
-        voice_settings: &serde_json::Value,
-        max_bytes: usize,
-        streaming: Option<&crate::ffmpeg::StreamingPcm>,
-        model_id: &str,
+        req: &SynthesisRequest<'_>,
     ) -> impl std::future::Future<Output = Result<usize, String>> + Send;
 }

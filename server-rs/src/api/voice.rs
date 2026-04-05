@@ -3,7 +3,7 @@
 use axum::{Json, body::Bytes, http::StatusCode};
 use serde::Serialize;
 
-use crate::constants::{BYTES_PER_SEC, VOICE_CLONE_FILE};
+use crate::core::config::{BYTES_PER_SEC, VOICE_CLONE_FILE};
 use crate::voice_clone;
 
 #[derive(Serialize)]

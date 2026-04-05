@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::constants::BYTES_PER_SEC;
+use crate::core::config::BYTES_PER_SEC;
 use super::{
     QueuedAudio,
     AUDIO_TICK, AUDIO_BYTES_PER_TICK,
@@ -16,6 +16,17 @@ use super::{
     DRIFT_CHECK_INTERVAL_TICKS, DRIFT_WARN_THRESHOLD_MS,
     JITTER_WARN_LOG_INTERVAL,
 };
+
+// ── Config struct (keep every function ≤ 2 params) ───────
+
+/// Everything needed to start an audio drain thread.
+pub(crate) struct AudioDrainConfig {
+    pub(crate) stream_id: String,
+    pub(crate) audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    pub(crate) fifo_path: String,
+    pub(crate) delay: Duration,
+    pub(crate) stop: Arc<AtomicBool>,
+}
 
 /// State for draining queued audio chunk-by-chunk
 struct ActiveAudio {
@@ -359,25 +370,19 @@ fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &
 ///
 /// Independent from the video thread — shares only the delayed clock reference.
 /// Tracks cumulative samples written to detect drift over long sessions.
-pub(crate) fn audio_drain_loop(
-    stream_id: String,
-    audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
-    fifo_path: String,
-    delay: Duration,
-    stop: Arc<AtomicBool>,
-) {
-    let fifo = match open_fifo(&stream_id, &fifo_path, &stop) {
+pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
+    let fifo = match open_fifo(&config) {
         Some(f) => f,
         None => return,
     };
 
     let now = Instant::now();
     let mut state = DrainState {
-        stream_id,
+        stream_id: config.stream_id,
         fifo,
-        audio_queue,
-        stop,
-        delay,
+        audio_queue: config.audio_queue,
+        stop: config.stop,
+        delay: config.delay,
         silence: vec![0u8; AUDIO_BYTES_PER_TICK],
         active_audio: None,
         tick_count: 0,
@@ -391,20 +396,16 @@ pub(crate) fn audio_drain_loop(
 }
 
 /// Open FIFO for writing (blocks until FFmpeg opens it for reading).
-fn open_fifo(
-    stream_id: &str,
-    fifo_path: &str,
-    stop: &AtomicBool,
-) -> Option<std::fs::File> {
-    tracing::info!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", stream_id);
-    match std::fs::OpenOptions::new().write(true).open(fifo_path) {
+fn open_fifo(config: &AudioDrainConfig) -> Option<std::fs::File> {
+    tracing::info!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", config.stream_id);
+    match std::fs::OpenOptions::new().write(true).open(&config.fifo_path) {
         Ok(f) => {
-            tracing::info!("[AUDIO:{}] FIFO opened", stream_id);
+            tracing::info!("[AUDIO:{}] FIFO opened", config.stream_id);
             Some(f)
         }
         Err(e) => {
-            if !stop.load(Ordering::Acquire) {
-                tracing::error!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
+            if !config.stop.load(Ordering::Acquire) {
+                tracing::error!("[AUDIO:{}] failed to open FIFO: {}", config.stream_id, e);
             }
             None
         }
