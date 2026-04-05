@@ -427,27 +427,33 @@ impl RtmpManager {
         ]
     }
 
-    fn build_video_encoding_args(&self, lang: &str) -> Vec<String> {
+    fn build_video_encoding_args(&self, _lang: &str) -> Vec<String> {
         tracing::info!("[FFMPEG] Encoding {} -> H.264 (ultrafast)", self.video_codec);
 
-        // Create subtitle text files for drawtext overlay (matched by final_handler.rs)
-        let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, lang);
-        let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, lang);
-        let _ = std::fs::write(&transcript_file, "");
-        let _ = std::fs::write(&translation_file, "");
+        // Subtitle overlay is available but disabled by default — the drawtext filter
+        // causes FFmpeg to produce output YouTube rejects ("Preparing stream" forever).
+        // Enable with BRIVVA_SUBTITLES=1 env var for local testing only.
+        let mut args = Vec::new();
 
-        // drawtext filter: transcript (white) at top, translation (yellow) at bottom
-        let vf = format!(
-            "drawtext=textfile='{transcript}':reload=1:fontsize=24:fontcolor=white:\
-             borderw=2:bordercolor=black:x=(w-tw)/2:y=30:font=Arial,\
-             drawtext=textfile='{translation}':reload=1:fontsize=28:fontcolor=yellow:\
-             borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70:font=Arial",
-            transcript = transcript_file,
-            translation = translation_file,
-        );
+        if std::env::var("BRIVVA_SUBTITLES").is_ok() {
+            let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, _lang);
+            let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, _lang);
+            let _ = std::fs::write(&transcript_file, "");
+            let _ = std::fs::write(&translation_file, "");
 
-        vec![
-            "-vf".to_string(), vf,
+            let vf = format!(
+                "drawtext=textfile='{transcript}':reload=1:fontsize=24:fontcolor=white:\
+                 borderw=2:bordercolor=black:x=(w-tw)/2:y=30,\
+                 drawtext=textfile='{translation}':reload=1:fontsize=28:fontcolor=yellow:\
+                 borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70",
+                transcript = transcript_file,
+                translation = translation_file,
+            );
+            args.extend(["-vf".to_string(), vf]);
+            tracing::info!("[FFMPEG] Subtitle overlay enabled (BRIVVA_SUBTITLES=1)");
+        }
+
+        args.extend([
             "-c:v".to_string(), "libx264".to_string(),
             "-preset".to_string(), "ultrafast".to_string(),
             "-tune".to_string(), "zerolatency".to_string(),
@@ -456,7 +462,8 @@ impl RtmpManager {
             "-bufsize".to_string(), VIDEO_BUFSIZE.to_string(),
             "-pix_fmt".to_string(), "yuv420p".to_string(),
             "-g".to_string(), VIDEO_GOP_SIZE.to_string(),
-        ]
+        ]);
+        args
     }
 
     fn build_output_args(rtmp_url: &str) -> Vec<String> {
