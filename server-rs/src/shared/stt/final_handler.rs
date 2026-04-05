@@ -243,7 +243,7 @@ async fn create_streaming_slot(
             return None;
         }
     };
-    let locked = mgr.lock().await;
+    let mut locked = mgr.lock().await;
     Some(locked.queue_streaming_audio(&req.target_lang, req.utterance_start))
 }
 

@@ -33,7 +33,7 @@ pub async fn handle_rtmp_config(json: &serde_json::Value, sessions: &Sessions, s
 
     setup_health_monitoring(sessions, session_id, shared_mgr.clone());
     store_rtmp_state(sessions, session_id, shared_mgr, &rtmp_langs);
-    tracing::info!("[RTMP] Started {} stream(s): {:?}", rtmp_langs.len(), rtmp_langs);
+    tracing::info!("[RTMP] Configured {} stream(s): {:?} (deferred until first audio)", rtmp_langs.len(), rtmp_langs);
 }
 
 pub async fn handle_rtmp_restart(sessions: &Sessions, session_id: &str) {

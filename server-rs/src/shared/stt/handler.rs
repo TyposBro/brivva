@@ -203,7 +203,7 @@ fn queue_source_passthrough(ctx: &SttContext, state: &SttState) {
     let start = state.utterance_start.unwrap_or_else(Instant::now);
 
     tokio::spawn(async move {
-        let locked = mgr.lock().await;
+        let mut locked = mgr.lock().await;
         locked.queue_audio(&lang_str, host_audio, start);
     });
 }

@@ -73,6 +73,7 @@ struct AudioDrainSetup {
 /// Manages all FFmpeg RTMP streams for a session.
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
+    pending_streams: HashMap<String, StreamConfig>,
     video_chunks: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
     video_init_segment: Arc<StdMutex<Option<Vec<u8>>>>,
     broadcast_delay: Duration,
@@ -96,6 +97,7 @@ impl RtmpManager {
         tracing::info!("[SYNC] Broadcast delay: {}ms", delay_ms);
         Self {
             streams: HashMap::new(),
+            pending_streams: HashMap::new(),
             video_chunks: Arc::new(StdMutex::new(VecDeque::new())),
             video_init_segment: Arc::new(StdMutex::new(None)),
             broadcast_delay: Duration::from_millis(delay_ms),
@@ -132,11 +134,11 @@ impl RtmpManager {
             lang: lang.to_string(),
             rtmp_url: rtmp_url.to_string(),
         };
-        self.spawn_stream_inner(&config, None)?;
         tracing::info!(
-            "[FFMPEG] Started RTMP stream {} ({}) -> {} [delay={}ms]",
+            "[FFMPEG] Deferred RTMP stream {} ({}) -> {} [delay={}ms]",
             stream_id, lang, rtmp_url, self.broadcast_delay.as_millis()
         );
+        self.pending_streams.insert(lang.to_string(), config);
         Ok(())
     }
 
@@ -151,7 +153,8 @@ impl RtmpManager {
         }
     }
 
-    pub fn queue_audio(&self, lang: &str, pcm: Vec<u8>, utterance_start: Instant) {
+    pub fn queue_audio(&mut self, lang: &str, pcm: Vec<u8>, utterance_start: Instant) {
+        self.activate_pending_for_lang(lang);
         let pcm_len = pcm.len();
         let pcm_arc = Arc::new(StdMutex::new(pcm));
         let complete = Arc::new(AtomicBool::new(true));
@@ -173,7 +176,8 @@ impl RtmpManager {
         tracing::warn!("[AUDIO] no stream found for lang={}, audio dropped", lang);
     }
 
-    pub fn queue_streaming_audio(&self, lang: &str, utterance_start: Instant) -> StreamingPcm {
+    pub fn queue_streaming_audio(&mut self, lang: &str, utterance_start: Instant) -> StreamingPcm {
+        self.activate_pending_for_lang(lang);
         let streaming = StreamingPcm::new();
         for stream in self.streams.values() {
             if stream.lang == lang {
@@ -231,12 +235,8 @@ impl RtmpManager {
     }
 
     pub async fn stop_all(&mut self) {
-        for (id, mut stream) in self.streams.drain() {
-            stream.stop_flag.store(true, Ordering::Release);
-            kill_ffmpeg_process(&id, &mut stream.child);
-            join_drain_threads(&id, &mut stream).await;
-            let _ = std::fs::remove_file(&stream.audio_fifo);
-        }
+        self.pending_streams.clear();
+        self.drain_active_streams().await;
     }
 
     pub async fn restart_all(&mut self) {
@@ -246,7 +246,7 @@ impl RtmpManager {
             return;
         }
         tracing::info!("[RTMP] restarting {} stream(s)", configs.len());
-        self.stop_all().await;
+        self.drain_active_streams().await;
         self.respawn_all(configs);
         tracing::info!("[RTMP] restart complete");
     }
@@ -255,6 +255,36 @@ impl RtmpManager {
 // ── Private helpers ──────────────────────────────────────
 
 impl RtmpManager {
+    async fn drain_active_streams(&mut self) {
+        for (id, mut stream) in self.streams.drain() {
+            stream.stop_flag.store(true, Ordering::Release);
+            kill_ffmpeg_process(&id, &mut stream.child);
+            join_drain_threads(&id, &mut stream).await;
+            let _ = std::fs::remove_file(&stream.audio_fifo);
+        }
+    }
+
+    fn activate_pending_for_lang(&mut self, lang: &str) {
+        let config = match self.pending_streams.remove(lang) {
+            Some(c) => c,
+            None => return,
+        };
+        match self.spawn_stream_inner(&config, None) {
+            Ok(()) => {
+                tracing::info!(
+                    "[FFMPEG] Activated stream {} ({}) — first audio queued",
+                    config.stream_id, config.lang
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[FFMPEG] Failed to activate stream {} ({}): {}",
+                    config.stream_id, config.lang, e
+                );
+            }
+        }
+    }
+
     fn spawn_stream_inner(
         &mut self,
         config: &StreamConfig,

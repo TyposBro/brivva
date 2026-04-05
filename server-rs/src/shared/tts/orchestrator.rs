@@ -198,7 +198,7 @@ async fn allocate_rtmp_slot(
 ) -> Option<crate::features::broadcast::data::streaming::StreamingPcm> {
     let erased = sessions.get(session_id)?.rtmp_manager.clone()?;
     let rtmp_mgr = crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased)?;
-    let mgr = rtmp_mgr.lock().await;
+    let mut mgr = rtmp_mgr.lock().await;
     Some(mgr.queue_streaming_audio(lang, utterance_start))
 }
 
