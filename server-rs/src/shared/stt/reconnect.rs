@@ -47,9 +47,10 @@ struct SessionEnv {
     http_client: reqwest::Client,
 }
 
-/// Config for a single Soniox connection (source or translation).
+/// Config for a single Soniox translation connection.
 struct SttConnectionConfig {
     target_lang: Option<String>,
+    is_transcript_provider: bool,
     session_env: Arc<SessionEnv>,
     audio_rx: broadcast::Receiver<Vec<u8>>,
 }
@@ -106,13 +107,7 @@ fn spawn_all_connections(
     audio_tx: &broadcast::Sender<Vec<u8>>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
-
-    let source_cfg = SttConnectionConfig {
-        target_lang: None,
-        session_env: env.clone(),
-        audio_rx: audio_tx.subscribe(),
-    };
-    handles.push(tokio::spawn(run_connection_loop(source_cfg)));
+    let mut first = true;
 
     for lang in &req.target_langs {
         if lang == &req.source_lang {
@@ -120,9 +115,14 @@ fn spawn_all_connections(
         }
         let cfg = SttConnectionConfig {
             target_lang: Some(lang.to_string()),
+            is_transcript_provider: first,
             session_env: env.clone(),
             audio_rx: audio_tx.subscribe(),
         };
+        if first {
+            info!("[STT] {} designated as transcript provider", lang);
+        }
+        first = false;
         handles.push(tokio::spawn(run_connection_loop(cfg)));
     }
 
@@ -203,7 +203,7 @@ async fn run_one_connection(
 
     let ctx = build_stt_context(&cfg.session_env);
     let send_task = spawn_send_task(&stt_sink, &cfg.session_env, &mut cfg.audio_rx);
-    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state, cfg.target_lang.clone());
+    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state, cfg.target_lang.clone(), cfg.is_transcript_provider);
 
     await_tasks(send_task, recv_task).await
 }
@@ -326,13 +326,14 @@ fn spawn_recv_task(
     ctx: SttContext,
     loop_state: &ConnectionLoopState,
     target_lang: Option<String>,
+    is_transcript_provider: bool,
 ) -> tokio::task::JoinHandle<SttState> {
     let carry = SttCarryOver {
         utterance_counter: loop_state.utterance_counter,
     };
 
     tokio::spawn(async move {
-        let mut state = SttState::new(carry, target_lang);
+        let mut state = SttState::new(carry, target_lang, is_transcript_provider);
         recv_loop(&mut state, &mut stt_stream, &ctx).await;
         state
     })

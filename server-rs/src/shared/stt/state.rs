@@ -31,6 +31,7 @@ pub(super) struct SttState {
     pub transcript_acc: String,
     pub translation_acc: String,
     pub target_lang: Option<String>,
+    pub is_transcript_provider: bool,
     pub exit_reason: ExitReason,
 }
 
@@ -40,13 +41,14 @@ pub(super) struct SttCarryOver {
 }
 
 impl SttState {
-    pub fn new(carry: SttCarryOver, target_lang: Option<String>) -> Self {
+    pub fn new(carry: SttCarryOver, target_lang: Option<String>, is_transcript_provider: bool) -> Self {
         Self {
             utterance_counter: carry.utterance_counter,
             utterance_start: None,
             transcript_acc: String::new(),
             translation_acc: String::new(),
             target_lang,
+            is_transcript_provider,
             exit_reason: ExitReason::Running,
         }
     }
@@ -79,14 +81,14 @@ mod tests {
 
     #[test]
     fn should_initialize_state_with_carry_over_counter() {
-        let state = SttState::new(make_carry_over(), None);
+        let state = SttState::new(make_carry_over(), None, false);
 
         assert_eq!(state.utterance_counter, 5);
     }
 
     #[test]
     fn should_initialize_with_empty_accumulators() {
-        let state = SttState::new(make_carry_over(), Some("ja".to_string()));
+        let state = SttState::new(make_carry_over(), Some("ja".to_string()), false);
 
         assert!(state.transcript_acc.is_empty());
         assert!(state.translation_acc.is_empty());
@@ -94,21 +96,21 @@ mod tests {
 
     #[test]
     fn should_store_target_lang() {
-        let state = SttState::new(make_carry_over(), Some("ja".to_string()));
+        let state = SttState::new(make_carry_over(), Some("ja".to_string()), false);
 
         assert_eq!(state.target_lang, Some("ja".to_string()));
     }
 
     #[test]
     fn should_default_target_lang_to_none_for_source_connection() {
-        let state = SttState::new(make_carry_over(), None);
+        let state = SttState::new(make_carry_over(), None, false);
 
         assert!(state.target_lang.is_none());
     }
 
     #[test]
     fn should_reset_utterance_clearing_accumulators() {
-        let mut state = SttState::new(make_carry_over(), Some("zh".to_string()));
+        let mut state = SttState::new(make_carry_over(), Some("zh".to_string()), false);
         state.transcript_acc.push_str("hello");
         state.translation_acc.push_str("nihao");
         state.utterance_start = Some(Instant::now());
@@ -122,7 +124,7 @@ mod tests {
 
     #[test]
     fn should_preserve_utterance_counter_on_reset() {
-        let mut state = SttState::new(make_carry_over(), None);
+        let mut state = SttState::new(make_carry_over(), None, false);
         state.utterance_counter = 10;
 
         state.reset_utterance();
@@ -132,7 +134,7 @@ mod tests {
 
     #[test]
     fn should_start_with_running_exit_reason() {
-        let state = SttState::new(make_carry_over(), None);
+        let state = SttState::new(make_carry_over(), None, false);
 
         assert!(matches!(state.exit_reason, ExitReason::Running));
     }

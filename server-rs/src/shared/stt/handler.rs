@@ -82,7 +82,7 @@ fn handle_original_token(token: &SonioxToken, state: &mut SttState, ctx: &SttCon
         }
         state.transcript_acc.push_str(&token.text);
     }
-    if state.target_lang.is_none() {
+    if state.is_transcript_provider {
         let interim = format!("{} {}", state.transcript_acc, token.text).trim().to_string();
         send_interim_to_host(ctx, &interim);
     }
@@ -107,40 +107,35 @@ async fn handle_endpoint(state: &mut SttState, ctx: &SttContext) {
     state.utterance_counter += 1;
     let uid = state.utterance_counter;
 
+    if state.is_transcript_provider {
+        send_transcript_final(state, uid, ctx);
+        queue_source_passthrough(ctx, state);
+    }
+
     if state.target_lang.is_some() {
-        handle_translation_connection_endpoint(state, uid, ctx).await;
-    } else {
-        handle_source_connection_endpoint(state, uid, ctx);
+        send_translation(state, uid, ctx).await;
     }
 
     state.reset_utterance();
 }
 
-async fn handle_translation_connection_endpoint(
-    state: &mut SttState,
-    uid: u64,
-    ctx: &SttContext,
-) {
+fn send_transcript_final(state: &SttState, uid: u64, ctx: &SttContext) {
+    let transcript = &state.transcript_acc;
+    if transcript.is_empty() {
+        return;
+    }
+    info!("[STT] #{} endpoint: transcript='{}'", uid, truncate_str(transcript, 80));
+    send_final_to_host(ctx, transcript, uid);
+}
+
+async fn send_translation(state: &mut SttState, uid: u64, ctx: &SttContext) {
     let translated = state.translation_acc.clone();
     if translated.is_empty() {
         return;
     }
-
     info!("[STT] #{} endpoint: translation='{}' (lang={:?})",
         uid, truncate_str(&translated, 80), state.target_lang);
-
     handle_translation_endpoint(state, &translated, ctx).await;
-}
-
-fn handle_source_connection_endpoint(state: &mut SttState, uid: u64, ctx: &SttContext) {
-    let transcript = state.transcript_acc.clone();
-    if transcript.is_empty() {
-        return;
-    }
-
-    info!("[STT] #{} endpoint: transcript='{}'", uid, truncate_str(&transcript, 80));
-    send_final_to_host(ctx, &transcript, uid);
-    queue_source_passthrough(ctx, state);
 }
 
 fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
