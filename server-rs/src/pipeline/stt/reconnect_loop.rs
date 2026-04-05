@@ -11,7 +11,7 @@ use crate::constants::STT_RECONNECT_DELAY_SECS;
 use crate::stt::config::{DEFAULT_ENDPOINTING_SECS, DEFAULT_MAX_DURATION_SECS};
 use crate::types::{Lang, Sessions};
 
-use super::state::{SttState, MessageAction, WsStream};
+use super::state::{ExitReason, SttState, MessageAction, WsStream};
 use super::connection::connect_gladia;
 use super::message_handler::process_gladia_message;
 use super::audio_forwarder::forward_audio_to_gladia;
@@ -180,7 +180,7 @@ async fn handle_ws_message(
 ) -> MessageAction {
     let msg = match msg_result {
         Ok(m) => m,
-        Err(e) => { error!("[STT] read error: {}", e); state.disconnected = true; return MessageAction::Break; }
+        Err(e) => { error!("[STT] read error: {}", e); state.exit_reason = ExitReason::Disconnected; return MessageAction::Break; }
     };
 
     let text = match extract_text(msg) {
@@ -230,16 +230,15 @@ fn handle_connection_result(
 
     apply_stt_state(&st, loop_state);
 
-    if st.needs_adaptive_reconnect {
-        apply_adaptive_params(&st, loop_state);
-        clear_accumulator(audio_acc);
-        return ReconnectDecision::AdaptiveReconnect;
-    }
-
-    if st.disconnected {
-        ReconnectDecision::StandardReconnect
-    } else {
-        ReconnectDecision::Stop
+    match &st.exit_reason {
+        ExitReason::AdaptiveReconnect { endpointing, max_duration } => {
+            loop_state.endpointing = *endpointing;
+            loop_state.max_duration = *max_duration;
+            clear_accumulator(audio_acc);
+            ReconnectDecision::AdaptiveReconnect
+        }
+        ExitReason::Disconnected => ReconnectDecision::StandardReconnect,
+        ExitReason::Running => ReconnectDecision::Stop,
     }
 }
 
@@ -247,13 +246,6 @@ fn apply_stt_state(st: &SttState, loop_state: &mut LoopState) {
     loop_state.utterance_counter = st.utterance_counter;
     loop_state.wpm_samples = st.wpm_samples.clone();
     loop_state.adapted = st.adapted;
-}
-
-fn apply_adaptive_params(st: &SttState, loop_state: &mut LoopState) {
-    if let Some((new_endp, new_max_dur)) = st.adaptive_params {
-        loop_state.endpointing = new_endp;
-        loop_state.max_duration = new_max_dur;
-    }
 }
 
 fn should_reconnect(session_id: &str, sessions: &Sessions, loop_state: &mut LoopState) -> bool {

@@ -3,6 +3,17 @@
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+/// Why the STT connection exited (or hasn't yet).
+#[derive(Debug)]
+pub(super) enum ExitReason {
+    /// Connection is still active (no exit yet).
+    Running,
+    /// WebSocket closed or errored — standard reconnect.
+    Disconnected,
+    /// Need to reconnect with new endpointing/duration params.
+    AdaptiveReconnect { endpointing: f64, max_duration: f64 },
+}
+
 /// Mutable state for one STT connection.
 pub(super) struct SttState {
     pub utterance_counter: u64,
@@ -14,9 +25,7 @@ pub(super) struct SttState {
     pub last_audio_byte_sent: usize,
     pub wpm_samples: Vec<u32>,
     pub adapted: bool,
-    pub disconnected: bool,
-    pub needs_adaptive_reconnect: bool,
-    pub adaptive_params: Option<(f64, f64)>,
+    pub exit_reason: ExitReason,
 }
 
 impl SttState {
@@ -36,9 +45,7 @@ impl SttState {
             last_audio_byte_sent: 0,
             wpm_samples,
             adapted,
-            disconnected: false,
-            needs_adaptive_reconnect: false,
-            adaptive_params: None,
+            exit_reason: ExitReason::Running,
         }
     }
 

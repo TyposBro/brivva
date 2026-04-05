@@ -11,7 +11,7 @@ use crate::stt::config::{ADAPTIVE_SAMPLE_COUNT, MAX_VALID_WPM, PASSTHROUGH_PADDI
 use crate::tts::StyleParams;
 use crate::types::{Lang, Sessions, ServerMsg};
 
-use super::state::{SttState, WsStream};
+use super::state::{ExitReason, SttState, WsStream};
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -335,9 +335,10 @@ async fn trigger_adaptive_reconnect(
         futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
     >>,
 ) {
-    state.adaptive_params = Some((new_endp, new_max_dur));
-    state.needs_adaptive_reconnect = true;
-    state.disconnected = true;
+    state.exit_reason = ExitReason::AdaptiveReconnect {
+        endpointing: new_endp,
+        max_duration: new_max_dur,
+    };
 
     let mut s = sink.lock().await;
     let _ = s.send(tungstenite::Message::Text(

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use crate::constants::DEFAULT_BROADCAST_DELAY_MS;
 use crate::types::{Lang, Sessions, ServerMsg};
 use crate::ffmpeg;
 
@@ -25,7 +26,7 @@ pub async fn handle_rtmp_config(json: &serde_json::Value, sessions: &Sessions, s
     };
     tracing::info!("[WS:{}] rtmp:config received: {} stream(s)", session_id, streams.len());
 
-    let delay_ms = json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(5000);
+    let delay_ms = json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(DEFAULT_BROADCAST_DELAY_MS);
     store_broadcast_delay(sessions, session_id, delay_ms);
 
     let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);

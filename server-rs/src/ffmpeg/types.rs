@@ -10,7 +10,7 @@ pub(crate) const AUDIO_TICK: Duration = Duration::from_millis(20);
 pub(crate) const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// Max video chunks to buffer (~60s at 10 chunks/sec)
 pub(super) const MAX_VIDEO_CHUNKS: usize = 600;
-/// Default broadcast delay (5s gives chunked utterances enough pipeline budget)
+/// Default broadcast delay (3s gives chunked utterances enough pipeline budget)
 pub(super) const DEFAULT_DELAY_MS: u64 = 3000;
 /// Max FFmpeg restart attempts per stream
 pub(super) const MAX_FFMPEG_RESTARTS: u32 = 50;
@@ -138,23 +138,27 @@ pub fn truncate_with_fadeout(pcm: &mut Vec<u8>, max_bytes: usize) {
         return;
     }
     pcm.truncate(max_bytes);
+    apply_linear_fadeout(pcm);
+}
 
-    // Apply linear fade-out to the last FADE_OUT_BYTES
+/// Apply a linear fade-out over the last FADE_OUT_BYTES of a PCM buffer.
+fn apply_linear_fadeout(pcm: &mut [u8]) {
     let fade_bytes = FADE_OUT_BYTES.min(pcm.len());
     let fade_start = pcm.len() - fade_bytes;
-    let fade_samples = fade_bytes / 2; // 16-bit = 2 bytes per sample
+    let fade_samples = fade_bytes / 2;
 
     for i in 0..fade_samples {
-        let byte_offset = fade_start + i * 2;
-        if byte_offset + 1 >= pcm.len() {
-            break;
-        }
-        let sample = i16::from_le_bytes([pcm[byte_offset], pcm[byte_offset + 1]]);
-        // Linear fade: 1.0 at start of fade region → 0.0 at end
-        let gain = 1.0 - (i as f32 / fade_samples as f32);
-        let faded = (sample as f32 * gain) as i16;
-        let bytes = faded.to_le_bytes();
-        pcm[byte_offset] = bytes[0];
-        pcm[byte_offset + 1] = bytes[1];
+        fade_sample(pcm, fade_start + i * 2, i, fade_samples);
     }
+}
+
+/// Attenuate a single 16-bit LE sample by a linear gain based on position.
+fn fade_sample(pcm: &mut [u8], offset: usize, index: usize, total: usize) {
+    if offset + 1 >= pcm.len() { return; }
+    let sample = i16::from_le_bytes([pcm[offset], pcm[offset + 1]]);
+    let gain = 1.0 - (index as f32 / total as f32);
+    let faded = (sample as f32 * gain) as i16;
+    let bytes = faded.to_le_bytes();
+    pcm[offset] = bytes[0];
+    pcm[offset + 1] = bytes[1];
 }

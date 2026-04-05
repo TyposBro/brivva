@@ -249,18 +249,60 @@ impl RtmpManager {
         rtmp_url: &str,
         existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
     ) -> Result<(), String> {
+        let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(stream_id, rtmp_url)?;
+        let (audio_queue, stop_flag, is_restart) = prepare_stream_state(existing_queue);
+        let (video_handle, audio_handle) = self.spawn_drain_threads(
+            stream_id, is_restart, stdin, &audio_queue, &audio_fifo, &stop_flag,
+        )?;
+        self.register_stream(
+            stream_id, lang, rtmp_url, child, video_handle, audio_handle,
+            audio_fifo, audio_queue, stop_flag, rtmp_error,
+        );
+        Ok(())
+    }
+
+    /// Create the audio FIFO, build args, and spawn the FFmpeg process.
+    fn setup_ffmpeg(
+        &self,
+        stream_id: &str,
+        rtmp_url: &str,
+    ) -> Result<(std::process::Child, std::process::ChildStdin, Arc<AtomicBool>, String), String> {
         let audio_fifo = create_audio_fifo(stream_id)?;
         let args = self.build_ffmpeg_args(&audio_fifo, rtmp_url);
         let (child, stdin, rtmp_error) = spawn_ffmpeg_process(stream_id, &args)?;
+        Ok((child, stdin, rtmp_error, audio_fifo))
+    }
 
-        let is_restart = existing_queue.is_some();
-        let audio_queue = existing_queue
-            .unwrap_or_else(|| Arc::new(StdMutex::new(VecDeque::new())));
-        let stop_flag = Arc::new(AtomicBool::new(false));
+    /// Spawn video and audio drain threads.
+    fn spawn_drain_threads(
+        &self,
+        stream_id: &str,
+        is_restart: bool,
+        stdin: std::process::ChildStdin,
+        audio_queue: &Arc<StdMutex<VecDeque<QueuedAudio>>>,
+        audio_fifo: &str,
+        stop_flag: &Arc<AtomicBool>,
+    ) -> Result<(thread::JoinHandle<()>, thread::JoinHandle<()>), String> {
+        let video_handle = self.spawn_video_drain(stream_id, is_restart, stdin, stop_flag)?;
+        let audio_handle = spawn_audio_drain(stream_id, audio_queue, audio_fifo, self.broadcast_delay, stop_flag)?;
+        Ok((video_handle, audio_handle))
+    }
 
-        let video_handle = self.spawn_video_drain(stream_id, is_restart, stdin, &stop_flag)?;
-        let audio_handle = spawn_audio_drain(stream_id, &audio_queue, &audio_fifo, self.broadcast_delay, &stop_flag)?;
-
+    /// Insert the fully-built RtmpStream into the manager's stream map.
+    #[allow(clippy::too_many_arguments)]
+    fn register_stream(
+        &mut self,
+        stream_id: &str,
+        lang: &str,
+        rtmp_url: &str,
+        child: std::process::Child,
+        video_handle: thread::JoinHandle<()>,
+        audio_handle: thread::JoinHandle<()>,
+        audio_fifo: String,
+        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+        stop_flag: Arc<AtomicBool>,
+        rtmp_error: Arc<AtomicBool>,
+    ) {
         self.streams.insert(
             stream_id.to_string(),
             RtmpStream {
@@ -276,8 +318,6 @@ impl RtmpManager {
                 rtmp_error,
             },
         );
-
-        Ok(())
     }
 
     /// Build the full FFmpeg CLI argument list for video+audio → RTMP.
@@ -439,6 +479,17 @@ impl RtmpManager {
 
 // ── Free functions (implementation details) ───────────────
 
+/// Resolve the audio queue and stop flag for a new or restarted stream.
+fn prepare_stream_state(
+    existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
+) -> (Arc<StdMutex<VecDeque<QueuedAudio>>>, Arc<AtomicBool>, bool) {
+    let is_restart = existing_queue.is_some();
+    let audio_queue = existing_queue
+        .unwrap_or_else(|| Arc::new(StdMutex::new(VecDeque::new())));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    (audio_queue, stop_flag, is_restart)
+}
+
 /// Create a named FIFO for audio data at /tmp/brivva_audio_{stream_id}.
 fn create_audio_fifo(stream_id: &str) -> Result<String, String> {
     let path = format!("/tmp/brivva_audio_{}", stream_id);
@@ -492,19 +543,22 @@ fn spawn_stderr_reader(
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) if !l.is_empty() => {
-                            tracing::warn!("[FFMPEG:{}] {}", sid, l);
-                            if is_rtmp_connection_error(&l) {
-                                tracing::error!("[FFMPEG:{}] RTMP error detected, flagging for restart", sid);
-                                err_flag.store(true, Ordering::Release);
-                            }
-                        }
+                        Ok(l) if !l.is_empty() => process_stderr_line(&sid, &l, &err_flag),
                         Err(_) => break,
                         _ => {}
                     }
                 }
             })
             .ok();
+    }
+}
+
+/// Handle a single non-empty stderr line: log it and flag RTMP errors.
+fn process_stderr_line(stream_id: &str, line: &str, err_flag: &AtomicBool) {
+    tracing::warn!("[FFMPEG:{}] {}", stream_id, line);
+    if is_rtmp_connection_error(line) {
+        tracing::error!("[FFMPEG:{}] RTMP error detected, flagging for restart", stream_id);
+        err_flag.store(true, Ordering::Release);
     }
 }
 

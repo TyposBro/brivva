@@ -6,7 +6,7 @@ use tracing::{error, debug};
 
 use crate::types::{Lang, Sessions};
 
-use super::state::{SttState, MessageAction, WsStream};
+use super::state::{ExitReason, SttState, MessageAction, WsStream};
 use super::final_handler::handle_final_transcript;
 use super::interim_handler::handle_interim_transcript;
 
@@ -27,7 +27,7 @@ pub(super) async fn process_gladia_message(
 
     if let Some(ref err) = gm.error {
         error!("[STT] Gladia error {}: {}", err.status_code, err.message);
-        state.disconnected = true;
+        state.exit_reason = ExitReason::Disconnected;
         return MessageAction::Break;
     }
 
@@ -57,7 +57,7 @@ async fn handle_transcript(
 
     if gm.is_final() {
         handle_final_transcript(state, &transcript, sessions, session_id, source_lang, acc_rx, sink).await;
-        if state.needs_adaptive_reconnect { return MessageAction::Break; }
+        if matches!(state.exit_reason, ExitReason::AdaptiveReconnect { .. }) { return MessageAction::Break; }
     } else {
         handle_interim_transcript(state, &transcript, sessions, session_id, source_lang, acc_rx).await;
     }
