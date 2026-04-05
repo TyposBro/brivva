@@ -127,7 +127,7 @@ async fn handle_translation_connection_endpoint(
     }
 
     info!("[STT] #{} endpoint: translation='{}' (lang={:?})",
-        uid, &translated[..translated.len().min(60)], state.target_lang);
+        uid, truncate_str(&translated, 80), state.target_lang);
 
     handle_translation_endpoint(state, &translated, ctx).await;
 }
@@ -138,7 +138,7 @@ fn handle_source_connection_endpoint(state: &mut SttState, uid: u64, ctx: &SttCo
         return;
     }
 
-    info!("[STT] #{} endpoint: transcript='{}'", uid, &transcript[..transcript.len().min(60)]);
+    info!("[STT] #{} endpoint: transcript='{}'", uid, truncate_str(&transcript, 80));
     send_final_to_host(ctx, &transcript, uid);
     queue_source_passthrough(ctx, state);
 }
@@ -195,4 +195,15 @@ fn queue_source_passthrough(ctx: &SttContext, state: &SttState) {
 fn drain_host_audio(ctx: &SttContext) -> Vec<u8> {
     let mut acc = ctx.audio_acc.lock().unwrap();
     acc.drain(..).flatten().collect()
+}
+
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
