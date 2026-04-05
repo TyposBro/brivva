@@ -23,25 +23,30 @@ pub struct TtsRequest<'a> {
     pub default_voice: &'a str,
 }
 
+/// Session-scoped environment for TTS execution.
+pub struct TtsEnv<'a> {
+    pub client: &'a reqwest::Client,
+    pub sessions: &'a Sessions,
+    pub session_id: &'a str,
+}
+
 /// ElevenLabs TTS -- WebSocket streaming with REST fallback.
 pub async fn do_tts(
-    client: &reqwest::Client,
+    env: &TtsEnv<'_>,
     req: &TtsRequest<'_>,
-    sessions: &Sessions,
-    session_id: &str,
 ) {
     let tts_start = Instant::now();
     let lang_str = req.lang.to_string();
-    let ctx = prepare_context(req, sessions, session_id);
+    let ctx = prepare_context(req, env.sessions, env.session_id);
 
     log_tts_start(req, &ctx);
 
-    let streaming = allocate_rtmp_slot(sessions, session_id, &lang_str, req.utterance_start).await;
+    let streaming = allocate_rtmp_slot(env.sessions, env.session_id, &lang_str, req.utterance_start).await;
     log_streaming_slot(req.utterance_id, &lang_str, ctx.max_bytes, &streaming);
-    notify_host(sessions, session_id, ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id: req.utterance_id });
+    notify_host(env.sessions, env.session_id, ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id: req.utterance_id });
 
     let synth_req = build_synthesis_request(req, &ctx, &lang_str, &streaming);
-    let tts_result = execute_tts_with_fallback(client, &synth_req, &ctx).await;
+    let tts_result = execute_tts_with_fallback(env.client, &synth_req, &ctx).await;
 
     let outcome = TtsOutcome {
         streaming,
@@ -52,7 +57,7 @@ pub async fn do_tts(
         deadline: &ctx.tts_deadline,
     };
     finalize(&outcome);
-    notify_host(sessions, session_id, ServerMsg::TtsEnd { lang: lang_str, utterance_id: req.utterance_id, tts_ms: tts_start.elapsed().as_millis() as u64 });
+    notify_host(env.sessions, env.session_id, ServerMsg::TtsEnd { lang: lang_str, utterance_id: req.utterance_id, tts_ms: tts_start.elapsed().as_millis() as u64 });
 }
 
 // ── Synthesizer implementation ───

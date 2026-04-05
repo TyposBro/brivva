@@ -88,7 +88,12 @@ pub async fn start_stt(req: SttStartRequest) {
         return;
     }
 
-    let env = SessionEnv {
+    let env = build_session_env(req);
+    run_reconnect_loop(&env).await;
+}
+
+fn build_session_env(req: SttStartRequest) -> SessionEnv {
+    SessionEnv {
         session_id: req.session_id,
         sessions: req.sessions,
         source_lang: req.source_lang,
@@ -99,12 +104,15 @@ pub async fn start_stt(req: SttStartRequest) {
         tts_api_key: req.tts_api_key,
         default_voice: req.default_voice,
         http_client: req.http_client,
-    };
+    }
+}
+
+async fn run_reconnect_loop(env: &SessionEnv) {
     let mut state = LoopState::new();
     let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
 
     loop {
-        let result = run_one_connection(&env, &state).await;
+        let result = run_one_connection(env, &state).await;
 
         match handle_connection_result(result, &mut state, &env.audio_acc) {
             ReconnectDecision::AdaptiveReconnect => continue,
@@ -112,7 +120,7 @@ pub async fn start_stt(req: SttStartRequest) {
             ReconnectDecision::StandardReconnect => {}
         }
 
-        if !should_reconnect(&env, &mut state) {
+        if !should_reconnect(env, &mut state) {
             break;
         }
         clear_accumulator(&env.audio_acc);
@@ -126,6 +134,21 @@ async fn run_one_connection(
     env: &SessionEnv,
     loop_state: &LoopState,
 ) -> Option<SttState> {
+    let ws_stream = open_gladia_connection(env, loop_state).await?;
+    let (stt_sink, stt_stream) = ws_stream.split();
+    let stt_sink: WsSink = Arc::new(tokio::sync::Mutex::new(stt_sink));
+
+    let ctx = build_stt_context(env, &stt_sink);
+    let send_task = spawn_send_task(&env.audio_rx, &ctx);
+    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state);
+
+    await_tasks(send_task, recv_task).await
+}
+
+async fn open_gladia_connection(
+    env: &SessionEnv,
+    loop_state: &LoopState,
+) -> Option<WsStream> {
     let config = ConnectionConfig {
         endpointing: loop_state.endpointing,
         max_duration: loop_state.max_duration,
@@ -138,13 +161,11 @@ async fn run_one_connection(
         stt_api_key: &env.stt_api_key,
         http_client: &env.http_client,
     };
+    connect_gladia(&sess, &config).await
+}
 
-    let ws_stream = connect_gladia(&sess, &config).await?;
-
-    let (stt_sink, stt_stream) = ws_stream.split();
-    let stt_sink: WsSink = Arc::new(tokio::sync::Mutex::new(stt_sink));
-
-    let ctx = SttContext {
+fn build_stt_context(env: &SessionEnv, stt_sink: &WsSink) -> SttContext {
+    SttContext {
         sessions: env.sessions.clone(),
         session_id: env.session_id.clone(),
         source_lang: env.source_lang.clone(),
@@ -154,12 +175,7 @@ async fn run_one_connection(
         tts_api_key: env.tts_api_key.clone(),
         default_voice: env.default_voice.clone(),
         http_client: env.http_client.clone(),
-    };
-
-    let send_task = spawn_send_task(&env.audio_rx, &ctx);
-    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state);
-
-    await_tasks(send_task, recv_task).await
+    }
 }
 
 fn spawn_send_task(audio_rx: &AudioRx, ctx: &SttContext) -> tokio::task::JoinHandle<()> {

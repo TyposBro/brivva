@@ -195,7 +195,12 @@ async fn run_tts_if_eligible(
 
     log_tts_start(task, output);
     let req = build_tts_request(ctx, &output.text, &task.target);
-    crate::shared::tts::do_tts(client, &req, &ctx.sessions, &ctx.session_id).await;
+    let tts_env = crate::shared::tts::TtsEnv {
+        client,
+        sessions: &ctx.sessions,
+        session_id: &ctx.session_id,
+    };
+    crate::shared::tts::do_tts(&tts_env, &req).await;
     log_tts_complete(task, output.step_start);
 }
 

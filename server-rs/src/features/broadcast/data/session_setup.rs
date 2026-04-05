@@ -9,22 +9,33 @@ use crate::shared::voice_clone;
 
 use super::ws_handler::{WsQuery, BroadcastDeps};
 
+// ── Internal types ──────────────────────────────────────────────────────────
+
+struct SessionParams {
+    session_id: String,
+    source_lang: Lang,
+    target_langs: Vec<Lang>,
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 pub fn create_session(query: &WsQuery, sessions: &Sessions) -> Option<(String, Lang)> {
-    let source_lang = Lang::from_str(&query.source_lang).unwrap_or(Lang::En);
     let target_langs = parse_target_langs(&query.target_langs);
     if target_langs.is_empty() {
         tracing::warn!("[WS] No valid target languages, closing");
         return None;
     }
 
-    let session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    log_session_start(&session_id, &source_lang, &target_langs, query);
-    let session = build_session(&session_id, &source_lang, target_langs, query);
-    sessions.insert(session_id.clone(), session);
+    let params = SessionParams {
+        session_id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+        source_lang: Lang::from_str(&query.source_lang).unwrap_or(Lang::En),
+        target_langs,
+    };
+    log_session_start(&params, query);
+    let session = build_session(&params, query);
+    sessions.insert(params.session_id.clone(), session);
 
-    Some((session_id, source_lang))
+    Some((params.session_id, params.source_lang))
 }
 
 pub fn attach_host_channel(sessions: &Sessions, session_id: &str, host_tx: mpsc::UnboundedSender<Message>) {
@@ -64,17 +75,22 @@ fn parse_target_langs(raw: &str) -> Vec<Lang> {
         .collect()
 }
 
-fn log_session_start(session_id: &str, source_lang: &Lang, target_langs: &[Lang], query: &WsQuery) {
+fn log_session_start(params: &SessionParams, query: &WsQuery) {
     let tts_model = resolve_tts_model(&query.tts_model);
     tracing::info!(
         "[WS] Session {} started: {} -> {:?} (tier {}, tts={})",
-        session_id, source_lang, target_langs, query.tier, tts_model,
+        params.session_id, params.source_lang, params.target_langs, query.tier, tts_model,
     );
 }
 
-fn build_session(session_id: &str, source_lang: &Lang, target_langs: Vec<Lang>, query: &WsQuery) -> Session {
+fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
     let tts_model = resolve_tts_model(&query.tts_model);
-    let mut session = Session::new(session_id.to_string(), source_lang.clone(), target_langs, query.tier);
+    let mut session = Session::new(
+        params.session_id.clone(),
+        params.source_lang.clone(),
+        params.target_langs.clone(),
+        query.tier,
+    );
     session.tts_model = tts_model;
     apply_persisted_voice(&mut session);
     session
