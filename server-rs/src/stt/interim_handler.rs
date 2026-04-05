@@ -3,8 +3,8 @@
 use std::time::Instant;
 use tracing::{info, error};
 
-use crate::tts::StyleParams;
-use crate::core::types::{ServerMsg};
+use crate::core::types::StyleParams;
+use crate::features::broadcast::domain::ServerMsg;
 
 use super::state::{SttState, SttContext};
 

@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -24,4 +25,9 @@ export default defineConfig({
   },
   // Env variables starting with TAURI_ are exposed to the frontend
   envPrefix: ["VITE_", "TAURI_"],
+  test: {
+    environment: "jsdom",
+    globals: true,
+    include: ["src/**/*.test.{ts,tsx}"],
+  },
 });

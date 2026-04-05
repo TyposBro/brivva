@@ -164,3 +164,138 @@ fn count_silent_ratio(energies: &[f32], threshold: f32) -> f32 {
     let silent = energies.iter().filter(|e| **e < threshold).count();
     silent as f32 / energies.len() as f32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── decode_pcm_samples ────────────────────────���─────
+
+    #[test]
+    fn should_decode_pcm_to_normalized_float() {
+        // 16384 as i16 little-endian = [0x00, 0x40]
+        let pcm = 16384i16.to_le_bytes();
+
+        let samples = decode_pcm_samples(&pcm);
+
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0] - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_decode_silence_to_zero() {
+        let pcm = 0i16.to_le_bytes();
+
+        let samples = decode_pcm_samples(&pcm);
+
+        assert_eq!(samples[0], 0.0);
+    }
+
+    // ── compute_energy_rms ──────────────────────��───────
+
+    #[test]
+    fn should_compute_rms_for_known_values() {
+        let samples = vec![0.5, -0.5, 0.5, -0.5];
+
+        let rms = compute_energy_rms(&samples);
+
+        assert!((rms - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_return_zero_rms_for_silence() {
+        let samples = vec![0.0; 100];
+
+        let rms = compute_energy_rms(&samples);
+
+        assert_eq!(rms, 0.0);
+    }
+
+    // ── mean_and_std ────────────────────────────────────
+
+    #[test]
+    fn should_compute_mean_and_std() {
+        let values = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+
+        let (mean, std) = mean_and_std(&values);
+
+        assert!((mean - 5.0).abs() < 0.001);
+        assert!(std > 0.0);
+    }
+
+    #[test]
+    fn should_return_zero_for_empty_values() {
+        let (mean, std) = mean_and_std(&[]);
+
+        assert_eq!(mean, 0.0);
+        assert_eq!(std, 0.0);
+    }
+
+    // ── classify_emotion ────────────────────────────────
+
+    #[test]
+    fn should_classify_excited() {
+        let prosody = Prosody {
+            pitch_mean: 250.0,
+            pitch_std: 100.0,
+            energy_rms: 0.05,
+            speaking_rate_wpm: 0,
+            pause_density: 0.0,
+            duration_s: 1.0,
+        };
+
+        assert_eq!(classify_emotion(&prosody), "excited");
+    }
+
+    #[test]
+    fn should_classify_angry() {
+        let prosody = Prosody {
+            pitch_mean: 150.0,
+            pitch_std: 100.0,
+            energy_rms: 0.05,
+            speaking_rate_wpm: 0,
+            pause_density: 0.0,
+            duration_s: 1.0,
+        };
+
+        assert_eq!(classify_emotion(&prosody), "angry");
+    }
+
+    #[test]
+    fn should_classify_sad() {
+        let prosody = Prosody {
+            pitch_mean: 100.0,
+            pitch_std: 40.0,
+            energy_rms: 0.01,
+            speaking_rate_wpm: 0,
+            pause_density: 0.5,
+            duration_s: 1.0,
+        };
+
+        assert_eq!(classify_emotion(&prosody), "sad");
+    }
+
+    #[test]
+    fn should_classify_neutral_for_moderate_values() {
+        let prosody = Prosody {
+            pitch_mean: 150.0,
+            pitch_std: 70.0,
+            energy_rms: 0.025,
+            speaking_rate_wpm: 0,
+            pause_density: 0.2,
+            duration_s: 1.0,
+        };
+
+        assert_eq!(classify_emotion(&prosody), "neutral");
+    }
+
+    #[test]
+    fn should_return_zero_prosody_for_short_audio() {
+        let pcm = vec![0u8; 100]; // Too short
+
+        let prosody = extract_prosody(&pcm, 44100);
+
+        assert_eq!(prosody.pitch_mean, 0.0);
+        assert_eq!(prosody.energy_rms, 0.0);
+    }
+}

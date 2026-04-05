@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
 use crate::core::config::DEFAULT_TTS_MODEL;
-use crate::core::types::{Lang, Session, Sessions};
+use crate::core::types::Lang; use crate::features::broadcast::domain::{Session, Sessions};
 use crate::voice_clone;
 
 use super::WsQuery;

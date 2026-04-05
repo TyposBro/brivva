@@ -236,3 +236,117 @@ pub fn classify_speaking_speed(avg_wpm: f32) -> (&'static str, f64, f64) {
         ("normal", DEFAULT_ENDPOINTING_SECS, DEFAULT_MAX_DURATION_SECS)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── find_clause_boundary ──────────────��──────────────
+
+    #[test]
+    fn should_find_english_clause_boundary() {
+        let result = find_clause_boundary(
+            "Hello, and then the rest of the story",
+            markers::ENGLISH_MARKERS,
+            3,
+        );
+
+        assert!(result);
+    }
+
+    #[test]
+    fn should_not_find_boundary_when_not_enough_chars_after() {
+        let result = find_clause_boundary(
+            "Hello, and ab",
+            markers::ENGLISH_MARKERS,
+            3,
+        );
+
+        assert!(!result);
+    }
+
+    #[test]
+    fn should_return_false_when_no_marker_present() {
+        let result = find_clause_boundary(
+            "Hello world",
+            markers::ENGLISH_MARKERS,
+            3,
+        );
+
+        assert!(!result);
+    }
+
+    // ── classify_speaking_speed ──────────────────────────
+
+    #[test]
+    fn should_classify_fast_speaking() {
+        let (label, _, _) = classify_speaking_speed(200.0);
+
+        assert_eq!(label, "fast");
+    }
+
+    #[test]
+    fn should_classify_slow_speaking() {
+        let (label, _, _) = classify_speaking_speed(100.0);
+
+        assert_eq!(label, "slow");
+    }
+
+    #[test]
+    fn should_classify_normal_speaking() {
+        let (label, _, _) = classify_speaking_speed(150.0);
+
+        assert_eq!(label, "normal");
+    }
+
+    // ── derive_normalized_position ──────────────────────
+
+    #[test]
+    fn should_derive_position_for_exact_prefix() {
+        let pos = derive_normalized_position("Hello", "Hello world");
+
+        assert_eq!(pos, 5);
+    }
+
+    #[test]
+    fn should_derive_position_ignoring_punctuation() {
+        let pos = derive_normalized_position("Hello,", "Hello world");
+
+        assert_eq!(pos, 5);
+    }
+
+    #[test]
+    fn should_return_zero_when_no_match() {
+        let pos = derive_normalized_position("zzzzz", "Hello world");
+
+        assert_eq!(pos, 0);
+    }
+
+    // ── find_progressive_boundary ───────────────────────
+
+    #[test]
+    fn should_find_progressive_boundary_after_marker() {
+        let result = find_progressive_boundary(
+            "first clause, and then some more text here",
+            markers::ENGLISH_MARKERS,
+            3,
+            0,
+            "first clause, and then some more text here",
+        );
+
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn should_not_find_progressive_boundary_without_enough_trailing_text() {
+        let result = find_progressive_boundary(
+            "first clause, and ab",
+            markers::ENGLISH_MARKERS,
+            3,
+            0,
+            "first clause, and ab",
+        );
+
+        assert!(result.is_none());
+    }
+}

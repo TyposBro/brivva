@@ -162,3 +162,82 @@ fn fade_sample(pcm: &mut [u8], offset: usize, index: usize, total: usize) {
     pcm[offset] = bytes[0];
     pcm[offset + 1] = bytes[1];
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_append_data_to_buffer() {
+        let spcm = StreamingPcm::new();
+
+        spcm.append(&[1, 2, 3]);
+
+        let buf = spcm.pcm.lock().unwrap();
+        assert_eq!(&*buf, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn should_start_not_complete() {
+        let spcm = StreamingPcm::new();
+
+        assert!(!spcm.complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_mark_complete_on_finish() {
+        let spcm = StreamingPcm::new();
+
+        spcm.finish();
+
+        assert!(spcm.complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_respect_max_bytes_limit() {
+        let spcm = StreamingPcm::new();
+
+        spcm.append_with_limit(&[0u8; 20], 10);
+
+        let buf = spcm.pcm.lock().unwrap();
+        assert_eq!(buf.len(), 10);
+        assert!(spcm.complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_not_append_when_already_at_limit() {
+        let spcm = StreamingPcm::new();
+        spcm.append_with_limit(&[0u8; 10], 10);
+
+        spcm.append_with_limit(&[1u8; 5], 10);
+
+        let buf = spcm.pcm.lock().unwrap();
+        assert_eq!(buf.len(), 10);
+    }
+
+    #[test]
+    fn should_truncate_with_fadeout_when_over_max() {
+        let max = 5000;
+        let mut pcm = vec![0u8; 10000];
+        // Fill with max-amplitude samples (0x7FFF = 32767)
+        for chunk in pcm.chunks_exact_mut(2) {
+            chunk.copy_from_slice(&0x7FFFi16.to_le_bytes());
+        }
+
+        truncate_with_fadeout(&mut pcm, max);
+
+        assert_eq!(pcm.len(), max);
+        // Last sample should be attenuated toward zero
+        let last_sample = i16::from_le_bytes([pcm[max - 2], pcm[max - 1]]);
+        assert!(last_sample.abs() < 100, "last sample should be near zero, got {last_sample}");
+    }
+
+    #[test]
+    fn should_not_truncate_when_under_max() {
+        let mut pcm = vec![0xAB; 100];
+
+        truncate_with_fadeout(&mut pcm, 200);
+
+        assert_eq!(pcm.len(), 100);
+    }
+}

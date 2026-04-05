@@ -7,8 +7,8 @@ use tracing::{info, error, debug};
 
 use crate::core::config::BYTES_PER_SEC;
 use crate::stt::config::{ADAPTIVE_SAMPLE_COUNT, MAX_VALID_WPM, PASSTHROUGH_PADDING_SECS};
-use crate::tts::StyleParams;
-use crate::core::types::{Lang, ServerMsg};
+use crate::core::types::StyleParams;
+use crate::core::types::Lang; use crate::features::broadcast::domain::ServerMsg;
 
 use super::state::{ExitReason, SttState, SttContext};
 
@@ -188,7 +188,7 @@ fn emit_final(utterance: &FinalUtterance, ctx: &SttContext) {
 }
 
 fn send_final_msg(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
+    session: &dashmap::mapref::one::Ref<'_, String, crate::features::broadcast::domain::Session>,
     transcript: &str,
     uid: u64,
 ) {
@@ -199,7 +199,7 @@ fn send_final_msg(
 }
 
 fn read_pipeline_params(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
+    session: &dashmap::mapref::one::Ref<'_, String, crate::features::broadcast::domain::Session>,
     utterance: &FinalUtterance,
 ) -> (Vec<Lang>, u8) {
     let active = session.active_langs();

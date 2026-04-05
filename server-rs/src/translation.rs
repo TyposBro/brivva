@@ -141,3 +141,54 @@ fn strip_context_prefix(text: &str, had_context: bool) -> String {
         None => text.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_query_text ────────────────────────────���───
+
+    #[test]
+    fn should_prepend_context_with_separator() {
+        let result = build_query_text("hello", Some("context"));
+
+        assert_eq!(result, "context ||| hello");
+    }
+
+    #[test]
+    fn should_return_text_as_is_without_context() {
+        let result = build_query_text("hello", None);
+
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn should_return_text_as_is_with_empty_context() {
+        let result = build_query_text("hello", Some(""));
+
+        assert_eq!(result, "hello");
+    }
+
+    // ── strip_context_prefix ────────────────────────────
+
+    #[test]
+    fn should_strip_context_prefix() {
+        let result = strip_context_prefix("ctx ||| result", true);
+
+        assert_eq!(result, "result");
+    }
+
+    #[test]
+    fn should_return_full_text_when_no_separator_found() {
+        let result = strip_context_prefix("no separator here", true);
+
+        assert_eq!(result, "no separator here");
+    }
+
+    #[test]
+    fn should_return_full_text_when_no_context_was_used() {
+        let result = strip_context_prefix("anything ||| extra", false);
+
+        assert_eq!(result, "anything ||| extra");
+    }
+}

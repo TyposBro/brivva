@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
-use crate::core::types::{Lang, Sessions};
+use crate::core::types::Lang; use crate::features::broadcast::domain::Sessions;
 
 /// Immutable session context shared across all STT message handlers.
 #[derive(Clone)]

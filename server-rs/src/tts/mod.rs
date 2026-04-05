@@ -7,7 +7,8 @@ pub(crate) mod ws;
 pub(crate) mod rest;
 
 // Re-export public API to maintain existing import paths
-pub use config::{StyleParams, TTS_API_KEY, DEFAULT_VOICE};
+pub use crate::core::types::StyleParams;
+pub use config::{TTS_API_KEY, DEFAULT_VOICE};
 pub use orchestrator::{do_tts, TtsRequest};
 pub use ws::do_tts_ws;
 pub use rest::do_tts_rest;

@@ -1,7 +1,7 @@
 //! Session cleanup on WebSocket disconnect.
 
 use std::sync::atomic::Ordering;
-use crate::core::types::Sessions;
+use crate::features::broadcast::domain::Sessions;
 
 pub async fn cleanup_session(session_id: &str, sessions: &Sessions) {
     tracing::info!("[WS] Session {} ending -- starting cleanup", session_id);
@@ -11,7 +11,7 @@ pub async fn cleanup_session(session_id: &str, sessions: &Sessions) {
     tracing::info!("[WS] Session {} cleanup complete", session_id);
 }
 
-async fn stop_rtmp(session_id: &str, session: &crate::core::types::Session) {
+async fn stop_rtmp(session_id: &str, session: &crate::features::broadcast::domain::Session) {
     tracing::info!("[WS:{}] signaling RTMP stop", session_id);
     session.rtmp_stop.store(true, Ordering::Release);
     if let Some(ref mgr) = session.rtmp_manager {

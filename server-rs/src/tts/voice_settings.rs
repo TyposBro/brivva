@@ -36,3 +36,38 @@ impl VoiceStyle {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_return_excited_style() {
+        let style = VoiceStyle::from_emotion("excited");
+
+        assert_eq!(style.stability, 0.20);
+        assert_eq!(style.similarity_boost, 0.50);
+        assert_eq!(style.style, 0.90);
+        assert_eq!(style.speed, 1.20);
+    }
+
+    #[test]
+    fn should_return_default_for_unknown_emotion() {
+        let style = VoiceStyle::from_emotion("confused");
+
+        assert_eq!(style.stability, 0.50);
+        assert_eq!(style.speed, 1.00);
+        assert_eq!(style.style, 0.00);
+    }
+
+    #[test]
+    fn should_generate_voice_settings_json_with_custom_speed() {
+        let style = VoiceStyle::from_emotion("happy");
+        let json = style.to_voice_settings(1.15);
+
+        assert_eq!(json["stability"], 0.30);
+        assert_eq!(json["similarity_boost"], 0.60);
+        assert_eq!(json["style"], 0.70);
+        assert_eq!(json["speed"], 1.15);
+    }
+}

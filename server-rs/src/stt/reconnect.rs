@@ -9,7 +9,7 @@ use tracing::error;
 
 use crate::core::config::STT_RECONNECT_DELAY_SECS;
 use crate::stt::config::{DEFAULT_ENDPOINTING_SECS, DEFAULT_MAX_DURATION_SECS};
-use crate::core::types::{Lang, Sessions};
+use crate::core::types::Lang; use crate::features::broadcast::domain::Sessions;
 
 use super::state::{ExitReason, SttState, SttCarryOver, SttContext, MessageAction, WsStream};
 use super::connection::{connect_gladia, ConnectionConfig, ConnectSession};

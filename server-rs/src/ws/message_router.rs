@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::core::config::{MSG_TAG_AUDIO, MSG_TAG_VIDEO};
-use crate::core::types::Sessions;
+use crate::features::broadcast::domain::Sessions;
 
 use super::rtmp_handlers;
 

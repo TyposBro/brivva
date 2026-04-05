@@ -1,6 +1,6 @@
 //! TTS configuration: API keys, style params, response types.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::LazyLock;
 
 use crate::core::config::DEFAULT_VOICE_ID;
@@ -15,24 +15,6 @@ pub static DEFAULT_VOICE: LazyLock<String> = LazyLock::new(|| {
     std::env::var("DEFAULT_VOICE")
         .unwrap_or_else(|_| DEFAULT_VOICE_ID.to_string())
 });
-
-/// TTS style parameters mapped from prosody/emotion analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StyleParams {
-    #[serde(default = "default_speed")]
-    pub speed: f64,
-    #[serde(default = "default_emotion")]
-    pub emotion: String,
-}
-
-fn default_speed() -> f64 { 1.0 }
-fn default_emotion() -> String { "neutral".to_string() }
-
-impl Default for StyleParams {
-    fn default() -> Self {
-        Self { speed: 1.0, emotion: "neutral".to_string() }
-    }
-}
 
 /// ElevenLabs WebSocket response shape.
 #[derive(Debug, Deserialize)]

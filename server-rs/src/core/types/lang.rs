@@ -31,3 +31,41 @@ impl Lang {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_parse_en() {
+        assert_eq!(Lang::from_str("en"), Some(Lang::En));
+    }
+
+    #[test]
+    fn should_parse_ja() {
+        assert_eq!(Lang::from_str("ja"), Some(Lang::Ja));
+    }
+
+    #[test]
+    fn should_parse_zh() {
+        assert_eq!(Lang::from_str("zh"), Some(Lang::Zh));
+    }
+
+    #[test]
+    fn should_parse_ko() {
+        assert_eq!(Lang::from_str("ko"), Some(Lang::Ko));
+    }
+
+    #[test]
+    fn should_return_none_for_unknown_code() {
+        assert_eq!(Lang::from_str("fr"), None);
+    }
+
+    #[test]
+    fn should_display_roundtrip() {
+        for (code, lang) in [("en", Lang::En), ("ja", Lang::Ja), ("zh", Lang::Zh), ("ko", Lang::Ko)] {
+            assert_eq!(lang.to_string(), code);
+            assert_eq!(Lang::from_str(&lang.to_string()), Some(lang));
+        }
+    }
+}
