@@ -99,9 +99,9 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 - Default broadcast delay: 3000ms
 - Quality bar: "better than hiring 4 more human interpreters"
 
-## Active Bugs (Apr 6, 2026)
+## Bugs Fixed (Apr 6, 2026)
 
-### Bug: FFmpeg crashes on first video chunk (P0 — BLOCKING)
+### Bug: FFmpeg crashes on first video chunk (P0 — FIXED)
 
 **Symptom:** Every session, FFmpeg crashes immediately on first video data. Auto-restarts and works after, but ~5s of video is lost. Audio keeps flowing → permanent ~5s audio-ahead-of-video desync. Confirmed by counting with fingers on camera at 1s broadcast delay.
 
@@ -120,21 +120,19 @@ Process crashed for lang=ru, exit=183
 - After restart, FFmpeg works perfectly — init segment is written first
 - The bug is that first-spawn doesn't wait for init segment before piping data
 
-**Fix direction:** Buffer video chunks in the drain thread until the init segment is available. Once init segment is captured, write it first, then flush buffered chunks, then continue normal drain loop. The init segment is already stored in `video_init_segment: Arc<StdMutex<Option<Vec<u8>>>>` on RtmpManager.
+**Fix (Apr 6):** `video_drain.rs` — Added `write_init_segment_on_first_spawn()` that polls for the init segment and writes it to FFmpeg stdin before any data chunks. The deeper root cause: `trim_video_for_activation()` was removing the init segment from the chunk buffer because it's older than `broadcast_delay` by the time first audio arrives. Now both first-spawn and restart paths write the init segment first.
 
-### Bug: TTS returns 0 bytes on first 1-2 calls
+### Bug: TTS returns 0 bytes on first 1-2 calls (FIXED)
 
 **Symptom:** First 1-2 ElevenLabs TTS WebSocket calls per session return empty audio (0 bytes). Subsequent calls work fine.
 
-**Likely cause:** ElevenLabs WebSocket connection not fully established before first text is sent. Or voice clone not warmed up for the target language.
+**Fix (Apr 6):** `ws.rs` — Extracted `do_tts_ws_once()` and added automatic retry in `do_tts_ws()` when the first attempt returns 0 audio bytes.
 
-**Impact:** First 1-2 utterances have no translated audio. Silence during the first ~10s of the stream.
+### Bug: TTS timeouts at low broadcast delay (FIXED)
 
-### Bug: TTS timeouts at low broadcast delay
+**Symptom:** At 1s broadcast delay, TTS deadline becomes 500ms (broadcast_delay - 500ms). ElevenLabs Turbo v2.5 often exceeds this, causing TIMEOUT.
 
-**Symptom:** At 1s broadcast delay, TTS deadline becomes 500ms (broadcast_delay - 500ms). ElevenLabs Turbo v2.5 often exceeds this, causing TIMEOUT. Multiple utterances lost.
-
-**Fix:** Set a minimum TTS deadline floor (e.g., 3s) regardless of broadcast delay. The broadcast delay controls A/V sync timing, not TTS generation budget — these should be decoupled.
+**Fix (Apr 6):** `config.rs` + `pipeline_budget.rs` — Added `TTS_DEADLINE_FLOOR_MS = 3000`. `compute_tts_deadline()` now returns `max(min(delay - margin, cap), floor)`. Decouples TTS generation budget from broadcast delay.
 
 ### Subtitle overlay (drawtext) breaks YouTube streaming
 

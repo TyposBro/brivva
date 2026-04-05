@@ -13,33 +13,21 @@ All tasks done. Gladia, Google Translate, ProgressiveChunkDetector fully removed
 
 ---
 
-## Priority 2: Fix Critical Bugs (Current Focus)
+## Priority 2: Critical Bug Fixes — COMPLETE (Apr 6)
 
-### P0 — FFmpeg crash on first video chunk (BLOCKING)
+| # | Bug | Fix | Status |
+|---|-----|-----|--------|
+| **V1** | FFmpeg crash on first video chunk (P0) | `video_drain.rs` — `write_init_segment_on_first_spawn()` polls for init segment and writes to stdin before any data chunks. Root cause: `trim_video_for_activation()` removed init segment from chunk buffer (older than broadcast_delay). Now both first-spawn and restart paths write init segment first. | **Fixed** |
+| V2 | TTS 0 bytes on first calls | `ws.rs` — extracted `do_tts_ws_once()`, added automatic retry in `do_tts_ws()` when first attempt returns 0 audio bytes (ElevenLabs cold-start). | **Fixed** |
+| V3 | TTS timeout at low broadcast delay | `config.rs` + `pipeline_budget.rs` — added `TTS_DEADLINE_FLOOR_MS = 3000`. `compute_tts_deadline()` returns `max(min(delay - margin, cap), floor)`. At 1s delay, deadline is 3s instead of 500ms. | **Fixed** |
 
-**Every session:** FFmpeg crashes on the first video data with `could not find corresponding trex (id 1)` → exit 183. Auto-restarts (attempt 1/50) but loses ~5-7s of video. This causes a permanent ~5s audio-ahead-of-video desync because audio keeps flowing during the crash+restart cycle.
-
-**Root cause:** MediaRecorder outputs fragmented MP4. The init segment (moov/trex) must be written to FFmpeg's stdin before the first moof fragment. The video drain is writing data chunks before FFmpeg has parsed the init segment headers.
-
-**Evidence:**
-- Happens in every test session (3/3 on Apr 5-6)
-- `[VIDEO] replaying init segment (929431B) for restart` — init segment IS available, but only replayed on restart, not on first spawn
-- After restart, FFmpeg works perfectly — the restart correctly writes init segment first
-- Audio-video desync confirmed: at 1s broadcast delay, audio arrives ~5s before video (tested with finger counting)
-
-| # | Task | Status | Notes |
-|---|------|--------|-------|
-| **V1** | **Fix init segment ordering** | **Open** | Ensure init segment is written to FFmpeg stdin before any moof data. Likely need to buffer video chunks until init segment is captured, then write init + buffered chunks. |
-| V2 | TTS cold-start empty response | Open | First 1-2 ElevenLabs TTS calls return 0 audio bytes. Likely WebSocket not fully ready. Consider warm-up call or retry. |
-| V3 | TTS timeout at 1s broadcast delay | Open | Multiple TTS timeouts when delay=1s. TTS deadline is min(broadcast_delay-500ms, 10s) — at 1s delay, deadline is 500ms. Too short for Expressive model. |
-
-### Production Polish
+### Production Polish (Current Focus)
 
 Quality and reliability for the demo. Target: 30+ min session, zero hiccups.
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| P1 | E2E live test (KO→JP) | Open | Full test on Coupang KR → Rakuten JP with real merchant accounts. Blocked by V1. |
+| P1 | E2E live test (KO→JP) | Open | Full test on Coupang KR → Rakuten JP with real merchant accounts |
 | P2 | Voice cloning quality test | Open | 30s sample → cloned voice → compare with real host. Is it "better than hiring a human"? |
 | P3 | 30-minute endurance test | Open | Continuous streaming, monitor for crashes, drift, FIFO starvation. Blocked by V1. |
 | P4 | Backup demo recording | Open | Screen record a flawless session in case live demo fails. Blocked by V1. |

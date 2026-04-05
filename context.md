@@ -101,15 +101,13 @@ Maps to 9 emotions → TTS voice style + speed:
 - **Drift tracking:** `Arc<AtomicU64>` per stream, `max_drift_ms()` API
 - **Logging:** `tracing_subscriber` → stderr + `/tmp/brivva/server.log`
 
-## Active Bugs (Apr 6)
+## Recently Fixed Bugs (Apr 6)
 
-**P0 — FFmpeg crashes on first video chunk.** Every session. Init segment (moov/trex) not written to stdin before first moof fragment → FFmpeg exits 183 → auto-restarts → works after restart but ~5s video lost → permanent audio-ahead-of-video desync. See `problem.md` for full analysis. **This is the #1 blocker.**
+- **V1 (P0): FFmpeg init segment crash** — `video_drain.rs` now writes init segment to stdin before any data chunks. Root cause: `trim_video_for_activation()` was removing it from the buffer. Fixed for both first-spawn and restart paths.
+- **V2: TTS cold-start 0 bytes** — `ws.rs` auto-retries when first ElevenLabs call returns empty audio.
+- **V3: TTS timeout at low delay** — `TTS_DEADLINE_FLOOR_MS = 3000` ensures minimum 3s TTS budget regardless of broadcast delay.
 
-**P1 — TTS returns 0 bytes on first 1-2 calls.** ElevenLabs cold-start issue. First utterances have no translated audio.
-
-**P1 — TTS timeouts at low broadcast delay.** TTS deadline = broadcast_delay - 500ms. At 1s delay → 500ms deadline → too short. Need minimum floor.
-
-**P2 — Subtitle overlay (drawtext) breaks YouTube.** Disabled by default (`BRIVVA_SUBTITLES=1` to enable). Fontconfig missing in bundled FFmpeg.
+**Known issue:** Subtitle overlay (drawtext) disabled by default (`BRIVVA_SUBTITLES=1`). Breaks YouTube streaming (Fontconfig missing in bundled FFmpeg).
 
 ## Pipeline is Commodity — Moat is Elsewhere
 
