@@ -98,3 +98,48 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 - Must handle 4+ languages simultaneously
 - Default broadcast delay: 3000ms
 - Quality bar: "better than hiring 4 more human interpreters"
+
+## Active Bugs (Apr 6, 2026)
+
+### Bug: FFmpeg crashes on first video chunk (P0 — BLOCKING)
+
+**Symptom:** Every session, FFmpeg crashes immediately on first video data. Auto-restarts and works after, but ~5s of video is lost. Audio keeps flowing → permanent ~5s audio-ahead-of-video desync. Confirmed by counting with fingers on camera at 1s broadcast delay.
+
+**FFmpeg error:**
+```
+could not find corresponding trex (id 1)
+error reading header
+Error opening input file pipe:0
+Process crashed for lang=ru, exit=183
+```
+
+**Root cause:** MediaRecorder outputs fragmented MP4 (fMP4). FFmpeg needs the init segment (moov atom with trex boxes) before it can parse any moof/trun fragments. The video drain starts writing data chunks to FFmpeg's stdin before the init segment arrives. FFmpeg sees a trun box without a preceding trex → crashes.
+
+**Evidence:**
+- On restart, `replaying init segment (929431B)` is logged — the init segment IS captured and available
+- After restart, FFmpeg works perfectly — init segment is written first
+- The bug is that first-spawn doesn't wait for init segment before piping data
+
+**Fix direction:** Buffer video chunks in the drain thread until the init segment is available. Once init segment is captured, write it first, then flush buffered chunks, then continue normal drain loop. The init segment is already stored in `video_init_segment: Arc<StdMutex<Option<Vec<u8>>>>` on RtmpManager.
+
+### Bug: TTS returns 0 bytes on first 1-2 calls
+
+**Symptom:** First 1-2 ElevenLabs TTS WebSocket calls per session return empty audio (0 bytes). Subsequent calls work fine.
+
+**Likely cause:** ElevenLabs WebSocket connection not fully established before first text is sent. Or voice clone not warmed up for the target language.
+
+**Impact:** First 1-2 utterances have no translated audio. Silence during the first ~10s of the stream.
+
+### Bug: TTS timeouts at low broadcast delay
+
+**Symptom:** At 1s broadcast delay, TTS deadline becomes 500ms (broadcast_delay - 500ms). ElevenLabs Turbo v2.5 often exceeds this, causing TIMEOUT. Multiple utterances lost.
+
+**Fix:** Set a minimum TTS deadline floor (e.g., 3s) regardless of broadcast delay. The broadcast delay controls A/V sync timing, not TTS generation budget — these should be decoupled.
+
+### Subtitle overlay (drawtext) breaks YouTube streaming
+
+**Symptom:** Adding `-vf drawtext` to FFmpeg args causes YouTube to show "Preparing stream" indefinitely. Stream health shows "Excellent" but video never appears.
+
+**Likely cause:** drawtext filter + Fontconfig error (`Cannot load default config file: No such file`) produces output YouTube can't parse. Or the decode→filter→re-encode pipeline changes the H.264 output in a way YouTube rejects.
+
+**Status:** Disabled by default. Enable with `BRIVVA_SUBTITLES=1` env var. Needs investigation — may need to bundle fontconfig, or use a different subtitle approach.
