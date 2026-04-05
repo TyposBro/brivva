@@ -1,5 +1,5 @@
 import { useRef, useEffect } from "react";
-import { LANGS, type TranscriptEntry } from "../constants";
+import { LANGS, type TranscriptEntry } from "../../domain/broadcast-types";
 
 type Props = {
   transcripts: TranscriptEntry[];

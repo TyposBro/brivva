@@ -1,4 +1,4 @@
-import { CLONE_DURATION_SEC } from "../constants";
+import { CLONE_DURATION_SEC } from "../../domain/broadcast-constants";
 
 type Props = {
   isCloning: boolean;

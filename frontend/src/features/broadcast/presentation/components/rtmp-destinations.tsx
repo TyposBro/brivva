@@ -1,4 +1,4 @@
-import { LANGS } from "../constants";
+import { LANGS } from "../../domain/broadcast-types";
 
 type Props = {
   sourceLang: string;

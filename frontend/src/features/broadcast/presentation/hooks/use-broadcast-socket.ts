@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback } from "react";
-import { API_BASE } from "../../../core/api/client";
-import { AudioPipeline } from "../lib/AudioPipeline";
-import { AUDIO_TAG, type TranscriptEntry, type TranslationTier } from "../constants";
+import { appConfig } from "../../../../orchestration/config/app-config";
+import { AudioPipeline } from "../../../../shared/media/audio-pipeline";
+import type { TranscriptEntry, TranslationTier } from "../../domain/broadcast-types";
+import { AUDIO_TAG } from "../../data/dtos";
 
 type SocketParams = {
   sourceLang: string;
@@ -85,7 +86,7 @@ function filterTargetLanguages(sourceLang: string, targetLangs: string[]): strin
 }
 
 function buildWsUrl(params: SocketParams, targets: string[]): string {
-  const base = API_BASE.replace(/^http/, "ws");
+  const base = appConfig.apiBaseUrl.replace(/^http/, "ws");
   return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}`;
 }
 

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { API_BASE } from "../../../core/api/client";
-import { float32ToInt16, mergePcmChunks } from "../../../core/audio/pcm";
-import { CLONE_DURATION_SEC, CLONE_SAMPLE_RATE, CLONE_BUFFER_SIZE, CLONE_PROGRESS_INTERVAL_MS } from "../constants";
+import { appConfig } from "../../../../orchestration/config/app-config";
+import { float32ToInt16, mergePcmChunks } from "../../../../core/audio/pcm";
+import { CLONE_DURATION_SEC, CLONE_SAMPLE_RATE, CLONE_BUFFER_SIZE, CLONE_PROGRESS_INTERVAL_MS } from "../../domain/broadcast-constants";
+import { checkVoiceStatus as fetchVoiceStatus, uploadVoiceClone } from "../../data/voice-clone-api-client";
 
 export function useVoiceClone(onError: (msg: string) => void) {
   const [isCloning, setIsCloning] = useState(false);
@@ -9,9 +10,8 @@ export function useVoiceClone(onError: (msg: string) => void) {
   const [voiceReady, setVoiceReady] = useState(false);
 
   const checkVoiceStatus = useCallback(() => {
-    fetch(`${API_BASE}/api/voice`)
-      .then((r) => r.json())
-      .then((data) => { if (data.active) setVoiceReady(true); })
+    fetchVoiceStatus(appConfig.apiBaseUrl)
+      .then((isActive) => { if (isActive) setVoiceReady(true); })
       .catch(() => {});
   }, []);
 
@@ -33,7 +33,12 @@ export function useVoiceClone(onError: (msg: string) => void) {
     const pcm = mergePcmChunks(chunks);
     setCloneProgress(1);
 
-    await uploadVoice(pcm, { onReady: setVoiceReady, onError });
+    try {
+      await uploadVoiceClone(appConfig.apiBaseUrl, pcm);
+      setVoiceReady(true);
+    } catch (e) {
+      onError(`${e}`);
+    }
     setIsCloning(false);
   }, [onError]);
 
@@ -73,23 +78,4 @@ function startProgressTimer(setProgress: (p: number) => void) {
 
 function waitForDuration() {
   return new Promise((resolve) => setTimeout(resolve, CLONE_DURATION_SEC * 1000));
-}
-
-type UploadCallbacks = {
-  onReady: (v: boolean) => void;
-  onError: (msg: string) => void;
-};
-
-async function uploadVoice(pcm: Int16Array, { onReady, onError }: UploadCallbacks) {
-  try {
-    const resp = await fetch(`${API_BASE}/api/voice/clone`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: new Uint8Array(pcm.buffer) as unknown as BodyInit,
-    });
-    if (resp.ok) onReady(true);
-    else onError(`Voice clone failed: ${await resp.text()}`);
-  } catch (e) {
-    onError(`Voice clone failed: ${e}`);
-  }
 }

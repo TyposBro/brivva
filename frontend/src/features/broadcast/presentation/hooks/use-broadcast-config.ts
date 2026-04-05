@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { STORAGE_KEY, type TranslationTier } from "../constants";
+import type { TranslationTier } from "../../domain/broadcast-types";
+import { STORAGE_KEY } from "../../domain/broadcast-constants";
 
 export type BroadcastConfig = {
   sourceLang: string;

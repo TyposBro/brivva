@@ -1,4 +1,4 @@
-import { DELAY_MIN, DELAY_MAX, DELAY_STEP } from "../../constants";
+import { DELAY_MIN, DELAY_MAX, DELAY_STEP } from "../../../domain/broadcast-constants";
 
 const MS_PER_SECOND = 1000;
 

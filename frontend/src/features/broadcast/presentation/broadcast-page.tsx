@@ -1,20 +1,20 @@
 import { useRef, useMemo } from "react";
-import { PageLayout } from "../../core/components/PageLayout";
-import { useBroadcastConfig } from "./hooks/useBroadcastConfig";
-import { useWebcam } from "./hooks/useWebcam";
-import { useVoiceClone } from "./hooks/useVoiceClone";
-import { useBroadcastSocket } from "./hooks/useBroadcastSocket";
-import { useMediaDevices } from "./hooks/useMediaDevices";
-import { useBroadcastHandlers } from "./hooks/useBroadcastHandlers";
-import { TierSelector } from "./components/TierSelector";
-import { LanguageConfig } from "./components/LanguageConfig";
-import { RtmpDestinations } from "./components/RtmpDestinations";
-import { BroadcastSettings } from "./components/BroadcastSettings";
-import { VoiceCloning } from "./components/VoiceCloning";
-import { LiveTranscript } from "./components/LiveTranscript";
-import { BroadcastControls } from "./components/BroadcastControls";
-import { ErrorBanners } from "./components/ErrorBanners";
-import { InfoFooter } from "./components/InfoFooter";
+import { PageLayout } from "../../../shared/ui-kit/page-layout";
+import { useBroadcastConfig } from "./hooks/use-broadcast-config";
+import { useWebcam } from "./hooks/use-webcam";
+import { useVoiceClone } from "./hooks/use-voice-clone";
+import { useBroadcastSocket } from "./hooks/use-broadcast-socket";
+import { useMediaDevices } from "./hooks/use-media-devices";
+import { useBroadcastHandlers } from "./hooks/use-broadcast-handlers";
+import { TierSelector } from "./components/tier-selector";
+import { LanguageConfig } from "./components/language-config";
+import { RtmpDestinations } from "./components/rtmp-destinations";
+import { BroadcastSettings } from "./components/broadcast-settings";
+import { VoiceCloning } from "./components/voice-cloning";
+import { LiveTranscript } from "./components/live-transcript";
+import { BroadcastControls } from "./components/broadcast-controls";
+import { ErrorBanners } from "./components/error-banners";
+import { InfoFooter } from "./components/info-footer";
 
 export default function BroadcastPage() {
   const { config, update } = useBroadcastConfig();

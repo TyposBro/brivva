@@ -1,8 +1,6 @@
 import { useRef, useCallback } from "react";
-import {
-  VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS,
-  VIDEO_BITRATE, RECORDING_CHUNK_MS, VIDEO_TAG,
-} from "../constants";
+import { VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS, VIDEO_BITRATE, RECORDING_CHUNK_MS } from "../../domain/broadcast-constants";
+import { VIDEO_TAG } from "../../data/dtos";
 
 export function useWebcam(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const recorderRef = useRef<MediaRecorder | null>(null);

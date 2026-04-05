@@ -1,1 +1,0 @@
-export const API_BASE = import.meta.env.VITE_WORKER_URL ?? "http://localhost:3000";

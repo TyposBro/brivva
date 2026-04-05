@@ -1,4 +1,4 @@
-import type { TranslationTier } from "../constants";
+import type { TranslationTier } from "../../domain/broadcast-types";
 
 type TierOption = { tier: TranslationTier; label: string; desc: string; cost: string; ready: boolean };
 

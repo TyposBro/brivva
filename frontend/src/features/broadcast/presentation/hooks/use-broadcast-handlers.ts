@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import type { BroadcastConfig } from "./useBroadcastConfig";
+import type { BroadcastConfig } from "./use-broadcast-config";
 
 type Deps = {
   config: BroadcastConfig;

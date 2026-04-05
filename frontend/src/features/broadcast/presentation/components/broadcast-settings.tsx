@@ -1,8 +1,8 @@
 import { useState } from "react";
-import type { BroadcastConfig } from "../hooks/useBroadcastConfig";
-import { DelaySlider } from "./settings/DelaySlider";
-import { DeviceSelect } from "./settings/DeviceSelect";
-import { TtsModelPicker } from "./settings/TtsModelPicker";
+import type { BroadcastConfig } from "../hooks/use-broadcast-config";
+import { DelaySlider } from "./settings/delay-slider";
+import { DeviceSelect } from "./settings/device-select";
+import { TtsModelPicker } from "./settings/tts-model-picker";
 
 type Props = {
   config: BroadcastConfig;
