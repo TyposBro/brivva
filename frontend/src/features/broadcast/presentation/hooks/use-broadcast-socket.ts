@@ -51,7 +51,12 @@ export function useBroadcastSocket(params: SocketParams) {
       case "final":            handleFinal(msg, dispatch); break;
       case "translation":      handleTranslation(msg, dispatch); break;
       case "chunk_translation": handleChunkTranslation(msg, dispatch); break;
-      case "pipeline_warning":  setPipelineWarnings((c) => c + 1); break;
+      case "pipeline_warning": {
+        setPipelineWarnings((c) => c + 1);
+        const w = msg as { kind: string; lang: string; detail: string };
+        addError(`[${w.kind}] ${w.lang}: ${w.detail}`);
+        break;
+      }
       case "error":            addError(msg.message); break;
     }
   }, [addError]);

@@ -23,7 +23,7 @@ pub(super) async fn process_soniox_message(
     };
 
     if resp.is_error() {
-        log_soniox_error(&resp);
+        log_soniox_error(&resp, ctx);
         state.exit_reason = ExitReason::Disconnected;
         return MessageAction::Break;
     }
@@ -35,12 +35,22 @@ pub(super) async fn process_soniox_message(
     process_tokens(&resp.tokens, state, ctx).await
 }
 
-fn log_soniox_error(resp: &SonioxResponse) {
-    error!(
-        "[STT] Soniox error {}: {}",
-        resp.error_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()),
-        resp.error_message.as_deref().unwrap_or("no message"),
-    );
+fn log_soniox_error(resp: &SonioxResponse, ctx: &SttContext) {
+    let code = resp.error_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+    let msg = resp.error_message.as_deref().unwrap_or("no message");
+    error!("[STT] Soniox error {}: {}", code, msg);
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &crate::core::types::ServerMsg::PipelineWarning {
+                    kind: "stt_error".to_string(),
+                    lang: ctx.source_lang.to_string(),
+                    detail: format!("Soniox error {}: {}", code, msg),
+                    utterance_id: 0,
+                },
+            ),
+        );
+    }
 }
 
 async fn process_tokens(

@@ -324,6 +324,7 @@ async fn handle_ws_message(
         Ok(m) => m,
         Err(e) => {
             error!("[STT] read error: {}", e);
+            send_error_to_host(ctx, &format!("STT read error: {}", e));
             state.exit_reason = ExitReason::Disconnected;
             return MessageAction::Break;
         }
@@ -381,6 +382,21 @@ fn notify_stt_disconnected(env: &SessionEnv, lang: &str) {
                     kind: "stt_disconnected".to_string(),
                     lang: lang.to_string(),
                     detail: "STT exhausted all reconnect attempts".to_string(),
+                    utterance_id: 0,
+                },
+            ),
+        );
+    }
+}
+
+fn send_error_to_host(ctx: &SttContext, detail: &str) {
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &crate::core::types::ServerMsg::PipelineWarning {
+                    kind: "stt_error".to_string(),
+                    lang: ctx.source_lang.to_string(),
+                    detail: detail.to_string(),
                     utterance_id: 0,
                 },
             ),
