@@ -13,7 +13,7 @@ export function useWebcam(videoRef: React.RefObject<HTMLVideoElement | null>) {
       attachPreview(videoRef, stream);
       const mimeType = negotiateCodec();
       notifyBackend(ws, mimeType);
-      recorderRef.current = createRecorder(stream, mimeType, ws);
+      recorderRef.current = createRecorder({ stream, mimeType, ws });
       recorderRef.current.start(RECORDING_CHUNK_MS);
     } catch (e) {
       console.error("[WEBCAM] Failed to start:", e);
@@ -52,13 +52,19 @@ function negotiateCodec(): string {
 
 function notifyBackend(ws: WebSocket, mimeType: string) {
   const isH264 = mimeType.includes("avc1") || mimeType.includes("h264");
-  console.log("[WEBCAM] MediaRecorder codec:", mimeType, isH264 ? "(H.264 — passthrough)" : "(re-encode)");
+  console.log("[WEBCAM] MediaRecorder codec:", mimeType, isH264 ? "(H.264 \u2014 passthrough)" : "(re-encode)");
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "video:codec", codec: isH264 ? "h264" : "vp8", mimeType }));
   }
 }
 
-function createRecorder(stream: MediaStream, mimeType: string, ws: WebSocket): MediaRecorder {
+type RecorderConfig = {
+  stream: MediaStream;
+  mimeType: string;
+  ws: WebSocket;
+};
+
+function createRecorder({ stream, mimeType, ws }: RecorderConfig): MediaRecorder {
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: VIDEO_BITRATE });
   recorder.ondataavailable = (e) => {
     if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {

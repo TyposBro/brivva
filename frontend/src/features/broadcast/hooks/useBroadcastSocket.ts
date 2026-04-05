@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
-import { API_BASE } from "../../../shared/api/client";
-import { AudioPipeline } from "../../../lib/AudioPipeline";
+import { API_BASE } from "../../../core/api/client";
+import { AudioPipeline } from "../lib/AudioPipeline";
 import { AUDIO_TAG, type TranscriptEntry, type TranslationTier } from "../constants";
 
 type SocketParams = {
@@ -29,6 +29,8 @@ export function useBroadcastSocket(params: SocketParams) {
     setErrors((prev) => [...prev, msg]);
   }, []);
 
+  const dispatch = { setInterim, setTranscripts };
+
   const handleMessage = useCallback((e: MessageEvent) => {
     if (typeof e.data !== "string") return;
     const msg = JSON.parse(e.data);
@@ -36,9 +38,9 @@ export function useBroadcastSocket(params: SocketParams) {
     switch (msg.type) {
       case "session:created":  setSessionId(msg.id); break;
       case "interim":          setInterim(msg.transcript); break;
-      case "final":            handleFinal(msg, setInterim, setTranscripts); break;
-      case "translation":      handleTranslation(msg, setTranscripts); break;
-      case "chunk_translation": handleChunkTranslation(msg, setTranscripts); break;
+      case "final":            handleFinal(msg, dispatch); break;
+      case "translation":      handleTranslation(msg, dispatch); break;
+      case "chunk_translation": handleChunkTranslation(msg, dispatch); break;
       case "error":            addError(msg.message); break;
     }
   }, [addError]);
@@ -47,13 +49,13 @@ export function useBroadcastSocket(params: SocketParams) {
     const available = filterTargetLanguages(params.sourceLang, params.targetLangs);
     if (available.length === 0) return;
 
-    const ws = await connectWebSocket(params, available, handleMessage, addError);
+    const ws = await connectWebSocket({ params, targets: available, onMessage: handleMessage, onError: addError });
     if (!ws) return;
 
     wsRef.current = ws;
-    registerCloseHandler(ws, addError, setIsLive, setSessionId);
+    registerCloseHandler(ws, { addError, setIsLive, setSessionId });
     await configureRtmpStreams(ws, params);
-    await startAudioCapture(ws, audioRef.current, params.audioDeviceId);
+    await startAudioCapture(ws, { audio: audioRef.current, deviceId: params.audioDeviceId });
 
     setIsLive(true);
     setTranscripts([]);
@@ -82,18 +84,20 @@ function filterTargetLanguages(sourceLang: string, targetLangs: string[]): strin
   return targetLangs.filter((l) => l !== sourceLang);
 }
 
-function buildWsUrl(sourceLang: string, targets: string[], tier: TranslationTier, ttsModel: string): string {
+function buildWsUrl(params: SocketParams, targets: string[]): string {
   const base = API_BASE.replace(/^http/, "ws");
-  return `${base}/ws?sourceLang=${sourceLang}&targetLangs=${targets.join(",")}&tier=${tier}&ttsModel=${ttsModel}`;
+  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}`;
 }
 
-async function connectWebSocket(
-  params: SocketParams,
-  targets: string[],
-  onMessage: (e: MessageEvent) => void,
-  onError: (msg: string) => void,
-): Promise<WebSocket | null> {
-  const url = buildWsUrl(params.sourceLang, targets, params.tier, params.ttsModel);
+type ConnectConfig = {
+  params: SocketParams;
+  targets: string[];
+  onMessage: (e: MessageEvent) => void;
+  onError: (msg: string) => void;
+};
+
+async function connectWebSocket({ params, targets, onMessage, onError }: ConnectConfig): Promise<WebSocket | null> {
+  const url = buildWsUrl(params, targets);
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onmessage = onMessage;
@@ -102,17 +106,18 @@ async function connectWebSocket(
     await waitForOpen(ws);
     return ws;
   } catch {
-    onError("Cannot connect — is the backend running?");
+    onError("Cannot connect \u2014 is the backend running?");
     return null;
   }
 }
 
-function registerCloseHandler(
-  ws: WebSocket,
-  addError: (msg: string) => void,
-  setIsLive: (v: boolean) => void,
-  setSessionId: (v: string | null) => void,
-): void {
+type CloseCallbacks = {
+  addError: (msg: string) => void;
+  setIsLive: (v: boolean) => void;
+  setSessionId: (v: string | null) => void;
+};
+
+function registerCloseHandler(ws: WebSocket, { addError, setIsLive, setSessionId }: CloseCallbacks): void {
   ws.onclose = (ev) => {
     if (ev.code !== 1000) addError(`Connection lost (code ${ev.code}). Restart to reconnect.`);
     setIsLive(false);
@@ -132,7 +137,12 @@ async function configureRtmpStreams(ws: WebSocket, params: SocketParams): Promis
   ws.send(JSON.stringify({ type: "rtmp:config", streams, broadcastDelay: params.broadcastDelay }));
 }
 
-async function startAudioCapture(ws: WebSocket, audio: AudioPipeline, deviceId: string): Promise<void> {
+type AudioCapture = {
+  audio: AudioPipeline;
+  deviceId: string;
+};
+
+async function startAudioCapture(ws: WebSocket, { audio, deviceId }: AudioCapture): Promise<void> {
   await audio.start((buffer) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const tagged = new Uint8Array(buffer.byteLength + 1);
@@ -144,10 +154,14 @@ async function startAudioCapture(ws: WebSocket, audio: AudioPipeline, deviceId: 
 
 // ── Message handlers ─────────────────────────────────────
 
+type TranscriptDispatch = {
+  setInterim: (s: string) => void;
+  setTranscripts: React.Dispatch<React.SetStateAction<TranscriptEntry[]>>;
+};
+
 function handleFinal(
   msg: { utteranceId: number; transcript: string },
-  setInterim: (s: string) => void,
-  setTranscripts: React.Dispatch<React.SetStateAction<TranscriptEntry[]>>,
+  { setInterim, setTranscripts }: TranscriptDispatch,
 ) {
   setInterim("");
   setTranscripts((prev) => [...prev, { id: msg.utteranceId, text: msg.transcript, translations: {} }]);
@@ -155,7 +169,7 @@ function handleFinal(
 
 function handleTranslation(
   msg: { utteranceId: number; lang: string; text: string },
-  setTranscripts: React.Dispatch<React.SetStateAction<TranscriptEntry[]>>,
+  { setTranscripts }: TranscriptDispatch,
 ) {
   setTranscripts((prev) =>
     prev.map((t) =>
@@ -168,7 +182,7 @@ function handleTranslation(
 
 function handleChunkTranslation(
   msg: { utteranceId: number; lang: string; text: string; chunkIndex: number },
-  setTranscripts: React.Dispatch<React.SetStateAction<TranscriptEntry[]>>,
+  { setTranscripts }: TranscriptDispatch,
 ) {
   setTranscripts((prev) => {
     const exists = prev.some((t) => t.id === msg.utteranceId);

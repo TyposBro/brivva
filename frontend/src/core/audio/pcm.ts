@@ -21,11 +21,3 @@ export function mergePcmChunks(chunks: Int16Array[]): Int16Array {
   return merged;
 }
 
-export function pcmToBase64(pcm: Int16Array): string {
-  const bytes = new Uint8Array(pcm.buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}

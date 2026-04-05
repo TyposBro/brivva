@@ -1,4 +1,4 @@
-import { float32ToInt16 } from "../shared/audio/pcm";
+import { float32ToInt16 } from "../../../core/audio/pcm";
 
 const SAMPLE_RATE = 44100;
 const BUFFER_SIZE = 4096;

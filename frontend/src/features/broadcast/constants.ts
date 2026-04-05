@@ -1,4 +1,13 @@
-import { LANGS } from "../../shared/platforms";
+// ── Language ─────────────────────────────────────────────
+
+export type Lang = { code: string; label: string; flag: string };
+
+export const LANGS: Lang[] = [
+  { code: "ko", label: "Korean", flag: "\uD83C\uDDF0\uD83C\uDDF7" },
+  { code: "en", label: "English", flag: "\uD83C\uDDEC\uD83C\uDDE7" },
+  { code: "ja", label: "Japanese", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
+  { code: "zh", label: "Chinese", flag: "\uD83C\uDDE8\uD83C\uDDF3" },
+] as const;
 
 // ── Types ────────────────────────────────────────────────
 
@@ -39,6 +48,3 @@ export const DELAY_STEP = 500;
 
 export const AUDIO_TAG = 0x01;
 export const VIDEO_TAG = 0x02;
-
-// Re-export for convenience
-export { LANGS };

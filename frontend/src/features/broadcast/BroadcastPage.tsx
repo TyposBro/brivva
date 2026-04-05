@@ -1,5 +1,5 @@
 import { useRef, useMemo } from "react";
-import { PageLayout } from "../../shared/components/PageLayout";
+import { PageLayout } from "../../core/components/PageLayout";
 import { useBroadcastConfig } from "./hooks/useBroadcastConfig";
 import { useWebcam } from "./hooks/useWebcam";
 import { useVoiceClone } from "./hooks/useVoiceClone";
