@@ -133,16 +133,3 @@ pub fn classify_emotion(prosody: &Prosody) -> &'static str {
     "neutral"
 }
 
-// ── Style Param Mapping ───────────────────────────────────
-// Kept for backward compatibility. Prefer VoiceStyle::from_emotion() for new code.
-
-pub fn map_style(emotion: &str) -> (f64, f64, f64, f64) {
-    match emotion {
-        "excited" => (0.20, 0.50, 0.90, 1.20),
-        "happy"   => (0.30, 0.60, 0.70, 1.10),
-        "angry"   => (0.25, 0.70, 0.85, 1.05),
-        "sad"     => (0.70, 0.80, 0.40, 0.85),
-        "serious" => (0.60, 0.80, 0.30, 0.95),
-        _         => (0.50, 0.75, 0.00, 1.00),
-    }
-}
