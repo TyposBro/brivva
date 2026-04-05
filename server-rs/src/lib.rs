@@ -1,39 +1,23 @@
 pub mod core;
 pub mod features;
 pub mod orchestration;
-pub mod streaming;
-pub mod stt;
-pub mod translation;
-pub mod tts;
-pub mod voice_clone;
-mod pipeline;
-mod ws;
-mod api;
+pub mod shared;
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 use features::broadcast::domain::Sessions;
 use orchestration::config::AppConfig;
-
-// PRAGMATIC: HTTP_CLIENT remains a global static during the config-threading
-// transition (Phase 4). It will be moved into AppContext once all consumers
-// accept &reqwest::Client as a parameter.
-pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(4)
-        .build()
-        .expect("failed to build HTTP client")
-});
+use orchestration::di::AppContext;
 
 pub async fn run_server() {
     load_env();
-    let _config = AppConfig::from_env();
-    streaming::kill_orphan_ffmpeg();
+    let config = AppConfig::from_env();
+    let app_ctx = Arc::new(AppContext::new(config));
+    features::broadcast::data::streaming::kill_orphan_ffmpeg();
 
     let sessions: Sessions = Arc::new(DashMap::new());
-    let app = orchestration::router::build_router(sessions);
+    let app = orchestration::router::build_router(sessions, app_ctx);
 
     let listener = tokio::net::TcpListener::bind(core::config::SERVER_ADDR).await.unwrap();
     tracing::info!("Brivva server on http://{}", core::config::SERVER_ADDR);
