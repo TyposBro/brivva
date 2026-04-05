@@ -101,43 +101,46 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 
 ## Bugs Fixed (Apr 6, 2026)
 
-### Bug: FFmpeg crashes on first video chunk (P0 — FIXED)
+### FFmpeg crashes on first video chunk (P0 — FIXED)
 
-**Symptom:** Every session, FFmpeg crashes immediately on first video data. Auto-restarts and works after, but ~5s of video is lost. Audio keeps flowing → permanent ~5s audio-ahead-of-video desync. Confirmed by counting with fingers on camera at 1s broadcast delay.
+**Root cause:** `trim_video_for_activation()` removed the fMP4 init segment (moov/trex) from the chunk buffer before FFmpeg spawned. FFmpeg saw moof fragments without a preceding trex → exit 183.
 
-**FFmpeg error:**
-```
-could not find corresponding trex (id 1)
-error reading header
-Error opening input file pipe:0
-Process crashed for lang=ru, exit=183
-```
+**Fix:** `video_drain.rs` — `write_init_segment_on_first_spawn()` polls for the init segment (stored in `video_init_segment: Arc<StdMutex<Option<Vec<u8>>>>`) and writes it to FFmpeg stdin before any data chunks. 30s timeout, 20ms poll interval.
 
-**Root cause:** MediaRecorder outputs fragmented MP4 (fMP4). FFmpeg needs the init segment (moov atom with trex boxes) before it can parse any moof/trun fragments. The video drain starts writing data chunks to FFmpeg's stdin before the init segment arrives. FFmpeg sees a trun box without a preceding trex → crashes.
+### TTS returns 0 bytes on first calls (FIXED)
 
-**Evidence:**
-- On restart, `replaying init segment (929431B)` is logged — the init segment IS captured and available
-- After restart, FFmpeg works perfectly — init segment is written first
-- The bug is that first-spawn doesn't wait for init segment before piping data
+**Root cause:** ElevenLabs WebSocket cold-start. First 1-2 WS connections per session return empty audio.
 
-**Fix (Apr 6):** `video_drain.rs` — Added `write_init_segment_on_first_spawn()` that polls for the init segment and writes it to FFmpeg stdin before any data chunks. The deeper root cause: `trim_video_for_activation()` was removing the init segment from the chunk buffer because it's older than `broadcast_delay` by the time first audio arrives. Now both first-spawn and restart paths write the init segment first.
+**Fix:** `ws.rs` — `do_tts_ws()` retries once on 0-byte response. If retry also returns 0 bytes, returns `Err` to trigger REST fallback in `execute_tts_with_fallback()`.
 
-### Bug: TTS returns 0 bytes on first 1-2 calls (FIXED)
+### TTS timeouts at low broadcast delay (FIXED)
 
-**Symptom:** First 1-2 ElevenLabs TTS WebSocket calls per session return empty audio (0 bytes). Subsequent calls work fine.
+**Root cause:** TTS deadline = `broadcast_delay - 500ms`. At 1s delay → 500ms deadline, too short for ElevenLabs.
 
-**Fix (Apr 6):** `ws.rs` — Extracted `do_tts_ws_once()` and added automatic retry in `do_tts_ws()` when the first attempt returns 0 audio bytes.
+**Fix:** `config.rs` + `pipeline_budget.rs` — `TTS_DEADLINE_FLOOR_MS = 3000`. Formula: `max(min(delay - margin, cap), floor)`.
 
-### Bug: TTS timeouts at low broadcast delay (FIXED)
+### Force-chunk stall during continuous speech (FIXED)
 
-**Symptom:** At 1s broadcast delay, TTS deadline becomes 500ms (broadcast_delay - 500ms). ElevenLabs Turbo v2.5 often exceeds this, causing TIMEOUT.
+**Root cause:** `maybe_force_chunk()` in `handler.rs` required `translation_acc` to be non-empty before firing. Soniox doesn't emit incremental translation tokens during long continuous speech — it accumulates internally and dumps everything at the semantic endpoint. The 4s force-chunk threshold never triggered, causing 24s+ accumulation.
 
-**Fix (Apr 6):** `config.rs` + `pipeline_budget.rs` — Added `TTS_DEADLINE_FLOOR_MS = 3000`. `compute_tts_deadline()` now returns `max(min(delay - margin, cap), floor)`. Decouples TTS generation budget from broadcast delay.
+**Fix:** `handler.rs` — Force-chunk now fires based on transcript duration alone. If `translation_acc` is empty at force-chunk time, resets the timer without spawning TTS. When translation is available, emits normally.
 
-### Subtitle overlay (drawtext) breaks YouTube streaming
+### Audio pile-up on stale TTS results (FIXED)
 
-**Symptom:** Adding `-vf drawtext` to FFmpeg args causes YouTube to show "Preparing stream" indefinitely. Stream health shows "Excellent" but video never appears.
+**Root cause:** `play_at` was set to `utterance_start` (when host started speaking). After slow TTS generation, multiple queued items had stale `play_at` timestamps → all became "ready" simultaneously → played back-to-back → audio raced ahead of video.
 
-**Likely cause:** drawtext filter + Fontconfig error (`Cannot load default config file: No such file`) produces output YouTube can't parse. Or the decode→filter→re-encode pipeline changes the H.264 output in a way YouTube rejects.
+**Fix:** `manager.rs` — `cap_stale_play_at()` caps `play_at` to `Instant::now()` when `utterance_start` is older than `broadcast_delay + 2s`. This adds a natural `broadcast_delay` gap before playing stale results.
 
-**Status:** Disabled by default. Enable with `BRIVVA_SUBTITLES=1` env var. Needs investigation — may need to bundle fontconfig, or use a different subtitle approach.
+### Subtitle overlay (drawtext) breaks YouTube — OPEN
+
+**Symptom:** `-vf drawtext` causes YouTube "Preparing stream" indefinitely. Fontconfig error in bundled FFmpeg.
+
+**Status:** Disabled by default (`BRIVVA_SUBTITLES=1` to enable). Needs fontconfig bundling or alternative subtitle approach.
+
+## Known Limitation: Soniox Translation Accumulation
+
+Soniox accumulates translation for long continuous speech and emits it all at the semantic endpoint. For pathological inputs (e.g., slowly counting 1-20 over 17s), the translated audio is ~6s — much shorter than original speech. This causes unavoidable A/V desync where translated audio finishes before the corresponding video.
+
+**Impact:** Only affects continuous monologues without natural pauses. Not an issue for natural commerce speech where sentence lengths are similar across languages.
+
+**Why it can't be fully fixed:** Force-chunking resets the local `translation_acc` every 4s, but Soniox's internal translation state keeps accumulating. The translation tokens only exist when Soniox decides to emit them. No amount of timing adjustment can stretch 6s of audio to fill 17s of video without time-stretching.

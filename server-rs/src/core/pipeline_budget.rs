@@ -4,7 +4,7 @@
 //! used by both the chunked and legacy pipeline paths.
 
 use std::time::{Duration, Instant};
-use crate::core::config::{BYTES_PER_SEC, TTS_DEADLINE_CAP_MS, TTS_DEADLINE_MARGIN_MS};
+use crate::core::config::{BYTES_PER_SEC, TTS_DEADLINE_CAP_MS, TTS_DEADLINE_FLOOR_MS, TTS_DEADLINE_MARGIN_MS};
 
 /// Compute the TTS deadline from broadcast delay.
 /// Returns the lesser of (delay - margin) and the hard cap.
@@ -13,7 +13,8 @@ pub fn compute_tts_deadline(broadcast_delay_ms: u64) -> Duration {
         broadcast_delay_ms.saturating_sub(TTS_DEADLINE_MARGIN_MS),
     );
     let hard_cap = Duration::from_millis(TTS_DEADLINE_CAP_MS);
-    sync_deadline.min(hard_cap)
+    let floor = Duration::from_millis(TTS_DEADLINE_FLOOR_MS);
+    sync_deadline.min(hard_cap).max(floor)
 }
 
 /// Compute max PCM bytes for an utterance duration plus tolerance.
@@ -43,16 +44,16 @@ mod tests {
 
     #[test]
     fn should_subtract_margin_from_delay() {
-        let deadline = compute_tts_deadline(3000);
+        let deadline = compute_tts_deadline(5000);
 
-        assert_eq!(deadline, Duration::from_millis(3000 - TTS_DEADLINE_MARGIN_MS));
+        assert_eq!(deadline, Duration::from_millis(5000 - TTS_DEADLINE_MARGIN_MS));
     }
 
     #[test]
-    fn should_not_underflow_on_small_delay() {
+    fn should_clamp_to_floor_on_small_delay() {
         let deadline = compute_tts_deadline(100);
 
-        assert_eq!(deadline, Duration::from_millis(0));
+        assert_eq!(deadline, Duration::from_millis(TTS_DEADLINE_FLOOR_MS));
     }
 
     #[test]
@@ -75,10 +76,10 @@ mod tests {
     }
 
     #[test]
-    fn should_return_zero_deadline_when_delay_is_zero() {
+    fn should_return_floor_deadline_when_delay_is_zero() {
         let deadline = compute_tts_deadline(0);
 
-        assert_eq!(deadline, Duration::from_millis(0));
+        assert_eq!(deadline, Duration::from_millis(TTS_DEADLINE_FLOOR_MS));
     }
 
     #[test]
@@ -124,17 +125,17 @@ mod tests {
     }
 
     #[test]
-    fn should_return_zero_deadline_when_delay_equals_margin() {
+    fn should_return_floor_deadline_when_delay_equals_margin() {
         let deadline = compute_tts_deadline(TTS_DEADLINE_MARGIN_MS);
 
-        assert_eq!(deadline, Duration::from_millis(0));
+        assert_eq!(deadline, Duration::from_millis(TTS_DEADLINE_FLOOR_MS));
     }
 
     #[test]
-    fn should_return_positive_deadline_when_delay_is_one_above_margin() {
+    fn should_return_floor_deadline_when_delay_is_one_above_margin() {
         let deadline = compute_tts_deadline(TTS_DEADLINE_MARGIN_MS + 1);
 
-        assert_eq!(deadline, Duration::from_millis(1));
+        assert_eq!(deadline, Duration::from_millis(TTS_DEADLINE_FLOOR_MS));
     }
 
     #[test]

@@ -8,6 +8,22 @@ use super::config::{ElevenLabsTtsResponse, CHUNK_LENGTH_SCHEDULE};
 use super::SynthesisRequest;
 
 pub async fn do_tts_ws(req: &SynthesisRequest<'_>) -> Result<usize, String> {
+    let (total, got_audio) = do_tts_ws_once(req).await?;
+
+    if !got_audio {
+        warn!("[TTS:{}] 0 audio bytes on first attempt (cold start), retrying", req.lang);
+        let (retry_total, retry_got_audio) = do_tts_ws_once(req).await?;
+        if !retry_got_audio {
+            warn!("[TTS:{}] 0 audio bytes on retry, falling back to REST", req.lang);
+            return Err("WS returned 0 audio bytes after retry".to_string());
+        }
+        return Ok(retry_total);
+    }
+
+    Ok(total)
+}
+
+async fn do_tts_ws_once(req: &SynthesisRequest<'_>) -> Result<(usize, bool), String> {
     let mut ws = connect_elevenlabs(req).await?;
     let tts_start = Instant::now();
 
@@ -20,13 +36,7 @@ pub async fn do_tts_ws(req: &SynthesisRequest<'_>) -> Result<usize, String> {
         streaming: req.streaming,
         tts_start: &tts_start,
     };
-    let (total, got_audio) = receive_and_decode_chunks(&mut ws, &recv_ctx).await?;
-
-    if !got_audio {
-        warn!("[TTS:{}] WARNING: stream ended with 0 audio bytes ({}ms)", req.lang, tts_start.elapsed().as_millis());
-    }
-
-    Ok(total)
+    receive_and_decode_chunks(&mut ws, &recv_ctx).await
 }
 
 // ── Types ───

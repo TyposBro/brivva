@@ -93,9 +93,13 @@ pub(crate) fn video_chunk_drain_loop(
         config.delay.as_millis()
     );
 
-    if config.is_restart {
+    {
         let mut state = VideoDrainState { stdin: &mut stdin, stats: &mut stats };
-        if handle_restart(&config, &mut state).is_err() {
+        if config.is_restart {
+            if handle_restart(&config, &mut state).is_err() {
+                return;
+            }
+        } else if write_init_segment_on_first_spawn(&config, &mut state).is_err() {
             return;
         }
     }
@@ -125,6 +129,51 @@ fn handle_restart(
     replay_init_segment(config, state)?;
     flush_stale_chunks(config);
     Ok(())
+}
+
+/// Wait for the init segment on first spawn and write it before any data chunks.
+/// Without this, trim_video_for_activation() may have removed the init segment from
+/// the chunk buffer, causing FFmpeg to see moof fragments without a preceding moov/trex.
+fn write_init_segment_on_first_spawn(
+    config: &VideoDrainConfig,
+    state: &mut VideoDrainState,
+) -> Result<(), ()> {
+    const MAX_WAIT: Duration = Duration::from_secs(30);
+    let start = Instant::now();
+
+    loop {
+        {
+            let init = config.init_segment.lock().unwrap();
+            if let Some(ref seg) = *init {
+                tracing::info!(
+                    "[VIDEO:{}] writing init segment ({}B) on first spawn",
+                    config.stream_id,
+                    seg.len()
+                );
+                if state.stdin.write_all(seg).is_err() {
+                    tracing::error!(
+                        "[VIDEO:{}] write error on init segment, exiting",
+                        config.stream_id
+                    );
+                    return Err(());
+                }
+                state.stats.total_bytes_written += seg.len() as u64;
+                return Ok(());
+            }
+        }
+        if config.stop.load(Ordering::Acquire) {
+            return Err(());
+        }
+        if start.elapsed() > MAX_WAIT {
+            tracing::error!(
+                "[VIDEO:{}] init segment not available after {}s, starting without it",
+                config.stream_id,
+                MAX_WAIT.as_secs()
+            );
+            return Ok(());
+        }
+        thread::sleep(VIDEO_POLL_INTERVAL);
+    }
 }
 
 /// Replay the init segment so FFmpeg can parse the fMP4 container.

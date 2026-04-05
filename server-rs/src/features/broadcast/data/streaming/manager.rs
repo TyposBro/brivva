@@ -198,12 +198,13 @@ impl RtmpManager {
 
     pub fn queue_streaming_audio(&mut self, lang: &str, utterance_start: Instant) -> StreamingPcm {
         self.activate_pending_for_lang(lang);
+        let play_at = cap_stale_play_at(utterance_start, self.broadcast_delay);
         let streaming = StreamingPcm::new();
         for stream in self.streams.values() {
             if stream.lang == lang {
                 let mut q = stream.audio_queue.lock().unwrap();
                 q.push_back(QueuedAudio {
-                    play_at: utterance_start,
+                    play_at,
                     pcm: streaming.pcm.clone(),
                     complete: streaming.complete.clone(),
                 });
@@ -562,6 +563,24 @@ impl RtmpManager {
 }
 
 // ── Free functions ───────────────────────────────────────
+
+/// Cap play_at to prevent audio pile-up when TTS generation is slow.
+/// If utterance_start is more than (broadcast_delay + 2s) in the past,
+/// use current time so the audio drain adds a natural broadcast_delay gap.
+fn cap_stale_play_at(utterance_start: Instant, delay: Duration) -> Instant {
+    let now = Instant::now();
+    let max_age = delay + Duration::from_secs(2);
+    if now.duration_since(utterance_start) > max_age {
+        tracing::debug!(
+            "[AUDIO] capping stale play_at: {}ms old > {}ms threshold",
+            now.duration_since(utterance_start).as_millis(),
+            max_age.as_millis()
+        );
+        now
+    } else {
+        utterance_start
+    }
+}
 
 fn prepare_stream_state(
     existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,

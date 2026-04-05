@@ -99,7 +99,7 @@ fn mark_utterance_start(state: &mut SttState) {
 }
 
 async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
-    if state.target_lang.is_none() || state.translation_acc.is_empty() {
+    if state.target_lang.is_none() || state.transcript_acc.is_empty() {
         return;
     }
     let elapsed = match state.utterance_start {
@@ -116,9 +116,14 @@ async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
     if state.is_transcript_provider {
         send_transcript_final(state, uid, ctx);
     }
-    send_translation(state, uid, ctx).await;
 
-    info!("[STT] #{} force-chunk after {}s of continuous speech", uid, elapsed);
+    if state.translation_acc.is_empty() {
+        info!("[STT] #{} force-chunk after {}s but no translation yet, resetting", uid, elapsed);
+    } else {
+        send_translation(state, uid, ctx).await;
+        info!("[STT] #{} force-chunk after {}s of continuous speech", uid, elapsed);
+    }
+
     state.transcript_acc.clear();
     state.translation_acc.clear();
     state.utterance_start = Some(Instant::now());

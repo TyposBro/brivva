@@ -21,6 +21,7 @@ pub const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
 // TTS timing
 pub const TTS_DEADLINE_CAP_MS: u64 = 10_000;
 pub const TTS_DEADLINE_MARGIN_MS: u64 = 500;
+pub const TTS_DEADLINE_FLOOR_MS: u64 = 3_000;
 
 // Pipeline
 pub const STREAMING_BUDGET_PADDING_SECS: f64 = 5.0;

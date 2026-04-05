@@ -103,11 +103,15 @@ Maps to 9 emotions → TTS voice style + speed:
 
 ## Recently Fixed Bugs (Apr 6)
 
-- **V1 (P0): FFmpeg init segment crash** — `video_drain.rs` now writes init segment to stdin before any data chunks. Root cause: `trim_video_for_activation()` was removing it from the buffer. Fixed for both first-spawn and restart paths.
-- **V2: TTS cold-start 0 bytes** — `ws.rs` auto-retries when first ElevenLabs call returns empty audio.
+- **V1 (P0): FFmpeg init segment crash** — `video_drain.rs` now writes init segment to stdin before any data chunks on first spawn. Root cause: `trim_video_for_activation()` removed init segment from buffer.
+- **V2: TTS cold-start 0 bytes** — `ws.rs` retries once on 0-byte response, then falls back to REST if retry also fails.
 - **V3: TTS timeout at low delay** — `TTS_DEADLINE_FLOOR_MS = 3000` ensures minimum 3s TTS budget regardless of broadcast delay.
+- **Force-chunk stall** — `handler.rs` force-chunk now fires based on transcript duration, not translation presence. Soniox may not emit translation tokens during continuous speech; previously the 4s threshold never triggered, causing 24s+ accumulation.
+- **Audio pile-up** — `manager.rs` caps stale `play_at` timestamps (`delay + 2s` max age) so consecutive TTS results don't dump immediately when their utterance_start is far in the past.
 
-**Known issue:** Subtitle overlay (drawtext) disabled by default (`BRIVVA_SUBTITLES=1`). Breaks YouTube streaming (Fontconfig missing in bundled FFmpeg).
+**Known limitations:**
+- Subtitle overlay (drawtext) disabled by default (`BRIVVA_SUBTITLES=1`). Breaks YouTube streaming (Fontconfig missing in bundled FFmpeg).
+- Soniox accumulates translation internally for long continuous speech and emits it all at the semantic endpoint. Translated audio may be shorter than original speech (e.g., counting numbers slowly → TTS reads them fast). This causes A/V desync during pathological inputs like counting. Not an issue for natural commerce speech where sentence lengths are similar across languages.
 
 ## Pipeline is Commodity — Moat is Elsewhere
 

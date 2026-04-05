@@ -17,9 +17,11 @@ All tasks done. Gladia, Google Translate, ProgressiveChunkDetector fully removed
 
 | # | Bug | Fix | Status |
 |---|-----|-----|--------|
-| **V1** | FFmpeg crash on first video chunk (P0) | `video_drain.rs` — `write_init_segment_on_first_spawn()` polls for init segment and writes to stdin before any data chunks. Root cause: `trim_video_for_activation()` removed init segment from chunk buffer (older than broadcast_delay). Now both first-spawn and restart paths write init segment first. | **Fixed** |
-| V2 | TTS 0 bytes on first calls | `ws.rs` — extracted `do_tts_ws_once()`, added automatic retry in `do_tts_ws()` when first attempt returns 0 audio bytes (ElevenLabs cold-start). | **Fixed** |
-| V3 | TTS timeout at low broadcast delay | `config.rs` + `pipeline_budget.rs` — added `TTS_DEADLINE_FLOOR_MS = 3000`. `compute_tts_deadline()` returns `max(min(delay - margin, cap), floor)`. At 1s delay, deadline is 3s instead of 500ms. | **Fixed** |
+| **V1** | FFmpeg crash on first video chunk (P0) | `video_drain.rs` — `write_init_segment_on_first_spawn()` writes init segment before data chunks. | **Fixed** |
+| V2 | TTS 0 bytes on first calls | `ws.rs` — retry once, then REST fallback on second 0-byte response. | **Fixed** |
+| V3 | TTS timeout at low broadcast delay | `pipeline_budget.rs` — `TTS_DEADLINE_FLOOR_MS = 3000`. | **Fixed** |
+| V4 | Force-chunk stall (24s+ accumulation) | `handler.rs` — fires on transcript duration, not translation presence. | **Fixed** |
+| V5 | Audio pile-up on stale TTS | `manager.rs` — `cap_stale_play_at()` caps when `utterance_start` > `delay + 2s`. | **Fixed** |
 
 ### Production Polish (Current Focus)
 
@@ -29,15 +31,14 @@ Quality and reliability for the demo. Target: 30+ min session, zero hiccups.
 |---|------|--------|-------|
 | P1 | E2E live test (KO→JP) | Open | Full test on Coupang KR → Rakuten JP with real merchant accounts |
 | P2 | Voice cloning quality test | Open | 30s sample → cloned voice → compare with real host. Is it "better than hiring a human"? |
-| P3 | 30-minute endurance test | Open | Continuous streaming, monitor for crashes, drift, FIFO starvation. Blocked by V1. |
-| P4 | Backup demo recording | Open | Screen record a flawless session in case live demo fails. Blocked by V1. |
-| P5 | Test Expressive TTS model | Open | Video lags audio by ~5s → headroom for slower but higher-quality TTS. Blocked by V1 (need accurate sync first). |
+| P3 | 30-minute endurance test | Open | Continuous streaming, monitor for crashes, drift, FIFO starvation |
+| P4 | Backup demo recording | Open | Screen record a flawless session in case live demo fails |
+| P5 | Test Expressive TTS model | Open | Slower but higher-quality TTS. Need accurate sync first. |
 
 ### Resilience (from v15.1 analysis, still open)
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| A3 | Empty translation guard | Open | Check `translated.trim().is_empty()` before TTS. Prevents empty TTS calls. |
 | B3 | Skip-ahead logic | Open | When drift > 1.5x broadcast_delay, skip to newest complete utterance. |
 | C1 | Pipeline failure counters | Open | Replace hardcoded 0s in pipeline_health.rs with real AtomicU64 counters. |
 | C2 | E2E latency tracking | Open | Record chunk_start → TTS_complete, rolling average. |
@@ -68,6 +69,13 @@ Quality and reliability for the demo. Target: 30+ min session, zero hiccups.
 ---
 
 ## Completed
+
+### v16.1 — Bug Fixes & A/V Sync (Apr 6, 2026)
+- [x] V1. FFmpeg init segment on first spawn (was crashing every session)
+- [x] V2. TTS cold-start retry + REST fallback on 0 bytes
+- [x] V3. TTS deadline floor (3s minimum, decoupled from broadcast delay)
+- [x] V4. Force-chunk fires on transcript duration (Soniox withholds translation tokens during continuous speech)
+- [x] V5. Stale play_at capping (prevents audio pile-up when TTS is slow)
 
 ### v16 — Soniox Migration (Apr 5, 2026)
 - [x] Full Soniox v4 integration (N+1 connections, semantic endpointing, native translation)
