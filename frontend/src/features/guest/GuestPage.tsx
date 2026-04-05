@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useGuestRoom } from "../hooks/useGuestRoom";
-import { type Lang, LANGS, LANG_LABELS } from "../types";
+import { useGuestRoom } from "../../hooks/useGuestRoom";
+import { type Lang, LANGS, LANG_LABELS } from "../../types";
 
 export default function GuestPage() {
   const { id = "" } = useParams<{ id: string }>();

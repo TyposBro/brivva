@@ -1,4 +1,4 @@
-import BroadcastPage from "./pages/BroadcastPage";
+import BroadcastPage from "./features/broadcast/BroadcastPage";
 
 export default function App() {
   return <BroadcastPage />;

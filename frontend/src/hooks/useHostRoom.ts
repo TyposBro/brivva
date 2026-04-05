@@ -4,12 +4,18 @@ import { RoomSocket } from "../lib/RoomSocket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
 import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
 import { createMessageHandler } from "../state/host/messageHandler";
+import { float32ToInt16, mergePcmChunks, pcmToBase64 } from "../shared/audio/pcm";
 
 export type { UtteranceTiming };
 export type { HostStatus, GuestCounts, HostUtterance } from "../state/host/reducer";
 
-const VOICE_SAMPLE_SECONDS = 30;
 const VOICE_SAMPLE_RATE = 44100;
+const VOICE_SAMPLE_SECONDS = 30;
+const VOICE_BUFFER_SIZE = 4096;
+const FRAME_INTERVAL_MS = 33; // ~30fps
+const JPEG_QUALITY_HD = 0.85;
+const JPEG_QUALITY_4K = 0.80;
+const RESOLUTION_4K_WIDTH = 2000;
 
 export function useHostRoom() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);
@@ -39,7 +45,6 @@ export function useHostRoom() {
 
   const startWebcam = useCallback(async () => {
     try {
-      // Request highest resolution the camera supports (up to 4K)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 3840 }, height: { ideal: 2160 }, facingMode: "user" },
       });
@@ -61,27 +66,22 @@ export function useHostRoom() {
     const video = videoElRef.current;
     if (!video || !socket.current.isOpen || !video.videoWidth) return;
 
-    // Use the camera's native resolution — no downscaling
     const w = video.videoWidth;
     const h = video.videoHeight;
 
     const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(video, 0, 0, w, h);
+    canvas.getContext("2d")!.drawImage(video, 0, 0, w, h);
 
-    // Higher quality for 1080p+, slightly lower for 4K to manage bandwidth
-    const quality = w > 2000 ? 0.80 : 0.85;
-    const dataUrl = canvas.toDataURL("image/jpeg", quality);
-    const base64 = dataUrl.split(",")[1];
-
+    const quality = w > RESOLUTION_4K_WIDTH ? JPEG_QUALITY_4K : JPEG_QUALITY_HD;
+    const base64 = canvas.toDataURL("image/jpeg", quality).split(",")[1];
     socket.current.sendJson({ type: "face:frame", data: base64 });
   }, []);
 
   const startFrameStreaming = useCallback(() => {
     stopFrameStreaming();
-    frameIntervalRef.current = setInterval(captureAndSendFrame, 33); // ~30fps
+    frameIntervalRef.current = setInterval(captureAndSendFrame, FRAME_INTERVAL_MS);
   }, [captureAndSendFrame]);
 
   const stopFrameStreaming = useCallback(() => {
@@ -102,20 +102,14 @@ export function useHostRoom() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ctx = new AudioContext({ sampleRate: VOICE_SAMPLE_RATE });
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      const processor = ctx.createScriptProcessor(VOICE_BUFFER_SIZE, 1, 1);
       processor.onaudioprocess = (e) => {
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
-        }
-        voicePcmRef.current.push(int16);
+        voicePcmRef.current.push(float32ToInt16(e.inputBuffer.getChannelData(0)));
       };
       source.connect(processor);
       processor.connect(ctx.destination);
       voiceRecorderRef.current = { ctx, source, processor };
 
-      // Auto-stop after VOICE_SAMPLE_SECONDS
       setTimeout(() => stopVoiceRecording(), VOICE_SAMPLE_SECONDS * 1000);
     } catch (err) {
       console.error("Voice recording failed:", err);
@@ -130,23 +124,9 @@ export function useHostRoom() {
     rec.ctx.close();
     voiceRecorderRef.current = null;
 
-    // Merge PCM chunks
-    const totalLen = voicePcmRef.current.reduce((s, c) => s + c.length, 0);
-    const merged = new Int16Array(totalLen);
-    let offset = 0;
-    for (const chunk of voicePcmRef.current) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
+    const merged = mergePcmChunks(voicePcmRef.current);
     voicePcmRef.current = [];
-
-    // Convert to base64 and send to server
-    const bytes = new Uint8Array(merged.buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const b64 = btoa(binary);
+    const b64 = pcmToBase64(merged);
 
     dispatch({ type: "voice_cloning" });
     socket.current.sendJson({ type: "voice:sample", data: b64 });
@@ -173,9 +153,7 @@ export function useHostRoom() {
     socket.current.connect(
       params,
       {
-        onMessage: (msg) => {
-          handleMessage(msg);
-        },
+        onMessage: (msg) => { handleMessage(msg); },
         onClose: () => { stopRecording(); dispatch({ type: "disconnected" }); },
       },
     );
