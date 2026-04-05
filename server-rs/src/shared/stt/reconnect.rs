@@ -161,12 +161,20 @@ async fn run_connection_loop(mut cfg: SttConnectionConfig) {
     let lang_label = cfg.target_lang.clone().unwrap_or_else(|| "source".to_string());
 
     loop {
+        info!("[STT:{}] {} connecting (attempt {})",
+            cfg.session_env.session_id, lang_label, loop_state.reconnect_count + 1);
+
         let result = run_one_connection(&mut cfg, &loop_state).await;
         update_loop_state(&result, &mut loop_state);
 
         if !should_reconnect(&cfg.session_env, &mut loop_state, &lang_label) {
             break;
         }
+
+        info!("[STT:{}] {} reconnecting in {}s (attempt {}/{})",
+            cfg.session_env.session_id, lang_label, STT_RECONNECT_DELAY_SECS,
+            loop_state.reconnect_count, crate::core::config::STT_RECONNECT_MAX);
+
         clear_accumulator(&cfg.session_env.audio_acc);
         tokio::time::sleep(reconnect_delay).await;
     }
@@ -390,6 +398,7 @@ async fn await_tasks(
 
 fn should_reconnect(env: &SessionEnv, loop_state: &mut ConnectionLoopState, lang: &str) -> bool {
     if !env.sessions.contains_key(&env.session_id) {
+        info!("[STT:{}] {} session gone, stopping reconnect", env.session_id, lang);
         return false;
     }
 
