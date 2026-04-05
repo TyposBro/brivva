@@ -60,6 +60,12 @@ pub(super) const STALE_CHUNK_MARGIN_SECS: u64 = 1;
 
 // ── Audio Drain ─────────────────────────────────────────
 
+/// Max age for queued audio before eviction (2x default broadcast delay).
+/// If audio is 6+ seconds stale, it will never sync with video.
+pub(crate) const MAX_AUDIO_STALENESS: Duration = Duration::from_secs(6);
+/// Max queued utterances before oldest complete items are dropped.
+/// Prevents unbounded memory growth during continuous host speech.
+pub(crate) const MAX_AUDIO_QUEUE_DEPTH: usize = 10;
 /// Drift warning threshold in milliseconds
 pub(crate) const DRIFT_WARN_THRESHOLD_MS: u64 = 50;
 /// Check drift every N ticks (~5 seconds at 20ms ticks)

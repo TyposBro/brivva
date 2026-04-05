@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 use tracing::{info, error, debug};
 
-use crate::core::config::BYTES_PER_SEC;
+use crate::core::config::{BYTES_PER_SEC, TRANSLATE_TIMEOUT_MS};
 use crate::shared::stt::config::PASSTHROUGH_PADDING_SECS;
 use crate::core::types::StyleParams;
 use crate::shared::tts::TtsRequest;
@@ -232,13 +232,20 @@ fn truncate_if_too_long(pcm: &mut Vec<u8>, utterance_start: Instant, utterance_e
 
 async fn translate_for_task(task: &LangTask) -> Option<(String, u64)> {
     let ctx = &task.ctx;
-    match crate::shared::translation::translate(
+    let timeout = std::time::Duration::from_millis(TRANSLATE_TIMEOUT_MS);
+    let fut = crate::shared::translation::translate(
         &task.transcript, None, &ctx.source_lang, &task.target,
         &ctx.translate_api_key, &ctx.http_client,
-    ).await {
-        Ok((t, ms)) => Some((t, ms)),
-        Err(e) => {
+    );
+
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok((t, ms))) => Some((t, ms)),
+        Ok(Err(e)) => {
             error!("[TRANSLATE] #{} {}: {}", ctx.utterance_id, task.target, e);
+            None
+        }
+        Err(_) => {
+            error!("[TRANSLATE] #{} {} TIMEOUT", ctx.utterance_id, task.target);
             None
         }
     }

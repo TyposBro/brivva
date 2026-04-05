@@ -22,6 +22,7 @@ export function useBroadcastSocket(params: SocketParams) {
   const [interim, setInterim] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  const [pipelineWarnings, setPipelineWarnings] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef(new AudioPipeline());
@@ -42,6 +43,7 @@ export function useBroadcastSocket(params: SocketParams) {
       case "final":            handleFinal(msg, dispatch); break;
       case "translation":      handleTranslation(msg, dispatch); break;
       case "chunk_translation": handleChunkTranslation(msg, dispatch); break;
+      case "pipeline_warning":  setPipelineWarnings((c) => c + 1); break;
       case "error":            addError(msg.message); break;
     }
   }, [addError]);
@@ -61,6 +63,7 @@ export function useBroadcastSocket(params: SocketParams) {
     setIsLive(true);
     setTranscripts([]);
     setInterim("");
+    setPipelineWarnings(0);
   }, [params, handleMessage, addError]);
 
   const stop = useCallback(() => {
@@ -76,7 +79,7 @@ export function useBroadcastSocket(params: SocketParams) {
     setErrors((prev) => prev.filter((_, j) => j !== index));
   }, []);
 
-  return { isLive, sessionId, interim, transcripts, errors, wsRef, start, stop, addError, dismissError };
+  return { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError };
 }
 
 // ── Helpers ──────────────────────────────────────────────

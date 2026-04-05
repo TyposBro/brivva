@@ -15,6 +15,7 @@ use super::{
     MAX_RECOVERY_TICKS,
     DRIFT_CHECK_INTERVAL_TICKS, DRIFT_WARN_THRESHOLD_MS,
     JITTER_WARN_LOG_INTERVAL,
+    MAX_AUDIO_STALENESS, MAX_AUDIO_QUEUE_DEPTH,
 };
 
 // ── Config struct (keep every function ≤ 2 params) ───────
@@ -52,6 +53,7 @@ struct DrainState {
     delay: Duration,
     silence: Vec<u8>,
     active_audio: Option<ActiveAudio>,
+    last_utterance_play_at: Option<Instant>,
     tick_count: u64,
     next_tick: Instant,
     start_time: Instant,
@@ -233,28 +235,58 @@ impl DrainState {
     }
 
     /// Try to pop next utterance from queue if ready.
+    /// Evicts stale and overflow items first to prevent unbounded desync.
     fn try_start_next_utterance(&mut self, target_ts: Instant) {
         if self.active_audio.is_some() {
             return;
         }
-        let mut q = self.audio_queue.lock().unwrap();
-        if let Some(front) = q.front()
-            && target_ts >= front.play_at
-        {
-            let audio = q.pop_front().unwrap();
-            let pcm_len = audio.pcm.lock().unwrap().len();
-            let is_complete = audio.complete.load(Ordering::Acquire);
-            let remaining = q.len();
-            tracing::debug!(
-                "[AUDIO:{}] starting utterance: {}B available, complete={}, queue_depth={}",
-                self.stream_id, pcm_len, is_complete, remaining
-            );
-            self.active_audio = Some(ActiveAudio {
-                pcm: audio.pcm,
-                complete: audio.complete,
-                offset: 0,
-            });
+        let queue_arc = self.audio_queue.clone();
+        let mut q = queue_arc.lock().unwrap();
+        evict_stale_items(&self.stream_id, &mut q, target_ts);
+        evict_overflow_items(&self.stream_id, &mut q);
+        self.pop_ready_utterance(&mut q, target_ts);
+    }
+
+    /// Pop the front item if its play_at has arrived, start playing it.
+    fn pop_ready_utterance(
+        &mut self,
+        q: &mut VecDeque<QueuedAudio>,
+        target_ts: Instant,
+    ) {
+        let Some(front) = q.front() else { return };
+        if target_ts < front.play_at {
+            return;
         }
+        let audio = q.pop_front().unwrap();
+        let pcm_len = audio.pcm.lock().unwrap().len();
+        let is_complete = audio.complete.load(Ordering::Acquire);
+        self.log_utterance_start(pcm_len, is_complete, q.len(), &audio.play_at);
+        self.last_utterance_play_at = Some(audio.play_at);
+        self.active_audio = Some(ActiveAudio {
+            pcm: audio.pcm,
+            complete: audio.complete,
+            offset: 0,
+        });
+    }
+
+    /// Log utterance start with audio-video drift metric.
+    fn log_utterance_start(
+        &self,
+        pcm_len: usize,
+        is_complete: bool,
+        remaining: usize,
+        play_at: &Instant,
+    ) {
+        let video_ts = Instant::now() - self.delay;
+        let behind_ms = video_ts
+            .checked_duration_since(*play_at)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        tracing::debug!(
+            "[AUDIO:{}] starting utterance: {}B available, complete={}, \
+             queue_depth={}, audio_behind_video={}ms",
+            self.stream_id, pcm_len, is_complete, remaining, behind_ms
+        );
     }
 
     /// Write data to the FIFO. Returns `true` on error (caller should break).
@@ -324,6 +356,55 @@ fn classify_jitter(jitter: Duration, tick_count: u64) -> JitterLevel {
     }
 }
 
+/// Drop complete items whose `play_at` is older than MAX_AUDIO_STALENESS.
+/// Audio this far behind video will never resync — evict to prevent unbounded desync.
+fn evict_stale_items(
+    stream_id: &str,
+    q: &mut VecDeque<QueuedAudio>,
+    target_ts: Instant,
+) {
+    let stale_threshold = target_ts - MAX_AUDIO_STALENESS;
+    let mut dropped_count = 0usize;
+    let mut dropped_bytes = 0usize;
+    q.retain(|item| {
+        let is_stale = item.play_at < stale_threshold;
+        let is_complete = item.complete.load(Ordering::Acquire);
+        if is_stale && is_complete {
+            dropped_bytes += item.pcm.lock().unwrap().len();
+            dropped_count += 1;
+            return false;
+        }
+        true
+    });
+    if dropped_count > 0 {
+        tracing::warn!(
+            "[AUDIO:{}] evicted {} stale utterance(s) ({}B total)",
+            stream_id, dropped_count, dropped_bytes
+        );
+    }
+}
+
+/// If queue exceeds MAX_AUDIO_QUEUE_DEPTH, drop oldest complete items.
+/// Prevents unbounded memory growth during continuous host speech.
+fn evict_overflow_items(stream_id: &str, q: &mut VecDeque<QueuedAudio>) {
+    let mut dropped = 0usize;
+    while q.len() > MAX_AUDIO_QUEUE_DEPTH {
+        let oldest_complete = q.iter().position(|item| {
+            item.complete.load(Ordering::Acquire)
+        });
+        match oldest_complete {
+            Some(idx) => { q.remove(idx); dropped += 1; }
+            None => break,
+        }
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            "[AUDIO:{}] evicted {} overflow utterance(s), queue_depth={}",
+            stream_id, dropped, q.len()
+        );
+    }
+}
+
 /// Drain one tick of audio from the active utterance, or produce silence.
 fn drain_tick_audio(
     active_audio: &mut Option<ActiveAudio>,
@@ -385,6 +466,7 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         delay: config.delay,
         silence: vec![0u8; AUDIO_BYTES_PER_TICK],
         active_audio: None,
+        last_utterance_play_at: None,
         tick_count: 0,
         next_tick: now + AUDIO_TICK,
         start_time: now,

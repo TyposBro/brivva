@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -52,6 +53,29 @@ pub enum ServerMsg {
         utterance_id: u64,
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
+    },
+
+    #[serde(rename = "pipeline_health")]
+    PipelineHealth {
+        #[serde(rename = "sttConnected")]
+        stt_connected: bool,
+        #[serde(rename = "queueDepth")]
+        queue_depth: HashMap<String, usize>,
+        #[serde(rename = "droppedChunks")]
+        dropped_chunks: u64,
+        #[serde(rename = "ttsTimeouts")]
+        tts_timeouts: u64,
+        #[serde(rename = "translateErrors")]
+        translate_errors: u64,
+    },
+
+    #[serde(rename = "pipeline_warning")]
+    PipelineWarning {
+        kind: String,
+        lang: String,
+        detail: String,
+        #[serde(rename = "utteranceId")]
+        utterance_id: u64,
     },
 
     #[serde(rename = "error")]
@@ -258,6 +282,46 @@ mod tests {
         assert_eq!(obj.len(), 2);
         assert!(obj.contains_key("type"));
         assert!(obj.contains_key("message"));
+    }
+
+    #[test]
+    fn should_serialize_pipeline_health_with_renamed_fields() {
+        let mut queue = HashMap::new();
+        queue.insert("ko".to_string(), 3_usize);
+        let msg = ServerMsg::PipelineHealth {
+            stt_connected: true,
+            queue_depth: queue,
+            dropped_chunks: 1,
+            tts_timeouts: 2,
+            translate_errors: 0,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "pipeline_health");
+        assert_eq!(json["sttConnected"], true);
+        assert_eq!(json["queueDepth"]["ko"], 3);
+        assert_eq!(json["droppedChunks"], 1);
+        assert_eq!(json["ttsTimeouts"], 2);
+        assert_eq!(json["translateErrors"], 0);
+    }
+
+    #[test]
+    fn should_serialize_pipeline_warning_with_all_fields() {
+        let msg = ServerMsg::PipelineWarning {
+            kind: "tts_timeout".to_string(),
+            lang: "ko".to_string(),
+            detail: "exceeded deadline".to_string(),
+            utterance_id: 5,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "pipeline_warning");
+        assert_eq!(json["kind"], "tts_timeout");
+        assert_eq!(json["lang"], "ko");
+        assert_eq!(json["detail"], "exceeded deadline");
+        assert_eq!(json["utteranceId"], 5);
     }
 
     #[test]

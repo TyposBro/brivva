@@ -6,6 +6,13 @@ export type InterimMsg = { type: "interim"; transcript: string };
 export type FinalMsg = { type: "final"; transcript: string; utteranceId: number };
 export type TranslationMsg = { type: "translation"; lang: string; text: string; utteranceId: number; translateMs: number };
 export type ChunkTranslationMsg = { type: "chunk_translation"; lang: string; text: string; utteranceId: number; chunkIndex: number; translateMs: number };
+export type PipelineWarningMsg = {
+  type: "pipeline_warning";
+  kind: string;
+  lang: string;
+  detail: string;
+  utteranceId: number;
+};
 export type ErrorMsg = { type: "error"; message: string };
 
 export type ServerMessage =
@@ -14,4 +21,5 @@ export type ServerMessage =
   | FinalMsg
   | TranslationMsg
   | ChunkTranslationMsg
+  | PipelineWarningMsg
   | ErrorMsg;

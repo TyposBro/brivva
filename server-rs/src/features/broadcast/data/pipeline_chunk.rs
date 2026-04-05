@@ -2,7 +2,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{info, error, debug};
 
-use crate::core::config::{CHUNK_PIPELINE_CAPACITY, STREAMING_BUDGET_PADDING_SECS};
+use crate::core::config::{CHUNK_PIPELINE_CAPACITY, STREAMING_BUDGET_PADDING_SECS, TRANSLATE_TIMEOUT_MS};
 use crate::core::types::StyleParams;
 use crate::core::types::Lang; use crate::features::broadcast::domain::{Sessions, ServerMsg};
 
@@ -252,19 +252,28 @@ async fn translate_and_synthesize_chunk(task: &ChunkTask) {
 
 async fn translate_chunk(task: &ChunkTask) -> Option<TranslationResult> {
     let ctx = &task.ctx;
-    match crate::shared::translation::translate(
+    let timeout = std::time::Duration::from_millis(TRANSLATE_TIMEOUT_MS);
+    let fut = crate::shared::translation::translate(
         &task.text, task.context.as_deref(), &ctx.source_lang, &task.target,
         &ctx.translate_api_key, &ctx.http_client,
-    ).await {
-        Ok((translated, ms)) => {
+    );
+
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok((translated, ms))) => {
             debug!(
                 "[TRANSLATE] chunk #{}.{} {} = '{}' ({}ms)",
                 ctx.utterance_id, task.chunk_idx, task.target, translated, ms
             );
             Some(TranslationResult { text: translated, translate_ms: ms })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!("[TRANSLATE] chunk #{}.{} {}: {}", ctx.utterance_id, task.chunk_idx, task.target, e);
+            send_pipeline_warning(ctx, "translate_error", &task.target.to_string(), &e.to_string());
+            None
+        }
+        Err(_) => {
+            error!("[TRANSLATE] chunk #{}.{} {} TIMEOUT", ctx.utterance_id, task.chunk_idx, task.target);
+            send_pipeline_warning(ctx, "translate_timeout", &task.target.to_string(), "Translation exceeded deadline");
             None
         }
     }
@@ -319,9 +328,13 @@ async fn synthesize_chunk(
         }
         Ok(Err(e)) => {
             error!("[TTS] chunk #{}.{} {} error: {}", ctx.utterance_id, task.chunk_idx, task.target, e);
+            streaming.finish();
+            send_pipeline_warning(ctx, "tts_error", &lang_str, &e.to_string());
         }
         Err(_) => {
             error!("[TTS] chunk #{}.{} {} TIMEOUT", ctx.utterance_id, task.chunk_idx, task.target);
+            streaming.finish();
+            send_pipeline_warning(ctx, "tts_timeout", &lang_str, "TTS synthesis exceeded deadline");
         }
     }
 }
@@ -347,6 +360,17 @@ fn notify_tts_end(ctx: &PipelineContext, lang_str: &str, pipeline_start: &Instan
             lang: lang_str.to_string(),
             utterance_id: ctx.utterance_id,
             tts_ms: pipeline_start.elapsed().as_millis() as u64,
+        }));
+    }
+}
+
+fn send_pipeline_warning(ctx: &PipelineContext, kind: &str, lang: &str, detail: &str) {
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
+        session.send_to_host(to_ws(&ServerMsg::PipelineWarning {
+            kind: kind.to_string(),
+            lang: lang.to_string(),
+            detail: detail.to_string(),
+            utterance_id: ctx.utterance_id,
         }));
     }
 }

@@ -55,7 +55,7 @@ fn detect_and_emit_chunk(
     let detected = DetectedChunk { boundary, context, transcript_len: transcript.len() };
     spawn_pipeline_if_needed(state, ctx);
     let event = build_chunk_event(state, detected, ctx);
-    try_send_chunk(state, event);
+    try_send_chunk(state, event, ctx);
 }
 
 fn build_chunk_event(
@@ -75,15 +75,29 @@ fn build_chunk_event(
     }
 }
 
-fn try_send_chunk(state: &mut SttState, event: crate::core::types::ChunkEvent) {
+fn try_send_chunk(state: &mut SttState, event: crate::core::types::ChunkEvent, ctx: &SttContext) {
     let tx = match &state.chunk_pipeline_tx {
         Some(tx) => tx,
         None => return,
     };
     if let Err(e) = tx.try_send(event) {
         error!("[CHUNK] #{}.{} dropped (channel full): {}", state.utterance_counter, state.chunk_index, e);
+        send_chunk_dropped_warning(ctx, state.utterance_counter, &e.to_string());
     }
     state.chunk_index += 1;
+}
+
+fn send_chunk_dropped_warning(ctx: &SttContext, utterance_id: u64, detail: &str) {
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(&ServerMsg::PipelineWarning {
+                kind: "chunk_dropped".to_string(),
+                lang: ctx.source_lang.to_string(),
+                detail: detail.to_string(),
+                utterance_id,
+            }),
+        );
+    }
 }
 
 fn spawn_pipeline_if_needed(state: &mut SttState, ctx: &SttContext) {
