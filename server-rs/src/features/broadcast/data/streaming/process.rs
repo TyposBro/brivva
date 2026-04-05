@@ -165,3 +165,90 @@ fn validate_pcm_output(output: &std::process::Output, mp3_len: usize, start: Ins
     );
     Ok(output.stdout.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_parse_single_pid_from_pgrep_output() {
+        let my_pid = std::process::id() as i32;
+        let foreign_pid = if my_pid == 99999 { 99998 } else { 99999 };
+        let raw = format!("{}\n", foreign_pid);
+
+        let pids = parse_pids(&raw);
+
+        assert_eq!(pids, vec![foreign_pid]);
+    }
+
+    #[test]
+    fn should_parse_multiple_pids() {
+        let my_pid = std::process::id() as i32;
+        let pid_a = if my_pid == 111 { 112 } else { 111 };
+        let pid_b = if my_pid == 222 { 223 } else { 222 };
+        let raw = format!("{}\n{}\n", pid_a, pid_b);
+
+        let pids = parse_pids(&raw);
+
+        assert_eq!(pids, vec![pid_a, pid_b]);
+    }
+
+    #[test]
+    fn should_exclude_own_pid() {
+        let my_pid = std::process::id() as i32;
+        let raw = format!("{}\n", my_pid);
+
+        let pids = parse_pids(&raw);
+
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn should_return_empty_for_empty_input() {
+        let pids = parse_pids("");
+
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn should_skip_non_numeric_lines() {
+        let raw = "not_a_pid\nabc\n";
+
+        let pids = parse_pids(raw);
+
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn should_handle_whitespace_around_pids() {
+        let my_pid = std::process::id() as i32;
+        let foreign_pid = if my_pid == 42 { 43 } else { 42 };
+        let raw = format!("  {}  \n", foreign_pid);
+
+        let pids = parse_pids(&raw);
+
+        assert_eq!(pids, vec![foreign_pid]);
+    }
+
+    #[test]
+    fn should_skip_blank_lines() {
+        let my_pid = std::process::id() as i32;
+        let foreign_pid = if my_pid == 500 { 501 } else { 500 };
+        let raw = format!("\n{}\n\n", foreign_pid);
+
+        let pids = parse_pids(&raw);
+
+        assert_eq!(pids, vec![foreign_pid]);
+    }
+
+    #[test]
+    fn should_handle_mixed_valid_and_invalid_lines() {
+        let my_pid = std::process::id() as i32;
+        let foreign_pid = if my_pid == 777 { 778 } else { 777 };
+        let raw = format!("abc\n{}\nnot_valid\n{}\n", foreign_pid, my_pid);
+
+        let pids = parse_pids(&raw);
+
+        assert_eq!(pids, vec![foreign_pid]);
+    }
+}
