@@ -159,18 +159,27 @@ fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
 fn queue_source_passthrough(ctx: &SttContext, state: &SttState) {
     let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
-        None => return,
+        None => {
+            tracing::warn!("[PASSTHROUGH] session {} gone, skipping", ctx.session_id);
+            return;
+        }
     };
     if !session.active_langs().contains(&ctx.source_lang) {
         return;
     }
     let erased = match session.rtmp_manager.clone() {
         Some(m) => m,
-        None => return,
+        None => {
+            tracing::warn!("[PASSTHROUGH] no RTMP manager for {}, audio dropped", ctx.source_lang);
+            return;
+        }
     };
     let mgr = match crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased) {
         Some(m) => m,
-        None => return,
+        None => {
+            tracing::error!("[PASSTHROUGH] RTMP manager downcast failed for {}", ctx.source_lang);
+            return;
+        }
     };
 
     let host_audio = drain_host_audio(ctx);

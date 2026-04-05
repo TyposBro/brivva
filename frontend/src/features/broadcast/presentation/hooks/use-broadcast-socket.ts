@@ -25,7 +25,7 @@ export function useBroadcastSocket(params: SocketParams) {
   const [interim, setInterim] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
-  const [pipelineWarnings, setPipelineWarnings] = useState(0);
+  const [pipelineWarnings, setPipelineWarnings] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef(new AudioPipeline());
@@ -52,9 +52,9 @@ export function useBroadcastSocket(params: SocketParams) {
       case "translation":      handleTranslation(msg, dispatch); break;
       case "chunk_translation": handleChunkTranslation(msg, dispatch); break;
       case "pipeline_warning": {
-        setPipelineWarnings((c) => c + 1);
         const w = msg as { kind: string; lang: string; detail: string };
-        addError(`[${w.kind}] ${w.lang}: ${w.detail}`);
+        const label = formatWarning(w.kind, w.lang, w.detail);
+        setPipelineWarnings((prev) => [...prev, label]);
         break;
       }
       case "error":            addError(msg.message); break;
@@ -82,7 +82,7 @@ export function useBroadcastSocket(params: SocketParams) {
     setIsLive(true);
     setTranscripts([]);
     setInterim("");
-    setPipelineWarnings(0);
+    setPipelineWarnings([]);
   }, [params, handleMessage, addError]);
 
   startRef.current = start;
@@ -238,6 +238,19 @@ function handleChunkTranslation(
       return { ...t, translations: { ...t.translations, [msg.lang]: existing + separator + msg.text } };
     });
   });
+}
+
+const WARNING_LABELS: Record<string, string> = {
+  stt_error: "STT error",
+  stt_disconnected: "STT disconnected",
+  tts_timeout: "TTS timed out",
+  tts_failed: "TTS failed",
+  rtmp_error: "RTMP error",
+};
+
+function formatWarning(kind: string, lang: string, detail: string): string {
+  const label = WARNING_LABELS[kind] ?? kind;
+  return lang ? `${label} (${lang}): ${detail}` : `${label}: ${detail}`;
 }
 
 function waitForOpen(ws: WebSocket): Promise<void> {

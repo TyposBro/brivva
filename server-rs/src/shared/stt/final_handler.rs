@@ -16,13 +16,18 @@ pub(super) async fn handle_translation_endpoint(
 ) {
     let utterance_start = state.utterance_start.take().unwrap_or_else(Instant::now);
     let host_audio = drain_host_audio(ctx);
-    let sp = analyze_prosody_and_style(translated_text, &host_audio);
     let uid = state.utterance_counter;
     let target_lang = match &state.target_lang {
         Some(l) => l.clone(),
         None => return,
     };
 
+    info!(
+        "[PIPELINE] #{} {} translate done ({}ms since speech), spawning TTS ({}B host audio)",
+        uid, target_lang, utterance_start.elapsed().as_millis(), host_audio.len(),
+    );
+
+    let sp = analyze_prosody_and_style(translated_text, &host_audio);
     send_translation_to_host(ctx, &target_lang, translated_text, uid);
     spawn_tts_for_translation(ctx, &target_lang, translated_text, uid, utterance_start, &sp);
 }
@@ -93,15 +98,22 @@ fn spawn_tts_for_translation(
 ) {
     let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
-        None => return,
+        None => {
+            tracing::warn!("[TTS] #{} {} skipped: session {} gone", uid, target_lang, ctx.session_id);
+            return;
+        }
     };
     if session.tier < 2 {
+        tracing::debug!("[TTS] #{} {} skipped: tier={} < 2", uid, target_lang, session.tier);
         return;
     }
     let voice_clone_id = session.voice_clone_id.clone();
     let tts_model = session.tts_model.clone();
     let broadcast_delay_ms = session.broadcast_delay_ms;
     let erased = session.rtmp_manager.clone();
+    if erased.is_none() {
+        tracing::warn!("[TTS] #{} {} no RTMP manager — TTS audio will not reach stream", uid, target_lang);
+    }
     drop(session);
 
     let tts_req = TtsSpawnRequest {
@@ -217,8 +229,20 @@ async fn try_rest_fallback(
 async fn create_streaming_slot(
     req: &TtsSpawnRequest,
 ) -> Option<crate::features::broadcast::data::streaming::StreamingPcm> {
-    let erased = req.erased_rtmp.as_ref()?;
-    let mgr = crate::features::broadcast::data::streaming::downcast_rtmp_manager(erased)?;
+    let erased = match req.erased_rtmp.as_ref() {
+        Some(e) => e,
+        None => {
+            tracing::warn!("[TTS] #{} {} no RTMP manager, streaming slot skipped", req.uid, req.target_lang);
+            return None;
+        }
+    };
+    let mgr = match crate::features::broadcast::data::streaming::downcast_rtmp_manager(erased) {
+        Some(m) => m,
+        None => {
+            tracing::error!("[TTS] #{} {} RTMP manager downcast failed", req.uid, req.target_lang);
+            return None;
+        }
+    };
     let locked = mgr.lock().await;
     Some(locked.queue_streaming_audio(&req.target_lang, req.utterance_start))
 }
