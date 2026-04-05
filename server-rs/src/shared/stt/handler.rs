@@ -77,22 +77,16 @@ fn is_semantic_endpoint(token: &SonioxToken) -> bool {
 fn handle_original_token(token: &SonioxToken, state: &mut SttState, ctx: &SttContext) {
     mark_utterance_start(state);
     if token.is_final {
-        if !state.transcript_acc.is_empty() && !token.text.starts_with(' ') {
-            state.transcript_acc.push(' ');
-        }
         state.transcript_acc.push_str(&token.text);
     }
     if state.is_transcript_provider {
-        let interim = format!("{} {}", state.transcript_acc, token.text).trim().to_string();
-        send_interim_to_host(ctx, &interim);
+        let interim = format!("{}{}", state.transcript_acc, token.text);
+        send_interim_to_host(ctx, interim.trim());
     }
 }
 
 fn handle_translation_token(token: &SonioxToken, state: &mut SttState) {
     if token.is_final {
-        if !state.translation_acc.is_empty() && !token.text.starts_with(' ') {
-            state.translation_acc.push(' ');
-        }
         state.translation_acc.push_str(&token.text);
     }
 }
