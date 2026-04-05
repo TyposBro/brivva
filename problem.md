@@ -23,6 +23,7 @@ Host speaks → Gladia STT (real-time transcription)
 The bottleneck is **NOT** any single API call — it's **sentence chunking**. STT must wait for the speaker to finish a thought before translating, because partial sentences produce bad translations.
 
 **Real speech patterns:**
+
 - Short phrase: "This is 50% off" → 2 seconds → fast
 - Long sentence: "This product was shipped from Colombia and sold out within one month of launch, and right now we're offering buy one get one free" → 8-10 seconds → viewer waits the entire time before hearing anything
 
@@ -39,6 +40,7 @@ A human simultaneous interpreter starts translating after ~3-4 words (1-2 second
 **3. Single StreamingPcm Accumulator** — Multiple TTS chunks feed the same `StreamingPcm` buffer per (utterance, language). The audio drain loop in `ffmpeg.rs` needed **zero changes**. Inter-chunk silence (~75ms TTFB = 3-4 ticks) is imperceptible.
 
 ### Expected improvement:
+
 - **Before** (8s utterance): ~13s total silence (8s speech + 5s delay)
 - **After** (same, 3 chunks): first audio at ~5.3s (2.3s chunk + 3s delay). **~7.7s improvement.**
 
@@ -54,22 +56,6 @@ A human simultaneous interpreter starts translating after ~3-4 words (1-2 second
 
 5. **STT transcript instability** — Gladia revises interim text (adds punctuation, corrects words). `ProgressiveChunkDetector` uses `derive_position` with normalized character matching to handle revisions.
 
-## Bugs Found & Fixed (v16)
-
-### Bug 1: YouTube stream pauses/buffers on longer utterances
-
-**Root cause:** Jitter recovery in `audio_drain_loop` (`ffmpeg.rs`) incremented byte counters but **never wrote silence to the FIFO**. When the audio drain thread fell behind (>500ms), it called `continue` without writing anything. FFmpeg's audio FIFO starved, which blocks FFmpeg's muxer entirely — both video AND audio stop outputting. YouTube's player buffer drains and the stream pauses.
-
-**Evidence:** `JITTER RECOVERY: 20996ms behind at tick 1839, skipping ~1049 ticks` — 21 seconds with zero audio bytes written to FFmpeg.
-
-**Fix:** Jitter recovery now writes catch-up data to the FIFO: any available audio from the active buffer first, then silence for the remainder. FFmpeg always has data to mux, preventing RTMP stalls.
-
-### Bug 2: Audio/video desync
-
-**Root cause:** Same bug. Jitter recovery added phantom bytes to `total_bytes_written` without actually writing them. FFmpeg received fewer audio bytes than the counter indicated, creating a permanent A/V offset. The first recovery at tick 5 (731ms, ~63KB phantom) set the initial desync; subsequent recoveries compounded it.
-
-**Fix:** Now that recovery writes real bytes, `total_bytes_written` accurately reflects what FFmpeg received. A/V sync is maintained because both the video drain (chunk-based delay) and audio drain (tick-based delay + actual FIFO writes) reference the same delayed clock.
-
 ## Strategic Pivot — Build vs Buy the Pipeline
 
 The industry is waking up to this exact problem. Several tools now handle semantic chunking and live translation natively:
@@ -84,6 +70,7 @@ The industry is waking up to this exact problem. Several tools now handle semant
 ### Why Palabra/Pinch don't replace Brivva
 
 Evaluated 2026-04-04. Palabra pricing makes it unviable for live commerce:
+
 - Broadcaster costs 60-80 credits/hour depending on plan
 - Business plan ($2917/mo) gives ~58 hours — a host streaming 160hr/month needs ~$8,750/mo **per language**
 - 4 languages = ~$35,000/month per host vs ~$500/month with own pipeline (Gladia + Google Translate + ElevenLabs)
@@ -92,13 +79,15 @@ Evaluated 2026-04-04. Palabra pricing makes it unviable for live commerce:
 ### Google DeepMind End-to-End S2ST (Nov 2025, blog published)
 
 Evaluated 2026-04-04. Google shipped a real-time end-to-end speech-to-speech translation model in Meet and Pixel 10:
+
 - **2-second fixed delay** — same "fixed-delay jitter buffer" concept as our `ffmpeg.rs` broadcast delay. Validates the architectural approach.
-- **End-to-end audio-to-audio** — no cascade (STT→Translate→TTS). A streaming encoder/decoder with RVQ audio tokens predicts translated audio directly. Eliminates the chunking problem entirely — the model learns *when* to start translating from time-synchronized training data.
+- **End-to-end audio-to-audio** — no cascade (STT→Translate→TTS). A streaming encoder/decoder with RVQ audio tokens predicts translated audio directly. Eliminates the chunking problem entirely — the model learns _when_ to start translating from time-synchronized training data.
 - **Voice preservation built-in** — custom TTS preserves speaker voice characteristics without a separate cloning step.
 - **5 Latin language pairs only**: EN ↔ ES/DE/FR/IT/PT. No CJK support. They acknowledge "languages with word orders significantly different from English" need longer lookahead and are future work. Hindi "promising" but not shipped.
 - **Not available as an API** — embedded in Meet (server-side) and Pixel 10 (on-device). Cannot be purchased or integrated.
 
 **Implications for Brivva:**
+
 - Our 3s delay with a cascade pipeline is competitive with Google's 2s end-to-end model
 - Our JA/KO/ZH support (SOV clause chunking) is a differentiator — Google doesn't cover these yet
 - When/if this ships as a Cloud API, it could replace our entire STT→Translate→TTS cascade
