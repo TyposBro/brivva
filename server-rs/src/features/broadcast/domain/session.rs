@@ -6,7 +6,7 @@ use axum::extract::ws::Message;
 
 use crate::core::config::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
 use crate::core::types::Lang;
-use crate::streaming::SharedRtmpManager;
+use crate::features::broadcast::data::streaming::SharedRtmpManager;
 
 pub struct Session {
     pub id: String,
