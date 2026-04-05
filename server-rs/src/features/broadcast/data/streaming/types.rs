@@ -240,4 +240,115 @@ mod tests {
 
         assert_eq!(pcm.len(), 100);
     }
+
+    #[test]
+    fn should_create_default_same_as_new() {
+        let from_default = StreamingPcm::default();
+        let from_new = StreamingPcm::new();
+
+        let default_buf = from_default.pcm.lock().unwrap();
+        let new_buf = from_new.pcm.lock().unwrap();
+        assert_eq!(default_buf.len(), new_buf.len());
+        assert!(!from_default.complete.load(Ordering::Acquire));
+        assert!(!from_new.complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_apply_fadeout_attenuating_end_samples() {
+        let num_bytes = FADE_OUT_BYTES;
+        let mut pcm = Vec::with_capacity(num_bytes);
+        let amplitude: i16 = 10000;
+        for _ in 0..(num_bytes / 2) {
+            pcm.extend_from_slice(&amplitude.to_le_bytes());
+        }
+
+        apply_linear_fadeout(&mut pcm);
+
+        let first_sample = i16::from_le_bytes([pcm[0], pcm[1]]);
+        let last_sample = i16::from_le_bytes([pcm[num_bytes - 2], pcm[num_bytes - 1]]);
+        assert!(first_sample.abs() > last_sample.abs(),
+            "first sample ({}) should be louder than last ({})", first_sample, last_sample);
+        assert!(last_sample.abs() < 100,
+            "last sample should be near zero, got {}", last_sample);
+    }
+
+    #[test]
+    fn should_not_panic_on_fadeout_with_empty_buffer() {
+        let mut pcm: Vec<u8> = Vec::new();
+
+        apply_linear_fadeout(&mut pcm);
+
+        assert!(pcm.is_empty());
+    }
+
+    #[test]
+    fn should_not_panic_on_fadeout_with_single_byte() {
+        let mut pcm = vec![0xFF];
+
+        apply_linear_fadeout(&mut pcm);
+
+        assert_eq!(pcm.len(), 1);
+    }
+
+    #[test]
+    fn should_fade_sample_attenuate_by_position() {
+        let amplitude: i16 = 1000;
+        let mut pcm = amplitude.to_le_bytes().to_vec();
+
+        fade_sample(&mut pcm, 0, 5, 10);
+
+        let result = i16::from_le_bytes([pcm[0], pcm[1]]);
+        assert_eq!(result, 500, "at halfway point gain=0.5, 1000*0.5=500");
+    }
+
+    #[test]
+    fn should_fade_sample_preserve_at_start() {
+        let amplitude: i16 = 1000;
+        let mut pcm = amplitude.to_le_bytes().to_vec();
+
+        fade_sample(&mut pcm, 0, 0, 10);
+
+        let result = i16::from_le_bytes([pcm[0], pcm[1]]);
+        assert_eq!(result, 1000, "at position 0 gain=1.0, no attenuation");
+    }
+
+    #[test]
+    fn should_fade_sample_skip_when_offset_out_of_bounds() {
+        let mut pcm = vec![0xFF, 0x7F];
+
+        fade_sample(&mut pcm, 5, 0, 10);
+
+        assert_eq!(pcm, vec![0xFF, 0x7F], "buffer should be unchanged");
+    }
+
+    #[test]
+    fn should_clone_streaming_pcm_share_same_buffer() {
+        let original = StreamingPcm::new();
+        let cloned = original.clone();
+
+        original.append(&[1, 2, 3]);
+
+        let cloned_buf = cloned.pcm.lock().unwrap();
+        assert_eq!(&*cloned_buf, &[1, 2, 3], "clone shares the same Arc buffer");
+    }
+
+    #[test]
+    fn should_append_with_limit_allow_partial_fill() {
+        let spcm = StreamingPcm::new();
+
+        spcm.append_with_limit(&[1, 2, 3], 100);
+
+        let buf = spcm.pcm.lock().unwrap();
+        assert_eq!(&*buf, &[1, 2, 3]);
+        assert!(!spcm.complete.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_truncate_exactly_at_max_when_equal() {
+        let mut pcm = vec![0u8; 100];
+
+        truncate_with_fadeout(&mut pcm, 100);
+
+        assert_eq!(pcm.len(), 100, "no truncation needed when exactly at max");
+    }
 }

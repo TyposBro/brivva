@@ -194,4 +194,62 @@ mod tests {
 
         assert_eq!(result, "anything ||| extra");
     }
+
+    // ── build_query_text edge cases ──────────────────────
+
+    #[test]
+    fn should_preserve_special_characters_in_text() {
+        let result = build_query_text("hello & goodbye <world>", None);
+
+        assert_eq!(result, "hello & goodbye <world>");
+    }
+
+    #[test]
+    fn should_preserve_separator_in_plain_text() {
+        let result = build_query_text("has ||| inside", None);
+
+        assert_eq!(result, "has ||| inside");
+    }
+
+    #[test]
+    fn should_handle_unicode_context() {
+        let result = build_query_text("hello", Some("こんにちは"));
+
+        assert_eq!(result, "こんにちは ||| hello");
+    }
+
+    // ── strip_context_prefix edge cases ──────────────────
+
+    #[test]
+    fn should_strip_prefix_with_multiple_separators() {
+        let result = strip_context_prefix("a ||| b ||| c", true);
+
+        assert_eq!(result, "b ||| c");
+    }
+
+    #[test]
+    fn should_handle_separator_at_start_of_string() {
+        let result = strip_context_prefix("||| only text", true);
+
+        assert_eq!(result, "only text");
+    }
+
+    #[test]
+    fn should_handle_separator_at_end_of_string() {
+        let result = strip_context_prefix("text |||", true);
+
+        assert_eq!(result, "");
+    }
+
+    // ── translate_url ────────────────────────────────────
+
+    #[test]
+    fn should_build_url_with_api_key() {
+        let url = translate_url("test-key-123");
+
+        assert_eq!(
+            url,
+            "https://translation.googleapis.com/language/translate/v2?key=test-key-123"
+        );
+    }
 }

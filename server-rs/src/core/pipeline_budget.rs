@@ -73,4 +73,87 @@ mod tests {
         let expected = (8.0 * BYTES_PER_SEC) as usize;
         assert_eq!(bytes, expected);
     }
+
+    #[test]
+    fn should_return_zero_deadline_when_delay_is_zero() {
+        let deadline = compute_tts_deadline(0);
+
+        assert_eq!(deadline, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn should_return_cap_when_delay_equals_cap_plus_margin() {
+        let deadline = compute_tts_deadline(TTS_DEADLINE_CAP_MS + TTS_DEADLINE_MARGIN_MS);
+
+        assert_eq!(deadline, Duration::from_millis(TTS_DEADLINE_CAP_MS));
+    }
+
+    #[test]
+    fn should_return_delay_minus_margin_when_just_below_cap() {
+        let delay = TTS_DEADLINE_CAP_MS + TTS_DEADLINE_MARGIN_MS - 1;
+
+        let deadline = compute_tts_deadline(delay);
+
+        assert_eq!(deadline, Duration::from_millis(delay - TTS_DEADLINE_MARGIN_MS));
+    }
+
+    #[test]
+    fn should_return_zero_pcm_bytes_when_duration_is_zero_and_no_tolerance() {
+        let now = Instant::now();
+
+        let bytes = compute_max_pcm_bytes(now, now, 0.0);
+
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn should_compute_pcm_bytes_from_tolerance_alone_when_zero_duration() {
+        let now = Instant::now();
+
+        let bytes = compute_max_pcm_bytes(now, now, 2.0);
+
+        let expected = (2.0 * BYTES_PER_SEC) as usize;
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn should_return_zero_streaming_bytes_when_delay_and_padding_are_zero() {
+        let bytes = compute_streaming_max_bytes(0, 0.0);
+
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn should_return_zero_deadline_when_delay_equals_margin() {
+        let deadline = compute_tts_deadline(TTS_DEADLINE_MARGIN_MS);
+
+        assert_eq!(deadline, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn should_return_positive_deadline_when_delay_is_one_above_margin() {
+        let deadline = compute_tts_deadline(TTS_DEADLINE_MARGIN_MS + 1);
+
+        assert_eq!(deadline, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn should_scale_streaming_bytes_linearly_with_delay() {
+        let bytes_3s = compute_streaming_max_bytes(3000, 0.0);
+        let bytes_6s = compute_streaming_max_bytes(6000, 0.0);
+
+        assert_eq!(bytes_6s, bytes_3s * 2);
+    }
+
+    #[test]
+    fn should_scale_pcm_bytes_linearly_with_duration() {
+        let start = Instant::now();
+        let end_1s = start + Duration::from_secs(1);
+        let end_2s = start + Duration::from_secs(2);
+
+        let bytes_1s = compute_max_pcm_bytes(start, end_1s, 0.0);
+        let bytes_2s = compute_max_pcm_bytes(start, end_2s, 0.0);
+
+        assert_eq!(bytes_2s, bytes_1s * 2);
+    }
 }

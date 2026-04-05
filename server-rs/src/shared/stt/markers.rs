@@ -119,3 +119,176 @@ pub fn progressive_config(lang: &str) -> ProgressiveLangConfig {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── detector_config ──────────────────────────────────
+
+    #[test]
+    fn should_return_english_markers_for_en() {
+        let config = detector_config("en");
+
+        assert!(!config.markers.is_empty());
+        assert!(config.markers.contains(&", and "));
+    }
+
+    #[test]
+    fn should_set_en_min_duration_to_1500ms() {
+        let config = detector_config("en");
+
+        assert_eq!(config.min_duration, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn should_set_en_max_duration_to_3s() {
+        let config = detector_config("en");
+
+        assert_eq!(config.max_duration, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn should_set_en_min_chars_after_to_3() {
+        let config = detector_config("en");
+
+        assert_eq!(config.min_chars_after, 3);
+    }
+
+    #[test]
+    fn should_return_japanese_markers_for_ja() {
+        let config = detector_config("ja");
+
+        assert!(!config.markers.is_empty());
+        assert!(config.markers.contains(&"けれども、"));
+    }
+
+    #[test]
+    fn should_set_ja_min_chars_after_to_2() {
+        let config = detector_config("ja");
+
+        assert_eq!(config.min_chars_after, 2);
+    }
+
+    #[test]
+    fn should_set_ja_min_duration_to_1s() {
+        let config = detector_config("ja");
+
+        assert_eq!(config.min_duration, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn should_set_ja_max_duration_to_2500ms() {
+        let config = detector_config("ja");
+
+        assert_eq!(config.max_duration, Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn should_return_korean_markers_for_ko() {
+        let config = detector_config("ko");
+
+        assert!(!config.markers.is_empty());
+        assert!(config.markers.contains(&"지만 "));
+    }
+
+    #[test]
+    fn should_set_ko_min_duration_to_1s() {
+        let config = detector_config("ko");
+
+        assert_eq!(config.min_duration, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn should_return_chinese_markers_for_zh() {
+        let config = detector_config("zh");
+
+        assert!(!config.markers.is_empty());
+    }
+
+    #[test]
+    fn should_set_zh_max_duration_to_3s() {
+        let config = detector_config("zh");
+
+        assert_eq!(config.max_duration, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn should_return_empty_markers_for_unknown_language() {
+        let config = detector_config("fr");
+
+        assert!(config.markers.is_empty());
+    }
+
+    #[test]
+    fn should_use_default_timing_for_unknown_language() {
+        let config = detector_config("unknown");
+
+        assert_eq!(config.min_duration, Duration::from_millis(1500));
+        assert_eq!(config.max_duration, Duration::from_secs(3));
+        assert_eq!(config.min_chars_after, 3);
+    }
+
+    // ── progressive_config ───────────────────────────────
+
+    #[test]
+    fn should_return_en_progressive_with_lower_thresholds() {
+        let config = progressive_config("en");
+
+        assert!(!config.markers.is_empty());
+        assert_eq!(config.min_duration, Duration::from_millis(1000));
+        assert_eq!(config.max_duration, Duration::from_millis(2000));
+        assert_eq!(config.min_chars_after, 3);
+    }
+
+    #[test]
+    fn should_return_ko_progressive_with_800ms_min() {
+        let config = progressive_config("ko");
+
+        assert!(!config.markers.is_empty());
+        assert_eq!(config.min_duration, Duration::from_millis(800));
+        assert_eq!(config.max_duration, Duration::from_millis(2000));
+        assert_eq!(config.min_chars_after, 2);
+    }
+
+    #[test]
+    fn should_return_ja_progressive_with_800ms_min() {
+        let config = progressive_config("ja");
+
+        assert_eq!(config.min_duration, Duration::from_millis(800));
+        assert_eq!(config.min_chars_after, 2);
+    }
+
+    #[test]
+    fn should_return_zh_progressive_config() {
+        let config = progressive_config("zh");
+
+        assert!(!config.markers.is_empty());
+        assert_eq!(config.min_duration, Duration::from_millis(800));
+    }
+
+    #[test]
+    fn should_return_empty_markers_for_unknown_progressive() {
+        let config = progressive_config("unknown");
+
+        assert!(config.markers.is_empty());
+        assert_eq!(config.min_duration, Duration::from_millis(1000));
+        assert_eq!(config.max_duration, Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn should_have_progressive_min_less_than_detector_min_for_en() {
+        let detector = detector_config("en");
+        let progressive = progressive_config("en");
+
+        assert!(progressive.min_duration < detector.min_duration);
+    }
+
+    #[test]
+    fn should_have_progressive_max_less_than_detector_max_for_en() {
+        let detector = detector_config("en");
+        let progressive = progressive_config("en");
+
+        assert!(progressive.max_duration < detector.max_duration);
+    }
+}

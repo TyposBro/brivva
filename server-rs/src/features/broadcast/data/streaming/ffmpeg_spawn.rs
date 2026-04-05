@@ -85,3 +85,61 @@ fn is_rtmp_connection_error(line: &str) -> bool {
         || lower.contains("i/o error")
         || lower.contains("error writing trailer")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_detect_connection_refused() {
+        assert!(is_rtmp_connection_error("Connection refused"));
+    }
+
+    #[test]
+    fn should_detect_connection_reset() {
+        assert!(is_rtmp_connection_error("Connection reset by peer"));
+    }
+
+    #[test]
+    fn should_detect_broken_pipe() {
+        assert!(is_rtmp_connection_error("Broken pipe"));
+    }
+
+    #[test]
+    fn should_detect_connection_timed_out() {
+        assert!(is_rtmp_connection_error("Connection timed out"));
+    }
+
+    #[test]
+    fn should_detect_io_error() {
+        assert!(is_rtmp_connection_error("I/O error reading from socket"));
+    }
+
+    #[test]
+    fn should_detect_error_writing_trailer() {
+        assert!(is_rtmp_connection_error("Error writing trailer"));
+    }
+
+    #[test]
+    fn should_be_case_insensitive() {
+        assert!(is_rtmp_connection_error("CONNECTION REFUSED"));
+        assert!(is_rtmp_connection_error("broken PIPE"));
+    }
+
+    #[test]
+    fn should_not_match_normal_ffmpeg_output() {
+        assert!(!is_rtmp_connection_error("frame= 100 fps=30 q=23.0 size=256kB"));
+    }
+
+    #[test]
+    fn should_not_match_empty_string() {
+        assert!(!is_rtmp_connection_error(""));
+    }
+
+    #[test]
+    fn should_detect_error_embedded_in_longer_line() {
+        assert!(is_rtmp_connection_error(
+            "[flv @ 0x5f] Connection refused while writing packet"
+        ));
+    }
+}

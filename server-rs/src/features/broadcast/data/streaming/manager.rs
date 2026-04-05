@@ -485,3 +485,165 @@ pub fn downcast_rtmp_manager(
 ) -> Option<SharedRtmpManager> {
     erased.clone().downcast::<tokio::sync::Mutex<RtmpManager>>().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_build_input_args_with_audio_fifo_path() {
+        let mgr = RtmpManager::new();
+
+        let args = mgr.build_input_args("/tmp/test_audio_fifo");
+
+        assert!(args.contains(&"pipe:0".to_string()));
+        assert!(args.contains(&"/tmp/test_audio_fifo".to_string()));
+        assert!(args.contains(&"s16le".to_string()));
+        assert!(args.contains(&"44100".to_string()));
+    }
+
+    #[test]
+    fn should_build_video_encoding_args_with_ultrafast_preset() {
+        let mgr = RtmpManager::new();
+
+        let args = mgr.build_video_encoding_args();
+
+        assert!(args.contains(&"libx264".to_string()));
+        assert!(args.contains(&"ultrafast".to_string()));
+        assert!(args.contains(&"zerolatency".to_string()));
+        assert!(args.contains(&VIDEO_CRF.to_string()));
+        assert!(args.contains(&VIDEO_MAX_BITRATE.to_string()));
+        assert!(args.contains(&VIDEO_BUFSIZE.to_string()));
+        assert!(args.contains(&VIDEO_GOP_SIZE.to_string()));
+    }
+
+    #[test]
+    fn should_build_output_args_with_rtmp_url() {
+        let url = "rtmp://live.example.com/app/key";
+
+        let args = RtmpManager::build_output_args(url);
+
+        assert_eq!(args.last().unwrap(), url);
+        assert!(args.contains(&"aac".to_string()));
+        assert!(args.contains(&AUDIO_CHANNELS_OUT.to_string()));
+        assert!(args.contains(&AUDIO_BITRATE.to_string()));
+        assert!(args.contains(&"flv".to_string()));
+    }
+
+    #[test]
+    fn should_build_ffmpeg_args_combining_all_sections() {
+        let mgr = RtmpManager::new();
+        let fifo = "/tmp/test_fifo";
+        let url = "rtmp://example.com/stream";
+
+        let args = mgr.build_ffmpeg_args(fifo, url);
+
+        assert!(args.contains(&fifo.to_string()), "should contain fifo path");
+        assert!(args.contains(&"libx264".to_string()), "should contain video codec");
+        assert_eq!(args.last().unwrap(), url, "should end with rtmp url");
+    }
+
+    #[test]
+    fn should_create_new_queue_when_no_existing_queue() {
+        let (queue, stop_flag, is_restart) = prepare_stream_state(None);
+
+        assert!(!is_restart);
+        assert!(!stop_flag.load(Ordering::Acquire));
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn should_reuse_existing_queue_on_restart() {
+        let existing = Arc::new(StdMutex::new(VecDeque::new()));
+        existing.lock().unwrap().push_back(QueuedAudio {
+            play_at: Instant::now(),
+            pcm: Arc::new(StdMutex::new(vec![1, 2, 3])),
+            complete: Arc::new(AtomicBool::new(true)),
+        });
+
+        let (queue, _stop_flag, is_restart) = prepare_stream_state(Some(existing));
+
+        assert!(is_restart);
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn should_create_manager_with_default_delay() {
+        let mgr = RtmpManager::new();
+
+        assert_eq!(mgr.broadcast_delay(), Duration::from_millis(DEFAULT_DELAY_MS));
+    }
+
+    #[test]
+    fn should_create_manager_with_custom_delay() {
+        let mgr = RtmpManager::with_delay(5000);
+
+        assert_eq!(mgr.broadcast_delay(), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn should_create_default_manager_same_as_new() {
+        let from_default = RtmpManager::default();
+        let from_new = RtmpManager::new();
+
+        assert_eq!(from_default.broadcast_delay(), from_new.broadcast_delay());
+    }
+
+    #[test]
+    fn should_set_video_codec() {
+        let mut mgr = RtmpManager::new();
+
+        mgr.set_video_codec("h264");
+
+        assert_eq!(mgr.video_codec, "h264");
+    }
+
+    #[test]
+    fn should_drop_overflow_chunks_when_exceeding_max() {
+        let mgr = RtmpManager::new();
+        let mut buf = VecDeque::new();
+        for _ in 0..(MAX_VIDEO_CHUNKS + 5) {
+            buf.push_back((Instant::now(), vec![0u8; 10]));
+        }
+        let buf_len = buf.len();
+
+        mgr.drop_overflow_chunks(&mut buf, buf_len);
+
+        assert_eq!(buf.len(), MAX_VIDEO_CHUNKS);
+    }
+
+    #[test]
+    fn should_not_drop_chunks_when_under_max() {
+        let mgr = RtmpManager::new();
+        let mut buf = VecDeque::new();
+        buf.push_back((Instant::now(), vec![0u8; 10]));
+        let buf_len = buf.len();
+
+        mgr.drop_overflow_chunks(&mut buf, buf_len);
+
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn should_save_init_segment_only_once() {
+        let mgr = RtmpManager::new();
+        let first = vec![1, 2, 3];
+        let second = vec![4, 5, 6];
+
+        mgr.save_init_segment(&first);
+        mgr.save_init_segment(&second);
+
+        let init = mgr.video_init_segment.lock().unwrap();
+        assert_eq!(init.as_ref().unwrap(), &first);
+    }
+
+    #[test]
+    fn should_erase_and_downcast_rtmp_manager() {
+        let mgr: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(RtmpManager::new()));
+
+        let erased = erase_rtmp_manager(mgr);
+        let recovered = downcast_rtmp_manager(&erased);
+
+        assert!(recovered.is_some());
+    }
+}

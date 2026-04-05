@@ -70,4 +70,65 @@ mod tests {
         assert_eq!(json["style"], 0.70);
         assert_eq!(json["speed"], 1.15);
     }
+
+    #[test]
+    fn should_return_happy_style() {
+        let style = VoiceStyle::from_emotion("happy");
+
+        assert_eq!(style.stability, 0.30);
+        assert_eq!(style.similarity_boost, 0.60);
+        assert_eq!(style.style, 0.70);
+        assert_eq!(style.speed, 1.10);
+    }
+
+    #[test]
+    fn should_return_angry_style() {
+        let style = VoiceStyle::from_emotion("angry");
+
+        assert_eq!(style.stability, 0.25);
+        assert_eq!(style.similarity_boost, 0.70);
+        assert_eq!(style.style, 0.85);
+        assert_eq!(style.speed, 1.05);
+    }
+
+    #[test]
+    fn should_return_sad_style() {
+        let style = VoiceStyle::from_emotion("sad");
+
+        assert_eq!(style.stability, 0.70);
+        assert_eq!(style.similarity_boost, 0.80);
+        assert_eq!(style.style, 0.40);
+        assert_eq!(style.speed, 0.85);
+    }
+
+    #[test]
+    fn should_return_serious_style() {
+        let style = VoiceStyle::from_emotion("serious");
+
+        assert_eq!(style.stability, 0.60);
+        assert_eq!(style.similarity_boost, 0.80);
+        assert_eq!(style.style, 0.30);
+        assert_eq!(style.speed, 0.95);
+    }
+
+    #[test]
+    fn should_use_custom_speed_not_style_speed_in_json() {
+        let style = VoiceStyle::from_emotion("excited");
+        let json = style.to_voice_settings(0.75);
+
+        assert_eq!(json["speed"], 0.75);
+    }
+
+    #[test]
+    fn should_produce_json_with_exactly_four_keys() {
+        let style = VoiceStyle::from_emotion("happy");
+        let json = style.to_voice_settings(1.0);
+        let obj = json.as_object().unwrap();
+
+        assert_eq!(obj.len(), 4);
+        assert!(obj.contains_key("stability"));
+        assert!(obj.contains_key("similarity_boost"));
+        assert!(obj.contains_key("style"));
+        assert!(obj.contains_key("speed"));
+    }
 }

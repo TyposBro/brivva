@@ -27,3 +27,167 @@ impl AppConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env var tests must run sequentially to avoid races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    unsafe fn set_env(key: &str, val: &str) {
+        unsafe { std::env::set_var(key, val); }
+    }
+
+    unsafe fn remove_env(key: &str) {
+        unsafe { std::env::remove_var(key); }
+    }
+
+    #[test]
+    fn should_read_stt_api_key_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { set_env("STT_API_KEY", "test-stt-key") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.stt_api_key, "test-stt-key");
+        unsafe { remove_env("STT_API_KEY") };
+    }
+
+    #[test]
+    fn should_read_tts_api_key_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { set_env("TTS_API_KEY", "test-tts-key") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.tts_api_key, "test-tts-key");
+        unsafe { remove_env("TTS_API_KEY") };
+    }
+
+    #[test]
+    fn should_read_translate_api_key_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { set_env("TRANSLATE_API_KEY", "test-translate-key") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.translate_api_key, "test-translate-key");
+        unsafe { remove_env("TRANSLATE_API_KEY") };
+    }
+
+    #[test]
+    fn should_fallback_stt_key_to_empty_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { remove_env("STT_API_KEY") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.stt_api_key, "");
+    }
+
+    #[test]
+    fn should_fallback_default_voice_to_constant_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { remove_env("DEFAULT_VOICE") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.default_voice, DEFAULT_VOICE_ID);
+    }
+
+    #[test]
+    fn should_read_default_voice_from_env_when_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { set_env("DEFAULT_VOICE", "custom-voice-id") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.default_voice, "custom-voice-id");
+        unsafe { remove_env("DEFAULT_VOICE") };
+    }
+
+    #[test]
+    fn should_use_server_addr_constant() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.server_addr, SERVER_ADDR);
+    }
+
+    #[test]
+    fn should_use_max_body_size_constant() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.max_body_size, MAX_BODY_SIZE);
+    }
+
+    #[test]
+    fn should_fallback_tts_key_to_empty_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { remove_env("TTS_API_KEY") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.tts_api_key, "");
+    }
+
+    #[test]
+    fn should_fallback_translate_key_to_empty_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { remove_env("TRANSLATE_API_KEY") };
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.translate_api_key, "");
+    }
+
+    #[test]
+    fn should_read_all_keys_when_all_env_vars_are_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            set_env("STT_API_KEY", "stt-val");
+            set_env("TTS_API_KEY", "tts-val");
+            set_env("TRANSLATE_API_KEY", "translate-val");
+            set_env("DEFAULT_VOICE", "voice-val");
+        }
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.stt_api_key, "stt-val");
+        assert_eq!(config.tts_api_key, "tts-val");
+        assert_eq!(config.translate_api_key, "translate-val");
+        assert_eq!(config.default_voice, "voice-val");
+
+        unsafe {
+            remove_env("STT_API_KEY");
+            remove_env("TTS_API_KEY");
+            remove_env("TRANSLATE_API_KEY");
+            remove_env("DEFAULT_VOICE");
+        }
+    }
+
+    #[test]
+    fn should_fallback_all_keys_to_defaults_when_no_env_vars_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            remove_env("STT_API_KEY");
+            remove_env("TTS_API_KEY");
+            remove_env("TRANSLATE_API_KEY");
+            remove_env("DEFAULT_VOICE");
+        }
+
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.stt_api_key, "");
+        assert_eq!(config.tts_api_key, "");
+        assert_eq!(config.translate_api_key, "");
+        assert_eq!(config.default_voice, DEFAULT_VOICE_ID);
+        assert_eq!(config.server_addr, SERVER_ADDR);
+        assert_eq!(config.max_body_size, MAX_BODY_SIZE);
+    }
+}
