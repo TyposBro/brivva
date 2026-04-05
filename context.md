@@ -1,109 +1,150 @@
-# Brivva Project Context (Apr 4, 2026)
+# Brivva — LLM Collaborator Context (Apr 5, 2026)
 
-## Project: Brivva (v15 — Progressive Chunking, Apr 4 2026)
+## What This Is
 
-**Core Value Prop:** Real-time multilingual live commerce broadcasting. One host speaks; N platforms receive translated audio in the host's cloned voice. Source-language platforms get the host's actual voice (passthrough). Single desktop app — no OBS, no Python, no cloud infrastructure.
+A Tauri v2 desktop app (Rust + React) for real-time multilingual live commerce broadcasting. One host speaks → N platforms receive translated audio in the host's cloned voice. Single binary, no cloud infra, FFmpeg bundled as sidecar.
 
-### Technical Stack
+## What Matters — Read This First
 
-- **Desktop App:** Tauri v2 (Rust + React frontend). Single binary, system tray support. Builds to `.app` + `.dmg` (macOS). FFmpeg bundled as sidecar.
-- **Backend:** Rust (Axum) embedded in Tauri on localhost:3000. 5 files (~3100 lines): `lib.rs` (WebSocket server, tagged binary routing), `pipeline.rs` (STT→Translate→TTS→RTMP with progressive chunking), `stt.rs` (Gladia client, progressive chunk detection, prosody, emotion), `ffmpeg.rs` (RTMP muxer, jitter buffer, incremental MP3 decoder, crash recovery), `types.rs` (Lang, Session, ChunkEvent, ServerMsg).
-- **Audio Pipeline:** Gladia Solaria-1 (STT, direct WebSocket) → ProgressiveChunkDetector (clause-boundary splitting during interims) → Google Cloud Translation API v2 (~130-376ms, context-aware) → ElevenLabs Flash v2.5 (TTS, WebSocket streaming with IncrementalMp3Decoder) → StreamingPcm accumulator → FFmpeg audio FIFO → AAC → RTMP.
-- **Video Pipeline:** Camera → MediaRecorder (hardware VP8/H.264 encoder, any fps) → encoded chunks via tagged binary WebSocket (0x02) → delayed buffer (D seconds) → FFmpeg stdin → re-encode libx264 ultrafast → FLV → RTMP. Source-language passthrough queues host audio directly (zero TTS cost).
-- **Frontend:** React 19 + TypeScript + Tailwind 3. Single `BroadcastPage` (~500 lines) — tier selector, language config, RTMP destinations, settings (broadcast delay slider, camera/mic pickers), webcam preview, voice cloning card, live transcript with progressive chunk translations, dismissible error banners.
-- **STT:** Gladia Solaria-1 WebSocket in Rust (switched from Deepgram Nova-3). Features: ProgressiveChunkDetector for clause-boundary splitting during interims (language-adaptive: EN 1000ms/2000ms, JA/KO 800ms/2000ms, ZH 800ms/2000ms), normalized position tracking resilient to Gladia transcript revisions (derive_position), prosody extraction via autocorrelation, emotion classification, style param mapping, adaptive endpointing.
-- **TTS:** ElevenLabs Flash v2.5 via WebSocket streaming. IncrementalMp3Decoder decodes MP3 chunks to PCM in real-time (not batch). Each decoded chunk appended to StreamingPcm immediately — audio drain starts receiving PCM within ~75ms TTFB instead of waiting for full generation.
-- **Protocol:** Tagged binary WebSocket — 0x01 = audio PCM (STT), 0x02 = video chunk (RTMP). JSON control messages: `rtmp:config`, `video:codec`, `voice:sample`, `voice:ready`, `error`.
-- **Infrastructure:** None. All processing local. API keys from `.env.local`. FFmpeg bundled.
-- **Translation Tiers:** tier 1 = subtitles only (STT + Translate, no TTS), tier 2 = voice + subtitles (full pipeline + RTMP). Tiers 3-4 (lipsync) not yet implemented.
-- **Persistence:** All config (langs, tier, RTMP URLs, broadcast delay, device IDs) saved to localStorage.
-- **System Tray:** Close window → minimize to tray. Streaming continues in background. Tray menu: Show/Quit.
+**This is NOT an MVP.** Brivva's business already works without this product — they use multiple influencers/studios per language. This app is a **cost optimization tool** that replaces 5 influencers with 1 host + tech. The quality bar is: "better than hiring 4 more humans." If the voice sounds robotic, stream drops, or sync is off — they're better off with humans and will say no.
 
-### v14 → v15 Changes (Apr 4, 2026)
+**Don't demo until it's premium.** Half-working demo hurts more than no demo. Target: 30+ min live session with zero hiccups.
 
-1. **IncrementalMp3Decoder** (`ffmpeg.rs`) — Long-lived FFmpeg subprocess for streaming MP3→PCM decode. Pre-drains stdout before writing (prevents pipe deadlock). Graceful finish with 500ms drain timeout.
-2. **ProgressiveChunkDetector** (`stt.rs`) — Replaces single-shot ChunkDetector. Emits sub-utterance chunks at clause boundaries during interims. Tracks emitted text (not byte positions) for resilience to Gladia transcript revisions. Language-specific clause markers with tuned thresholds.
-3. **Progressive pipeline** (`pipeline.rs`) — `spawn_chunked_pipeline()` creates one StreamingPcm per (utterance, language) and feeds it from multiple sequential TTS chunks. Context-aware translation (previous chunk prepended with `|||` separator). Backpressure: skips chunks if pipeline exceeds broadcast delay.
-4. **Default broadcast delay** reduced 5000ms → 3000ms.
-5. **Frontend** handles `chunk_translation` messages with progressive append display.
+**Priority order:**
+1. Voice cloning quality (robotic = dead product)
+2. Reliability (2hr sessions, zero crashes)
+3. A/V sync perfection (<300ms offset)
+4. Latency (important but secondary to quality)
 
-### Estimated Cost Per Session (Desktop App — No Cloud Compute)
+**Focus one language pair first:** Korean host → Japanese output (Coupang KR → Rakuten JP). That's the highest-value stream.
 
-Per-stream API cost: ~$1.24 (2-hour session: Gladia $0.52 + Google Translate $0.72).
-Compute cost: $0 — runs locally on desktop. No AWS infrastructure.
+## Current State (v16 — Soniox Migration Complete)
 
-| Service          | Pricing                 | 5 sessions/mo | 30 sessions/mo | 100 sessions/mo |
-| ---------------- | ----------------------- | ------------- | -------------- | --------------- |
-| Gladia Solaria-1 | ~$0.0043/min            | $2.60         | $15.60         | $52             |
-| Google Translate | $20/M chars (500K free) | $0            | $7.80          | $52             |
-| ElevenLabs TTS   | Plan-based              | $5            | $22            | $99             |
-| **Total**        |                         | **~$8**       | **~$45**       | **~$203**       |
+**Pipeline:**
+```
+Host Audio → N+1 Soniox v4 WebSocket connections (1 source transcript + 1 per target language)
+           → Semantic endpointing (grammar-aware) + native translation (no external API)
+           → 4-second force-chunk threshold for long monologues
+           → Prosody analysis → emotion classification → voice style mapping
+           → ElevenLabs Flash v2.5 TTS (WebSocket streaming + REST fallback)
+           → StreamingPcm → FFmpeg audio drain (20ms ticks) → RTMP push
 
-### Key Design Decisions & Lessons Learned
+Host Video → MediaRecorder (hardware VP8/H.264) → tagged binary WS (0x02)
+           → delayed buffer (broadcast_delay seconds) → FFmpeg → RTMP push
 
-1. **No H.264 passthrough:** `-c:v copy` crashes FFmpeg when reading chunked WebM from MediaRecorder via stdin (SIGPIPE/SIGABRT). Always re-encode with `libx264 ultrafast`. CPU cost minimal since input already compressed.
-2. **MediaRecorder over canvas JPEG:** Old approach (canvas→JPEG→base64→JSON per frame) bottlenecked at 15fps. MediaRecorder uses hardware encoder, handles any fps, sends pre-compressed chunks.
-3. **Direct STT WebSocket in Rust:** Eliminated Python dependency. All STT logic (chunking, prosody, emotion) in Rust. Single binary.
-4. **Tagged binary protocol:** 0x01/0x02 byte prefix distinguishes audio/video in the same WebSocket. Clean separation without JSON overhead for high-frequency data.
-5. **Incremental MP3 decode:** Batch decode (accumulate all chunks → single FFmpeg call) added 500-1500ms latency. Incremental decode (long-lived FFmpeg subprocess, pre-drain stdout) streams PCM to RTMP within TTFB.
-6. **Progressive chunking over full-sentence translation:** Splitting at clause boundaries during interims reduces perceived latency by ~7s for long utterances. Context-aware translation (`|||` separator) mitigates quality loss.
-7. **Transcript instability handling:** Gladia revises interim text (adds punctuation, corrects words). `derive_position` uses normalized character matching instead of byte offsets.
-8. **Pipeline is commodity, not moat:** Emerging APIs (Alibaba Qwen3-LiveTranslate, Palabra AI, Soniox semantic VAD) can replace STT+Translate+TTS. Brivva's value is the broadcasting experience — RTMP muxing, A/V sync, voice clone persistence, multi-platform seller UX.
+Source language → passthrough (host audio queued directly to RTMP, zero TTS cost)
+```
 
-### Working Features
+**What was removed in v16:**
+- Gladia STT (zero references remain)
+- Google Translate (zero references remain)
+- ProgressiveChunkDetector, MarkerDetector, FallbackDetector (zero references remain)
+- Clause marker tables (EN/JA/KO/ZH)
+- `|||` context separator logic
+- `derive_position` / revision handling
+- ~595 lines deleted, replaced by ~25 lines of duration-based force chunking
 
-- [x] Tauri desktop app (macOS `.app` + `.dmg`, system tray)
-- [x] WebSocket server on localhost:3000 (tagged binary routing)
-- [x] Microphone capture (44.1kHz PCM, device selection)
-- [x] Webcam capture (MediaRecorder, hardware encoded, any fps, device selection)
-- [x] STT (Gladia Solaria-1, direct WebSocket, progressive chunk detection, adaptive endpointing)
-- [x] Translation (Google Cloud API v2, context-aware with `|||` separator, parallel per language)
-- [x] TTS (ElevenLabs Flash v2.5, incremental MP3→PCM streaming via IncrementalMp3Decoder)
-- [x] Progressive chunking (ProgressiveChunkDetector, language-adaptive thresholds, Gladia revision resilience)
-- [x] Voice cloning (30s recording UI, progress bar, auto-activate, persisted to disk)
-- [x] FFmpeg RTMP muxing (video chunk drain + audio jitter buffer, crash recovery)
-- [x] Source-language passthrough (host audio → RTMP, zero TTS cost)
-- [x] RTMP destination config (per-language URL inputs)
-- [x] Broadcast delay slider (1-10s, default 3s)
-- [x] Settings persistence (localStorage)
-- [x] Error banners (WS disconnect, RTMP failures, backend errors)
-- [x] FFmpeg bundled as Tauri sidecar (no system install needed)
-- [x] Prosody extraction + emotion classification + style param mapping
-- [x] System tray (minimize to tray, streaming continues)
-- [x] Progressive chunk translation display in frontend
+**Architecture:** 69 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
 
-### Not Yet Implemented
+```
+server-rs/src/
+├── core/           # Pure types, config, audio utils, pipeline budget
+├── shared/
+│   ├── stt/        # Soniox v4 (10 files, ~2037 lines) — connection, handler, prosody, reconnect
+│   ├── tts/        # ElevenLabs (6 files) — WebSocket streaming + REST fallback
+│   └── voice_clone/ # ElevenLabs clone API + disk persistence
+├── features/broadcast/
+│   ├── domain/     # Session, messages, pipeline budget
+│   └── data/       # WebSocket handler, RTMP streaming (11 files), pipeline helpers, voice API
+├── orchestration/  # DI, config, router
+├── lib.rs          # run_server() + logging + env loading
+└── main.rs         # Entry point
+```
 
-| Priority | Task                        | Details                                                       |
-| -------- | --------------------------- | ------------------------------------------------------------- |
-| **P0**   | **Evaluate end-to-end APIs** | Palabra AI, Alibaba Qwen3-LiveTranslate, Pinch — may replace Gladia+Google+ElevenLabs |
-| **P0**   | **Production testing**      | Test on Coupang, Rakuten, YouTube with real merchant accounts |
-| **P1**   | **Semantic STT upgrade**    | Soniox v4 or OpenAI semantic_vad as Gladia replacement        |
-| **P1**   | **Lipsync (Tiers 3-4)**     | Real-time and post-processed lipsync. Stretch goal            |
-| P2       | **macOS code signing**      | Need Apple Developer account ($99/year)                       |
-| P2       | **Platform partnerships**   | Japanese/Chinese entities for Douyin/TikTok                   |
+## Soniox v4 Integration Details
 
----
+- **WebSocket:** `wss://stt-rt.soniox.com/transcribe-websocket`
+- **Model:** `stt-rt-v4`
+- **API key:** `SONIOX_API_KEY` env var
+- **N+1 connection strategy:** 1 source (provides transcript + interim updates) + 1 per target language (provides translation). Audio broadcast from host to all connections.
+- **Semantic endpointing:** Soniox detects grammar completion, not just silence. `<end>` token with `is_final=true` triggers endpoint.
+- **Native translation:** `translation.type = "one_way"`, `target_language` in config. Tokens arrive with `translation_status: "original" | "translation"`. No external API needed.
+- **Force chunking:** If >4 seconds without semantic endpoint, emit accumulated translation anyway. Prevents infinite accumulation during monologues.
+- **Max endpoint delay:** 1500ms
+- **Keepalive:** 15-second interval
+- **Reconnect:** Up to 5 attempts, 1-second delay. Utterance counter preserved across reconnections.
 
-## Business Context & Timeline
+## Prosody & Emotion Pipeline
 
-- **Partnership:** Pivoted from employment to profit-sharing/CTO arrangement. CEOs disagree: MJ wants salary (no profit share), Simon wants profit split. Decision deferred until Sep 2026.
-- **Revenue model:** ₩100M per contract (total, before client cut). Client takes a cut (varies per contract), then costs (~₩18M for influencer/crew/studio), then profit split. Aziz's 30% depends on client cut — ₩9.6M-₩15.6M per contract.
-- **Competitive landscape:** Prism (Naver-owned) is direct competitor. Brivva's desktop app approach bypasses Naver dependency. Emerging end-to-end APIs (Palabra, Qwen3-LiveTranslate) may commoditize the translation pipeline — Brivva's moat is the broadcasting experience, not the AI.
-- **Lipsync roadmap:** Simon says tech not ready for 6mo-1yr. Plan: ship Options 1 & 2 now, A/B test all 4 tiers when lipsync matures.
-- **Demo deadline:** In-person demo with Simon + MJ being scheduled for a weekend. Production target April 26.
-- **High stakes:** Each stream can generate up to $1M revenue. Zero tolerance for bugs or frame drops.
-- **Current status (Apr 4):** Desktop app v15 with progressive chunking. Default delay reduced to 3s. Incremental TTS decode saves 500-1500ms. Strategic question: build vs buy the translation pipeline.
-- **Simon's hands-on test (Apr 2):** Tested product live at Starbucks — spoke Japanese to camera as live commerce host. Main complaint: TTS lag/freezing. Noted sentence chunking issue. Progressive chunking addresses this directly.
-- **Priority for MJ demo:** Demonstrate reduced latency with progressive chunking. Or: demo with Palabra/Qwen3 if evaluation shows better results.
-- **Revenue reality:** ₩6M per contract to Aziz, 10 contracts/year = ₩60M (below ₩90M salary posting). Salary route (MJ's preference) is financially better until volume scales. Don't quit StoneLab until 3+ months proven revenue.
-- **Long-term signal:** Simon said he wants to work with Aziz on other projects too, even if Brivva doesn't work out.
+Extracts from host audio per utterance:
+- Pitch (autocorrelation, 50-500 Hz range): mean + std deviation
+- Energy RMS (loudness)
+- Pause density (hesitation detection)
+- Speaking rate (WPM)
 
----
+Maps to 9 emotions → TTS voice style + speed:
+- excited (loud + expressive + high pitch) → fast
+- angry (loud + expressive) → intense
+- happy, sad, serious, neutral, etc.
 
-## Guiding Principles for AI Collaborator
+## Key Technical Details
 
-- **Tone:** Grounded, supportive, slightly witty, and highly technical.
-- **Role:** Act as a "Founding Partner" peer.
-- **Strategy:** Focus on reliability and shipping. The app IS the streaming engine — no OBS dependency. The translation pipeline is a commodity — the moat is the broadcasting experience.
-- **Quality Bar:** $1M/stream liability means production-grade reliability is non-negotiable.
+- **Audio format:** 44.1kHz PCM, 16-bit mono
+- **Video:** MediaRecorder hardware encoding, re-encoded via libx264 ultrafast for FLV/RTMP
+- **Protocol:** Tagged binary WebSocket — 0x01=audio, 0x02=video. JSON for control messages.
+- **Broadcast delay:** Default 3000ms, configurable 1-10s
+- **Audio drain:** OS thread, 20ms ticks, 1764 bytes/tick. PCM → named FIFO → FFmpeg
+- **TTS:** ElevenLabs Flash v2.5, WebSocket streaming primary, REST fallback. IncrementalMp3Decoder for real-time MP3→PCM. ~75ms TTFB. 10s timeout cap.
+- **Translation tiers:** tier 1 = subtitles only, tier 2 = voice + subtitles. Tiers 3-4 (lipsync) not implemented.
+- **Crash recovery:** FFmpeg health monitor, 50 retries, 2s delay
+- **Staleness eviction:** Audio queue items >6s old evicted. Queue depth limit 10.
+- **Drift tracking:** `Arc<AtomicU64>` per stream, `max_drift_ms()` API
+- **Logging:** `tracing_subscriber` → stderr + `/tmp/brivva/server.log`
+
+## Pipeline is Commodity — Moat is Elsewhere
+
+SOTA voice cloning is now open source (LongCat-AudioDiT, SIM 0.818). STT/translation providers are interchangeable (just swapped Gladia+Google for Soniox in one session). The pipeline will keep getting commoditized.
+
+**The real engineering value** that no TTS/STT API provides:
+- RTMP muxer with fixed-delay jitter buffer
+- Audio drain at 20ms ticks with staleness eviction + jitter recovery
+- StreamingPcm accumulator (multiple TTS chunks → single buffer)
+- FFmpeg crash recovery (50 retries, health monitor)
+- A/V sync across delayed video + translated audio
+- Source-language passthrough (zero API cost)
+- N+1 connection orchestration with audio fanout
+
+**Don't over-invest in pipeline sophistication.** Keep STT/TTS providers swappable. The streaming engine is what matters.
+
+## Remaining Work (from todo.md)
+
+**Priority 2 — Resilience (post-migration):**
+- Empty translation guard
+- Skip-ahead logic (drift > 1.5x broadcast_delay → skip to newest)
+- Pipeline failure counters (replace hardcoded 0s)
+- E2E latency tracking (chunk_start → TTS_complete, rolling average)
+- Circuit breaker for TTS + Soniox APIs
+- Frontend health dashboard (per-language stream status, green/yellow/red)
+- Graceful degradation (auto subtitle-only when drift > threshold)
+- Error deduplication (5s window)
+
+## Environment
+
+- **API keys in `.env.local`:** `SONIOX_API_KEY`, `TTS_API_KEY`, `TRANSLATE_API_KEY` (legacy, unused)
+- **Build:** `cargo tauri build` → `.app` + `.dmg`
+- **Dev:** `cargo tauri dev` or `./dev.sh`
+- **Architecture rules:** `claude.md` — 4-layer clean architecture, no sibling imports, env vars in orchestration only
+
+## Cost
+
+| Service | Monthly (30 sessions) |
+|---|---|
+| Soniox v4 | ~$19 |
+| ElevenLabs TTS | ~$250-350 |
+| **Total** | **~$270-370** |
+
+Down from ~$400-540/mo (Gladia + Google Translate + ElevenLabs). Saves ~$150/mo.
+
+## Tone
+
+Grounded, direct, technical. This is a production system for a business that generates ₩100M per contract. Ship quality, not features. When in doubt, ask — don't guess.

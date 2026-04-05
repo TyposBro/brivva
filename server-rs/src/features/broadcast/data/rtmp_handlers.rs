@@ -83,7 +83,7 @@ fn parse_broadcast_delay(json: &serde_json::Value) -> u64 {
 
 fn create_and_configure_manager(sessions: &Sessions, session_id: &str, delay_ms: u64) -> streaming::RtmpManager {
     store_broadcast_delay(sessions, session_id, delay_ms);
-    let mut manager = streaming::RtmpManager::with_delay(delay_ms);
+    let mut manager = streaming::RtmpManager::with_delay(session_id.to_string(), delay_ms);
     apply_existing_codec(sessions, session_id, &mut manager);
     manager
 }

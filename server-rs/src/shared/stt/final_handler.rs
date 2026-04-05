@@ -29,6 +29,7 @@ pub(super) async fn handle_translation_endpoint(
 
     let sp = analyze_prosody_and_style(translated_text, &host_audio);
     send_translation_to_host(ctx, &target_lang, translated_text, uid);
+    update_stream_subtitles(ctx, &target_lang, &state.transcript_acc, translated_text);
     spawn_tts_for_translation(ctx, &target_lang, translated_text, uid, utterance_start, &sp);
 }
 
@@ -49,8 +50,17 @@ fn analyze_prosody_and_style(text: &str, host_audio: &[u8]) -> StyleParams {
 }
 
 fn compute_prosody(host_audio: &[u8], text: &str) -> crate::shared::stt::Prosody {
+    // Cap to last 3 seconds to avoid blocking TTS spawn on long utterances
+    // (autocorrelation is O(n^2) per frame, so 16s of audio → ~4.5s of CPU)
+    const MAX_PROSODY_SECS: usize = 3;
+    let max_bytes = MAX_PROSODY_SECS * crate::core::config::BYTES_PER_SEC as usize;
+    let audio = if host_audio.len() > max_bytes {
+        &host_audio[host_audio.len() - max_bytes..]
+    } else {
+        host_audio
+    };
     let mut prosody = crate::shared::stt::extract_prosody(
-        host_audio, crate::core::config::SAMPLE_RATE,
+        audio, crate::core::config::SAMPLE_RATE,
     );
     let word_count = text.split_whitespace().count();
     crate::shared::stt::compute_speaking_rate(&mut prosody, word_count);
@@ -84,6 +94,18 @@ fn send_translation_to_host(ctx: &SttContext, lang: &str, text: &str, uid: u64) 
             ),
         );
     }
+}
+
+// ── Subtitle overlay ───────────────────────────────────────────────────────
+
+/// Write transcript + translation to subtitle files that FFmpeg reads via drawtext reload=1.
+/// Files are named by session_id + lang so each RTMP stream shows its own subtitles.
+fn update_stream_subtitles(ctx: &SttContext, lang: &str, transcript: &str, translation: &str) {
+    let sid = &ctx.session_id;
+    let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", sid, lang);
+    let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", sid, lang);
+    let _ = std::fs::write(&transcript_file, transcript);
+    let _ = std::fs::write(&translation_file, translation);
 }
 
 // ── TTS spawn ───────────────────────────────────────────────────────────────

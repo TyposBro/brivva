@@ -5,6 +5,7 @@ export const LANGS: Lang[] = [
   { code: "en", label: "English", flag: "\uD83C\uDDEC\uD83C\uDDE7" },
   { code: "ja", label: "Japanese", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
   { code: "zh", label: "Chinese", flag: "\uD83C\uDDE8\uD83C\uDDF3" },
+  { code: "ru", label: "Russian", flag: "\uD83C\uDDF7\uD83C\uDDFA" },
 ] as const;
 
 export type TranslationTier = 1 | 2 | 3 | 4;

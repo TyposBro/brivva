@@ -72,6 +72,7 @@ struct AudioDrainSetup {
 
 /// Manages all FFmpeg RTMP streams for a session.
 pub struct RtmpManager {
+    session_id: String,
     streams: HashMap<String, RtmpStream>,
     pending_streams: HashMap<String, StreamConfig>,
     video_chunks: Arc<StdMutex<VecDeque<(Instant, Vec<u8>)>>>,
@@ -82,20 +83,21 @@ pub struct RtmpManager {
 
 impl Default for RtmpManager {
     fn default() -> Self {
-        Self::new()
+        Self::new("default".to_string())
     }
 }
 
 // ── Public API ───────────────────────────────────────────
 
 impl RtmpManager {
-    pub fn new() -> Self {
-        Self::with_delay(DEFAULT_DELAY_MS)
+    pub fn new(session_id: String) -> Self {
+        Self::with_delay(session_id, DEFAULT_DELAY_MS)
     }
 
-    pub fn with_delay(delay_ms: u64) -> Self {
-        tracing::info!("[SYNC] Broadcast delay: {}ms", delay_ms);
+    pub fn with_delay(session_id: String, delay_ms: u64) -> Self {
+        tracing::info!("[SYNC] Broadcast delay: {}ms (session={})", delay_ms, session_id);
         Self {
+            session_id,
             streams: HashMap::new(),
             pending_streams: HashMap::new(),
             video_chunks: Arc::new(StdMutex::new(VecDeque::new())),
@@ -115,6 +117,24 @@ impl RtmpManager {
             let depth = s.audio_queue.lock().unwrap().len();
             (s.lang.clone(), depth)
         }).collect()
+    }
+
+    /// Update the subtitle overlay text for a specific stream.
+    /// `transcript` = original speech, `translation` = translated text.
+    pub fn update_subtitles(&self, stream_id: &str, transcript: &str, translation: &str) {
+        let transcript_file = format!("/tmp/brivva_sub_{}_transcript.txt", stream_id);
+        let translation_file = format!("/tmp/brivva_sub_{}_translation.txt", stream_id);
+        let _ = std::fs::write(&transcript_file, transcript);
+        let _ = std::fs::write(&translation_file, translation);
+    }
+
+    /// Update subtitles for all streams matching a given language.
+    pub fn update_subtitles_for_lang(&self, lang: &str, transcript: &str, translation: &str) {
+        for (id, stream) in &self.streams {
+            if stream.lang == lang {
+                self.update_subtitles(id, transcript, translation);
+            }
+        }
     }
 
     pub fn set_video_codec(&mut self, codec: &str) {
@@ -269,6 +289,7 @@ impl RtmpManager {
             Some(c) => c,
             None => return,
         };
+        self.trim_video_for_activation();
         match self.spawn_stream_inner(&config, None) {
             Ok(()) => {
                 tracing::info!(
@@ -285,12 +306,32 @@ impl RtmpManager {
         }
     }
 
+    fn trim_video_for_activation(&self) {
+        let cutoff = Instant::now() - self.broadcast_delay;
+        let mut buf = self.video_chunks.lock().unwrap();
+        let before = buf.len();
+        while let Some((ts, _)) = buf.front() {
+            if *ts < cutoff {
+                buf.pop_front();
+            } else {
+                break;
+            }
+        }
+        let dropped = before - buf.len();
+        if dropped > 0 {
+            tracing::info!(
+                "[VIDEO] trimmed {} stale chunks before activation ({} kept)",
+                dropped, buf.len()
+            );
+        }
+    }
+
     fn spawn_stream_inner(
         &mut self,
         config: &StreamConfig,
         existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
     ) -> Result<(), String> {
-        let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(&config.stream_id, &config.rtmp_url)?;
+        let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(&config.stream_id, &config.rtmp_url, &config.lang)?;
         let (audio_queue, stop_flag, is_restart) = prepare_stream_state(existing_queue);
         let drift_ms = Arc::new(AtomicU64::new(0));
         let setup = DrainSetup {
@@ -315,9 +356,10 @@ impl RtmpManager {
         &self,
         stream_id: &str,
         rtmp_url: &str,
+        lang: &str,
     ) -> Result<(std::process::Child, std::process::ChildStdin, Arc<AtomicBool>, String), String> {
         let audio_fifo = create_audio_fifo(stream_id)?;
-        let args = self.build_ffmpeg_args(&audio_fifo, rtmp_url);
+        let args = self.build_ffmpeg_args(&audio_fifo, rtmp_url, lang);
         let (child, stdin, rtmp_error) = spawn_ffmpeg_process(stream_id, &args)?;
         Ok((child, stdin, rtmp_error, audio_fifo))
     }
@@ -366,9 +408,9 @@ impl RtmpManager {
         );
     }
 
-    fn build_ffmpeg_args(&self, audio_fifo: &str, rtmp_url: &str) -> Vec<String> {
+    fn build_ffmpeg_args(&self, audio_fifo: &str, rtmp_url: &str, lang: &str) -> Vec<String> {
         let mut args = self.build_input_args(audio_fifo);
-        args.extend(self.build_video_encoding_args());
+        args.extend(self.build_video_encoding_args(lang));
         args.extend(Self::build_output_args(rtmp_url));
         args
     }
@@ -385,9 +427,27 @@ impl RtmpManager {
         ]
     }
 
-    fn build_video_encoding_args(&self) -> Vec<String> {
+    fn build_video_encoding_args(&self, lang: &str) -> Vec<String> {
         tracing::info!("[FFMPEG] Encoding {} -> H.264 (ultrafast)", self.video_codec);
+
+        // Create subtitle text files for drawtext overlay (matched by final_handler.rs)
+        let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, lang);
+        let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, lang);
+        let _ = std::fs::write(&transcript_file, "");
+        let _ = std::fs::write(&translation_file, "");
+
+        // drawtext filter: transcript (white) at top, translation (yellow) at bottom
+        let vf = format!(
+            "drawtext=textfile='{transcript}':reload=1:fontsize=24:fontcolor=white:\
+             borderw=2:bordercolor=black:x=(w-tw)/2:y=30:font=Arial,\
+             drawtext=textfile='{translation}':reload=1:fontsize=28:fontcolor=yellow:\
+             borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70:font=Arial",
+            transcript = transcript_file,
+            translation = translation_file,
+        );
+
         vec![
+            "-vf".to_string(), vf,
             "-c:v".to_string(), "libx264".to_string(),
             "-preset".to_string(), "ultrafast".to_string(),
             "-tune".to_string(), "zerolatency".to_string(),
@@ -545,7 +605,7 @@ mod tests {
 
     #[test]
     fn should_build_input_args_with_audio_fifo_path() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
 
         let args = mgr.build_input_args("/tmp/test_audio_fifo");
 
@@ -557,9 +617,9 @@ mod tests {
 
     #[test]
     fn should_build_video_encoding_args_with_ultrafast_preset() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
 
-        let args = mgr.build_video_encoding_args();
+        let args = mgr.build_video_encoding_args("en");
 
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"ultrafast".to_string()));
@@ -585,11 +645,11 @@ mod tests {
 
     #[test]
     fn should_build_ffmpeg_args_combining_all_sections() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
         let fifo = "/tmp/test_fifo";
         let url = "rtmp://example.com/stream";
 
-        let args = mgr.build_ffmpeg_args(fifo, url);
+        let args = mgr.build_ffmpeg_args(fifo, url, "test_stream");
 
         assert!(args.contains(&fifo.to_string()), "should contain fifo path");
         assert!(args.contains(&"libx264".to_string()), "should contain video codec");
@@ -622,14 +682,14 @@ mod tests {
 
     #[test]
     fn should_create_manager_with_default_delay() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
 
         assert_eq!(mgr.broadcast_delay(), Duration::from_millis(DEFAULT_DELAY_MS));
     }
 
     #[test]
     fn should_create_manager_with_custom_delay() {
-        let mgr = RtmpManager::with_delay(5000);
+        let mgr = RtmpManager::with_delay("test".to_string(), 5000);
 
         assert_eq!(mgr.broadcast_delay(), Duration::from_millis(5000));
     }
@@ -637,14 +697,14 @@ mod tests {
     #[test]
     fn should_create_default_manager_same_as_new() {
         let from_default = RtmpManager::default();
-        let from_new = RtmpManager::new();
+        let from_new = RtmpManager::new("test".to_string());
 
         assert_eq!(from_default.broadcast_delay(), from_new.broadcast_delay());
     }
 
     #[test]
     fn should_set_video_codec() {
-        let mut mgr = RtmpManager::new();
+        let mut mgr = RtmpManager::new("test".to_string());
 
         mgr.set_video_codec("h264");
 
@@ -653,7 +713,7 @@ mod tests {
 
     #[test]
     fn should_drop_overflow_chunks_when_exceeding_max() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
         let mut buf = VecDeque::new();
         for _ in 0..(MAX_VIDEO_CHUNKS + 5) {
             buf.push_back((Instant::now(), vec![0u8; 10]));
@@ -667,7 +727,7 @@ mod tests {
 
     #[test]
     fn should_not_drop_chunks_when_under_max() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
         let mut buf = VecDeque::new();
         buf.push_back((Instant::now(), vec![0u8; 10]));
         let buf_len = buf.len();
@@ -679,7 +739,7 @@ mod tests {
 
     #[test]
     fn should_save_init_segment_only_once() {
-        let mgr = RtmpManager::new();
+        let mgr = RtmpManager::new("test".to_string());
         let first = vec![1, 2, 3];
         let second = vec![4, 5, 6];
 
@@ -692,7 +752,7 @@ mod tests {
 
     #[test]
     fn should_erase_and_downcast_rtmp_manager() {
-        let mgr: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(RtmpManager::new()));
+        let mgr: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(RtmpManager::new("test".to_string())));
 
         let erased = erase_rtmp_manager(mgr);
         let recovered = downcast_rtmp_manager(&erased);

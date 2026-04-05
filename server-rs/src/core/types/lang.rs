@@ -7,6 +7,7 @@ pub enum Lang {
     Ja,
     Zh,
     Ko,
+    Ru,
 }
 
 impl std::fmt::Display for Lang {
@@ -16,6 +17,7 @@ impl std::fmt::Display for Lang {
             Lang::Ja => write!(f, "ja"),
             Lang::Zh => write!(f, "zh"),
             Lang::Ko => write!(f, "ko"),
+            Lang::Ru => write!(f, "ru"),
         }
     }
 }
@@ -27,6 +29,7 @@ impl Lang {
             "ja" => Some(Lang::Ja),
             "zh" => Some(Lang::Zh),
             "ko" => Some(Lang::Ko),
+            "ru" => Some(Lang::Ru),
             _ => None,
         }
     }
@@ -57,13 +60,21 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_ru() {
+        assert_eq!(Lang::from_str("ru"), Some(Lang::Ru));
+    }
+
+    #[test]
     fn should_return_none_for_unknown_code() {
         assert_eq!(Lang::from_str("fr"), None);
     }
 
     #[test]
     fn should_display_roundtrip() {
-        for (code, lang) in [("en", Lang::En), ("ja", Lang::Ja), ("zh", Lang::Zh), ("ko", Lang::Ko)] {
+        for (code, lang) in [
+            ("en", Lang::En), ("ja", Lang::Ja), ("zh", Lang::Zh),
+            ("ko", Lang::Ko), ("ru", Lang::Ru),
+        ] {
             assert_eq!(lang.to_string(), code);
             assert_eq!(Lang::from_str(&lang.to_string()), Some(lang));
         }
