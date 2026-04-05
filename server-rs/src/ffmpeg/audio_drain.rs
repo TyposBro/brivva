@@ -51,51 +51,53 @@ struct DrainState {
 impl DrainState {
     /// Main drain loop: check stop → sleep → classify jitter → handle.
     fn run(&mut self) {
+        self.log_start();
+        loop {
+            if self.stop.load(Ordering::Acquire) { break; }
+            self.sleep_until_next_tick();
+            if self.handle_jitter() { break; }
+        }
+        self.cleanup_and_log();
+    }
+
+    fn log_start(&self) {
         tracing::info!(
             "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
-            self.stream_id,
-            self.delay.as_millis()
+            self.stream_id, self.delay.as_millis()
         );
+    }
 
-        loop {
-            if self.stop.load(Ordering::Acquire) {
-                break;
-            }
-
-            let now = Instant::now();
-            if self.next_tick > now {
-                thread::sleep(self.next_tick - now);
-            }
-
-            let actual = Instant::now();
-            let jitter = actual.saturating_duration_since(self.next_tick);
-
-            match classify_jitter(jitter, self.tick_count) {
-                JitterLevel::Recovery(jitter) => {
-                    if self.handle_recovery(jitter) {
-                        break;
-                    }
-                    continue;
-                }
-                JitterLevel::Warn(jitter) => {
-                    self.log_jitter_warn(jitter);
-                }
-                JitterLevel::Normal => {}
-            }
-
-            self.next_tick += AUDIO_TICK;
-            self.tick_count += 1;
-
-            if self.process_tick(actual) {
-                break;
-            }
+    /// Sleep until the next scheduled tick.
+    fn sleep_until_next_tick(&self) {
+        let now = Instant::now();
+        if self.next_tick > now {
+            thread::sleep(self.next_tick - now);
         }
+    }
 
+    /// Classify jitter and dispatch to recovery, warn, or normal tick.
+    /// Returns `true` if the loop should break.
+    fn handle_jitter(&mut self) -> bool {
+        let actual = Instant::now();
+        let jitter = actual.saturating_duration_since(self.next_tick);
+        match classify_jitter(jitter, self.tick_count) {
+            JitterLevel::Recovery(j) => self.handle_recovery(j),
+            JitterLevel::Warn(j) => { self.log_jitter_warn(j); self.advance_and_tick(actual) }
+            JitterLevel::Normal => self.advance_and_tick(actual),
+        }
+    }
+
+    /// Advance tick counter and process a normal tick. Returns true to break.
+    fn advance_and_tick(&mut self, actual: Instant) -> bool {
+        self.next_tick += AUDIO_TICK;
+        self.tick_count += 1;
+        self.process_tick(actual)
+    }
+
+    /// Drop the FIFO and log exit.
+    fn cleanup_and_log(&mut self) {
         drop(std::mem::replace(
             &mut self.fifo,
-            // This is never used — we're about to return from audio_drain_loop.
-            // We need to move `self.fifo` out so its Drop runs, but struct fields
-            // can't be partially moved. Replace with /dev/null as a dummy.
             std::fs::File::open("/dev/null").unwrap(),
         ));
         tracing::info!(
@@ -145,31 +147,34 @@ impl DrainState {
     /// Build catch-up buffer: drain any active audio first, fill rest with silence.
     fn build_catchup_buffer(&mut self, catch_up_bytes: usize) -> (Vec<u8>, usize) {
         let mut buffer = vec![0u8; catch_up_bytes];
-        let mut audio_used = 0usize;
-        let mut should_clear = false;
+        let audio_used = self.copy_active_audio(&mut buffer);
+        self.clear_if_complete("during recovery");
+        (buffer, audio_used)
+    }
 
-        if let Some(active) = self.active_audio.as_mut() {
-            let guard = active.pcm.lock().unwrap();
-            let available = guard.len().saturating_sub(active.offset);
-            let to_copy = available.min(catch_up_bytes);
-            if to_copy > 0 {
-                buffer[..to_copy]
-                    .copy_from_slice(&guard[active.offset..active.offset + to_copy]);
-                active.offset += to_copy;
-                audio_used = to_copy;
-            }
-            let is_complete = active.complete.load(Ordering::Acquire);
-            if active.offset >= guard.len() && is_complete {
-                should_clear = true;
-            }
+    /// Copy available audio from the active utterance into `buffer`. Returns bytes copied.
+    fn copy_active_audio(&mut self, buffer: &mut [u8]) -> usize {
+        let Some(active) = self.active_audio.as_mut() else { return 0 };
+        let guard = active.pcm.lock().unwrap();
+        let available = guard.len().saturating_sub(active.offset);
+        let to_copy = available.min(buffer.len());
+        if to_copy > 0 {
+            buffer[..to_copy].copy_from_slice(&guard[active.offset..active.offset + to_copy]);
+            active.offset += to_copy;
         }
+        to_copy
+    }
 
+    /// Clear the active utterance if it's fully drained and complete.
+    fn clear_if_complete(&mut self, context: &str) {
+        let should_clear = self.active_audio.as_ref().is_some_and(|a| {
+            let len = a.pcm.lock().unwrap().len();
+            a.offset >= len && a.complete.load(Ordering::Acquire)
+        });
         if should_clear {
-            self.log_utterance_done("during recovery");
+            self.log_utterance_done(context);
             self.active_audio = None;
         }
-
-        (buffer, audio_used)
     }
 
     /// Write catch-up buffer and advance the tick anchor.
@@ -316,29 +321,35 @@ fn drain_tick_audio(
     let Some(active) = active_audio.as_mut() else {
         return (silence.to_vec(), false);
     };
-
     let guard = active.pcm.lock().unwrap();
     let available = guard.len() - active.offset;
     let is_complete = active.complete.load(Ordering::Acquire);
 
     if available >= AUDIO_BYTES_PER_TICK {
-        let start = active.offset;
-        let end = start + AUDIO_BYTES_PER_TICK;
-        let data = guard[start..end].to_vec();
-        active.offset = end;
-        let done = active.offset >= guard.len() && is_complete;
-        (data, done)
+        drain_full_tick(&guard, &mut active.offset, is_complete)
     } else if is_complete {
-        if available > 0 {
-            let mut chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
-            chunk[..available].copy_from_slice(&guard[active.offset..]);
-            (chunk, true)
-        } else {
-            (silence.to_vec(), true)
-        }
+        (drain_final_partial(&guard, active.offset, available, silence), true)
     } else {
-        // TTS still streaming, not enough data yet — write silence this tick
-        (silence.to_vec(), false)
+        (silence.to_vec(), false) // TTS still streaming, not enough data yet
+    }
+}
+
+/// Enough data: copy one full tick and advance offset.
+fn drain_full_tick(guard: &[u8], offset: &mut usize, is_complete: bool) -> (Vec<u8>, bool) {
+    let data = guard[*offset..*offset + AUDIO_BYTES_PER_TICK].to_vec();
+    *offset += AUDIO_BYTES_PER_TICK;
+    let done = *offset >= guard.len() && is_complete;
+    (data, done)
+}
+
+/// Complete but less than a full tick: pad remaining with silence.
+fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &[u8]) -> Vec<u8> {
+    if available > 0 {
+        let mut chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
+        chunk[..available].copy_from_slice(&guard[offset..]);
+        chunk
+    } else {
+        silence.to_vec()
     }
 }
 

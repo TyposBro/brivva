@@ -44,6 +44,49 @@ pub async fn do_tts(
     notify_host(sessions, session_id, ServerMsg::TtsEnd { lang: lang_str, utterance_id: req.utterance_id, tts_ms: tts_start.elapsed().as_millis() as u64 });
 }
 
+// ── Synthesizer implementation ───
+
+/// ElevenLabs synthesizer: WebSocket streaming with REST fallback.
+pub struct ElevenLabsSynthesizer {
+    client: reqwest::Client,
+}
+
+impl ElevenLabsSynthesizer {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+}
+
+impl super::Synthesizer for ElevenLabsSynthesizer {
+    async fn synthesize(
+        &self, text: &str, voice_id: &str, lang: &str,
+        voice_settings: &serde_json::Value, max_bytes: usize,
+        streaming: Option<&crate::ffmpeg::StreamingPcm>, model_id: &str,
+    ) -> Result<usize, String> {
+        let ws_result = super::ws::do_tts_ws(
+            text, voice_id, lang, voice_settings, max_bytes, streaming, model_id,
+        ).await;
+        match ws_result {
+            Ok(bytes) => Ok(bytes),
+            Err(ws_err) => fallback_to_rest(
+                &self.client, text, voice_id, lang, voice_settings,
+                max_bytes, streaming, model_id, &ws_err,
+            ).await,
+        }
+    }
+}
+
+async fn fallback_to_rest(
+    client: &reqwest::Client, text: &str, voice_id: &str, lang: &str,
+    voice_settings: &serde_json::Value, max_bytes: usize,
+    streaming: Option<&crate::ffmpeg::StreamingPcm>, model_id: &str, ws_err: &str,
+) -> Result<usize, String> {
+    tracing::warn!("[TTS] WS failed: {}, falling back to REST", ws_err);
+    super::rest::do_tts_rest(
+        client, text, voice_id, lang, voice_settings, max_bytes, streaming, model_id,
+    ).await
+}
+
 // ── Internal types ───
 
 struct TtsContext {
@@ -78,21 +121,22 @@ async fn execute_tts_with_fallback(
     lang_str: &str,
     streaming: &Option<crate::ffmpeg::StreamingPcm>,
 ) -> Result<Result<usize, String>, tokio::time::error::Elapsed> {
+    let synth = ElevenLabsSynthesizer::new(client.clone());
+    run_with_deadline(&synth, req, ctx, lang_str, streaming).await
+}
+
+async fn run_with_deadline(
+    synth: &impl super::Synthesizer,
+    req: &TtsRequest<'_>,
+    ctx: &TtsContext,
+    lang_str: &str,
+    streaming: &Option<crate::ffmpeg::StreamingPcm>,
+) -> Result<Result<usize, String>, tokio::time::error::Elapsed> {
     tokio::time::timeout(ctx.tts_deadline, async {
-        let ws_result = super::ws::do_tts_ws(
+        synth.synthesize(
             req.text, &ctx.voice_id, lang_str, &ctx.voice_settings,
             ctx.max_bytes, streaming.as_ref(), req.tts_model,
-        ).await;
-        match ws_result {
-            Ok(total_bytes) => Ok(total_bytes),
-            Err(ws_err) => {
-                tracing::warn!("[TTS] #{} {} WS failed: {}, falling back to REST", req.utterance_id, lang_str, ws_err);
-                super::rest::do_tts_rest(
-                    client, req.text, &ctx.voice_id, lang_str, &ctx.voice_settings,
-                    ctx.max_bytes, streaming.as_ref(), req.tts_model,
-                ).await
-            }
-        }
+        ).await
     }).await
 }
 

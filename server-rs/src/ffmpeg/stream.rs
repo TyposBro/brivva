@@ -216,22 +216,14 @@ impl RtmpManager {
     /// Restart all RTMP streams (stop + re-spawn with same config).
     /// Used when YouTube drops the RTMP connection and needs a fresh start.
     pub async fn restart_all(&mut self) {
-        let configs: Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)> =
-            self.streams.iter().map(|(id, s)| {
-                (id.clone(), s.lang.clone(), s.rtmp_url.clone(), s.audio_queue.clone())
-            }).collect();
-
+        let configs = self.collect_stream_configs();
         if configs.is_empty() {
             tracing::info!("[RTMP] restart_all: no streams to restart");
             return;
         }
-
         tracing::info!("[RTMP] restarting {} stream(s)", configs.len());
         self.stop_all().await;
-
-        for (id, lang, url, aq) in configs {
-            self.restart_stream(&id, &lang, &url, 0, aq);
-        }
+        self.respawn_all(configs);
         tracing::info!("[RTMP] restart complete");
     }
 }
@@ -320,7 +312,7 @@ impl RtmpManager {
         );
     }
 
-    /// Build the full FFmpeg CLI argument list for video+audio → RTMP.
+    /// Build the full FFmpeg CLI argument list for video+audio -> RTMP.
     fn build_ffmpeg_args(&self, audio_fifo: &str, rtmp_url: &str) -> Vec<String> {
         let mut args = self.build_input_args(audio_fifo);
         args.extend(self.build_video_encoding_args());
@@ -432,19 +424,28 @@ impl RtmpManager {
         &mut self,
         to_restart: Vec<(String, String, String)>,
     ) -> Vec<(String, String, String, u32, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
-        let mut result = Vec::new();
-        for (id, lang, rtmp_url) in to_restart {
-            if let Some(mut old) = self.streams.remove(&id) {
-                old.stop_flag.store(true, Ordering::Release);
-                let _ = old.child.kill();
-                let _ = old.child.wait();
-                let _ = std::fs::remove_file(&old.audio_fifo);
-                let prev_count = old.restart_count;
-                let audio_queue = old.audio_queue.clone();
-                result.push((id, lang, rtmp_url, prev_count, audio_queue));
-            }
+        to_restart
+            .into_iter()
+            .filter_map(|(id, lang, rtmp_url)| {
+                let mut old = self.streams.remove(&id)?;
+                let (prev_count, audio_queue) = cleanup_single_stream(&mut old);
+                Some((id, lang, rtmp_url, prev_count, audio_queue))
+            })
+            .collect()
+    }
+
+    /// Snapshot each stream's config for restart_all.
+    fn collect_stream_configs(&self) -> Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)> {
+        self.streams.iter().map(|(id, s)| {
+            (id.clone(), s.lang.clone(), s.rtmp_url.clone(), s.audio_queue.clone())
+        }).collect()
+    }
+
+    /// Re-spawn all streams from saved configs (after stop_all).
+    fn respawn_all(&mut self, configs: Vec<(String, String, String, Arc<StdMutex<VecDeque<QueuedAudio>>>)>) {
+        for (id, lang, url, aq) in configs {
+            self.restart_stream(&id, &lang, &url, 0, aq);
         }
-        result
     }
 
     /// Kill an FFmpeg child process and log the result.
@@ -673,43 +674,81 @@ fn log_thread_join_result(
     }
 }
 
+/// Stop the stream, kill the process, remove the FIFO, and return restart state.
+fn cleanup_single_stream(old: &mut RtmpStream) -> (u32, Arc<StdMutex<VecDeque<QueuedAudio>>>) {
+    old.stop_flag.store(true, Ordering::Release);
+    let _ = old.child.kill();
+    let _ = old.child.wait();
+    let _ = std::fs::remove_file(&old.audio_fifo);
+    (old.restart_count, old.audio_queue.clone())
+}
+
 /// Thread-safe wrapper
 pub type SharedRtmpManager = Arc<tokio::sync::Mutex<RtmpManager>>;
 
-/// Spawn a background task that periodically checks for crashed FFmpeg processes
-/// and restarts them. Runs every 2 seconds. Stops when stop_flag is set.
-pub fn spawn_health_monitor(
+// ── Health Monitor ────────────────────────────────────────
+
+/// Background health checker that detects crashed FFmpeg processes and restarts them.
+struct HealthMonitor {
     manager: SharedRtmpManager,
     stop_flag: Arc<AtomicBool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+}
+
+impl HealthMonitor {
+    /// Main loop: tick every N seconds, detect crashes, restart streams.
+    async fn run(self) {
         tracing::info!("[HEALTH] FFmpeg health monitor started (check every {}s)", HEALTH_CHECK_INTERVAL_SECS);
         let mut interval = tokio::time::interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
         let mut check_count: u64 = 0;
         loop {
             interval.tick().await;
-            if stop_flag.load(Ordering::Acquire) {
+            if self.stop_flag.load(Ordering::Acquire) {
                 tracing::info!("[HEALTH] stop signal received, exiting");
                 break;
             }
             check_count += 1;
-            // Detect crashes (quick, non-blocking check)
-            let crashed = {
-                let mut mgr = manager.lock().await;
-                mgr.detect_crashed()
-            };
-            if !crashed.is_empty() {
-                tracing::warn!("[HEALTH] check #{}: {} crashed stream(s) detected", check_count, crashed.len());
-            }
-            // Restart each crashed stream with async delay between attempts
-            for (id, lang, rtmp_url, prev_count, audio_queue) in crashed {
-                tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
-                if stop_flag.load(Ordering::Acquire) {
-                    break;
-                }
-                let mut mgr = manager.lock().await;
-                mgr.restart_stream(&id, &lang, &rtmp_url, prev_count, audio_queue);
-            }
+            self.detect_and_restart_crashes(&mut check_count).await;
         }
-    })
+    }
+
+    /// Single health-check pass: find crashed streams and restart each one.
+    async fn detect_and_restart_crashes(&self, check_count: &mut u64) {
+        let crashed = {
+            let mut mgr = self.manager.lock().await;
+            mgr.detect_crashed()
+        };
+        if !crashed.is_empty() {
+            tracing::warn!("[HEALTH] check #{}: {} crashed stream(s) detected", check_count, crashed.len());
+        }
+        for (id, lang, rtmp_url, prev_count, audio_queue) in crashed {
+            self.restart_one(&id, &lang, &rtmp_url, prev_count, audio_queue).await;
+        }
+    }
+
+    /// Wait the restart delay, then restart a single crashed stream.
+    async fn restart_one(
+        &self,
+        id: &str,
+        lang: &str,
+        rtmp_url: &str,
+        prev_count: u32,
+        audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
+    ) {
+        tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
+        if self.stop_flag.load(Ordering::Acquire) {
+            return;
+        }
+        let mut mgr = self.manager.lock().await;
+        mgr.restart_stream(id, lang, rtmp_url, prev_count, audio_queue);
+    }
+}
+
+/// Spawn a background task that periodically checks for crashed FFmpeg processes
+/// and restarts them. Runs every N seconds. Stops when stop_flag is set.
+pub fn spawn_health_monitor(
+    manager: SharedRtmpManager,
+    stop_flag: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let monitor = HealthMonitor { manager, stop_flag };
+    tokio::spawn(monitor.run())
 }

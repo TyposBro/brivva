@@ -22,25 +22,49 @@ struct GoogleTranslation {
     translated_text: String,
 }
 
-// ── Public API ───────────────────────────────────────────
+// ── Trait (IoC) ──────────────────────────────────────────
 
-/// Translate text with optional context prefix (for chunk-aware translation).
-/// Context is prepended as "context ||| text" and stripped from the result.
-/// Returns (translated_text, elapsed_ms).
+/// Abstraction over translation providers.
+/// Implementations: `GoogleTranslator` (current), easily swappable for DeepL, etc.
+pub trait Translator: Send + Sync {
+    fn translate(
+        &self,
+        text: &str,
+        context: Option<&str>,
+        source: &Lang,
+        target: &Lang,
+    ) -> impl std::future::Future<Output = Result<(String, u64), String>> + Send;
+}
+
+/// Google Cloud Translation API v2 implementation.
+pub struct GoogleTranslator;
+
+impl Translator for GoogleTranslator {
+    async fn translate(
+        &self,
+        text: &str,
+        context: Option<&str>,
+        source: &Lang,
+        target: &Lang,
+    ) -> Result<(String, u64), String> {
+        let has_context = context.is_some_and(|c| !c.is_empty());
+        let query_text = build_query_text(text, context);
+        let start = Instant::now();
+        let full = send_translate_request(&query_text, source, target).await?;
+        Ok((strip_context_prefix(&full, has_context), start.elapsed().as_millis() as u64))
+    }
+}
+
+// ── Public facade ────────────────────────────────────────
+
+/// Translate text. Delegates to `GoogleTranslator`.
 pub async fn translate(
     text: &str,
     context: Option<&str>,
     source: &Lang,
     target: &Lang,
 ) -> Result<(String, u64), String> {
-    let has_context = context.is_some_and(|c| !c.is_empty());
-    let query_text = build_query_text(text, context);
-    let start = Instant::now();
-
-    let full_translation = send_translate_request(&query_text, source, target).await?;
-    let translated_text = strip_context_prefix(&full_translation, has_context);
-
-    Ok((translated_text, start.elapsed().as_millis() as u64))
+    GoogleTranslator.translate(text, context, source, target).await
 }
 
 // ── Helpers ──────────────────────────────────────────────

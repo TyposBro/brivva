@@ -65,22 +65,28 @@ async fn create_gladia_session(
     max_duration: f64,
 ) -> Result<crate::stt::GladiaSession, String> {
     let body = build_session_body(lang, endpointing, max_duration);
+    let resp = post_gladia_session(&body).await?;
+    check_response_status(&resp)?;
+    parse_session_response(resp).await
+}
 
-    let resp = crate::HTTP_CLIENT
+async fn post_gladia_session(body: &serde_json::Value) -> Result<reqwest::Response, String> {
+    crate::HTTP_CLIENT
         .post("https://api.gladia.io/v2/live")
         .header("Content-Type", "application/json")
         .header("x-gladia-key", &*super::super::STT_API_KEY)
-        .json(&body)
+        .json(body)
         .send()
         .await
-        .map_err(|e| format!("Gladia session POST failed: {}", e))?;
+        .map_err(|e| format!("Gladia session POST failed: {}", e))
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Gladia error {}: {}", status, body));
-    }
+fn check_response_status(resp: &reqwest::Response) -> Result<(), String> {
+    if resp.status().is_success() { return Ok(()); }
+    Err(format!("Gladia error {}", resp.status()))
+}
 
+async fn parse_session_response(resp: reqwest::Response) -> Result<crate::stt::GladiaSession, String> {
     resp.json::<crate::stt::GladiaSession>()
         .await
         .map_err(|e| format!("Gladia session parse error: {}", e))

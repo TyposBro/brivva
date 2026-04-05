@@ -127,6 +127,36 @@ fn spawn_send_task(
     ))
 }
 
+struct RecvTaskArgs {
+    sessions: Sessions,
+    session_id: String,
+    source_lang: Lang,
+    audio_acc: AudioAcc,
+    lang_str: String,
+    utterance_counter: u64,
+    wpm_samples: Vec<u32>,
+    adapted: bool,
+}
+
+fn build_recv_args(
+    sessions: &Sessions,
+    session_id: &str,
+    source_lang: &Lang,
+    audio_acc: &AudioAcc,
+    loop_state: &LoopState,
+) -> RecvTaskArgs {
+    RecvTaskArgs {
+        sessions: sessions.clone(),
+        session_id: session_id.to_string(),
+        source_lang: source_lang.clone(),
+        audio_acc: audio_acc.clone(),
+        lang_str: source_lang.to_string(),
+        utterance_counter: loop_state.utterance_counter,
+        wpm_samples: loop_state.wpm_samples.clone(),
+        adapted: loop_state.adapted,
+    }
+}
+
 fn spawn_recv_task(
     mut stt_stream: WsRecvStream,
     sink_for_ctrl: WsSink,
@@ -136,18 +166,11 @@ fn spawn_recv_task(
     audio_acc: &AudioAcc,
     loop_state: &LoopState,
 ) -> tokio::task::JoinHandle<SttState> {
-    let sessions_ref = sessions.clone();
-    let sid = session_id.to_string();
-    let source_lang_clone = source_lang.clone();
-    let acc_rx = audio_acc.clone();
-    let lang_str = source_lang.to_string();
-    let utterance_counter = loop_state.utterance_counter;
-    let wpm_samples = loop_state.wpm_samples.clone();
-    let adapted = loop_state.adapted;
+    let args = build_recv_args(sessions, session_id, source_lang, audio_acc, loop_state);
 
     tokio::spawn(async move {
-        let mut state = SttState::new(&lang_str, utterance_counter, wpm_samples, adapted);
-        recv_loop(&mut state, &mut stt_stream, &sessions_ref, &sid, &source_lang_clone, &acc_rx, &sink_for_ctrl).await;
+        let mut state = SttState::new(&args.lang_str, args.utterance_counter, args.wpm_samples, args.adapted);
+        recv_loop(&mut state, &mut stt_stream, &args.sessions, &args.session_id, &args.source_lang, &args.audio_acc, &sink_for_ctrl).await;
         state
     })
 }

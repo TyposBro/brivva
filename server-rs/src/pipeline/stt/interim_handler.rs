@@ -46,31 +46,42 @@ fn detect_and_emit_chunk(
     source_lang: &Lang,
     acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
 ) {
-    let pre_check_context = state.progressive.context().map(|s| s.to_string());
+    let context = state.progressive.context().map(|s| s.to_string());
     let boundary = match state.progressive.check(transcript) {
         Some(b) => b,
         None => return,
     };
 
     spawn_pipeline_if_needed(state, sessions, session_id, source_lang);
+    let event = build_chunk_event(state, boundary, transcript, context, acc_rx);
+    try_send_chunk(state, event);
+}
 
+fn build_chunk_event(
+    state: &mut SttState,
+    boundary: crate::stt::ChunkBoundary,
+    transcript: &str,
+    context: Option<String>,
+    acc_rx: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) -> crate::types::ChunkEvent {
+    let audio = extract_chunk_audio(acc_rx, transcript, boundary.split_pos, &mut state.last_audio_byte_sent);
+    crate::types::ChunkEvent {
+        text: boundary.chunk_text,
+        chunk_index: state.chunk_index,
+        context,
+        is_utterance_final: false,
+        utterance_id: state.utterance_counter,
+        utterance_start: state.utterance_start.unwrap(),
+        host_audio: audio,
+    }
+}
+
+fn try_send_chunk(state: &mut SttState, event: crate::types::ChunkEvent) {
     let tx = match &state.chunk_pipeline_tx {
         Some(tx) => tx,
         None => return,
     };
-
-    let chunk_audio = extract_chunk_audio(acc_rx, transcript, boundary.split_pos, &mut state.last_audio_byte_sent);
-    let start = state.utterance_start.unwrap();
-
-    if let Err(e) = tx.try_send(crate::types::ChunkEvent {
-        text: boundary.chunk_text,
-        chunk_index: state.chunk_index,
-        context: pre_check_context,
-        is_utterance_final: false,
-        utterance_id: state.utterance_counter,
-        utterance_start: start,
-        host_audio: chunk_audio,
-    }) {
+    if let Err(e) = tx.try_send(event) {
         error!("[CHUNK] #{}.{} dropped (channel full): {}", state.utterance_counter, state.chunk_index, e);
     }
     state.chunk_index += 1;

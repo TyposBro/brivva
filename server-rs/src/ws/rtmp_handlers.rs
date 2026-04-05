@@ -26,20 +26,12 @@ pub async fn handle_rtmp_config(json: &serde_json::Value, sessions: &Sessions, s
     };
     tracing::info!("[WS:{}] rtmp:config received: {} stream(s)", session_id, streams.len());
 
-    let delay_ms = json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(DEFAULT_BROADCAST_DELAY_MS);
-    store_broadcast_delay(sessions, session_id, delay_ms);
-
-    let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
-    apply_existing_codec(sessions, session_id, &mut manager);
-
+    let delay_ms = parse_broadcast_delay(json);
+    let mut manager = create_and_configure_manager(sessions, session_id, delay_ms);
     let rtmp_langs = start_all_streams(&mut manager, streams, sessions, session_id);
     let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
 
-    let health_stop = sessions.get(session_id)
-        .map(|s| s.rtmp_stop.clone())
-        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-    ffmpeg::spawn_health_monitor(shared_mgr.clone(), health_stop);
-
+    setup_health_monitoring(sessions, session_id, shared_mgr.clone());
     store_rtmp_state(sessions, session_id, shared_mgr, &rtmp_langs);
     tracing::info!("[RTMP] Started {} stream(s): {:?}", rtmp_langs.len(), rtmp_langs);
 }
@@ -81,31 +73,50 @@ fn apply_existing_codec(sessions: &Sessions, session_id: &str, manager: &mut ffm
     }
 }
 
+fn parse_broadcast_delay(json: &serde_json::Value) -> u64 {
+    json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(DEFAULT_BROADCAST_DELAY_MS)
+}
+
+fn create_and_configure_manager(sessions: &Sessions, session_id: &str, delay_ms: u64) -> ffmpeg::RtmpManager {
+    store_broadcast_delay(sessions, session_id, delay_ms);
+    let mut manager = ffmpeg::RtmpManager::with_delay(delay_ms);
+    apply_existing_codec(sessions, session_id, &mut manager);
+    manager
+}
+
+fn setup_health_monitoring(sessions: &Sessions, session_id: &str, mgr: ffmpeg::SharedRtmpManager) {
+    let health_stop = sessions.get(session_id)
+        .map(|s| s.rtmp_stop.clone())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    ffmpeg::spawn_health_monitor(mgr, health_stop);
+}
+
 fn start_all_streams(
     manager: &mut ffmpeg::RtmpManager,
     streams: &[serde_json::Value],
     sessions: &Sessions,
     session_id: &str,
 ) -> Vec<Lang> {
-    let mut rtmp_langs = Vec::new();
-    for stream_cfg in streams {
-        if let (Some(lang), Some(url)) = (
-            stream_cfg.get("lang").and_then(|l| l.as_str()),
-            stream_cfg.get("url").and_then(|u| u.as_str()),
-        ) {
-            let stream_id = format!("{}_{}", session_id, lang);
-            match manager.start_stream(&stream_id, lang, url) {
-                Ok(_) => {
-                    if let Some(l) = Lang::from_str(lang) { rtmp_langs.push(l); }
-                }
-                Err(e) => {
-                    tracing::error!("[RTMP] Failed to start {}: {}", lang, e);
-                    notify_host(sessions, session_id, &format!("RTMP failed for {}: {}", lang, e));
-                }
-            }
+    streams.iter().filter_map(|cfg| try_start_stream(manager, cfg, sessions, session_id)).collect()
+}
+
+fn try_start_stream(
+    manager: &mut ffmpeg::RtmpManager,
+    cfg: &serde_json::Value,
+    sessions: &Sessions,
+    session_id: &str,
+) -> Option<Lang> {
+    let lang = cfg.get("lang").and_then(|l| l.as_str())?;
+    let url = cfg.get("url").and_then(|u| u.as_str())?;
+    let stream_id = format!("{}_{}", session_id, lang);
+    match manager.start_stream(&stream_id, lang, url) {
+        Ok(_) => Lang::from_str(lang),
+        Err(e) => {
+            tracing::error!("[RTMP] Failed to start {}: {}", lang, e);
+            notify_host(sessions, session_id, &format!("RTMP failed for {}: {}", lang, e));
+            None
         }
     }
-    rtmp_langs
 }
 
 fn store_rtmp_state(sessions: &Sessions, session_id: &str, mgr: ffmpeg::SharedRtmpManager, langs: &[Lang]) {

@@ -155,8 +155,7 @@ async fn process_ws_message(
         None => return Ok(ControlFlow::Continue(())),
     };
 
-    check_elevenlabs_error(&text_data)?;
-    let resp = parse_response(&text_data)?;
+    let resp = validate_and_parse(&text_data)?;
 
     if is_final(&resp, state, lang, tts_start) {
         return Ok(ControlFlow::Break(()));
@@ -164,6 +163,11 @@ async fn process_ws_message(
 
     handle_audio_chunk(&resp, decoder, state, lang, max_bytes, streaming, tts_start).await?;
     Ok(ControlFlow::Continue(()))
+}
+
+fn validate_and_parse(text_data: &str) -> Result<ElevenLabsTtsResponse, String> {
+    check_elevenlabs_error(text_data)?;
+    parse_response(text_data)
 }
 
 fn extract_text_payload(
@@ -271,20 +275,29 @@ async fn decode_audio_chunk(
     lang: &str,
     tts_start: &Instant,
 ) -> Result<(Vec<u8>, bool), String> {
-    let mp3_chunk = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        audio_b64,
-    ).map_err(|e| format!("base64 decode error: {}", e))?;
-
-    *chunk_count += 1;
-    let is_first = *chunk_count == 1;
-    if is_first {
-        debug!("[TTS:{}] TTFB {}ms ({}B first MP3 chunk)", lang, tts_start.elapsed().as_millis(), mp3_chunk.len());
-    }
+    let mp3_chunk = decode_base64(audio_b64)?;
+    let is_first = advance_chunk_counter(chunk_count);
+    log_ttfb_if_first(is_first, lang, tts_start, mp3_chunk.len());
 
     let pcm_chunk = decoder.feed(&mp3_chunk).await
         .map_err(|e| format!("Incremental decode failed: {}", e))?;
     Ok((pcm_chunk, is_first))
+}
+
+fn decode_base64(audio_b64: &str) -> Result<Vec<u8>, String> {
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, audio_b64)
+        .map_err(|e| format!("base64 decode error: {}", e))
+}
+
+fn advance_chunk_counter(chunk_count: &mut u32) -> bool {
+    *chunk_count += 1;
+    *chunk_count == 1
+}
+
+fn log_ttfb_if_first(is_first: bool, lang: &str, tts_start: &Instant, mp3_len: usize) {
+    if is_first {
+        debug!("[TTS:{}] TTFB {}ms ({}B first MP3 chunk)", lang, tts_start.elapsed().as_millis(), mp3_len);
+    }
 }
 
 async fn drain_decoder(decoder: crate::ffmpeg::IncrementalMp3Decoder) -> Result<Vec<u8>, String> {

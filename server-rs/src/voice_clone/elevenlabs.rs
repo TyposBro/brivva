@@ -4,15 +4,44 @@ use serde::Deserialize;
 use tracing::{info, warn, error};
 use crate::tts::TTS_API_KEY;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// ── Trait implementation ────────────────────────────────────────────────────
+
+pub struct ElevenLabsCloner;
+
+impl super::VoiceCloner for ElevenLabsCloner {
+    async fn clone_voice(&self, wav: Vec<u8>) -> Result<String, String> {
+        let form = build_clone_form(wav);
+        let resp = send_clone_request(form).await?;
+        parse_clone_response(resp).await
+    }
+
+    async fn delete_voice(&self, voice_id: &str) {
+        delete_voice_by_id(voice_id).await;
+    }
+
+    async fn cleanup_old_voices(&self) {
+        cleanup_brivva_voices().await;
+    }
+}
+
+// ── Public facade (keeps callers unchanged) ─────────────────────────────────
 
 pub async fn clone_voice(wav: Vec<u8>) -> Result<String, String> {
-    let form = build_clone_form(wav);
-    let resp = send_clone_request(form).await?;
-    parse_clone_response(resp).await
+    use super::VoiceCloner;
+    ElevenLabsCloner.clone_voice(wav).await
 }
 
 pub async fn delete_voice(voice_id: &str) {
+    delete_voice_by_id(voice_id).await;
+}
+
+pub async fn cleanup_old_voices() {
+    cleanup_brivva_voices().await;
+}
+
+// ── Internal helpers ────────────────────────────────────────────────────────
+
+async fn delete_voice_by_id(voice_id: &str) {
     let client = &*crate::HTTP_CLIENT;
     let url = format!("https://api.elevenlabs.io/v1/voices/{}", voice_id);
     match client.delete(&url).header("xi-api-key", &*TTS_API_KEY).send().await {
@@ -22,7 +51,7 @@ pub async fn delete_voice(voice_id: &str) {
     }
 }
 
-pub async fn cleanup_old_voices() {
+async fn cleanup_brivva_voices() {
     let voices = match list_all_voices().await {
         Some(v) => v,
         None => return,
