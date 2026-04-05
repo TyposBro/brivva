@@ -1,10 +1,8 @@
-import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
-import type { Session, StreamInfo } from "../../shared/api";
-import { getSession, deleteSession } from "../../shared/api";
 import { PageLayout } from "../../shared/components/PageLayout";
 import { BackButton } from "../../shared/components/BackButton";
+import { useSessionData } from "./hooks/useSessionData";
 import { parseTargetLangs } from "./utils/parseTargetLangs";
 import { StreamCard } from "./components/StreamCard";
 import { SessionInfo } from "./components/SessionInfo";
@@ -13,39 +11,7 @@ import { SessionActions } from "./components/SessionActions";
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-
-  const [session, setSession] = useState<Session | null>(null);
-  const [streams, setStreams] = useState<StreamInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [ending, setEnding] = useState(false);
-
-  const loadSession = useCallback(async () => {
-    if (!id) return;
-    try {
-      const data = await getSession(id);
-      setSession(data.session);
-      setStreams(data.streams);
-    } catch (e) {
-      console.error("Failed to load session:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  useEffect(() => { loadSession(); }, [loadSession]);
-
-  const handleEnd = async () => {
-    if (!id || ending) return;
-    setEnding(true);
-    try {
-      await deleteSession(id);
-      await loadSession();
-    } catch (e) {
-      console.error("Failed to end session:", e);
-    } finally {
-      setEnding(false);
-    }
-  };
+  const { session, streams, loading, ending, endSession } = useSessionData(id);
 
   if (loading) {
     return (
@@ -99,7 +65,7 @@ export default function SessionPage() {
         session={session}
         isLive={isLive}
         ending={ending}
-        onEnd={handleEnd}
+        onEnd={endSession}
         onNavigate={navigate}
       />
     </PageLayout>

@@ -1,3 +1,5 @@
+import { float32ToInt16 } from "../shared/audio/pcm";
+
 const SAMPLE_RATE = 44100;
 const BUFFER_SIZE = 4096;
 const FFT_SIZE = 512;
@@ -38,7 +40,7 @@ export class AudioPipeline {
   ): void {
     this.processor = this.ctx!.createScriptProcessor(BUFFER_SIZE, 1, 1);
     this.processor.onaudioprocess = (e) =>
-      onAudio(toInt16(e.inputBuffer.getChannelData(0)));
+      onAudio(float32ToInt16(e.inputBuffer.getChannelData(0)).buffer as ArrayBuffer);
     source.connect(this.processor);
     this.processor.connect(this.ctx!.destination);
   }
@@ -51,12 +53,4 @@ export class AudioPipeline {
     this.stream = null;
     this.ctx = null;
   }
-}
-
-function toInt16(float32: Float32Array): ArrayBuffer {
-  const out = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++) {
-    out[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-  }
-  return out.buffer;
 }

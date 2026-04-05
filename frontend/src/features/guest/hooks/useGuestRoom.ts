@@ -1,11 +1,11 @@
 import { useReducer, useRef, useEffect, useCallback } from "react";
-import { RoomSocket } from "../lib/RoomSocket";
-import { TtsPlayer } from "../lib/TtsPlayer";
-import { VideoPlayer } from "../lib/VideoPlayer";
-import { guestReducer, INITIAL_STATE } from "../state/guest/reducer";
-import { createGuestMessageHandler } from "../state/guest/messageHandler";
+import { RoomSocket } from "../../../lib/RoomSocket";
+import { TtsPlayer } from "../../../lib/TtsPlayer";
+import { VideoPlayer } from "../../../lib/VideoPlayer";
+import { guestReducer, INITIAL_STATE } from "../state/reducer";
+import { createGuestMessageHandler } from "../state/messageHandler";
 
-export type { GuestStatus, GuestUtterance } from "../state/guest/reducer";
+export type { GuestStatus, GuestUtterance } from "../state/reducer";
 
 export function useGuestRoom(roomId: string, lang: string | null) {
   const [state, dispatch] = useReducer(guestReducer, INITIAL_STATE);

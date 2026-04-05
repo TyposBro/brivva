@@ -1,6 +1,6 @@
 import { useRef, useEffect } from "react";
 import { LANG_LABELS, type Lang } from "../../../types";
-import type { GuestUtterance } from "../../../hooks/useGuestRoom";
+import type { GuestUtterance } from "../state/reducer";
 
 type Props = {
   utterances: GuestUtterance[];

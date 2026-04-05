@@ -44,14 +44,14 @@ export function useBroadcastSocket(params: SocketParams) {
   }, [addError]);
 
   const start = useCallback(async () => {
-    const available = getAvailableTargets(params.sourceLang, params.targetLangs);
+    const available = filterTargetLanguages(params.sourceLang, params.targetLangs);
     if (available.length === 0) return;
 
     const ws = await connectWebSocket(params, available, handleMessage, addError);
     if (!ws) return;
 
     wsRef.current = ws;
-    wireCloseHandler(ws, addError, setIsLive, setSessionId);
+    registerCloseHandler(ws, addError, setIsLive, setSessionId);
     await configureRtmpStreams(ws, params);
     await startAudioCapture(ws, audioRef.current, params.audioDeviceId);
 
@@ -78,7 +78,7 @@ export function useBroadcastSocket(params: SocketParams) {
 
 // ── Helpers ──────────────────────────────────────────────
 
-function getAvailableTargets(sourceLang: string, targetLangs: string[]): string[] {
+function filterTargetLanguages(sourceLang: string, targetLangs: string[]): string[] {
   return targetLangs.filter((l) => l !== sourceLang);
 }
 
@@ -107,7 +107,7 @@ async function connectWebSocket(
   }
 }
 
-function wireCloseHandler(
+function registerCloseHandler(
   ws: WebSocket,
   addError: (msg: string) => void,
   setIsLive: (v: boolean) => void,

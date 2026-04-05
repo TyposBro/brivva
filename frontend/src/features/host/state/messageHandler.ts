@@ -1,7 +1,7 @@
 import { type Dispatch } from "react";
-import { type RoomMessage } from "../../lib/RoomSocket";
+import { type RoomMessage } from "../../../lib/RoomSocket";
 import { type HostAction, type GuestCounts } from "./reducer";
-import { LANGS } from "../../types";
+import { LANGS } from "../../../types";
 
 type Stopwatch = {
   startTimer: (uid: string, text: string, langs: string[]) => void;

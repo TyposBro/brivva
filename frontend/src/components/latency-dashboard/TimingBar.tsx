@@ -1,4 +1,4 @@
-import type { UtteranceTiming } from "../../hooks/useHostRoom";
+import type { UtteranceTiming } from "../../features/host";
 import { COLORS } from "./constants";
 
 export function buildSegments(t: UtteranceTiming, maxMs: number) {

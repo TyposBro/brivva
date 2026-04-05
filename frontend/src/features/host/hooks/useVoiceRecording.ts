@@ -1,6 +1,6 @@
 import { useRef, useCallback } from "react";
 import type { Dispatch } from "react";
-import type { HostAction } from "../../../state/host/reducer";
+import type { HostAction } from "../state/reducer";
 import { float32ToInt16, mergePcmChunks, pcmToBase64 } from "../../../shared/audio/pcm";
 import { VOICE_SAMPLE_RATE, VOICE_SAMPLE_SECONDS, VOICE_BUFFER_SIZE } from "../constants";
 

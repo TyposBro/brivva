@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useGuestRoom } from "../../hooks/useGuestRoom";
+import { useGuestRoom } from "./hooks/useGuestRoom";
 import { type Lang, LANGS } from "../../types";
 import { LanguagePicker } from "./components/LanguagePicker";
 import { GuestTranscripts } from "./components/GuestTranscripts";

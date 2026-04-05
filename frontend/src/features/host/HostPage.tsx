@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useHostRoom } from "../../hooks/useHostRoom";
+import { useHostRoom } from "./hooks/useHostRoom";
 import { AudioRecorder } from "../../components/audio-recorder";
 import { LatencyDashboard } from "../../components/latency-dashboard";
 import { PageLayout } from "../../shared/components/PageLayout";

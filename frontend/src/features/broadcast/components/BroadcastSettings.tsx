@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { BroadcastConfig } from "../hooks/useBroadcastConfig";
-import { DELAY_MIN, DELAY_MAX, DELAY_STEP } from "../constants";
+import { DelaySlider } from "./settings/DelaySlider";
+import { DeviceSelect } from "./settings/DeviceSelect";
+import { TtsModelPicker } from "./settings/TtsModelPicker";
 
 type Props = {
   config: BroadcastConfig;
@@ -51,99 +53,6 @@ export function BroadcastSettings({ config, devices, isLive, onConfigChange }: P
           />
         </div>
       )}
-    </div>
-  );
-}
-
-const MS_PER_SECOND = 1000;
-
-function DelaySlider({ value, disabled, onChange }: {
-  value: number;
-  disabled: boolean;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <div className="pt-3 space-y-1">
-      <label className="text-sm text-on-surface-variant">
-        Broadcast Delay: {(value / MS_PER_SECOND).toFixed(1)}s
-      </label>
-      <input
-        type="range"
-        min={DELAY_MIN}
-        max={DELAY_MAX}
-        step={DELAY_STEP}
-        disabled={disabled}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-primary"
-      />
-      <p className="text-xs text-outline">
-        Higher = more time for TTS, lower = less stream latency
-      </p>
-    </div>
-  );
-}
-
-const DEVICE_ID_PREVIEW_LEN = 8;
-
-function DeviceSelect({ label, kind, devices, value, disabled, onChange }: {
-  label: string;
-  kind: string;
-  devices: MediaDeviceInfo[];
-  value: string;
-  disabled: boolean;
-  onChange: (v: string) => void;
-}) {
-  const filtered = devices.filter((d) => d.kind === kind);
-  const fallback = kind === "videoinput" ? "Camera" : "Mic";
-
-  return (
-    <div className="space-y-1">
-      <label className="text-sm text-on-surface-variant">{label}</label>
-      <select
-        disabled={disabled}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-sm text-on-surface disabled:opacity-50"
-      >
-        <option value="">Default</option>
-        {filtered.map((d) => (
-          <option key={d.deviceId} value={d.deviceId}>
-            {d.label || `${fallback} ${d.deviceId.slice(0, DEVICE_ID_PREVIEW_LEN)}`}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-function TtsModelPicker({ value, disabled, onChange }: {
-  value: "turbo" | "flash";
-  disabled: boolean;
-  onChange: (v: "turbo" | "flash") => void;
-}) {
-  const btn = (model: "turbo" | "flash", label: string, latency: string) => (
-    <button
-      disabled={disabled}
-      onClick={() => onChange(model)}
-      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
-        value === model
-          ? "bg-primary text-on-primary"
-          : "bg-surface-container border border-outline-variant text-on-surface-variant hover:bg-surface-container-high"
-      }`}
-    >
-      {label}
-      <span className="block text-xs opacity-70">{latency}</span>
-    </button>
-  );
-
-  return (
-    <div className="space-y-1">
-      <label className="text-sm text-on-surface-variant">TTS Model</label>
-      <div className="flex gap-2">
-        {btn("turbo", "Expressive", "~300ms")}
-        {btn("flash", "Fast", "~75ms")}
-      </div>
     </div>
   );
 }

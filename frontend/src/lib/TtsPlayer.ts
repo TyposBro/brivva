@@ -48,7 +48,7 @@ export class TtsPlayer {
     this.playing = true;
     const url = this.createBlobUrl(entry.chunks);
     this.audio = new Audio(url);
-    this.wirePlaybackHandlers(url);
+    this.registerPlaybackHandlers(url);
     this.audio.play().catch((err) => {
       console.error("TTS play() rejected:", err);
       this.advance(url);
@@ -59,7 +59,7 @@ export class TtsPlayer {
     return URL.createObjectURL(new Blob(chunks, { type: "audio/mpeg" }));
   }
 
-  private wirePlaybackHandlers(url: string): void {
+  private registerPlaybackHandlers(url: string): void {
     this.audio!.onended = () => this.advance(url);
     this.audio!.onerror = () => {
       console.error("TTS playback error");

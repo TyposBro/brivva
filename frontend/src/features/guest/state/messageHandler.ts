@@ -1,7 +1,7 @@
 import { type Dispatch } from "react";
-import { type RoomMessage, type RoomSocket } from "../../lib/RoomSocket";
-import { type TtsPlayer } from "../../lib/TtsPlayer";
-import { type VideoPlayer } from "../../lib/VideoPlayer";
+import { type RoomMessage, type RoomSocket } from "../../../lib/RoomSocket";
+import { type TtsPlayer } from "../../../lib/TtsPlayer";
+import { type VideoPlayer } from "../../../lib/VideoPlayer";
 import { type GuestAction } from "./reducer";
 
 export function createGuestMessageHandler(

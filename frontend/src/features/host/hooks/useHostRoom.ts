@@ -1,14 +1,14 @@
 import { useReducer, useRef, useCallback } from "react";
-import { AudioPipeline } from "../lib/AudioPipeline";
-import { RoomSocket } from "../lib/RoomSocket";
+import { AudioPipeline } from "../../../lib/AudioPipeline";
+import { RoomSocket } from "../../../lib/RoomSocket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
-import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
-import { createMessageHandler } from "../state/host/messageHandler";
-import { useWebcamCapture } from "../features/host/hooks/useWebcamCapture";
-import { useVoiceRecording } from "../features/host/hooks/useVoiceRecording";
+import { hostReducer, INITIAL_STATE } from "../state/reducer";
+import { createMessageHandler } from "../state/messageHandler";
+import { useWebcamCapture } from "./useWebcamCapture";
+import { useVoiceRecording } from "./useVoiceRecording";
 
 export type { UtteranceTiming };
-export type { HostStatus, GuestCounts, HostUtterance } from "../state/host/reducer";
+export type { HostStatus, GuestCounts, HostUtterance } from "../state/reducer";
 
 export function useHostRoom() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);

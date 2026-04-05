@@ -1,4 +1,4 @@
-import type { UtteranceTiming } from "../../hooks/useHostRoom";
+import type { UtteranceTiming } from "../../features/host";
 import { TimingBar } from "./TimingBar";
 import { TimingDetails } from "./TimingDetails";
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { HostUtterance } from "../../../state/host/reducer";
+import type { HostUtterance } from "../state/reducer";
 
 export function UtteranceList({
   utterances,

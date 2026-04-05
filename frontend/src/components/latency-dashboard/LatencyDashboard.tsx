@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Loader2, Zap } from "lucide-react";
 import { cn } from "../../lib/cn";
-import type { UtteranceTiming } from "../../hooks/useHostRoom";
+import type { UtteranceTiming } from "../../features/host";
 import { TARGET_MS, MAX_TARGET_PCT, GAP_CRITICAL_THRESHOLD } from "./constants";
 import { computeStats, computeMaxMs } from "./stats";
 import { TimingRow } from "./TimingRow";

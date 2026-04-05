@@ -1,4 +1,4 @@
-import type { UtteranceTiming } from "../../hooks/useHostRoom";
+import type { UtteranceTiming } from "../../features/host";
 import { TARGET_MS, DEFAULT_MAX_MS, MIN_MAX_MS } from "./constants";
 
 export type Stats = { avg: number; best: number; gap: string; n: number };
