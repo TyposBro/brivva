@@ -131,6 +131,16 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 
 **Fix:** `manager.rs` — `cap_stale_play_at()` caps `play_at` to `Instant::now()` when `utterance_start` is older than `broadcast_delay + 2s`. This adds a natural `broadcast_delay` gap before playing stale results.
 
+### Translated audio outrunning video on asymmetric language pairs (FIXED)
+
+**Root cause:** Translated speech can be shorter than original speech (KO→EN, counting, etc.). TTS generates 6s of audio for 10s of host speech → audio finishes early → next utterance starts immediately → audio progressively races ahead of video.
+
+**Fix:** `types.rs` + `manager.rs` + `audio_drain.rs` — `QueuedAudio` now carries `speech_duration` (how long the host originally spoke). After TTS audio finishes playing, `schedule_speech_padding()` computes `remaining = speech_duration - audio_played`. If remaining > 0.5s, the drain pads silence (defers next utterance via `padding_until`) so audio stays synchronized with video regardless of translation length mismatch.
+
+- For **shorter translations** (KO→EN, counting): silence padding fills the gap
+- For **longer translations** (EN→JA): no padding needed; audio naturally runs slightly behind, self-corrects
+- For **similar-length pairs**: minimal/no padding, existing sync preserved
+
 ### Subtitle overlay (drawtext) breaks YouTube — OPEN
 
 **Symptom:** `-vf drawtext` causes YouTube "Preparing stream" indefinitely. Fontconfig error in bundled FFmpeg.
@@ -139,8 +149,11 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 
 ## Known Limitation: Soniox Translation Accumulation
 
-Soniox accumulates translation for long continuous speech and emits it all at the semantic endpoint. For pathological inputs (e.g., slowly counting 1-20 over 17s), the translated audio is ~6s — much shorter than original speech. This causes unavoidable A/V desync where translated audio finishes before the corresponding video.
+Soniox accumulates translation for long continuous speech and emits it all at the semantic endpoint. Force-chunking resets the local `translation_acc` every 4s, but Soniox's internal translation state keeps accumulating. The translation tokens only exist when Soniox decides to emit them.
 
-**Impact:** Only affects continuous monologues without natural pauses. Not an issue for natural commerce speech where sentence lengths are similar across languages.
+**Mitigations in place:**
+- Speech-duration pacing pads silence after short TTS audio to match original speech length
+- Stale `play_at` capping prevents pile-up of multiple TTS results
+- Force-chunk on transcript duration prevents 24s+ accumulations
 
-**Why it can't be fully fixed:** Force-chunking resets the local `translation_acc` every 4s, but Soniox's internal translation state keeps accumulating. The translation tokens only exist when Soniox decides to emit them. No amount of timing adjustment can stretch 6s of audio to fill 17s of video without time-stretching.
+**Residual impact:** For pathological inputs (slowly counting numbers), the translated audio may be significantly shorter than original speech. Pacing helps but can't fully bridge the gap when Soniox emits 17s of accumulated translation in one burst. Not an issue for natural commerce speech with normal pauses.

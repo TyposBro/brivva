@@ -98,6 +98,7 @@ Maps to 9 emotions → TTS voice style + speed:
 - **Translation tiers:** tier 1 = subtitles only, tier 2 = voice + subtitles. Tiers 3-4 (lipsync) not implemented.
 - **Crash recovery:** FFmpeg health monitor, 50 retries, 2s delay
 - **Staleness eviction:** Audio queue items >6s old evicted. Queue depth limit 10.
+- **Speech pacing:** Each queued utterance carries `speech_duration`. After TTS audio finishes, drain pads silence until original speech duration elapses. Prevents audio outrunning video on asymmetric language pairs.
 - **Drift tracking:** `Arc<AtomicU64>` per stream, `max_drift_ms()` API
 - **Logging:** `tracing_subscriber` → stderr + `/tmp/brivva/server.log`
 
@@ -108,10 +109,11 @@ Maps to 9 emotions → TTS voice style + speed:
 - **V3: TTS timeout at low delay** — `TTS_DEADLINE_FLOOR_MS = 3000` ensures minimum 3s TTS budget regardless of broadcast delay.
 - **Force-chunk stall** — `handler.rs` force-chunk now fires based on transcript duration, not translation presence. Soniox may not emit translation tokens during continuous speech; previously the 4s threshold never triggered, causing 24s+ accumulation.
 - **Audio pile-up** — `manager.rs` caps stale `play_at` timestamps (`delay + 2s` max age) so consecutive TTS results don't dump immediately when their utterance_start is far in the past.
+- **Speech-duration pacing** — `QueuedAudio` now carries `speech_duration` (how long the host originally spoke). After TTS audio finishes, the audio drain pads silence until `speech_duration` elapses before starting the next utterance. Prevents translated audio from outrunning video on language pairs with asymmetric sentence lengths (KO→EN, EN→JA).
 
 **Known limitations:**
 - Subtitle overlay (drawtext) disabled by default (`BRIVVA_SUBTITLES=1`). Breaks YouTube streaming (Fontconfig missing in bundled FFmpeg).
-- Soniox accumulates translation internally for long continuous speech and emits it all at the semantic endpoint. Translated audio may be shorter than original speech (e.g., counting numbers slowly → TTS reads them fast). This causes A/V desync during pathological inputs like counting. Not an issue for natural commerce speech where sentence lengths are similar across languages.
+- Soniox accumulates translation internally for long continuous speech and emits it all at the semantic endpoint. Speech-duration pacing mitigates this for normal speech, but pathological inputs (e.g., slowly counting 1-20 → TTS reads them fast) may still show mild A/V desync.
 
 ## Pipeline is Commodity — Moat is Elsewhere
 

@@ -35,6 +35,7 @@ struct ActiveAudio {
     pcm: Arc<StdMutex<Vec<u8>>>,
     complete: Arc<AtomicBool>,
     offset: usize,
+    speech_duration: Duration,
 }
 
 enum JitterLevel {
@@ -55,6 +56,7 @@ struct DrainState {
     silence: Vec<u8>,
     active_audio: Option<ActiveAudio>,
     last_utterance_play_at: Option<Instant>,
+    padding_until: Option<Instant>,
     tick_count: u64,
     next_tick: Instant,
     start_time: Instant,
@@ -130,6 +132,7 @@ impl DrainState {
         let (data, should_clear) = drain_tick_audio(&mut self.active_audio, &self.silence);
 
         if should_clear {
+            self.schedule_speech_padding();
             self.log_utterance_done("");
             self.active_audio = None;
         }
@@ -238,9 +241,17 @@ impl DrainState {
 
     /// Try to pop next utterance from queue if ready.
     /// Evicts stale and overflow items first to prevent unbounded desync.
+    /// Respects padding_until: after a short TTS finishes, pads silence
+    /// until the original speech duration elapses so audio doesn't outrun video.
     fn try_start_next_utterance(&mut self, target_ts: Instant) {
         if self.active_audio.is_some() {
             return;
+        }
+        if let Some(pad_until) = self.padding_until {
+            if Instant::now() < pad_until {
+                return;
+            }
+            self.padding_until = None;
         }
         let queue_arc = self.audio_queue.clone();
         let mut q = queue_arc.lock().unwrap();
@@ -268,6 +279,7 @@ impl DrainState {
             pcm: audio.pcm,
             complete: audio.complete,
             offset: 0,
+            speech_duration: audio.speech_duration,
         });
     }
 
@@ -332,6 +344,25 @@ impl DrainState {
                 self.stream_id, self.tick_count, jitter.as_millis(), self.jitter_warn_count,
                 JITTER_WARN_THRESHOLD.as_millis()
             );
+        }
+    }
+
+    /// If TTS audio was shorter than original speech, schedule silence padding
+    /// so the next utterance doesn't start before the host's original speech time
+    /// has elapsed. Prevents translated audio from outrunning video on language
+    /// pairs where translation is shorter (e.g., KO→EN, counting).
+    fn schedule_speech_padding(&mut self) {
+        let Some(active) = &self.active_audio else { return };
+        let audio_secs = active.offset as f64 / BYTES_PER_SEC;
+        let speech_secs = active.speech_duration.as_secs_f64();
+        let remaining = speech_secs - audio_secs;
+        if remaining > 0.5 {
+            let pad = Duration::from_secs_f64(remaining);
+            tracing::debug!(
+                "[AUDIO:{}] padding {:.1}s silence (speech={:.1}s, audio={:.1}s)",
+                self.stream_id, remaining, speech_secs, audio_secs
+            );
+            self.padding_until = Some(Instant::now() + pad);
         }
     }
 
@@ -470,6 +501,7 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         silence: vec![0u8; AUDIO_BYTES_PER_TICK],
         active_audio: None,
         last_utterance_play_at: None,
+        padding_until: None,
         tick_count: 0,
         next_tick: now + AUDIO_TICK,
         start_time: now,

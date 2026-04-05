@@ -22,6 +22,7 @@ All tasks done. Gladia, Google Translate, ProgressiveChunkDetector fully removed
 | V3 | TTS timeout at low broadcast delay | `pipeline_budget.rs` — `TTS_DEADLINE_FLOOR_MS = 3000`. | **Fixed** |
 | V4 | Force-chunk stall (24s+ accumulation) | `handler.rs` — fires on transcript duration, not translation presence. | **Fixed** |
 | V5 | Audio pile-up on stale TTS | `manager.rs` — `cap_stale_play_at()` caps when `utterance_start` > `delay + 2s`. | **Fixed** |
+| V6 | Audio outrunning video on asymmetric lang pairs | `audio_drain.rs` — speech-duration pacing pads silence after short TTS. | **Fixed** |
 
 ### Production Polish (Current Focus)
 
@@ -76,6 +77,7 @@ Quality and reliability for the demo. Target: 30+ min session, zero hiccups.
 - [x] V3. TTS deadline floor (3s minimum, decoupled from broadcast delay)
 - [x] V4. Force-chunk fires on transcript duration (Soniox withholds translation tokens during continuous speech)
 - [x] V5. Stale play_at capping (prevents audio pile-up when TTS is slow)
+- [x] V6. Speech-duration pacing (prevents audio outrunning video on asymmetric language pairs)
 
 ### v16 — Soniox Migration (Apr 5, 2026)
 - [x] Full Soniox v4 integration (N+1 connections, semantic endpointing, native translation)

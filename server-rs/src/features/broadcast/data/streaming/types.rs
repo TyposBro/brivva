@@ -129,6 +129,10 @@ impl StreamingPcm {
 pub(crate) struct QueuedAudio {
     /// Source timestamp when this utterance started (host speaking)
     pub(crate) play_at: Instant,
+    /// How long the host originally spoke this utterance.
+    /// Used to pace playback: after TTS audio finishes, pad silence until
+    /// speech_duration elapses so translated audio doesn't outrun video.
+    pub(crate) speech_duration: Duration,
     /// Shared PCM buffer (may still be growing if TTS is streaming)
     pub(crate) pcm: Arc<StdMutex<Vec<u8>>>,
     /// True when all audio data has been written

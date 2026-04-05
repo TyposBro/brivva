@@ -176,6 +176,7 @@ impl RtmpManager {
     pub fn queue_audio(&mut self, lang: &str, pcm: Vec<u8>, utterance_start: Instant) {
         self.activate_pending_for_lang(lang);
         let pcm_len = pcm.len();
+        let speech_duration = utterance_start.elapsed();
         let pcm_arc = Arc::new(StdMutex::new(pcm));
         let complete = Arc::new(AtomicBool::new(true));
         for stream in self.streams.values() {
@@ -183,6 +184,7 @@ impl RtmpManager {
                 let mut q = stream.audio_queue.lock().unwrap();
                 q.push_back(QueuedAudio {
                     play_at: utterance_start,
+                    speech_duration,
                     pcm: pcm_arc,
                     complete,
                 });
@@ -199,12 +201,14 @@ impl RtmpManager {
     pub fn queue_streaming_audio(&mut self, lang: &str, utterance_start: Instant) -> StreamingPcm {
         self.activate_pending_for_lang(lang);
         let play_at = cap_stale_play_at(utterance_start, self.broadcast_delay);
+        let speech_duration = utterance_start.elapsed();
         let streaming = StreamingPcm::new();
         for stream in self.streams.values() {
             if stream.lang == lang {
                 let mut q = stream.audio_queue.lock().unwrap();
                 q.push_back(QueuedAudio {
                     play_at,
+                    speech_duration,
                     pcm: streaming.pcm.clone(),
                     complete: streaming.complete.clone(),
                 });
@@ -696,6 +700,7 @@ mod tests {
         let existing = Arc::new(StdMutex::new(VecDeque::new()));
         existing.lock().unwrap().push_back(QueuedAudio {
             play_at: Instant::now(),
+            speech_duration: Duration::from_secs(1),
             pcm: Arc::new(StdMutex::new(vec![1, 2, 3])),
             complete: Arc::new(AtomicBool::new(true)),
         });
