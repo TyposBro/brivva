@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useGuestRoom } from "../../hooks/useGuestRoom";
-import { type Lang, LANGS, LANG_LABELS } from "../../types";
+import { type Lang, LANGS } from "../../types";
 import { LanguagePicker } from "./components/LanguagePicker";
 import { GuestTranscripts } from "./components/GuestTranscripts";
 import { HostVideo } from "./components/HostVideo";
+import { getStatusText } from "./utils/getStatusText";
 
 export default function GuestPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -49,14 +50,4 @@ export default function GuestPage() {
       </main>
     </div>
   );
-}
-
-function getStatusText(status: string, lang: Lang): string {
-  const labels: Record<string, string> = {
-    connecting: "Connecting\u2026",
-    listening: `Listening \u00b7 ${LANG_LABELS[lang]}`,
-    closed: "Host disconnected",
-    error: "Connection error",
-  };
-  return labels[status] ?? "";
 }

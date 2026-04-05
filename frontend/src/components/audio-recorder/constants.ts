@@ -1,0 +1,11 @@
+export const CANVAS_WIDTH = 600;
+export const CANVAS_HEIGHT = 80;
+export const CANVAS_BG = "#131313";
+export const BAR_WIDTH_SCALE = 2.5;
+export const BAR_GAP = 1;
+export const BAR_HEIGHT_SCALE = 0.9;
+export const MAX_BYTE_VALUE = 255;
+export const HUE_START = 240;
+export const HUE_RANGE = 60;
+export const SATURATION = 80;
+export const LIGHTNESS = 60;

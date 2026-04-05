@@ -45,7 +45,12 @@ export function RtmpDestinations({ sourceLang, targetLangs, rtmpUrls, isLive, on
   );
 }
 
-function RtmpInput({ label, value, disabled, onChange }: { label: string; value: string; disabled: boolean; onChange: (v: string) => void }) {
+function RtmpInput({ label, value, disabled, onChange }: {
+  label: string;
+  value: string;
+  disabled: boolean;
+  onChange: (v: string) => void;
+}) {
   return (
     <div className="space-y-1">
       <label className="text-sm text-on-surface-variant">{label}</label>

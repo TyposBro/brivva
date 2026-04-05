@@ -8,7 +8,9 @@ type Props = {
   onRtmpRestart: () => void;
 };
 
-export function BroadcastControls({ isLive, canStart, hasRtmpStreams, voiceReady, onStart, onStop, onRtmpRestart }: Props) {
+export function BroadcastControls({
+  isLive, canStart, hasRtmpStreams, voiceReady, onStart, onStop, onRtmpRestart,
+}: Props) {
   return (
     <div className="flex items-center gap-4">
       {!isLive ? (
@@ -28,12 +30,22 @@ export function BroadcastControls({ isLive, canStart, hasRtmpStreams, voiceReady
         </button>
       )}
 
-      {isLive && <LiveIndicator hasRtmp={hasRtmpStreams} voiceReady={voiceReady} onRestart={onRtmpRestart} />}
+      {isLive && (
+        <LiveIndicator
+          hasRtmp={hasRtmpStreams}
+          voiceReady={voiceReady}
+          onRestart={onRtmpRestart}
+        />
+      )}
     </div>
   );
 }
 
-function LiveIndicator({ hasRtmp, voiceReady, onRestart }: { hasRtmp: boolean; voiceReady: boolean; onRestart: () => void }) {
+function LiveIndicator({ hasRtmp, voiceReady, onRestart }: {
+  hasRtmp: boolean;
+  voiceReady: boolean;
+  onRestart: () => void;
+}) {
   return (
     <div className="flex items-center gap-2">
       <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
@@ -49,7 +61,9 @@ function LiveIndicator({ hasRtmp, voiceReady, onRestart }: { hasRtmp: boolean; v
           </button>
         </>
       )}
-      {voiceReady && <span className="text-xs text-secondary ml-2">Voice cloned</span>}
+      {voiceReady && (
+        <span className="text-xs text-secondary ml-2">Voice cloned</span>
+      )}
     </div>
   );
 }

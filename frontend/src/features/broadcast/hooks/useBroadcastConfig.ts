@@ -12,16 +12,22 @@ export type BroadcastConfig = {
   ttsModel: "turbo" | "flash";
 };
 
+const DEFAULT_SOURCE_LANG = "en";
+const DEFAULT_TARGET_LANGS = ["ja", "ko"];
+const DEFAULT_TIER: TranslationTier = 2;
+const DEFAULT_BROADCAST_DELAY_MS = 5000;
+const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "turbo";
+
 function defaultConfig(): BroadcastConfig {
   return {
-    sourceLang: "en",
-    targetLangs: ["ja", "ko"],
-    tier: 2,
+    sourceLang: DEFAULT_SOURCE_LANG,
+    targetLangs: DEFAULT_TARGET_LANGS,
+    tier: DEFAULT_TIER,
     rtmpUrls: {},
-    broadcastDelay: 5000,
+    broadcastDelay: DEFAULT_BROADCAST_DELAY_MS,
     videoDeviceId: "",
     audioDeviceId: "",
-    ttsModel: "turbo",
+    ttsModel: DEFAULT_TTS_MODEL,
   };
 }
 
