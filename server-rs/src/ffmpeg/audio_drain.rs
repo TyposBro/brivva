@@ -13,6 +13,8 @@ use super::{
     AUDIO_TICK, AUDIO_BYTES_PER_TICK,
     JITTER_WARN_THRESHOLD, JITTER_RECOVERY_THRESHOLD,
     MAX_RECOVERY_TICKS,
+    DRIFT_CHECK_INTERVAL_TICKS, DRIFT_WARN_THRESHOLD_MS,
+    JITTER_WARN_LOG_INTERVAL,
 };
 
 /// State for draining queued audio chunk-by-chunk
@@ -29,7 +31,6 @@ enum WriteResult {
 
 enum JitterAction {
     Recovery,
-    Normal,
 }
 
 enum JitterLevel {
@@ -117,8 +118,8 @@ fn try_start_next_utterance(
         return;
     }
     let mut q = audio_queue.lock().unwrap();
-    if let Some(front) = q.front() {
-        if target_ts >= front.play_at {
+    if let Some(front) = q.front()
+        && target_ts >= front.play_at {
             let audio = q.pop_front().unwrap();
             let pcm_len = audio.pcm.lock().unwrap().len();
             let is_complete = audio.complete.load(Ordering::Acquire);
@@ -133,7 +134,6 @@ fn try_start_next_utterance(
                 offset: 0,
             });
         }
-    }
 }
 
 fn drain_tick_audio(
@@ -202,7 +202,7 @@ fn check_drift(
     start_time: Instant,
     total_bytes_written: u64,
 ) {
-    if tick_count % 250 != 0 {
+    if !tick_count.is_multiple_of(DRIFT_CHECK_INTERVAL_TICKS) {
         return;
     }
     // Periodic drift check (every ~5 seconds = 250 ticks at 20ms)
@@ -211,7 +211,7 @@ fn check_drift(
     let drift_bytes =
         (total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
     let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
-    if drift_ms > 50 {
+    if drift_ms > DRIFT_WARN_THRESHOLD_MS {
         tracing::warn!(
             "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
             stream_id, drift_ms, total_bytes_written, expected_bytes
@@ -237,7 +237,7 @@ fn handle_jitter_warn(
 ) {
     *jitter_warn_count += 1;
     // Rate-limit: log every 25th warning, or the first one
-    if *jitter_warn_count == 1 || *jitter_warn_count % 25 == 0 {
+    if *jitter_warn_count == 1 || (*jitter_warn_count).is_multiple_of(JITTER_WARN_LOG_INTERVAL) {
         tracing::warn!(
             "[AUDIO:{}] jitter: tick {} was {}ms late (warning #{}, threshold={}ms)",
             stream_id, tick_count, jitter.as_millis(), *jitter_warn_count,

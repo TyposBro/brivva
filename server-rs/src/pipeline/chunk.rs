@@ -141,8 +141,8 @@ pub(super) fn spawn_chunked_pipeline(
                     }
 
                     // TTS (tier 2+ only)
-                    if tier >= 2 {
-                        if let Some(ref s) = streaming {
+                    if tier >= 2
+                        && let Some(ref s) = streaming {
                             let voice_id = voice_clone.as_deref()
                                 .unwrap_or(&*DEFAULT_VOICE);
                             let lang_str = target.to_string();
@@ -184,7 +184,6 @@ pub(super) fn spawn_chunked_pipeline(
                                 }
                             }
                         }
-                    }
                 }));
             }
 

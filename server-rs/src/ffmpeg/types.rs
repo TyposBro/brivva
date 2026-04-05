@@ -27,6 +27,46 @@ const FADE_OUT_BYTES: usize = 4410;
 /// already broken; dumping megabytes of silence only crashes RTMP.
 pub(crate) const MAX_RECOVERY_TICKS: usize = 100;
 
+// ── FFmpeg Encoding ─────────────────────────────────────
+
+/// H.264 Constant Rate Factor (quality; lower = better, 23 is ffmpeg default)
+pub(super) const VIDEO_CRF: &str = "23";
+/// Max video bitrate
+pub(super) const VIDEO_MAX_BITRATE: &str = "8000k";
+/// Video rate control buffer size
+pub(super) const VIDEO_BUFSIZE: &str = "16000k";
+/// GOP (Group of Pictures) size — keyframe interval
+pub(super) const VIDEO_GOP_SIZE: &str = "60";
+/// Output audio bitrate for AAC encoding
+pub(super) const AUDIO_BITRATE: &str = "128k";
+/// Output audio channels (stereo for RTMP)
+pub(super) const AUDIO_CHANNELS_OUT: &str = "2";
+
+// ── Stream Lifecycle ────────────────────────────────────
+
+/// Timeout for joining drain threads during cleanup
+pub(super) const THREAD_JOIN_TIMEOUT_SECS: u64 = 3;
+/// Health check interval for crash detection
+pub(super) const HEALTH_CHECK_INTERVAL_SECS: u64 = 2;
+
+// ── Video Drain ─────────────────────────────────────────
+
+/// Video chunk poll interval
+pub(super) const VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+/// Log stats every N video chunks (~10s at 10 chunks/sec)
+pub(super) const VIDEO_STATS_INTERVAL: u64 = 100;
+/// Extra margin when flushing stale chunks on restart
+pub(super) const STALE_CHUNK_MARGIN_SECS: u64 = 1;
+
+// ── Audio Drain ─────────────────────────────────────────
+
+/// Drift warning threshold in milliseconds
+pub(crate) const DRIFT_WARN_THRESHOLD_MS: u64 = 50;
+/// Check drift every N ticks (~5 seconds at 20ms ticks)
+pub(crate) const DRIFT_CHECK_INTERVAL_TICKS: u64 = 250;
+/// Rate-limit jitter warnings: log every Nth occurrence
+pub(crate) const JITTER_WARN_LOG_INTERVAL: u64 = 25;
+
 // ── Shared Types ──────────────────────────────────────────
 
 /// Shared growing PCM buffer for streaming TTS audio.
@@ -35,6 +75,12 @@ pub(crate) const MAX_RECOVERY_TICKS: usize = 100;
 pub struct StreamingPcm {
     pub pcm: Arc<StdMutex<Vec<u8>>>,
     pub complete: Arc<AtomicBool>,
+}
+
+impl Default for StreamingPcm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamingPcm {

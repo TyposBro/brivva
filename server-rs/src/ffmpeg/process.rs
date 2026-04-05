@@ -25,8 +25,8 @@ const SIDECAR_NAME: &str = "ffmpeg-x86_64-unknown-linux-gnu";
 const SIDECAR_NAME: &str = "ffmpeg";
 
 pub(crate) static FFMPEG_BIN: LazyLock<String> = LazyLock::new(|| {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             // Tauri sidecar convention: ffmpeg-{target_triple}
             let sidecar = dir.join(SIDECAR_NAME);
             if sidecar.exists() {
@@ -40,7 +40,6 @@ pub(crate) static FFMPEG_BIN: LazyLock<String> = LazyLock::new(|| {
                 return plain.to_string_lossy().to_string();
             }
         }
-    }
     tracing::info!("[FFMPEG] Using system ffmpeg from PATH");
     "ffmpeg".to_string()
 });
@@ -80,12 +79,11 @@ pub fn kill_orphan_ffmpeg() {
     // Clean up stale FIFOs
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("brivva_audio_") {
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with("brivva_audio_") {
                     let _ = std::fs::remove_file(entry.path());
                     tracing::info!("[STARTUP] removed stale FIFO: {}", name);
                 }
-            }
         }
     }
 

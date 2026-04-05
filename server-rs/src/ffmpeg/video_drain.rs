@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::types::{VIDEO_POLL_INTERVAL, VIDEO_STATS_INTERVAL, STALE_CHUNK_MARGIN_SECS};
+
 // ── Video Chunk Drain Thread ──────────────────────────────
 
 /// Dedicated OS thread: forwards encoded video chunks to FFmpeg stdin
@@ -25,7 +27,7 @@ pub(crate) fn video_chunk_drain_loop(
     delay: Duration,
     stop: Arc<AtomicBool>,
 ) {
-    let poll_interval = Duration::from_millis(20);
+    let poll_interval = VIDEO_POLL_INTERVAL;
     let mut chunks_written: u64 = 0;
     let mut total_bytes_written: u64 = 0;
     let drain_start = Instant::now();
@@ -55,7 +57,7 @@ pub(crate) fn video_chunk_drain_loop(
         // and their timestamps won't match the new FFmpeg timeline
         let mut buf = chunk_buffer.lock().unwrap();
         let now = Instant::now();
-        let stale_cutoff = now - delay - Duration::from_secs(1);
+        let stale_cutoff = now - delay - Duration::from_secs(STALE_CHUNK_MARGIN_SECS);
         let before = buf.len();
         buf.retain(|(ts, _)| *ts > stale_cutoff);
         let dropped = before - buf.len();
@@ -97,7 +99,7 @@ pub(crate) fn video_chunk_drain_loop(
                     total_bytes_written += data_len as u64;
 
                     // Periodic stats every 100 chunks (~10s at 10 chunks/sec)
-                    if chunks_written % 100 == 0 {
+                    if chunks_written.is_multiple_of(VIDEO_STATS_INTERVAL) {
                         tracing::debug!(
                             "[VIDEO:{}] stats: {} chunks, {}KB written, {:.0}s elapsed",
                             stream_id, chunks_written, total_bytes_written / 1024,

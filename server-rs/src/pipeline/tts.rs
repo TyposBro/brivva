@@ -40,8 +40,8 @@ pub(super) async fn run_pipeline(
         if lang == source_lang {
             // Source-language passthrough: host audio queued directly to RTMP
             let rtmp_mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
-            if let Some(manager) = rtmp_mgr {
-                if !host_audio.is_empty() {
+            if let Some(manager) = rtmp_mgr
+                && !host_audio.is_empty() {
                     let mut pcm = host_audio.clone();
                     let pcm_len = pcm.len();
                     let lang_str = lang.to_string();
@@ -61,7 +61,6 @@ pub(super) async fn run_pipeline(
                         );
                     }));
                 }
-            }
             continue;
         }
 

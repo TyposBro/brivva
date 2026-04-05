@@ -10,6 +10,9 @@ use super::process::FFMPEG_BIN;
 use super::types::{
     StreamingPcm, QueuedAudio,
     MAX_VIDEO_CHUNKS, DEFAULT_DELAY_MS, MAX_FFMPEG_RESTARTS, FFMPEG_RESTART_DELAY,
+    VIDEO_CRF, VIDEO_MAX_BITRATE, VIDEO_BUFSIZE, VIDEO_GOP_SIZE,
+    AUDIO_BITRATE, AUDIO_CHANNELS_OUT,
+    THREAD_JOIN_TIMEOUT_SECS, HEALTH_CHECK_INTERVAL_SECS,
 };
 use super::{video_drain, audio_drain};
 
@@ -49,6 +52,12 @@ pub struct RtmpManager {
     broadcast_delay: Duration,
     /// Video codec from MediaRecorder ("h264" = passthrough, "vp8"/"vp9" = re-encode)
     video_codec: String,
+}
+
+impl Default for RtmpManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RtmpManager {
@@ -118,7 +127,7 @@ impl RtmpManager {
         if dropped > 0 {
             tracing::warn!("[VIDEO] buffer overflow: dropped {} old chunks (buf={})", dropped, buf_len);
         }
-        if buf_len % 50 == 0 {
+        if buf_len.is_multiple_of(50) {
             tracing::debug!("[VIDEO] buffered chunk: {}B (buf_depth={})", data.len(), buf_len);
         }
     }
@@ -322,18 +331,18 @@ impl RtmpManager {
                 "-c:v".to_string(), "libx264".to_string(),
                 "-preset".to_string(), "ultrafast".to_string(),
                 "-tune".to_string(), "zerolatency".to_string(),
-                "-crf".to_string(), "23".to_string(),
-                "-maxrate".to_string(), "8000k".to_string(),
-                "-bufsize".to_string(), "16000k".to_string(),
+                "-crf".to_string(), VIDEO_CRF.to_string(),
+                "-maxrate".to_string(), VIDEO_MAX_BITRATE.to_string(),
+                "-bufsize".to_string(), VIDEO_BUFSIZE.to_string(),
                 "-pix_fmt".to_string(), "yuv420p".to_string(),
-                "-g".to_string(), "60".to_string(),
+                "-g".to_string(), VIDEO_GOP_SIZE.to_string(),
             ]);
         }
 
         args.extend([
             "-c:a".to_string(), "aac".to_string(),
-            "-ac:a".to_string(), "2".to_string(),
-            "-b:a".to_string(), "128k".to_string(),
+            "-ac:a".to_string(), AUDIO_CHANNELS_OUT.to_string(),
+            "-b:a".to_string(), AUDIO_BITRATE.to_string(),
             "-map".to_string(), "0:v".to_string(),
             "-map".to_string(), "1:a".to_string(),
             "-f".to_string(), "flv".to_string(),
@@ -461,7 +470,7 @@ impl RtmpManager {
             }
             // Join drain threads with timeout — if a thread is stuck (e.g., blocked
             // on FIFO write after FFmpeg died in a weird state), don't hang cleanup.
-            let join_timeout = Duration::from_secs(3);
+            let join_timeout = Duration::from_secs(THREAD_JOIN_TIMEOUT_SECS);
             for (label, handle) in [
                 ("video", stream.video_handle.take()),
                 ("audio", stream.audio_handle.take()),
@@ -476,7 +485,7 @@ impl RtmpManager {
                         Ok(Ok(Ok(()))) => {}
                         Ok(Ok(Err(_))) => tracing::error!("[FFMPEG:{}] {} thread panicked", id_clone, label),
                         Ok(Err(_)) => tracing::warn!("[FFMPEG:{}] {} thread join cancelled", id_clone, label),
-                        Err(_) => tracing::warn!("[FFMPEG:{}] {} thread join timed out (3s), abandoning", id_clone, label),
+                        Err(_) => tracing::warn!("[FFMPEG:{}] {} thread join timed out ({}s), abandoning", id_clone, label, THREAD_JOIN_TIMEOUT_SECS),
                     }
                 }
             }
@@ -517,8 +526,8 @@ pub fn spawn_health_monitor(
     stop_flag: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        tracing::info!("[HEALTH] FFmpeg health monitor started (check every 2s)");
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        tracing::info!("[HEALTH] FFmpeg health monitor started (check every {}s)", HEALTH_CHECK_INTERVAL_SECS);
+        let mut interval = tokio::time::interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
         let mut check_count: u64 = 0;
         loop {
             interval.tick().await;
