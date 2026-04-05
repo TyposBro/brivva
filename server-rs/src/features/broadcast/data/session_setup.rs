@@ -7,7 +7,7 @@ use crate::core::config::DEFAULT_TTS_MODEL;
 use crate::core::types::Lang; use crate::features::broadcast::domain::{Session, Sessions};
 use crate::shared::voice_clone;
 
-use super::ws_handler::WsQuery;
+use super::ws_handler::{WsQuery, BroadcastDeps};
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -38,18 +38,18 @@ pub fn spawn_stt_pipeline(
     session_id: &str,
     source_lang: &Lang,
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    app_ctx: &crate::orchestration::di::AppContext,
+    deps: &BroadcastDeps,
 ) {
     let req = crate::shared::stt::SttStartRequest {
         session_id: session_id.to_string(),
         sessions: sessions.clone(),
         source_lang: source_lang.clone(),
         audio_rx,
-        stt_api_key: app_ctx.config.stt_api_key.clone(),
-        translate_api_key: app_ctx.config.translate_api_key.clone(),
-        tts_api_key: app_ctx.config.tts_api_key.clone(),
-        default_voice: app_ctx.config.default_voice.clone(),
-        http_client: app_ctx.http_client.clone(),
+        stt_api_key: deps.stt_api_key.clone(),
+        translate_api_key: deps.translate_api_key.clone(),
+        tts_api_key: deps.tts_api_key.clone(),
+        default_voice: deps.default_voice.clone(),
+        http_client: deps.http_client.clone(),
     };
     tokio::spawn(async move {
         crate::shared::stt::start_stt(req).await;

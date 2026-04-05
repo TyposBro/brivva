@@ -139,7 +139,8 @@ fn spawn_source_passthrough(
     lang: &Lang,
     host_audio: &[u8],
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let mgr = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone())?;
+    let erased = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone())?;
+    let mgr = super::streaming::downcast_rtmp_manager(&erased)?;
     if host_audio.is_empty() { return None; }
 
     let mut pcm = host_audio.to_vec();

@@ -38,20 +38,24 @@ pub async fn handle_rtmp_config(json: &serde_json::Value, sessions: &Sessions, s
 
 pub async fn handle_rtmp_restart(sessions: &Sessions, session_id: &str) {
     tracing::info!("[WS:{}] rtmp:restart requested", session_id);
-    let mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
-    if let Some(manager) = mgr {
-        let mut locked = manager.lock().await;
-        locked.restart_all().await;
-        notify_host(sessions, session_id, "RTMP streams restarted");
+    let erased = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
+    if let Some(erased) = erased {
+        if let Some(mgr) = streaming::downcast_rtmp_manager(&erased) {
+            let mut locked = mgr.lock().await;
+            locked.restart_all().await;
+            notify_host(sessions, session_id, "RTMP streams restarted");
+        }
     }
 }
 
 // -- Private Helpers --------------------------------------------------
 
 async fn propagate_codec_to_manager(sessions: &Sessions, session_id: &str, codec: &str) {
-    if let Some(mgr) = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone()) {
-        let mut locked = mgr.lock().await;
-        locked.set_video_codec(codec);
+    if let Some(erased) = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone()) {
+        if let Some(mgr) = streaming::downcast_rtmp_manager(&erased) {
+            let mut locked = mgr.lock().await;
+            locked.set_video_codec(codec);
+        }
     }
 }
 
@@ -121,7 +125,7 @@ fn try_start_stream(
 
 fn store_rtmp_state(sessions: &Sessions, session_id: &str, mgr: streaming::SharedRtmpManager, langs: &[Lang]) {
     if let Some(mut session) = sessions.get_mut(session_id) {
-        session.rtmp_manager = Some(mgr);
+        session.rtmp_manager = Some(streaming::erase_rtmp_manager(mgr));
         session.rtmp_langs = langs.to_vec();
     }
 }

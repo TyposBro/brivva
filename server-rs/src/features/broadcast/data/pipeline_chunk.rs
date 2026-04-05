@@ -205,7 +205,8 @@ async fn create_streaming_pcm(
     lang_str: &str,
     utterance_start: Instant,
 ) -> Option<super::streaming::StreamingPcm> {
-    let rtmp_mgr = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone())?;
+    let erased = ctx.sessions.get(&ctx.session_id).and_then(|s| s.rtmp_manager.clone())?;
+    let rtmp_mgr = super::streaming::downcast_rtmp_manager(&erased)?;
     let mgr = rtmp_mgr.lock().await;
     let streaming = mgr.queue_streaming_audio(lang_str, utterance_start);
     debug!("[CHUNK] #{}.0 {} created StreamingPcm slot", ctx.utterance_id, lang_str);

@@ -36,20 +36,30 @@ pub(crate) struct WsQuery {
 fn default_tier() -> u8 { 2 }
 fn default_tts_model() -> String { "turbo".to_string() }
 
+/// Dependencies injected from orchestration for broadcast WebSocket handlers.
+#[derive(Clone)]
+pub struct BroadcastDeps {
+    pub stt_api_key: String,
+    pub translate_api_key: String,
+    pub tts_api_key: String,
+    pub default_voice: String,
+    pub http_client: reqwest::Client,
+}
+
 pub(crate) async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
     State(sessions): State<Sessions>,
-    axum::Extension(app_ctx): axum::Extension<std::sync::Arc<crate::orchestration::di::AppContext>>,
+    axum::Extension(deps): axum::Extension<std::sync::Arc<BroadcastDeps>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, query, sessions, app_ctx))
+    ws.on_upgrade(move |socket| handle_socket(socket, query, sessions, deps))
 }
 
 async fn handle_socket(
     socket: WebSocket,
     query: WsQuery,
     sessions: Sessions,
-    app_ctx: std::sync::Arc<crate::orchestration::di::AppContext>,
+    deps: std::sync::Arc<BroadcastDeps>,
 ) {
     let (session_id, source_lang) = match super::session_setup::create_session(&query, &sessions) {
         Some(result) => result,
@@ -65,7 +75,7 @@ async fn handle_socket(
     }
 
     let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    super::session_setup::spawn_stt_pipeline(&sessions, &session_id, &source_lang, audio_rx, &app_ctx);
+    super::session_setup::spawn_stt_pipeline(&sessions, &session_id, &source_lang, audio_rx, &deps);
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = host_rx.recv().await {

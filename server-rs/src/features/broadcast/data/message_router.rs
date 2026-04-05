@@ -51,10 +51,12 @@ async fn handle_binary(
 }
 
 async fn forward_video(data: &[u8], sessions: &Sessions, session_id: &str) {
-    let mgr = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
-    if let Some(manager) = mgr {
-        let locked = manager.lock().await;
-        locked.push_video_chunk(&data[1..]);
+    let erased = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
+    if let Some(erased) = erased {
+        if let Some(mgr) = super::streaming::downcast_rtmp_manager(&erased) {
+            let locked = mgr.lock().await;
+            locked.push_video_chunk(&data[1..]);
+        }
     }
 }
 

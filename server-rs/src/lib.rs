@@ -6,7 +6,7 @@ pub mod shared;
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use features::broadcast::domain::Sessions;
+use core::types::Sessions;
 use orchestration::config::AppConfig;
 use orchestration::di::AppContext;
 

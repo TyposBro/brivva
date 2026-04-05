@@ -4,9 +4,8 @@ use std::time::Instant;
 use tracing::{info, error, debug};
 
 use crate::core::config::{BYTES_PER_SEC, DEFAULT_BROADCAST_DELAY_MS};
-use crate::features::broadcast::domain::pipeline_budget::{compute_tts_deadline, compute_max_pcm_bytes};
-use crate::core::types::Lang; use crate::features::broadcast::domain::{Sessions, ServerMsg};
-use crate::core::types::StyleParams;
+use crate::core::pipeline_budget::{compute_tts_deadline, compute_max_pcm_bytes};
+use crate::core::types::{Lang, ServerMsg, Sessions, StyleParams};
 use super::voice_settings::VoiceStyle;
 use super::SynthesisRequest;
 
@@ -192,7 +191,8 @@ async fn allocate_rtmp_slot(
     lang: &str,
     utterance_start: Instant,
 ) -> Option<crate::features::broadcast::data::streaming::StreamingPcm> {
-    let rtmp_mgr = sessions.get(session_id)?.rtmp_manager.clone()?;
+    let erased = sessions.get(session_id)?.rtmp_manager.clone()?;
+    let rtmp_mgr = crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased)?;
     let mgr = rtmp_mgr.lock().await;
     Some(mgr.queue_streaming_audio(lang, utterance_start))
 }

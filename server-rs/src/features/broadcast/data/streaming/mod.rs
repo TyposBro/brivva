@@ -27,7 +27,7 @@ mod health_monitor;
 pub use decoder::IncrementalMp3Decoder;
 pub use process::{kill_orphan_ffmpeg, decode_mp3_to_pcm};
 pub use types::{StreamingPcm, truncate_with_fadeout};
-pub use manager::{RtmpManager, SharedRtmpManager};
+pub use manager::{RtmpManager, SharedRtmpManager, erase_rtmp_manager, downcast_rtmp_manager};
 pub use health_monitor::spawn_health_monitor;
 
 // Re-export crate-internal items used by submodules (audio_drain, video_drain, decoder)

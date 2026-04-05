@@ -473,3 +473,15 @@ fn spawn_audio_drain(setup: AudioDrainSetup) -> Result<thread::JoinHandle<()>, S
 
 /// Thread-safe wrapper
 pub type SharedRtmpManager = Arc<tokio::sync::Mutex<RtmpManager>>;
+
+/// Wrap a SharedRtmpManager as an ErasedRtmpManager for storage in Session.
+pub fn erase_rtmp_manager(mgr: SharedRtmpManager) -> crate::core::types::ErasedRtmpManager {
+    mgr as crate::core::types::ErasedRtmpManager
+}
+
+/// Downcast an ErasedRtmpManager back to SharedRtmpManager.
+pub fn downcast_rtmp_manager(
+    erased: &crate::core::types::ErasedRtmpManager,
+) -> Option<SharedRtmpManager> {
+    erased.clone().downcast::<tokio::sync::Mutex<RtmpManager>>().ok()
+}
