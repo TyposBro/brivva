@@ -17,8 +17,7 @@ pub fn build_router(sessions: Sessions, app_ctx: Arc<AppContext>) -> Router {
         .allow_headers(Any);
 
     let broadcast_deps = Arc::new(BroadcastDeps {
-        stt_api_key: app_ctx.config.stt_api_key.clone(),
-        translate_api_key: app_ctx.config.translate_api_key.clone(),
+        stt_api_key: app_ctx.config.soniox_api_key.clone(),
         tts_api_key: app_ctx.config.tts_api_key.clone(),
         default_voice: app_ctx.config.default_voice.clone(),
         http_client: app_ctx.http_client.clone(),

@@ -5,9 +5,8 @@ use crate::core::config::{DEFAULT_VOICE_ID, SERVER_ADDR, MAX_BODY_SIZE};
 
 /// Typed configuration populated from environment variables at startup.
 pub struct AppConfig {
-    pub stt_api_key: String,
+    pub soniox_api_key: String,
     pub tts_api_key: String,
-    pub translate_api_key: String,
     pub default_voice: String,
     pub server_addr: String,
     pub max_body_size: usize,
@@ -17,9 +16,8 @@ impl AppConfig {
     /// Read all environment variables once at application bootstrap.
     pub fn from_env() -> Self {
         Self {
-            stt_api_key: std::env::var("STT_API_KEY").unwrap_or_default(),
+            soniox_api_key: std::env::var("SONIOX_API_KEY").unwrap_or_default(),
             tts_api_key: std::env::var("TTS_API_KEY").unwrap_or_default(),
-            translate_api_key: std::env::var("TRANSLATE_API_KEY").unwrap_or_default(),
             default_voice: std::env::var("DEFAULT_VOICE")
                 .unwrap_or_else(|_| DEFAULT_VOICE_ID.to_string()),
             server_addr: SERVER_ADDR.to_string(),
@@ -45,14 +43,14 @@ mod tests {
     }
 
     #[test]
-    fn should_read_stt_api_key_from_env() {
+    fn should_read_soniox_api_key_from_env() {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { set_env("STT_API_KEY", "test-stt-key") };
+        unsafe { set_env("SONIOX_API_KEY", "test-soniox-key") };
 
         let config = AppConfig::from_env();
 
-        assert_eq!(config.stt_api_key, "test-stt-key");
-        unsafe { remove_env("STT_API_KEY") };
+        assert_eq!(config.soniox_api_key, "test-soniox-key");
+        unsafe { remove_env("SONIOX_API_KEY") };
     }
 
     #[test]
@@ -67,24 +65,13 @@ mod tests {
     }
 
     #[test]
-    fn should_read_translate_api_key_from_env() {
+    fn should_fallback_soniox_key_to_empty_when_unset() {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { set_env("TRANSLATE_API_KEY", "test-translate-key") };
+        unsafe { remove_env("SONIOX_API_KEY") };
 
         let config = AppConfig::from_env();
 
-        assert_eq!(config.translate_api_key, "test-translate-key");
-        unsafe { remove_env("TRANSLATE_API_KEY") };
-    }
-
-    #[test]
-    fn should_fallback_stt_key_to_empty_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { remove_env("STT_API_KEY") };
-
-        let config = AppConfig::from_env();
-
-        assert_eq!(config.stt_api_key, "");
+        assert_eq!(config.soniox_api_key, "");
     }
 
     #[test]
@@ -137,36 +124,23 @@ mod tests {
     }
 
     #[test]
-    fn should_fallback_translate_key_to_empty_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { remove_env("TRANSLATE_API_KEY") };
-
-        let config = AppConfig::from_env();
-
-        assert_eq!(config.translate_api_key, "");
-    }
-
-    #[test]
     fn should_read_all_keys_when_all_env_vars_are_set() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
-            set_env("STT_API_KEY", "stt-val");
+            set_env("SONIOX_API_KEY", "soniox-val");
             set_env("TTS_API_KEY", "tts-val");
-            set_env("TRANSLATE_API_KEY", "translate-val");
             set_env("DEFAULT_VOICE", "voice-val");
         }
 
         let config = AppConfig::from_env();
 
-        assert_eq!(config.stt_api_key, "stt-val");
+        assert_eq!(config.soniox_api_key, "soniox-val");
         assert_eq!(config.tts_api_key, "tts-val");
-        assert_eq!(config.translate_api_key, "translate-val");
         assert_eq!(config.default_voice, "voice-val");
 
         unsafe {
-            remove_env("STT_API_KEY");
+            remove_env("SONIOX_API_KEY");
             remove_env("TTS_API_KEY");
-            remove_env("TRANSLATE_API_KEY");
             remove_env("DEFAULT_VOICE");
         }
     }
@@ -175,17 +149,15 @@ mod tests {
     fn should_fallback_all_keys_to_defaults_when_no_env_vars_set() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
-            remove_env("STT_API_KEY");
+            remove_env("SONIOX_API_KEY");
             remove_env("TTS_API_KEY");
-            remove_env("TRANSLATE_API_KEY");
             remove_env("DEFAULT_VOICE");
         }
 
         let config = AppConfig::from_env();
 
-        assert_eq!(config.stt_api_key, "");
+        assert_eq!(config.soniox_api_key, "");
         assert_eq!(config.tts_api_key, "");
-        assert_eq!(config.translate_api_key, "");
         assert_eq!(config.default_voice, DEFAULT_VOICE_ID);
         assert_eq!(config.server_addr, SERVER_ADDR);
         assert_eq!(config.max_body_size, MAX_BODY_SIZE);

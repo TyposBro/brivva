@@ -51,13 +51,16 @@ pub fn spawn_stt_pipeline(
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     deps: &BroadcastDeps,
 ) {
+    let target_langs = sessions.get(session_id)
+        .map(|s| s.active_langs())
+        .unwrap_or_default();
     let req = crate::shared::stt::SttStartRequest {
         session_id: session_id.to_string(),
         sessions: sessions.clone(),
         source_lang: source_lang.clone(),
+        target_langs,
         audio_rx,
         stt_api_key: deps.stt_api_key.clone(),
-        translate_api_key: deps.translate_api_key.clone(),
         tts_api_key: deps.tts_api_key.clone(),
         default_voice: deps.default_voice.clone(),
         http_client: deps.http_client.clone(),

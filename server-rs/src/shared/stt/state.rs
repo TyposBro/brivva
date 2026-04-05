@@ -1,8 +1,7 @@
-//! Mutable state carried across Gladia messages within one WS connection.
+//! Mutable state carried across Soniox messages within one WS connection.
 
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
 use crate::core::types::{Lang, Sessions};
@@ -17,7 +16,6 @@ pub(super) struct SttContext {
     pub sink: Arc<tokio::sync::Mutex<
         futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
     >>,
-    pub translate_api_key: String,
     pub tts_api_key: String,
     pub default_voice: String,
     pub http_client: reqwest::Client,
@@ -26,56 +24,41 @@ pub(super) struct SttContext {
 /// Why the STT connection exited (or hasn't yet).
 #[derive(Debug)]
 pub(super) enum ExitReason {
-    /// Connection is still active (no exit yet).
     Running,
-    /// WebSocket closed or errored — standard reconnect.
     Disconnected,
-    /// Need to reconnect with new endpointing/duration params.
-    AdaptiveReconnect { endpointing: f64, max_duration: f64 },
 }
 
 /// Mutable state for one STT connection.
 pub(super) struct SttState {
     pub utterance_counter: u64,
     pub utterance_start: Option<Instant>,
-    pub chunk_detector: Box<dyn crate::shared::stt::ChunkDetector>,
-    pub progressive: crate::shared::stt::ProgressiveChunkDetector,
-    pub chunk_index: u16,
-    pub chunk_pipeline_tx: Option<mpsc::Sender<crate::core::types::ChunkEvent>>,
-    pub last_audio_byte_sent: usize,
-    pub wpm_samples: Vec<u32>,
-    pub adapted: bool,
+    pub transcript_acc: String,
+    pub translation_acc: String,
+    pub target_lang: Option<String>,
     pub exit_reason: ExitReason,
 }
 
 /// Carry-over state from a previous STT connection for seamless reconnects.
 pub(super) struct SttCarryOver {
     pub utterance_counter: u64,
-    pub wpm_samples: Vec<u32>,
-    pub adapted: bool,
 }
 
 impl SttState {
-    pub fn new(source_lang: &str, carry: SttCarryOver) -> Self {
+    pub fn new(carry: SttCarryOver, target_lang: Option<String>) -> Self {
         Self {
             utterance_counter: carry.utterance_counter,
             utterance_start: None,
-            chunk_detector: crate::shared::stt::get_detector(source_lang),
-            progressive: crate::shared::stt::ProgressiveChunkDetector::new(source_lang),
-            chunk_index: 0,
-            chunk_pipeline_tx: None,
-            last_audio_byte_sent: 0,
-            wpm_samples: carry.wpm_samples,
-            adapted: carry.adapted,
+            transcript_acc: String::new(),
+            translation_acc: String::new(),
+            target_lang,
             exit_reason: ExitReason::Running,
         }
     }
 
     pub fn reset_utterance(&mut self) {
-        self.progressive.reset();
-        self.chunk_index = 0;
-        self.last_audio_byte_sent = 0;
-        self.chunk_detector.reset();
+        self.transcript_acc.clear();
+        self.translation_acc.clear();
+        self.utterance_start = None;
     }
 }
 
@@ -90,3 +73,71 @@ pub(super) type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_carry_over() -> SttCarryOver {
+        SttCarryOver { utterance_counter: 5 }
+    }
+
+    #[test]
+    fn should_initialize_state_with_carry_over_counter() {
+        let state = SttState::new(make_carry_over(), None);
+
+        assert_eq!(state.utterance_counter, 5);
+    }
+
+    #[test]
+    fn should_initialize_with_empty_accumulators() {
+        let state = SttState::new(make_carry_over(), Some("ja".to_string()));
+
+        assert!(state.transcript_acc.is_empty());
+        assert!(state.translation_acc.is_empty());
+    }
+
+    #[test]
+    fn should_store_target_lang() {
+        let state = SttState::new(make_carry_over(), Some("ja".to_string()));
+
+        assert_eq!(state.target_lang, Some("ja".to_string()));
+    }
+
+    #[test]
+    fn should_default_target_lang_to_none_for_source_connection() {
+        let state = SttState::new(make_carry_over(), None);
+
+        assert!(state.target_lang.is_none());
+    }
+
+    #[test]
+    fn should_reset_utterance_clearing_accumulators() {
+        let mut state = SttState::new(make_carry_over(), Some("zh".to_string()));
+        state.transcript_acc.push_str("hello");
+        state.translation_acc.push_str("nihao");
+        state.utterance_start = Some(Instant::now());
+
+        state.reset_utterance();
+
+        assert!(state.transcript_acc.is_empty());
+        assert!(state.translation_acc.is_empty());
+        assert!(state.utterance_start.is_none());
+    }
+
+    #[test]
+    fn should_preserve_utterance_counter_on_reset() {
+        let mut state = SttState::new(make_carry_over(), None);
+        state.utterance_counter = 10;
+
+        state.reset_utterance();
+
+        assert_eq!(state.utterance_counter, 10);
+    }
+
+    #[test]
+    fn should_start_with_running_exit_reason() {
+        let state = SttState::new(make_carry_over(), None);
+
+        assert!(matches!(state.exit_reason, ExitReason::Running));
+    }
+}

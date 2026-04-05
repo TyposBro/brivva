@@ -1,56 +1,38 @@
-//! STT reconnection loop — the main entry point for the STT pipeline.
+//! STT reconnection loop — N+1 Soniox connections for source + target languages.
 
 use std::sync::Arc;
 use std::time::Duration;
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::core::config::STT_RECONNECT_DELAY_SECS;
-use crate::shared::stt::config::{DEFAULT_ENDPOINTING_SECS, DEFAULT_MAX_DURATION_SECS};
 use crate::core::types::{Lang, Sessions};
 
 use super::state::{ExitReason, SttState, SttCarryOver, SttContext, MessageAction, WsStream};
-use super::connection::{connect_gladia, ConnectionConfig, ConnectSession};
-use super::handler::process_gladia_message;
-use super::audio_forwarder::{forward_audio_to_gladia, AudioForwardEnv};
+use super::connection::{connect_soniox, ConnectSession, SonioxConfig};
+use super::handler::process_soniox_message;
 
 // ── Types ────────────────────────────────────────────────
 
 type AudioAcc = Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
-type AudioRx = Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>;
 type WsSink = Arc<tokio::sync::Mutex<
     futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
 >>;
 type WsRecvStream = futures_util::stream::SplitStream<WsStream>;
 
-struct LoopState {
+const AUDIO_BROADCAST_CAPACITY: usize = 64;
+
+struct ConnectionLoopState {
     utterance_counter: u64,
     reconnect_count: u32,
-    endpointing: f64,
-    max_duration: f64,
-    wpm_samples: Vec<u32>,
-    adapted: bool,
 }
 
-impl LoopState {
+impl ConnectionLoopState {
     fn new() -> Self {
-        Self {
-            utterance_counter: 0,
-            reconnect_count: 0,
-            endpointing: DEFAULT_ENDPOINTING_SECS,
-            max_duration: DEFAULT_MAX_DURATION_SECS,
-            wpm_samples: Vec::new(),
-            adapted: false,
-        }
+        Self { utterance_counter: 0, reconnect_count: 0 }
     }
-}
-
-enum ReconnectDecision {
-    AdaptiveReconnect,
-    StandardReconnect,
-    Stop,
 }
 
 /// Immutable parts of start_stt shared across the entire session lifetime.
@@ -58,13 +40,18 @@ struct SessionEnv {
     session_id: String,
     sessions: Sessions,
     source_lang: Lang,
-    audio_rx: AudioRx,
     audio_acc: AudioAcc,
     stt_api_key: String,
-    translate_api_key: String,
     tts_api_key: String,
     default_voice: String,
     http_client: reqwest::Client,
+}
+
+/// Config for a single Soniox connection (source or translation).
+struct SttConnectionConfig {
+    target_lang: Option<String>,
+    session_env: Arc<SessionEnv>,
+    audio_rx: broadcast::Receiver<Vec<u8>>,
 }
 
 // ── Public API ───────────────────────────────────────────
@@ -74,9 +61,9 @@ pub struct SttStartRequest {
     pub session_id: String,
     pub sessions: Sessions,
     pub source_lang: Lang,
+    pub target_langs: Vec<Lang>,
     pub audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     pub stt_api_key: String,
-    pub translate_api_key: String,
     pub tts_api_key: String,
     pub default_voice: String,
     pub http_client: reqwest::Client,
@@ -88,80 +75,139 @@ pub async fn start_stt(req: SttStartRequest) {
         return;
     }
 
-    let env = build_session_env(req);
-    run_reconnect_loop(&env).await;
+    let env = Arc::new(build_session_env(&req));
+    let (audio_tx, _) = broadcast::channel::<Vec<u8>>(AUDIO_BROADCAST_CAPACITY);
+
+    let mut handles = spawn_all_connections(&req, &env, &audio_tx);
+    let fanout_handle = spawn_audio_fanout(req.audio_rx, audio_tx);
+    handles.push(fanout_handle);
+
+    await_all_connections(handles).await;
 }
 
-fn build_session_env(req: SttStartRequest) -> SessionEnv {
+// ── Setup ────────────────────────────────────────────────
+
+fn build_session_env(req: &SttStartRequest) -> SessionEnv {
     SessionEnv {
-        session_id: req.session_id,
-        sessions: req.sessions,
-        source_lang: req.source_lang,
-        audio_rx: Arc::new(tokio::sync::Mutex::new(req.audio_rx)),
+        session_id: req.session_id.clone(),
+        sessions: req.sessions.clone(),
+        source_lang: req.source_lang.clone(),
         audio_acc: Arc::new(std::sync::Mutex::new(Vec::new())),
-        stt_api_key: req.stt_api_key,
-        translate_api_key: req.translate_api_key,
-        tts_api_key: req.tts_api_key,
-        default_voice: req.default_voice,
-        http_client: req.http_client,
+        stt_api_key: req.stt_api_key.clone(),
+        tts_api_key: req.tts_api_key.clone(),
+        default_voice: req.default_voice.clone(),
+        http_client: req.http_client.clone(),
     }
 }
 
-async fn run_reconnect_loop(env: &SessionEnv) {
-    let mut state = LoopState::new();
-    let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
+fn spawn_all_connections(
+    req: &SttStartRequest,
+    env: &Arc<SessionEnv>,
+    audio_tx: &broadcast::Sender<Vec<u8>>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::new();
 
-    loop {
-        let result = run_one_connection(env, &state).await;
+    let source_cfg = SttConnectionConfig {
+        target_lang: None,
+        session_env: env.clone(),
+        audio_rx: audio_tx.subscribe(),
+    };
+    handles.push(tokio::spawn(run_connection_loop(source_cfg)));
 
-        match handle_connection_result(result, &mut state, &env.audio_acc) {
-            ReconnectDecision::AdaptiveReconnect => continue,
-            ReconnectDecision::Stop => break,
-            ReconnectDecision::StandardReconnect => {}
+    for lang in &req.target_langs {
+        if lang == &req.source_lang {
+            continue;
         }
+        let cfg = SttConnectionConfig {
+            target_lang: Some(lang.to_string()),
+            session_env: env.clone(),
+            audio_rx: audio_tx.subscribe(),
+        };
+        handles.push(tokio::spawn(run_connection_loop(cfg)));
+    }
 
-        if !should_reconnect(env, &mut state) {
+    handles
+}
+
+fn spawn_audio_fanout(
+    audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    audio_tx: broadcast::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(audio_fanout_loop(audio_rx, audio_tx))
+}
+
+async fn audio_fanout_loop(
+    mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    audio_tx: broadcast::Sender<Vec<u8>>,
+) {
+    while let Some(data) = audio_rx.recv().await {
+        if audio_tx.send(data).is_err() {
             break;
         }
-        clear_accumulator(&env.audio_acc);
+    }
+}
+
+async fn await_all_connections(handles: Vec<tokio::task::JoinHandle<()>>) {
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+// ── Per-connection reconnect loop ────────────────────────
+
+async fn run_connection_loop(mut cfg: SttConnectionConfig) {
+    let mut loop_state = ConnectionLoopState::new();
+    let reconnect_delay = Duration::from_secs(STT_RECONNECT_DELAY_SECS);
+    let lang_label = cfg.target_lang.clone().unwrap_or_else(|| "source".to_string());
+
+    loop {
+        let result = run_one_connection(&mut cfg, &loop_state).await;
+        update_loop_state(&result, &mut loop_state);
+
+        if !should_reconnect(&cfg.session_env, &mut loop_state, &lang_label) {
+            break;
+        }
+        clear_accumulator(&cfg.session_env.audio_acc);
         tokio::time::sleep(reconnect_delay).await;
     }
 }
 
-// ── Connection lifecycle ─────────────────────────────────
+fn update_loop_state(stt_state: &Option<SttState>, loop_state: &mut ConnectionLoopState) {
+    if let Some(st) = stt_state {
+        loop_state.utterance_counter = st.utterance_counter;
+    }
+}
+
+// ── Single connection lifecycle ──────────────────────────
 
 async fn run_one_connection(
-    env: &SessionEnv,
-    loop_state: &LoopState,
+    cfg: &mut SttConnectionConfig,
+    loop_state: &ConnectionLoopState,
 ) -> Option<SttState> {
-    let ws_stream = open_gladia_connection(env, loop_state).await?;
+    let soniox_cfg = build_soniox_config(cfg);
+    let sess = ConnectSession {
+        session_id: &cfg.session_env.session_id,
+        sessions: &cfg.session_env.sessions,
+    };
+    let ws_stream: WsStream = connect_soniox(&sess, &soniox_cfg).await?;
     let (stt_sink, stt_stream) = ws_stream.split();
     let stt_sink: WsSink = Arc::new(tokio::sync::Mutex::new(stt_sink));
 
-    let ctx = build_stt_context(env, &stt_sink);
-    let send_task = spawn_send_task(&env.audio_rx, &ctx);
-    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state);
+    let ctx = build_stt_context(&cfg.session_env, &stt_sink);
+    let send_task = spawn_send_task(&stt_sink, &cfg.session_env, &mut cfg.audio_rx);
+    let recv_task = spawn_recv_task(stt_stream, ctx, loop_state, cfg.target_lang.clone());
 
     await_tasks(send_task, recv_task).await
 }
 
-async fn open_gladia_connection(
-    env: &SessionEnv,
-    loop_state: &LoopState,
-) -> Option<WsStream> {
-    let config = ConnectionConfig {
-        endpointing: loop_state.endpointing,
-        max_duration: loop_state.max_duration,
-        reconnect_count: loop_state.reconnect_count,
-    };
-    let sess = ConnectSession {
-        session_id: &env.session_id,
-        sessions: &env.sessions,
-        source_lang: &env.source_lang,
-        stt_api_key: &env.stt_api_key,
-        http_client: &env.http_client,
-    };
-    connect_gladia(&sess, &config).await
+fn build_soniox_config(cfg: &SttConnectionConfig) -> SonioxConfig {
+    SonioxConfig {
+        api_key: cfg.session_env.stt_api_key.clone(),
+        source_lang: cfg.session_env.source_lang.to_string(),
+        target_lang: cfg.target_lang.clone(),
+        max_endpoint_delay_ms: super::config::SONIOX_MAX_ENDPOINT_DELAY_MS,
+        sample_rate: crate::core::config::SAMPLE_RATE,
+    }
 }
 
 fn build_stt_context(env: &SessionEnv, stt_sink: &WsSink) -> SttContext {
@@ -171,37 +217,86 @@ fn build_stt_context(env: &SessionEnv, stt_sink: &WsSink) -> SttContext {
         source_lang: env.source_lang.clone(),
         audio_acc: env.audio_acc.clone(),
         sink: stt_sink.clone(),
-        translate_api_key: env.translate_api_key.clone(),
         tts_api_key: env.tts_api_key.clone(),
         default_voice: env.default_voice.clone(),
         http_client: env.http_client.clone(),
     }
 }
 
-fn spawn_send_task(audio_rx: &AudioRx, ctx: &SttContext) -> tokio::task::JoinHandle<()> {
-    let env = AudioForwardEnv {
-        audio_rx: audio_rx.clone(),
-        sink: ctx.sink.clone(),
-        accumulator: ctx.audio_acc.clone(),
-        session_id: ctx.session_id.clone(),
-    };
-    tokio::spawn(forward_audio_to_gladia(env))
+// -- Send task ------------------------------------------------
+
+struct BroadcastForwardEnv {
+    sink: WsSink,
+    accumulator: AudioAcc,
+    session_id: String,
 }
+
+fn spawn_send_task(
+    sink: &WsSink,
+    env: &SessionEnv,
+    audio_rx: &mut broadcast::Receiver<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    let fwd_env = BroadcastForwardEnv {
+        sink: sink.clone(),
+        accumulator: env.audio_acc.clone(),
+        session_id: env.session_id.clone(),
+    };
+    let mut rx = audio_rx.resubscribe();
+    tokio::spawn(async move {
+        forward_audio_from_broadcast(&mut rx, &fwd_env).await;
+    })
+}
+
+async fn forward_audio_from_broadcast(
+    rx: &mut broadcast::Receiver<Vec<u8>>,
+    env: &BroadcastForwardEnv,
+) {
+    use futures_util::SinkExt;
+    let mut chunk_count: u64 = 0;
+
+    loop {
+        let data = match rx.recv().await {
+            Ok(d) => d,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("[STT:{}] broadcast lagged {} frames", env.session_id, n);
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+
+        chunk_count += 1;
+        accumulate_audio(&env.accumulator, &data);
+
+        let mut sink = env.sink.lock().await;
+        if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+            error!("[STT:{}] sink write error, stopping audio forward", env.session_id);
+            break;
+        }
+    }
+
+    info!("[STT:{}] audio forward ended ({} chunks)", env.session_id, chunk_count);
+}
+
+fn accumulate_audio(accumulator: &AudioAcc, data: &[u8]) {
+    if let Ok(mut acc) = accumulator.lock() {
+        acc.push(data.to_vec());
+    }
+}
+
+// ── Recv task ────────────────────────────────────────────
 
 fn spawn_recv_task(
     mut stt_stream: WsRecvStream,
     ctx: SttContext,
-    loop_state: &LoopState,
+    loop_state: &ConnectionLoopState,
+    target_lang: Option<String>,
 ) -> tokio::task::JoinHandle<SttState> {
-    let lang_str = ctx.source_lang.to_string();
     let carry = SttCarryOver {
         utterance_counter: loop_state.utterance_counter,
-        wpm_samples: loop_state.wpm_samples.clone(),
-        adapted: loop_state.adapted,
     };
 
     tokio::spawn(async move {
-        let mut state = SttState::new(&lang_str, carry);
+        let mut state = SttState::new(carry, target_lang);
         recv_loop(&mut state, &mut stt_stream, &ctx).await;
         state
     })
@@ -227,7 +322,11 @@ async fn handle_ws_message(
 ) -> MessageAction {
     let msg = match msg_result {
         Ok(m) => m,
-        Err(e) => { error!("[STT] read error: {}", e); state.exit_reason = ExitReason::Disconnected; return MessageAction::Break; }
+        Err(e) => {
+            error!("[STT] read error: {}", e);
+            state.exit_reason = ExitReason::Disconnected;
+            return MessageAction::Break;
+        }
     };
 
     let text = match extract_text(msg) {
@@ -235,12 +334,7 @@ async fn handle_ws_message(
         None => return MessageAction::Continue,
     };
 
-    let gm: crate::shared::stt::GladiaMessage = match serde_json::from_str(&text) {
-        Ok(d) => d,
-        Err(_) => return MessageAction::Continue,
-    };
-
-    process_gladia_message(gm, state, ctx).await
+    process_soniox_message(&text, state, ctx).await
 }
 
 fn extract_text(msg: tungstenite::Message) -> Option<String> {
@@ -265,57 +359,27 @@ async fn await_tasks(
 
 // ── Reconnection logic ──────────────────────────────────
 
-fn handle_connection_result(
-    stt_state: Option<SttState>,
-    loop_state: &mut LoopState,
-    audio_acc: &AudioAcc,
-) -> ReconnectDecision {
-    let st = match stt_state {
-        Some(st) => st,
-        None => return ReconnectDecision::StandardReconnect,
-    };
-
-    apply_stt_state(&st, loop_state);
-
-    match &st.exit_reason {
-        ExitReason::AdaptiveReconnect { endpointing, max_duration } => {
-            loop_state.endpointing = *endpointing;
-            loop_state.max_duration = *max_duration;
-            clear_accumulator(audio_acc);
-            ReconnectDecision::AdaptiveReconnect
-        }
-        ExitReason::Disconnected => ReconnectDecision::StandardReconnect,
-        ExitReason::Running => ReconnectDecision::Stop,
-    }
-}
-
-fn apply_stt_state(st: &SttState, loop_state: &mut LoopState) {
-    loop_state.utterance_counter = st.utterance_counter;
-    loop_state.wpm_samples = st.wpm_samples.clone();
-    loop_state.adapted = st.adapted;
-}
-
-fn should_reconnect(env: &SessionEnv, loop_state: &mut LoopState) -> bool {
+fn should_reconnect(env: &SessionEnv, loop_state: &mut ConnectionLoopState, lang: &str) -> bool {
     if !env.sessions.contains_key(&env.session_id) {
         return false;
     }
 
     loop_state.reconnect_count += 1;
     if loop_state.reconnect_count > crate::core::config::STT_RECONNECT_MAX {
-        error!("[STT] Exceeded max reconnects, giving up");
-        notify_stt_disconnected(env);
+        error!("[STT:{}] Exceeded max reconnects for {}", env.session_id, lang);
+        notify_stt_disconnected(env, lang);
         return false;
     }
     true
 }
 
-fn notify_stt_disconnected(env: &SessionEnv) {
+fn notify_stt_disconnected(env: &SessionEnv, lang: &str) {
     if let Some(session) = env.sessions.get(&env.session_id) {
         session.send_to_host(
             crate::features::broadcast::data::pipeline_helpers::to_ws(
                 &crate::core::types::ServerMsg::PipelineWarning {
                     kind: "stt_disconnected".to_string(),
-                    lang: env.source_lang.to_string(),
+                    lang: lang.to_string(),
                     detail: "STT exhausted all reconnect attempts".to_string(),
                     utterance_id: 0,
                 },

@@ -40,7 +40,6 @@ fn default_tts_model() -> String { "turbo".to_string() }
 #[derive(Clone)]
 pub struct BroadcastDeps {
     pub stt_api_key: String,
-    pub translate_api_key: String,
     pub tts_api_key: String,
     pub default_voice: String,
     pub http_client: reqwest::Client,

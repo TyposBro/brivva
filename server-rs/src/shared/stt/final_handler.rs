@@ -1,67 +1,30 @@
-//! Handle final transcripts from Gladia.
+//! Handle semantic endpoints from Soniox — spawn TTS for translated text.
 
 use std::time::Instant;
-use futures_util::SinkExt;
-use tokio_tungstenite::tungstenite;
 use tracing::{info, error, debug};
 
-use crate::core::config::BYTES_PER_SEC;
-use crate::shared::stt::config::{ADAPTIVE_SAMPLE_COUNT, MAX_VALID_WPM, PASSTHROUGH_PADDING_SECS};
-use crate::core::types::StyleParams;
-use crate::core::types::{Lang, ServerMsg};
+use crate::core::types::{ServerMsg, StyleParams};
 
-use super::state::{ExitReason, SttState, SttContext};
-
-// ── Context structs ─────────────────────────────────────────────────────────
-
-/// Everything needed to emit a final utterance to clients.
-struct FinalUtterance {
-    transcript: String,
-    utterance_id: u64,
-    style_params: StyleParams,
-    utterance_start: Instant,
-    host_audio: Vec<u8>,
-}
-
-/// Input for spawning the full-utterance translation pipeline.
-pub(crate) struct PipelineInput {
-    pub text: String,
-    pub utterance_id: u64,
-    pub source_lang: Lang,
-    pub style_params: StyleParams,
-    pub utterance_start: Instant,
-    pub host_audio: Vec<u8>,
-    pub active: Vec<Lang>,
-    pub tier: u8,
-}
+use super::state::{SttState, SttContext};
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-pub(super) async fn handle_final_transcript(
+pub(super) async fn handle_translation_endpoint(
     state: &mut SttState,
-    transcript: &str,
+    translated_text: &str,
     ctx: &SttContext,
 ) {
-    let start = state.utterance_start.take().unwrap_or_else(Instant::now);
+    let utterance_start = state.utterance_start.take().unwrap_or_else(Instant::now);
     let host_audio = drain_host_audio(ctx);
-    let sp = analyze_prosody_and_style(transcript, &host_audio);
-
-    let utterance = FinalUtterance {
-        transcript: transcript.to_string(),
-        utterance_id: 0, // filled per path
-        style_params: sp,
-        utterance_start: start,
-        host_audio,
+    let sp = analyze_prosody_and_style(translated_text, &host_audio);
+    let uid = state.utterance_counter;
+    let target_lang = match &state.target_lang {
+        Some(l) => l.clone(),
+        None => return,
     };
 
-    if state.chunk_pipeline_tx.is_some() {
-        finalize_chunked_utterance(state, &utterance, ctx);
-    } else {
-        finalize_legacy_utterance(state, &utterance, ctx);
-    }
-
-    state.reset_utterance();
-    check_adaptive_endpointing(state, &utterance.host_audio, ctx).await;
+    send_translation_to_host(ctx, &target_lang, translated_text, uid);
+    spawn_tts_for_translation(ctx, &target_lang, translated_text, uid, utterance_start, &sp);
 }
 
 // ── Audio drain ─────────────────────────────────────────────────────────────
@@ -73,16 +36,18 @@ fn drain_host_audio(ctx: &SttContext) -> Vec<u8> {
 
 // ── Prosody analysis ────────────────────────────────────────────────────────
 
-fn analyze_prosody_and_style(transcript: &str, host_audio: &[u8]) -> StyleParams {
-    let prosody = compute_prosody(host_audio, transcript);
+fn analyze_prosody_and_style(text: &str, host_audio: &[u8]) -> StyleParams {
+    let prosody = compute_prosody(host_audio, text);
     let emotion = crate::shared::stt::classify_emotion(&prosody);
     log_emotion(&prosody, emotion);
     style_from_emotion(emotion)
 }
 
-fn compute_prosody(host_audio: &[u8], transcript: &str) -> crate::shared::stt::Prosody {
-    let mut prosody = crate::shared::stt::extract_prosody(host_audio, crate::core::config::SAMPLE_RATE);
-    let word_count = transcript.split_whitespace().count();
+fn compute_prosody(host_audio: &[u8], text: &str) -> crate::shared::stt::Prosody {
+    let mut prosody = crate::shared::stt::extract_prosody(
+        host_audio, crate::core::config::SAMPLE_RATE,
+    );
+    let word_count = text.split_whitespace().count();
     crate::shared::stt::compute_speaking_rate(&mut prosody, word_count);
     prosody
 }
@@ -99,268 +64,194 @@ fn style_from_emotion(emotion: &str) -> StyleParams {
     StyleParams { speed: vs.speed, emotion: emotion.to_string() }
 }
 
-// ── Chunked utterance finalization ──────────────────────────────────────────
-
-fn finalize_chunked_utterance(
-    state: &mut SttState,
-    utterance: &FinalUtterance,
-    ctx: &SttContext,
-) {
-    let uid = state.utterance_counter;
-    info!("[FINAL #{}] {} (chunked, {} prior chunks)", uid, utterance.transcript, state.chunk_index);
-
-    flush_final_chunk(state, utterance);
-    state.chunk_pipeline_tx = None;
-    send_final_to_host(ctx, &utterance.transcript, uid);
-    queue_source_passthrough(ctx, utterance);
-}
-
-fn flush_final_chunk(state: &mut SttState, utterance: &FinalUtterance) {
-    let tx = match &state.chunk_pipeline_tx {
-        Some(tx) => tx,
-        None => return,
-    };
-
-    let uid = state.utterance_counter;
-    let flush_context = state.progressive.context().map(|s| s.to_string());
-    if let Some(boundary) = state.progressive.flush(&utterance.transcript)
-        && let Err(e) = tx.try_send(crate::core::types::ChunkEvent {
-            text: boundary.chunk_text,
-            chunk_index: state.chunk_index,
-            context: flush_context,
-            is_utterance_final: true,
-            utterance_id: uid,
-            utterance_start: utterance.utterance_start,
-            host_audio: utterance.host_audio.clone(),
-        }) {
-            error!("[CHUNK] #{} final chunk dropped: {}", uid, e);
-        }
-}
-
-// ── Legacy (non-chunked) utterance finalization ─────────────────────────────
-
-fn finalize_legacy_utterance(
-    state: &mut SttState,
-    utterance: &FinalUtterance,
-    ctx: &SttContext,
-) {
-    state.utterance_counter += 1;
-    let uid = state.utterance_counter;
-    info!("[FINAL #{}] {}", uid, utterance.transcript);
-
-    let utt = FinalUtterance {
-        transcript: utterance.transcript.clone(),
-        utterance_id: uid,
-        style_params: utterance.style_params.clone(),
-        utterance_start: utterance.utterance_start,
-        host_audio: utterance.host_audio.clone(),
-    };
-
-    emit_final(&utt, ctx);
-}
-
-// ── emit_final ──────────────────────────────────────────────────────────────
-
-fn emit_final(utterance: &FinalUtterance, ctx: &SttContext) {
-    let session = match ctx.sessions.get(&ctx.session_id) {
-        Some(s) => s,
-        None => return,
-    };
-
-    send_final_msg(&session, &utterance.transcript, utterance.utterance_id);
-    let (active, tier) = read_pipeline_params(&session, utterance);
-    drop(session);
-
-    if active.is_empty() { return; }
-
-    let input = PipelineInput {
-        text: utterance.transcript.clone(),
-        utterance_id: utterance.utterance_id,
-        source_lang: ctx.source_lang.clone(),
-        style_params: utterance.style_params.clone(),
-        utterance_start: utterance.utterance_start,
-        host_audio: utterance.host_audio.clone(),
-        active,
-        tier,
-    };
-
-    spawn_pipeline(input, ctx);
-}
-
-fn send_final_msg(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
-    transcript: &str,
-    uid: u64,
-) {
-    session.send_to_host(crate::features::broadcast::data::pipeline_helpers::to_ws(&ServerMsg::Final {
-        transcript: transcript.to_string(),
-        utterance_id: uid,
-    }));
-}
-
-fn read_pipeline_params(
-    session: &dashmap::mapref::one::Ref<'_, String, crate::core::types::Session>,
-    utterance: &FinalUtterance,
-) -> (Vec<Lang>, u8) {
-    let active = session.active_langs();
-    let tier = session.tier;
-    let utterance_dur = Instant::now().duration_since(utterance.utterance_start);
-
-    info!(
-        "[PIPELINE] #{} active langs: {:?} tier={} utterance_dur={}ms host_audio={}B ({:.1}s)",
-        utterance.utterance_id, active, tier, utterance_dur.as_millis(),
-        utterance.host_audio.len(), utterance.host_audio.len() as f64 / BYTES_PER_SEC,
-    );
-
-    (active, tier)
-}
-
-fn spawn_pipeline(input: PipelineInput, ctx: &SttContext) {
-    let utterance_end = Instant::now();
-    let sessions_clone = ctx.sessions.clone();
-    let sid = ctx.session_id.clone();
-    let translate_api_key = ctx.translate_api_key.clone();
-    let tts_api_key = ctx.tts_api_key.clone();
-    let default_voice = ctx.default_voice.clone();
-    let http_client = ctx.http_client.clone();
-
-    tokio::spawn(async move {
-        let req = crate::features::broadcast::data::pipeline_full::PipelineRequest {
-            transcript: input.text,
-            utterance_id: input.utterance_id,
-            source_lang: input.source_lang,
-            target_langs: input.active,
-            sessions: sessions_clone,
-            session_id: sid,
-            style_params: input.style_params,
-            tier: input.tier,
-            utterance_start: input.utterance_start,
-            utterance_end,
-            host_audio: input.host_audio,
-            translate_api_key,
-            tts_api_key,
-            default_voice,
-            http_client,
-        };
-        crate::features::broadcast::data::pipeline_full::run_pipeline(req).await;
-    });
-}
-
 // ── Host messaging ──────────────────────────────────────────────────────────
 
-fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
+fn send_translation_to_host(ctx: &SttContext, lang: &str, text: &str, uid: u64) {
     if let Some(session) = ctx.sessions.get(&ctx.session_id) {
-        send_final_msg(&session, transcript, uid);
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &ServerMsg::Translation {
+                    lang: lang.to_string(),
+                    text: text.to_string(),
+                    utterance_id: uid,
+                    translate_ms: 0,
+                },
+            ),
+        );
     }
 }
 
-// ── Source passthrough ──────────────────────────────────────────────────────
+// ── TTS spawn ───────────────────────────────────────────────────────────────
 
-fn queue_source_passthrough(ctx: &SttContext, utterance: &FinalUtterance) {
+fn spawn_tts_for_translation(
+    ctx: &SttContext,
+    target_lang: &str,
+    translated_text: &str,
+    uid: u64,
+    utterance_start: Instant,
+    style_params: &StyleParams,
+) {
     let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
         None => return,
     };
-    if !session.active_langs().contains(&ctx.source_lang) { return; }
-    let erased = match session.rtmp_manager.clone() {
-        Some(m) => m,
-        None => return,
-    };
-    let mgr = match crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased) {
-        Some(m) => m,
-        None => return,
-    };
-
-    let lang_str = ctx.source_lang.to_string();
-    let start = utterance.utterance_start;
-    let pcm = truncate_passthrough_audio(&utterance.host_audio);
-    tokio::spawn(async move {
-        let locked = mgr.lock().await;
-        locked.queue_audio(&lang_str, pcm, start);
-    });
-}
-
-fn truncate_passthrough_audio(host_audio: &[u8]) -> Vec<u8> {
-    let mut pcm = host_audio.to_vec();
-    let max_bytes = ((host_audio.len() as f64 / BYTES_PER_SEC + PASSTHROUGH_PADDING_SECS) * BYTES_PER_SEC) as usize;
-    if pcm.len() > max_bytes {
-        crate::features::broadcast::data::streaming::truncate_with_fadeout(&mut pcm, max_bytes);
-    }
-    pcm
-}
-
-// ── Adaptive endpointing ───────────────────────────────────────────────────
-
-async fn check_adaptive_endpointing(
-    state: &mut SttState,
-    host_audio: &[u8],
-    ctx: &SttContext,
-) {
-    let prosody = crate::shared::stt::extract_prosody(host_audio, crate::core::config::SAMPLE_RATE);
-    if should_skip_adaptive(state, &prosody) { return; }
-
-    state.wpm_samples.push(prosody.speaking_rate_wpm);
-    if let Some(result) = compute_adaptive_params(state) {
-        apply_adaptive_result(state, result, ctx).await;
-    }
-}
-
-fn should_skip_adaptive(state: &SttState, prosody: &crate::shared::stt::Prosody) -> bool {
-    state.adapted
-        || prosody.speaking_rate_wpm == 0
-        || prosody.speaking_rate_wpm > MAX_VALID_WPM
-}
-
-/// Result of adaptive speech-rate analysis.
-struct AdaptiveResult {
-    label: String,
-    endpointing: f64,
-    max_duration: f64,
-}
-
-fn compute_adaptive_params(state: &SttState) -> Option<AdaptiveResult> {
-    if state.wpm_samples.len() < ADAPTIVE_SAMPLE_COUNT { return None; }
-
-    let avg_wpm = state.wpm_samples.iter().sum::<u32>() as f32 / state.wpm_samples.len() as f32;
-    let (label, new_endp, new_max_dur) = crate::shared::stt::classify_speaking_speed(avg_wpm);
-    Some(AdaptiveResult { label: label.to_string(), endpointing: new_endp, max_duration: new_max_dur })
-}
-
-async fn apply_adaptive_result(
-    state: &mut SttState,
-    result: AdaptiveResult,
-    ctx: &SttContext,
-) {
-    state.adapted = true;
-
-    if result.label == "normal" {
-        info!("[ADAPTIVE] Avg classified: {}, keeping defaults", result.label);
+    if session.tier < 2 {
         return;
     }
+    let voice_clone_id = session.voice_clone_id.clone();
+    let tts_model = session.tts_model.clone();
+    let broadcast_delay_ms = session.broadcast_delay_ms;
+    let erased = session.rtmp_manager.clone();
+    drop(session);
 
-    log_adaptive_reconnect(&result);
-    trigger_adaptive_reconnect(state, &result, ctx).await;
-}
-
-fn log_adaptive_reconnect(result: &AdaptiveResult) {
-    info!(
-        "[ADAPTIVE] classified: {}, reconnecting (endpointing={:.2}s, max_dur={:.0}s)",
-        result.label, result.endpointing, result.max_duration
-    );
-}
-
-async fn trigger_adaptive_reconnect(
-    state: &mut SttState,
-    result: &AdaptiveResult,
-    ctx: &SttContext,
-) {
-    state.exit_reason = ExitReason::AdaptiveReconnect {
-        endpointing: result.endpointing,
-        max_duration: result.max_duration,
+    let tts_req = TtsSpawnRequest {
+        sessions: ctx.sessions.clone(),
+        session_id: ctx.session_id.clone(),
+        tts_api_key: ctx.tts_api_key.clone(),
+        default_voice: ctx.default_voice.clone(),
+        http_client: ctx.http_client.clone(),
+        target_lang: target_lang.to_string(),
+        translated_text: translated_text.to_string(),
+        uid,
+        utterance_start,
+        style_params: style_params.clone(),
+        voice_clone_id,
+        tts_model,
+        broadcast_delay_ms,
+        erased_rtmp: erased,
     };
 
-    let mut s = ctx.sink.lock().await;
-    let _ = s.send(tungstenite::Message::Text(
-        r#"{"type":"stop_recording"}"#.to_string().into()
-    )).await;
+    tokio::spawn(run_tts_synthesis(tts_req));
+}
+
+struct TtsSpawnRequest {
+    sessions: crate::core::types::Sessions,
+    session_id: String,
+    tts_api_key: String,
+    default_voice: String,
+    http_client: reqwest::Client,
+    target_lang: String,
+    translated_text: String,
+    uid: u64,
+    utterance_start: Instant,
+    style_params: StyleParams,
+    voice_clone_id: Option<String>,
+    tts_model: String,
+    broadcast_delay_ms: u64,
+    erased_rtmp: Option<crate::core::types::ErasedRtmpManager>,
+}
+
+async fn run_tts_synthesis(req: TtsSpawnRequest) {
+    let streaming = create_streaming_slot(&req).await;
+
+    notify_tts_start(&req);
+    let tts_start = Instant::now();
+
+    let voice_id = req.voice_clone_id.as_deref().unwrap_or(&req.default_voice);
+    let voice_settings = crate::shared::tts::VoiceStyle::from_emotion(&req.style_params.emotion)
+        .to_voice_settings(req.style_params.speed);
+    let max_bytes = crate::features::broadcast::domain::pipeline_budget::compute_streaming_max_bytes(
+        req.broadcast_delay_ms,
+        crate::core::config::STREAMING_BUDGET_PADDING_SECS,
+    );
+    let tts_deadline = crate::features::broadcast::domain::pipeline_budget::compute_tts_deadline(
+        req.broadcast_delay_ms,
+    );
+
+    let synth_req = crate::shared::tts::SynthesisRequest {
+        text: &req.translated_text,
+        voice_id,
+        lang: &req.target_lang,
+        voice_settings: &voice_settings,
+        max_bytes,
+        streaming: streaming.as_ref(),
+        model_id: &req.tts_model,
+        api_key: &req.tts_api_key,
+    };
+
+    execute_tts_with_fallback(&synth_req, &req, streaming.as_ref(), tts_deadline).await;
+
+    finish_streaming(streaming.as_ref());
+    notify_tts_end(&req, &tts_start);
+}
+
+async fn execute_tts_with_fallback(
+    synth_req: &crate::shared::tts::SynthesisRequest<'_>,
+    req: &TtsSpawnRequest,
+    streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>,
+    tts_deadline: std::time::Duration,
+) {
+    match tokio::time::timeout(tts_deadline, crate::shared::tts::do_tts_ws(synth_req)).await {
+        Ok(Ok(bytes)) => {
+            info!("[TTS] #{} {} = {}KB PCM", req.uid, req.target_lang, bytes / 1024);
+        }
+        Ok(Err(ws_err)) => {
+            tracing::warn!("[TTS] #{} {} WS failed: {}, falling back to REST",
+                req.uid, req.target_lang, ws_err);
+            try_rest_fallback(synth_req, req, streaming).await;
+        }
+        Err(_) => {
+            error!("[TTS] #{} {} TIMEOUT", req.uid, req.target_lang);
+            if let Some(s) = streaming { s.finish(); }
+        }
+    }
+}
+
+async fn try_rest_fallback(
+    synth_req: &crate::shared::tts::SynthesisRequest<'_>,
+    req: &TtsSpawnRequest,
+    streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>,
+) {
+    match crate::shared::tts::do_tts_rest(&req.http_client, synth_req).await {
+        Ok(bytes) => {
+            info!("[TTS] #{} {} REST fallback = {}KB PCM", req.uid, req.target_lang, bytes / 1024);
+        }
+        Err(rest_err) => {
+            error!("[TTS] #{} {} REST fallback also failed: {}",
+                req.uid, req.target_lang, rest_err);
+            if let Some(s) = streaming { s.finish(); }
+        }
+    }
+}
+
+async fn create_streaming_slot(
+    req: &TtsSpawnRequest,
+) -> Option<crate::features::broadcast::data::streaming::StreamingPcm> {
+    let erased = req.erased_rtmp.as_ref()?;
+    let mgr = crate::features::broadcast::data::streaming::downcast_rtmp_manager(erased)?;
+    let locked = mgr.lock().await;
+    Some(locked.queue_streaming_audio(&req.target_lang, req.utterance_start))
+}
+
+fn finish_streaming(streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>) {
+    if let Some(s) = streaming {
+        s.finish();
+    }
+}
+
+fn notify_tts_start(req: &TtsSpawnRequest) {
+    if let Some(session) = req.sessions.get(&req.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &ServerMsg::TtsStart {
+                    lang: req.target_lang.clone(),
+                    utterance_id: req.uid,
+                },
+            ),
+        );
+    }
+}
+
+fn notify_tts_end(req: &TtsSpawnRequest, tts_start: &Instant) {
+    if let Some(session) = req.sessions.get(&req.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &ServerMsg::TtsEnd {
+                    lang: req.target_lang.clone(),
+                    utterance_id: req.uid,
+                    tts_ms: tts_start.elapsed().as_millis() as u64,
+                },
+            ),
+        );
+    }
 }
