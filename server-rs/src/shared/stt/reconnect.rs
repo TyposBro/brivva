@@ -193,7 +193,7 @@ async fn run_one_connection(
     let (stt_sink, stt_stream) = ws_stream.split();
     let stt_sink: WsSink = Arc::new(tokio::sync::Mutex::new(stt_sink));
 
-    let ctx = build_stt_context(&cfg.session_env, &stt_sink);
+    let ctx = build_stt_context(&cfg.session_env);
     let send_task = spawn_send_task(&stt_sink, &cfg.session_env, &mut cfg.audio_rx);
     let recv_task = spawn_recv_task(stt_stream, ctx, loop_state, cfg.target_lang.clone());
 
@@ -210,13 +210,12 @@ fn build_soniox_config(cfg: &SttConnectionConfig) -> SonioxConfig {
     }
 }
 
-fn build_stt_context(env: &SessionEnv, stt_sink: &WsSink) -> SttContext {
+fn build_stt_context(env: &SessionEnv) -> SttContext {
     SttContext {
         sessions: env.sessions.clone(),
         session_id: env.session_id.clone(),
         source_lang: env.source_lang.clone(),
         audio_acc: env.audio_acc.clone(),
-        sink: stt_sink.clone(),
         tts_api_key: env.tts_api_key.clone(),
         default_voice: env.default_voice.clone(),
         http_client: env.http_client.clone(),
@@ -252,29 +251,58 @@ async fn forward_audio_from_broadcast(
     env: &BroadcastForwardEnv,
 ) {
     use futures_util::SinkExt;
+
+    let keepalive_interval = Duration::from_secs(super::config::SONIOX_KEEPALIVE_INTERVAL_SECS);
     let mut chunk_count: u64 = 0;
 
     loop {
-        let data = match rx.recv().await {
-            Ok(d) => d,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("[STT:{}] broadcast lagged {} frames", env.session_id, n);
-                continue;
+        let recv_result = tokio::time::timeout(keepalive_interval, rx.recv()).await;
+
+        match recv_result {
+            Ok(Ok(data)) => {
+                chunk_count += 1;
+                accumulate_audio(&env.accumulator, &data);
+
+                let mut sink = env.sink.lock().await;
+                if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+                    error!("[STT:{}] sink write error, stopping audio forward", env.session_id);
+                    break;
+                }
             }
-            Err(broadcast::error::RecvError::Closed) => break,
-        };
-
-        chunk_count += 1;
-        accumulate_audio(&env.accumulator, &data);
-
-        let mut sink = env.sink.lock().await;
-        if sink.send(tungstenite::Message::Binary(data.into())).await.is_err() {
-            error!("[STT:{}] sink write error, stopping audio forward", env.session_id);
-            break;
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                tracing::warn!("[STT:{}] broadcast lagged {} frames", env.session_id, n);
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {
+                if send_keepalive(&env.sink, &env.session_id).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
+    send_end_of_stream(&env.sink, &env.session_id).await;
     info!("[STT:{}] audio forward ended ({} chunks)", env.session_id, chunk_count);
+}
+
+async fn send_keepalive(sink: &WsSink, session_id: &str) -> Result<(), ()> {
+    use futures_util::SinkExt;
+
+    let msg = tungstenite::Message::Text(r#"{"type":"keepalive"}"#.to_string().into());
+    let mut sink = sink.lock().await;
+    if sink.send(msg).await.is_err() {
+        error!("[STT:{}] keepalive send failed, stopping", session_id);
+        return Err(());
+    }
+    Ok(())
+}
+
+async fn send_end_of_stream(sink: &WsSink, session_id: &str) {
+    use futures_util::SinkExt;
+
+    let mut sink = sink.lock().await;
+    let _ = sink.send(tungstenite::Message::Binary(vec![].into())).await;
+    info!("[STT:{}] sent end-of-stream", session_id);
 }
 
 fn accumulate_audio(accumulator: &AudioAcc, data: &[u8]) {

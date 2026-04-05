@@ -61,10 +61,10 @@ async fn process_tokens(
     for token in tokens {
         if is_semantic_endpoint(token) {
             handle_endpoint(state, ctx).await;
-        } else if token.is_original() {
-            handle_original_token(token, state, ctx);
         } else if token.is_translation() {
             handle_translation_token(token, state);
+        } else {
+            handle_original_token(token, state, ctx);
         }
     }
     MessageAction::Continue

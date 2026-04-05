@@ -10,7 +10,6 @@ pub(super) mod connection;
 pub(super) mod handler;
 pub(super) mod final_handler;
 pub(super) mod interim_handler;
-pub(super) mod audio_forwarder;
 
 pub use types::*;
 pub use prosody::*;

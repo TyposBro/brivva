@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 use std::time::Instant;
-use tokio_tungstenite::tungstenite;
 
 use crate::core::types::{Lang, Sessions};
 
@@ -13,9 +12,6 @@ pub(super) struct SttContext {
     pub session_id: String,
     pub source_lang: Lang,
     pub audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
-    pub sink: Arc<tokio::sync::Mutex<
-        futures_util::stream::SplitSink<WsStream, tungstenite::Message>,
-    >>,
     pub tts_api_key: String,
     pub default_voice: String,
     pub http_client: reqwest::Client,

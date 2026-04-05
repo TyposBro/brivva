@@ -1,6 +1,5 @@
 pub(crate) mod streaming;
 pub(crate) mod pipeline_helpers;
-pub(crate) mod pipeline_full;
 pub(crate) mod ws_handler;
 mod session_setup;
 mod message_router;
