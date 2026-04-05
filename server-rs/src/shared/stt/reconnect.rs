@@ -303,9 +303,25 @@ fn should_reconnect(env: &SessionEnv, loop_state: &mut LoopState) -> bool {
     loop_state.reconnect_count += 1;
     if loop_state.reconnect_count > crate::core::config::STT_RECONNECT_MAX {
         error!("[STT] Exceeded max reconnects, giving up");
+        notify_stt_disconnected(env);
         return false;
     }
     true
+}
+
+fn notify_stt_disconnected(env: &SessionEnv) {
+    if let Some(session) = env.sessions.get(&env.session_id) {
+        session.send_to_host(
+            crate::features::broadcast::data::pipeline_helpers::to_ws(
+                &crate::core::types::ServerMsg::PipelineWarning {
+                    kind: "stt_disconnected".to_string(),
+                    lang: env.source_lang.to_string(),
+                    detail: "STT exhausted all reconnect attempts".to_string(),
+                    utterance_id: 0,
+                },
+            ),
+        );
+    }
 }
 
 fn clear_accumulator(acc: &AudioAcc) {

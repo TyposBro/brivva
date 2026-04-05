@@ -1,7 +1,7 @@
 //! RtmpManager: manages all FFmpeg RTMP streams for a session.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,6 +44,7 @@ struct NewStream {
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     stop_flag: Arc<AtomicBool>,
     rtmp_error: Arc<AtomicBool>,
+    drift_ms: Arc<AtomicU64>,
 }
 
 /// Everything needed to spawn the video + audio drain threads.
@@ -54,6 +55,7 @@ struct DrainSetup {
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     audio_fifo: String,
     stop_flag: Arc<AtomicBool>,
+    drift_ms: Arc<AtomicU64>,
 }
 
 /// Config for the audio drain thread spawner.
@@ -63,6 +65,7 @@ struct AudioDrainSetup {
     fifo_path: String,
     delay: Duration,
     stop: Arc<AtomicBool>,
+    drift_ms: Arc<AtomicU64>,
 }
 
 // ── RtmpManager ──────────────────────────────────────────
@@ -102,6 +105,14 @@ impl RtmpManager {
 
     pub fn broadcast_delay(&self) -> Duration {
         self.broadcast_delay
+    }
+
+    /// Return the audio queue depth for each language (lang -> queue size).
+    pub fn queue_depths(&self) -> HashMap<String, usize> {
+        self.streams.values().map(|s| {
+            let depth = s.audio_queue.lock().unwrap().len();
+            (s.lang.clone(), depth)
+        }).collect()
     }
 
     pub fn set_video_codec(&mut self, codec: &str) {
@@ -183,6 +194,13 @@ impl RtmpManager {
         streaming
     }
 
+    pub fn max_drift_ms(&self) -> u64 {
+        self.streams.values()
+            .map(|s| s.drift_ms.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn detect_crashed(&mut self) -> Vec<(StreamConfig, RestartState)> {
         let to_restart = self.collect_crashed_streams();
         self.cleanup_crashed_streams(to_restart)
@@ -244,6 +262,7 @@ impl RtmpManager {
     ) -> Result<(), String> {
         let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(&config.stream_id, &config.rtmp_url)?;
         let (audio_queue, stop_flag, is_restart) = prepare_stream_state(existing_queue);
+        let drift_ms = Arc::new(AtomicU64::new(0));
         let setup = DrainSetup {
             stream_id: config.stream_id.clone(),
             is_restart,
@@ -251,11 +270,12 @@ impl RtmpManager {
             audio_queue: audio_queue.clone(),
             audio_fifo: audio_fifo.clone(),
             stop_flag: stop_flag.clone(),
+            drift_ms: drift_ms.clone(),
         };
         let (video_handle, audio_handle) = self.spawn_drain_threads(setup)?;
         let new_stream = NewStream {
             child, video_handle, audio_handle, audio_fifo,
-            audio_queue, stop_flag, rtmp_error,
+            audio_queue, stop_flag, rtmp_error, drift_ms,
         };
         self.register_stream(config, new_stream);
         Ok(())
@@ -291,6 +311,7 @@ impl RtmpManager {
             fifo_path: setup.audio_fifo,
             delay: self.broadcast_delay,
             stop: setup.stop_flag,
+            drift_ms: setup.drift_ms,
         };
         let audio_handle = spawn_audio_drain(audio_setup)?;
         Ok((video_handle, audio_handle))
@@ -310,6 +331,7 @@ impl RtmpManager {
                 stop_flag: stream.stop_flag,
                 restart_count: 0,
                 rtmp_error: stream.rtmp_error,
+                drift_ms: stream.drift_ms,
             },
         );
     }
@@ -462,6 +484,7 @@ fn spawn_audio_drain(setup: AudioDrainSetup) -> Result<thread::JoinHandle<()>, S
         fifo_path: setup.fifo_path,
         delay: setup.delay,
         stop: setup.stop,
+        drift_ms: setup.drift_ms,
     };
     thread::Builder::new()
         .name(thread_name)

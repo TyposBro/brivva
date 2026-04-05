@@ -15,6 +15,7 @@ import { LiveTranscript } from "./components/live-transcript";
 import { BroadcastControls } from "./components/broadcast-controls";
 import { ErrorBanners } from "./components/error-banners";
 import { InfoFooter } from "./components/info-footer";
+import { PipelineHealthBadge } from "./components/pipeline-health-badge";
 
 export default function BroadcastPage() {
   const { config, update } = useBroadcastConfig();
@@ -34,7 +35,7 @@ export default function BroadcastPage() {
     onStopWebcam: stopWebcam,
   }), [config, startWebcam, stopWebcam]);
 
-  const { isLive, sessionId, interim, transcripts, errors, wsRef, start, stop, addError, dismissError } =
+  const { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError } =
     useBroadcastSocket(socketParams);
 
   const { isCloning, cloneProgress, voiceReady, setVoiceReady, cloneVoice } = useVoiceClone(addError);
@@ -108,6 +109,7 @@ export default function BroadcastPage() {
         onRtmpRestart={handleRtmpRestart}
       />
 
+      {isLive && <PipelineHealthBadge warnings={pipelineWarnings} />}
       {isLive && <LiveTranscript transcripts={transcripts} interim={interim} />}
       <InfoFooter tier={config.tier} hasRtmpStreams={hasRtmpStreams} />
     </PageLayout>

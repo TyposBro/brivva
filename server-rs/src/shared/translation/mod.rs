@@ -85,20 +85,40 @@ async fn send_translate_request(
     target: &Lang,
 ) -> Result<String, String> {
     let url = translate_url(api_key);
+    let body = serde_json::json!({
+        "q": query_text,
+        "source": source.to_string(),
+        "target": target.to_string(),
+        "format": "text",
+    });
 
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "q": query_text,
-            "source": source.to_string(),
-            "target": target.to_string(),
-            "format": "text",
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("request error for {}: {}", target, e))?;
+    let resp = fire_translate_request(client, &url, &body, target).await?;
+
+    if resp.status().is_server_error() {
+        let status = resp.status();
+        tracing::warn!("[TRANSLATE] {} returned {}, retrying once", target, status);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            crate::core::config::TRANSLATE_RETRY_DELAY_MS,
+        )).await;
+        let retry_resp = fire_translate_request(client, &url, &body, target).await?;
+        return parse_translate_response(retry_resp, target).await;
+    }
 
     parse_translate_response(resp, target).await
+}
+
+async fn fire_translate_request(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    target: &Lang,
+) -> Result<reqwest::Response, String> {
+    client
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request error for {}: {}", target, e))
 }
 
 fn translate_url(api_key: &str) -> String {

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, type MutableRefObject } from "react";
 import { appConfig } from "../../../../orchestration/config/app-config";
 import { AudioPipeline } from "../../../../shared/media/audio-pipeline";
 import type { TranscriptEntry, TranslationTier } from "../../domain/broadcast-types";
@@ -16,6 +16,9 @@ type SocketParams = {
   onStopWebcam: () => void;
 };
 
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAY_MS = 2000;
+
 export function useBroadcastSocket(params: SocketParams) {
   const [isLive, setIsLive] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -26,6 +29,8 @@ export function useBroadcastSocket(params: SocketParams) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef(new AudioPipeline());
+  const reconnectCountRef = useRef(0);
+  const startRef = useRef<(() => Promise<void>) | undefined>(undefined);
 
   const addError = useCallback((msg: string) => {
     setErrors((prev) => [...prev, msg]);
@@ -38,7 +43,10 @@ export function useBroadcastSocket(params: SocketParams) {
     const msg = JSON.parse(e.data);
 
     switch (msg.type) {
-      case "session:created":  setSessionId(msg.id); break;
+      case "session:created":
+        setSessionId(msg.id);
+        reconnectCountRef.current = 0;
+        break;
       case "interim":          setInterim(msg.transcript); break;
       case "final":            handleFinal(msg, dispatch); break;
       case "translation":      handleTranslation(msg, dispatch); break;
@@ -56,7 +64,13 @@ export function useBroadcastSocket(params: SocketParams) {
     if (!ws) return;
 
     wsRef.current = ws;
-    registerCloseHandler(ws, { addError, setIsLive, setSessionId });
+    registerCloseHandler(ws, {
+      addError,
+      setIsLive,
+      setSessionId,
+      reconnectCountRef,
+      startRef,
+    });
     await configureRtmpStreams(ws, params);
     await startAudioCapture(ws, { audio: audioRef.current, deviceId: params.audioDeviceId });
 
@@ -66,7 +80,10 @@ export function useBroadcastSocket(params: SocketParams) {
     setPipelineWarnings(0);
   }, [params, handleMessage, addError]);
 
+  startRef.current = start;
+
   const stop = useCallback(() => {
+    reconnectCountRef.current = MAX_RECONNECT_ATTEMPTS;
     params.onStopWebcam();
     audioRef.current.stop();
     wsRef.current?.close();
@@ -119,13 +136,31 @@ type CloseCallbacks = {
   addError: (msg: string) => void;
   setIsLive: (v: boolean) => void;
   setSessionId: (v: string | null) => void;
+  reconnectCountRef: MutableRefObject<number>;
+  startRef: MutableRefObject<(() => Promise<void>) | undefined>;
 };
 
-function registerCloseHandler(ws: WebSocket, { addError, setIsLive, setSessionId }: CloseCallbacks): void {
+function registerCloseHandler(
+  ws: WebSocket,
+  { addError, setIsLive, setSessionId, reconnectCountRef, startRef }: CloseCallbacks,
+): void {
   ws.onclose = (ev) => {
-    if (ev.code !== 1000) addError(`Connection lost (code ${ev.code}). Restart to reconnect.`);
-    setIsLive(false);
     setSessionId(null);
+
+    if (ev.code === 1000) {
+      setIsLive(false);
+      return;
+    }
+
+    if (reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
+      reconnectCountRef.current += 1;
+      addError(`Connection lost. Reconnecting... (attempt ${reconnectCountRef.current}/${MAX_RECONNECT_ATTEMPTS})`);
+      setTimeout(() => startRef.current?.(), RECONNECT_DELAY_MS);
+      return;
+    }
+
+    addError(`Connection lost (code ${ev.code}). Restart to reconnect.`);
+    setIsLive(false);
   };
   ws.onerror = () => {};
 }

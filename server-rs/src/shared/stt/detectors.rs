@@ -145,7 +145,8 @@ impl ProgressiveChunkDetector {
         if new_text.trim().is_empty() { return None; }
 
         if since_last >= self.max_duration && new_text.trim().chars().count() >= super::config::MIN_CHARS_FOR_FORCE_SPLIT {
-            return self.emit(transcript, emitted_pos, transcript.len());
+            let split_at = find_last_word_boundary(new_text, emitted_pos);
+            return self.emit(transcript, emitted_pos, split_at);
         }
         if since_last < self.min_duration { return None; }
 
@@ -199,6 +200,13 @@ fn derive_normalized_position(emitted: &str, transcript: &str) -> usize {
         pos += ch.len_utf8();
     }
     if matched >= emitted_norm.len() * super::config::NORMALIZED_MATCH_THRESHOLD_PCT / 100 { pos } else { 0 }
+}
+
+fn find_last_word_boundary(new_text: &str, emitted_pos: usize) -> usize {
+    match new_text.rfind(char::is_whitespace) {
+        Some(rel_pos) => emitted_pos + rel_pos,
+        None => emitted_pos + new_text.len(),
+    }
 }
 
 fn find_progressive_boundary(
@@ -320,6 +328,36 @@ mod tests {
         let pos = derive_normalized_position("zzzzz", "Hello world");
 
         assert_eq!(pos, 0);
+    }
+
+    // ── find_last_word_boundary ────────────────────────
+
+    #[test]
+    fn should_split_at_last_whitespace() {
+        let pos = find_last_word_boundary("hello world foo", 10);
+
+        assert_eq!(pos, 10 + 11);
+    }
+
+    #[test]
+    fn should_fallback_to_end_when_no_whitespace() {
+        let pos = find_last_word_boundary("superlongword", 5);
+
+        assert_eq!(pos, 5 + 13);
+    }
+
+    #[test]
+    fn should_split_at_only_whitespace() {
+        let pos = find_last_word_boundary("one two", 0);
+
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn should_handle_empty_text() {
+        let pos = find_last_word_boundary("", 7);
+
+        assert_eq!(pos, 7);
     }
 
     // ── find_progressive_boundary ───────────────────────

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ pub(crate) struct AudioDrainConfig {
     pub(crate) fifo_path: String,
     pub(crate) delay: Duration,
     pub(crate) stop: Arc<AtomicBool>,
+    pub(crate) drift_ms: Arc<AtomicU64>,
 }
 
 /// State for draining queued audio chunk-by-chunk
@@ -59,6 +60,7 @@ struct DrainState {
     start_time: Instant,
     total_bytes_written: u64,
     jitter_warn_count: u64,
+    drift_ms: Arc<AtomicU64>,
 }
 
 impl DrainState {
@@ -282,6 +284,7 @@ impl DrainState {
             .checked_duration_since(*play_at)
             .map(|d| d.as_millis())
             .unwrap_or(0);
+        self.drift_ms.store(behind_ms as u64, Ordering::Relaxed);
         tracing::debug!(
             "[AUDIO:{}] starting utterance: {}B available, complete={}, \
              queue_depth={}, audio_behind_video={}ms",
@@ -472,6 +475,7 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         start_time: now,
         total_bytes_written: 0,
         jitter_warn_count: 0,
+        drift_ms: config.drift_ms,
     };
 
     state.run();

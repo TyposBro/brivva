@@ -326,10 +326,23 @@ async fn synthesize_chunk(
         Ok(Ok(bytes)) => {
             debug!("[TTS] chunk #{}.{} {} = {}KB PCM", ctx.utterance_id, task.chunk_idx, task.target, bytes / 1024);
         }
-        Ok(Err(e)) => {
-            error!("[TTS] chunk #{}.{} {} error: {}", ctx.utterance_id, task.chunk_idx, task.target, e);
-            streaming.finish();
-            send_pipeline_warning(ctx, "tts_error", &lang_str, &e.to_string());
+        Ok(Err(ws_err)) => {
+            tracing::warn!(
+                "[TTS] chunk #{}.{} {} WS failed: {}, falling back to REST",
+                ctx.utterance_id, task.chunk_idx, task.target, ws_err
+            );
+            match crate::shared::tts::do_tts_rest(&ctx.http_client, &synth_req).await {
+                Ok(bytes) => {
+                    debug!("[TTS] chunk #{}.{} {} REST fallback = {}KB PCM",
+                        ctx.utterance_id, task.chunk_idx, task.target, bytes / 1024);
+                }
+                Err(rest_err) => {
+                    error!("[TTS] chunk #{}.{} {} REST fallback also failed: {}",
+                        ctx.utterance_id, task.chunk_idx, task.target, rest_err);
+                    streaming.finish();
+                    send_pipeline_warning(ctx, "tts_error", &lang_str, &rest_err);
+                }
+            }
         }
         Err(_) => {
             error!("[TTS] chunk #{}.{} {} TIMEOUT", ctx.utterance_id, task.chunk_idx, task.target);

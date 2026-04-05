@@ -23,9 +23,10 @@ pub const TTS_DEADLINE_CAP_MS: u64 = 10_000;
 pub const TTS_DEADLINE_MARGIN_MS: u64 = 500;
 
 // Pipeline
-pub const CHUNK_PIPELINE_CAPACITY: usize = 6;
+pub const CHUNK_PIPELINE_CAPACITY: usize = 12;
 pub const STREAMING_BUDGET_PADDING_SECS: f64 = 5.0;
 pub const TRANSLATE_TIMEOUT_MS: u64 = 5_000;
+pub const TRANSLATE_RETRY_DELAY_MS: u64 = 500;
 pub const STT_RECONNECT_MAX: u32 = 5;
 pub const STT_RECONNECT_DELAY_SECS: u64 = 1;
 

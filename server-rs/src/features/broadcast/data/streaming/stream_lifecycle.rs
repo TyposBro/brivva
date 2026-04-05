@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ pub(super) struct RtmpStream {
     pub(super) stop_flag: Arc<AtomicBool>,
     pub(super) restart_count: u32,
     pub(super) rtmp_error: Arc<AtomicBool>,
+    pub(super) drift_ms: Arc<AtomicU64>,
 }
 
 /// Check a single stream's health. Returns restart info if it needs restarting.
