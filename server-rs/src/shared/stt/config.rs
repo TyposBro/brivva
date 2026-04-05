@@ -29,6 +29,13 @@ pub const SONIOX_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 pub const SONIOX_CONNECT_MAX_ATTEMPTS: u32 = 10;
 pub const SONIOX_CONNECT_RETRY_DELAY_SECS: u64 = 2;
 
+// ── Progressive Chunking ──────────────────────────────
+
+/// Force-emit partial translation if utterance exceeds this duration
+/// without a semantic endpoint. Prevents long continuous speech from
+/// accumulating into a single giant chunk.
+pub const FORCE_CHUNK_AFTER_SECS: u64 = 4;
+
 // ── Source-Lang Passthrough ─────────────────────────────
 
 pub const PASSTHROUGH_PADDING_SECS: f64 = 2.0;
