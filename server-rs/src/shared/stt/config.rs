@@ -1,5 +1,11 @@
 //! STT configuration: thresholds, timing, and per-language settings.
 
+// ── Audio Accumulator ──────────────────────────────────
+
+/// Max bytes retained in the audio accumulator (3s at 44.1kHz 16-bit mono).
+/// Prosody analysis only needs the last few seconds; keeping more wastes RAM.
+pub const MAX_AUDIO_ACC_BYTES: usize = 3 * 88_200;
+
 // ── Prosody Extraction ──────────────────────────────────
 
 pub const PITCH_MIN_HZ: f32 = 50.0;
@@ -43,6 +49,20 @@ pub const PASSTHROUGH_PADDING_SECS: f64 = 2.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Audio Accumulator Constants ────────────────────────
+
+    #[test]
+    fn should_have_positive_max_audio_acc_bytes() {
+        assert!(MAX_AUDIO_ACC_BYTES > 0);
+    }
+
+    #[test]
+    fn should_cap_audio_acc_to_a_few_seconds() {
+        let bytes_per_sec = crate::core::config::BYTES_PER_SEC as usize;
+        let secs = MAX_AUDIO_ACC_BYTES / bytes_per_sec;
+        assert!(secs >= 1 && secs <= 10);
+    }
 
     // ── Prosody Extraction Constants ────────────────────────
 
