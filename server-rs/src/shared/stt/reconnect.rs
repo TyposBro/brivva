@@ -316,6 +316,26 @@ async fn send_end_of_stream(sink: &WsSink, session_id: &str) {
 fn accumulate_audio(accumulator: &AudioAcc, data: &[u8]) {
     if let Ok(mut acc) = accumulator.lock() {
         acc.push(data.to_vec());
+        trim_accumulator(&mut acc);
+    }
+}
+
+fn trim_accumulator(acc: &mut Vec<Vec<u8>>) {
+    let max = super::config::MAX_AUDIO_ACC_BYTES;
+    let total: usize = acc.iter().map(|c| c.len()).sum();
+    if total <= max {
+        return;
+    }
+    let mut excess = total - max;
+    while excess > 0 && !acc.is_empty() {
+        let front_len = acc[0].len();
+        if front_len <= excess {
+            excess -= front_len;
+            acc.remove(0);
+        } else {
+            acc[0] = acc[0][excess..].to_vec();
+            break;
+        }
     }
 }
 
@@ -451,4 +471,61 @@ fn send_error_to_host(ctx: &SttContext, detail: &str) {
 
 fn clear_accumulator(acc: &AudioAcc) {
     if let Ok(mut a) = acc.lock() { a.clear(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_not_trim_when_under_limit() {
+        let mut acc = vec![vec![0u8; 100], vec![0u8; 200]];
+        trim_accumulator(&mut acc);
+        assert_eq!(acc.len(), 2);
+        assert_eq!(total_bytes(&acc), 300);
+    }
+
+    #[test]
+    fn should_trim_oldest_chunks_when_over_limit() {
+        let max = super::super::config::MAX_AUDIO_ACC_BYTES;
+        let chunk_size = max / 4;
+        let mut acc = vec![vec![1u8; chunk_size]; 6]; // 150% of max
+        trim_accumulator(&mut acc);
+        assert!(total_bytes(&acc) <= max);
+    }
+
+    #[test]
+    fn should_partially_trim_front_chunk_when_needed() {
+        let max = super::super::config::MAX_AUDIO_ACC_BYTES;
+        let mut acc = vec![vec![0u8; max], vec![0u8; 100]];
+        trim_accumulator(&mut acc);
+        assert!(total_bytes(&acc) <= max);
+        assert_eq!(acc.len(), 2);
+        assert_eq!(acc[1].len(), 100);
+    }
+
+    #[test]
+    fn should_handle_empty_accumulator() {
+        let mut acc: Vec<Vec<u8>> = vec![];
+        trim_accumulator(&mut acc);
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn should_accumulate_and_trim_through_public_fn() {
+        let max = super::super::config::MAX_AUDIO_ACC_BYTES;
+        let accumulator: AudioAcc = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chunk = vec![0u8; max / 2];
+
+        accumulate_audio(&accumulator, &chunk);
+        accumulate_audio(&accumulator, &chunk);
+        accumulate_audio(&accumulator, &chunk);
+
+        let acc = accumulator.lock().unwrap();
+        assert!(total_bytes(&acc) <= max);
+    }
+
+    fn total_bytes(acc: &[Vec<u8>]) -> usize {
+        acc.iter().map(|c| c.len()).sum()
+    }
 }
