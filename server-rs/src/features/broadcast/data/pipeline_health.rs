@@ -45,11 +45,12 @@ impl PipelineHealthReporter {
     }
 
     async fn send_health_snapshot(&self) {
-        let queue_depth = self.collect_queue_depths().await;
+        let (queue_depth, drift_ms) = self.collect_stream_metrics().await;
         let stt_connected = self.is_session_active();
         let msg = ServerMsg::PipelineHealth {
             stt_connected,
             queue_depth,
+            drift_ms,
             dropped_chunks: 0,
             tts_timeouts: 0,
             translate_errors: 0,
@@ -57,9 +58,9 @@ impl PipelineHealthReporter {
         self.send_to_host(&msg);
     }
 
-    async fn collect_queue_depths(&self) -> HashMap<String, usize> {
+    async fn collect_stream_metrics(&self) -> (HashMap<String, usize>, HashMap<String, u64>) {
         let mgr = self.deps.rtmp_manager.lock().await;
-        mgr.queue_depths()
+        (mgr.queue_depths(), mgr.drift_per_lang())
     }
 
     fn is_session_active(&self) -> bool {

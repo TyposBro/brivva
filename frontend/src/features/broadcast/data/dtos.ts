@@ -13,6 +13,15 @@ export type PipelineWarningMsg = {
   detail: string;
   utteranceId: number;
 };
+export type PipelineHealthMsg = {
+  type: "pipeline_health";
+  sttConnected: boolean;
+  queueDepth: Record<string, number>;
+  driftMs: Record<string, number>;
+  droppedChunks: number;
+  ttsTimeouts: number;
+  translateErrors: number;
+};
 export type ErrorMsg = { type: "error"; message: string };
 
 export type ServerMessage =
@@ -22,4 +31,5 @@ export type ServerMessage =
   | TranslationMsg
   | ChunkTranslationMsg
   | PipelineWarningMsg
+  | PipelineHealthMsg
   | ErrorMsg;

@@ -2,7 +2,9 @@ import { useState, useRef, useCallback, type MutableRefObject } from "react";
 import { appConfig } from "../../../../orchestration/config/app-config";
 import { AudioPipeline } from "../../../../shared/media/audio-pipeline";
 import type { TranscriptEntry, TranslationTier } from "../../domain/broadcast-types";
+import type { PipelineHealthMsg } from "../../data/dtos";
 import { AUDIO_TAG } from "../../data/dtos";
+import { useDeduplicatedErrors } from "./use-deduplicated-errors";
 
 type SocketParams = {
   sourceLang: string;
@@ -14,6 +16,7 @@ type SocketParams = {
   broadcastDelay: number;
   onStartWebcam: (ws: WebSocket) => Promise<void>;
   onStopWebcam: () => void;
+  onHealthMessage?: (msg: PipelineHealthMsg) => void;
 };
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -24,17 +27,13 @@ export function useBroadcastSocket(params: SocketParams) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [interim, setInterim] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
-  const [errors, setErrors] = useState<string[]>([]);
   const [pipelineWarnings, setPipelineWarnings] = useState<string[]>([]);
+  const { errors, addError, dismissError } = useDeduplicatedErrors();
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef(new AudioPipeline());
   const reconnectCountRef = useRef(0);
   const startRef = useRef<(() => Promise<void>) | undefined>(undefined);
-
-  const addError = useCallback((msg: string) => {
-    setErrors((prev) => [...prev, msg]);
-  }, []);
 
   const dispatch = { setInterim, setTranscripts };
 
@@ -57,9 +56,12 @@ export function useBroadcastSocket(params: SocketParams) {
         setPipelineWarnings((prev) => [...prev, label]);
         break;
       }
+      case "pipeline_health":
+        params.onHealthMessage?.(msg as PipelineHealthMsg);
+        break;
       case "error":            addError(msg.message); break;
     }
-  }, [addError]);
+  }, [addError, params.onHealthMessage]);
 
   const start = useCallback(async () => {
     const available = filterTargetLanguages(params.sourceLang, params.targetLangs);
@@ -96,10 +98,6 @@ export function useBroadcastSocket(params: SocketParams) {
     setIsLive(false);
     setSessionId(null);
   }, [params]);
-
-  const dismissError = useCallback((index: number) => {
-    setErrors((prev) => prev.filter((_, j) => j !== index));
-  }, []);
 
   return { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError };
 }
