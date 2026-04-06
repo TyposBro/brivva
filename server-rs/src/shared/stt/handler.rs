@@ -118,6 +118,7 @@ async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
     }
 
     if state.translation_acc.is_empty() {
+        increment_translation_empty(ctx);
         info!("[STT] #{} force-chunk after {}s but no translation yet, resetting", uid, elapsed);
     } else {
         send_translation(state, uid, ctx).await;
@@ -157,11 +158,18 @@ fn send_transcript_final(state: &SttState, uid: u64, ctx: &SttContext) {
 async fn send_translation(state: &mut SttState, uid: u64, ctx: &SttContext) {
     let translated = state.translation_acc.clone();
     if translated.is_empty() {
+        increment_translation_empty(ctx);
         return;
     }
     info!("[STT] #{} endpoint: translation='{}' (lang={:?})",
         uid, truncate_str(&translated, 80), state.target_lang);
     handle_translation_endpoint(state, &translated, ctx).await;
+}
+
+fn increment_translation_empty(ctx: &SttContext) {
+    if let Some(session) = ctx.sessions.get(&ctx.session_id) {
+        session.pipeline_counters.increment_translation_empty();
+    }
 }
 
 fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {

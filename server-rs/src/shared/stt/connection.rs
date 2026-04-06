@@ -29,6 +29,10 @@ pub(super) async fn connect_soniox(
     sess: &ConnectSession<'_>,
     config: &SonioxConfig,
 ) -> Option<WsStream> {
+    if check_stt_circuit_breaker(sess) {
+        return None;
+    }
+
     let retry_delay = Duration::from_secs(SONIOX_CONNECT_RETRY_DELAY_SECS);
 
     for attempt in 1..=SONIOX_CONNECT_MAX_ATTEMPTS {
@@ -39,6 +43,7 @@ pub(super) async fn connect_soniox(
 
         match try_connect(config).await {
             Ok(stream) => {
+                record_stt_success(sess);
                 info!(
                     "[STT] Connected to Soniox {} (attempt {}, lang={}, target={:?})",
                     SONIOX_MODEL, attempt, config.source_lang, config.target_lang,
@@ -46,6 +51,7 @@ pub(super) async fn connect_soniox(
                 return Some(stream);
             }
             Err(e) => {
+                record_stt_failure(sess);
                 error!(
                     "[STT] attempt {}/{} failed: {}",
                     attempt, SONIOX_CONNECT_MAX_ATTEMPTS, e,
@@ -60,6 +66,28 @@ pub(super) async fn connect_soniox(
         SONIOX_CONNECT_MAX_ATTEMPTS,
     );
     None
+}
+
+fn check_stt_circuit_breaker(sess: &ConnectSession<'_>) -> bool {
+    if let Some(session) = sess.sessions.get(sess.session_id) {
+        if session.stt_circuit_breaker.is_open() {
+            tracing::warn!("[STT] circuit breaker OPEN for {}, skipping connect", sess.session_id);
+            return true;
+        }
+    }
+    false
+}
+
+fn record_stt_success(sess: &ConnectSession<'_>) {
+    if let Some(session) = sess.sessions.get(sess.session_id) {
+        session.stt_circuit_breaker.record_success();
+    }
+}
+
+fn record_stt_failure(sess: &ConnectSession<'_>) {
+    if let Some(session) = sess.sessions.get(sess.session_id) {
+        session.stt_circuit_breaker.record_failure();
+    }
 }
 
 async fn try_connect(config: &SonioxConfig) -> Result<WsStream, String> {

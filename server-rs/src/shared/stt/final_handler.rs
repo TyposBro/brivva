@@ -133,6 +133,9 @@ fn spawn_tts_for_translation(
     let tts_model = session.tts_model.clone();
     let broadcast_delay_ms = session.broadcast_delay_ms;
     let erased = session.rtmp_manager.clone();
+    let pipeline_counters = session.pipeline_counters.clone();
+    let latency_tracker = session.latency_tracker.clone();
+    let tts_circuit_breaker = session.tts_circuit_breaker.clone();
     if erased.is_none() {
         tracing::warn!("[TTS] #{} {} no RTMP manager — TTS audio will not reach stream", uid, target_lang);
     }
@@ -153,6 +156,9 @@ fn spawn_tts_for_translation(
         tts_model,
         broadcast_delay_ms,
         erased_rtmp: erased,
+        pipeline_counters,
+        latency_tracker,
+        tts_circuit_breaker,
     };
 
     tokio::spawn(run_tts_synthesis(tts_req));
@@ -173,9 +179,16 @@ struct TtsSpawnRequest {
     tts_model: String,
     broadcast_delay_ms: u64,
     erased_rtmp: Option<crate::core::types::ErasedRtmpManager>,
+    pipeline_counters: std::sync::Arc<crate::core::pipeline_counters::PipelineCounters>,
+    latency_tracker: std::sync::Arc<crate::core::latency_tracker::LatencyTracker>,
+    tts_circuit_breaker: std::sync::Arc<crate::core::circuit_breaker::CircuitBreaker>,
 }
 
 async fn run_tts_synthesis(req: TtsSpawnRequest) {
+    if check_tts_circuit_breaker(&req) {
+        return;
+    }
+
     let streaming = create_streaming_slot(&req).await;
 
     notify_tts_start(&req);
@@ -206,7 +219,26 @@ async fn run_tts_synthesis(req: TtsSpawnRequest) {
     execute_tts_with_fallback(&synth_req, &req, streaming.as_ref(), tts_deadline).await;
 
     finish_streaming(streaming.as_ref());
+    record_e2e_latency(&req);
     notify_tts_end(&req, &tts_start);
+}
+
+/// Skip TTS if the circuit breaker is open. Returns true if skipped.
+fn check_tts_circuit_breaker(req: &TtsSpawnRequest) -> bool {
+    if req.tts_circuit_breaker.is_open() {
+        tracing::warn!(
+            "[TTS] #{} {} circuit breaker OPEN, skipping",
+            req.uid, req.target_lang
+        );
+        return true;
+    }
+    false
+}
+
+/// Record end-to-end latency: utterance_start -> TTS complete.
+fn record_e2e_latency(req: &TtsSpawnRequest) {
+    let latency_ms = req.utterance_start.elapsed().as_millis() as u64;
+    req.latency_tracker.record(latency_ms);
 }
 
 async fn execute_tts_with_fallback(
@@ -217,6 +249,7 @@ async fn execute_tts_with_fallback(
 ) {
     match tokio::time::timeout(tts_deadline, crate::shared::tts::do_tts_ws(synth_req)).await {
         Ok(Ok(bytes)) => {
+            req.tts_circuit_breaker.record_success();
             info!("[TTS] #{} {} = {}KB PCM", req.uid, req.target_lang, bytes / 1024);
         }
         Ok(Err(ws_err)) => {
@@ -225,6 +258,8 @@ async fn execute_tts_with_fallback(
             try_rest_fallback(synth_req, req, streaming).await;
         }
         Err(_) => {
+            req.pipeline_counters.increment_tts_timeouts();
+            req.tts_circuit_breaker.record_failure();
             error!("[TTS] #{} {} TIMEOUT", req.uid, req.target_lang);
             if let Some(s) = streaming { s.finish(); }
         }
@@ -238,9 +273,12 @@ async fn try_rest_fallback(
 ) {
     match crate::shared::tts::do_tts_rest(&req.http_client, synth_req).await {
         Ok(bytes) => {
+            req.tts_circuit_breaker.record_success();
             info!("[TTS] #{} {} REST fallback = {}KB PCM", req.uid, req.target_lang, bytes / 1024);
         }
         Err(rest_err) => {
+            req.pipeline_counters.increment_tts_failures();
+            req.tts_circuit_breaker.record_failure();
             error!("[TTS] #{} {} REST fallback also failed: {}",
                 req.uid, req.target_lang, rest_err);
             if let Some(s) = streaming { s.finish(); }

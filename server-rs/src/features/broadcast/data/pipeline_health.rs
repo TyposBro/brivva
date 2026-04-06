@@ -47,12 +47,16 @@ impl PipelineHealthReporter {
     async fn send_health_snapshot(&self) {
         let queue_depth = self.collect_queue_depths().await;
         let stt_connected = self.is_session_active();
+        let counters = self.read_counters();
         let msg = ServerMsg::PipelineHealth {
             stt_connected,
             queue_depth,
-            dropped_chunks: 0,
-            tts_timeouts: 0,
-            translate_errors: 0,
+            dropped_chunks: counters.tts_failures + counters.tts_timeouts,
+            tts_timeouts: counters.tts_timeouts,
+            translate_errors: counters.translation_empty,
+            avg_latency_ms: counters.avg_latency_ms,
+            tts_failures: counters.tts_failures,
+            stt_disconnects: counters.stt_disconnects,
         };
         self.send_to_host(&msg);
     }
@@ -66,11 +70,34 @@ impl PipelineHealthReporter {
         self.deps.sessions.get(&self.deps.session_id).is_some()
     }
 
+    fn read_counters(&self) -> HealthCounterSnapshot {
+        let session = match self.deps.sessions.get(&self.deps.session_id) {
+            Some(s) => s,
+            None => return HealthCounterSnapshot::default(),
+        };
+        HealthCounterSnapshot {
+            tts_failures: session.pipeline_counters.tts_failures(),
+            tts_timeouts: session.pipeline_counters.tts_timeouts(),
+            stt_disconnects: session.pipeline_counters.stt_disconnects(),
+            translation_empty: session.pipeline_counters.translation_empty(),
+            avg_latency_ms: session.latency_tracker.rolling_average_ms(),
+        }
+    }
+
     fn send_to_host(&self, msg: &ServerMsg) {
         if let Some(session) = self.deps.sessions.get(&self.deps.session_id) {
             session.send_to_host(to_ws(msg));
         }
     }
+}
+
+#[derive(Default)]
+struct HealthCounterSnapshot {
+    tts_failures: u64,
+    tts_timeouts: u64,
+    stt_disconnects: u64,
+    translation_empty: u64,
+    avg_latency_ms: u64,
 }
 
 /// Spawn a background task that sends PipelineHealth to the host every 5 seconds.
@@ -90,4 +117,3 @@ pub fn spawn_pipeline_health_reporter(
     let reporter = PipelineHealthReporter { deps };
     tokio::spawn(reporter.run())
 }
-
