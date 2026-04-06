@@ -1,4 +1,10 @@
 //! Session cleanup on WebSocket disconnect.
+//!
+//! Removing the session from the DashMap causes spawned STT and TTS tasks to
+//! self-terminate: STT checks `sessions.contains_key()` on every message and
+//! returns `Break` when the session is gone; TTS checks `sessions.get()` and
+//! exits when the session is missing. Setting `rtmp_stop` ensures all FFmpeg
+//! drain threads and the health monitor exit their loops.
 
 use std::sync::atomic::Ordering;
 use crate::features::broadcast::domain::Sessions;

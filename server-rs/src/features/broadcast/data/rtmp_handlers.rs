@@ -92,7 +92,12 @@ fn setup_health_monitoring(sessions: &Sessions, session_id: &str, mgr: streaming
     let health_stop = sessions.get(session_id)
         .map(|s| s.rtmp_stop.clone())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-    streaming::spawn_health_monitor(mgr.clone(), health_stop.clone());
+    streaming::spawn_health_monitor(
+        mgr.clone(),
+        health_stop.clone(),
+        sessions.clone(),
+        session_id.to_string(),
+    );
     super::pipeline_health::spawn_pipeline_health_reporter(
         session_id.to_string(),
         sessions.clone(),

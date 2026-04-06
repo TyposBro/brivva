@@ -242,6 +242,22 @@ impl RtmpManager {
         self.cleanup_crashed_streams(to_restart)
     }
 
+    /// Remove streams that exceeded MAX_FFMPEG_RESTARTS. Returns (lang, restart_count)
+    /// for each permanently failed stream so the caller can notify the host.
+    pub(crate) fn drain_exhausted_streams(&mut self) -> Vec<(String, u32)> {
+        let exhausted_ids: Vec<String> = self.streams.iter()
+            .filter(|(_, s)| {
+                s.stop_flag.load(Ordering::Acquire) && s.restart_count >= MAX_FFMPEG_RESTARTS
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        exhausted_ids.into_iter().filter_map(|id| {
+            let stream = self.streams.remove(&id)?;
+            Some((stream.lang.clone(), stream.restart_count))
+        }).collect()
+    }
+
     pub(crate) fn restart_stream(
         &mut self,
         config: &StreamConfig,
