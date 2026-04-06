@@ -16,6 +16,7 @@ use super::{
     DRIFT_CHECK_INTERVAL_TICKS, DRIFT_WARN_THRESHOLD_MS,
     JITTER_WARN_LOG_INTERVAL,
     MAX_AUDIO_STALENESS, MAX_AUDIO_QUEUE_DEPTH,
+    SKIP_AHEAD_DRIFT_FACTOR,
 };
 
 // ── Config struct (keep every function ≤ 2 params) ───────
@@ -241,6 +242,7 @@ impl DrainState {
 
     /// Try to pop next utterance from queue if ready.
     /// Evicts stale and overflow items first to prevent unbounded desync.
+    /// When drift exceeds threshold, skips to newest complete utterance.
     /// Respects padding_until: after a short TTS finishes, pads silence
     /// until the original speech duration elapses so audio doesn't outrun video.
     fn try_start_next_utterance(&mut self, target_ts: Instant) {
@@ -257,7 +259,19 @@ impl DrainState {
         let mut q = queue_arc.lock().unwrap();
         evict_stale_items(&self.stream_id, &mut q, target_ts);
         evict_overflow_items(&self.stream_id, &mut q);
+        self.skip_ahead_if_drifted(&mut q);
         self.pop_ready_utterance(&mut q, target_ts);
+    }
+
+    /// When audio drift exceeds `broadcast_delay * SKIP_AHEAD_DRIFT_FACTOR`,
+    /// skip all but the newest complete utterance to prevent unbounded desync.
+    fn skip_ahead_if_drifted(&self, q: &mut VecDeque<QueuedAudio>) {
+        let drift = self.drift_ms.load(Ordering::Relaxed);
+        let threshold = (self.delay.as_millis() as f64 * SKIP_AHEAD_DRIFT_FACTOR) as u64;
+        if drift < threshold || q.len() < 2 {
+            return;
+        }
+        skip_to_newest_complete(&self.stream_id, q, drift, threshold);
     }
 
     /// Pop the front item if its play_at has arrived, start playing it.
@@ -437,6 +451,30 @@ fn evict_overflow_items(stream_id: &str, q: &mut VecDeque<QueuedAudio>) {
             stream_id, dropped, q.len()
         );
     }
+}
+
+/// Skip to the newest complete utterance in the queue.
+/// Removes all items except the last complete one, preventing unbounded desync.
+fn skip_to_newest_complete(
+    stream_id: &str,
+    q: &mut VecDeque<QueuedAudio>,
+    drift_ms: u64,
+    threshold_ms: u64,
+) {
+    let newest_complete_idx = q.iter().rposition(|item| {
+        item.complete.load(Ordering::Acquire)
+    });
+    let Some(keep_idx) = newest_complete_idx else { return };
+    if keep_idx == 0 {
+        return;
+    }
+    let skipped = keep_idx;
+    q.drain(..keep_idx);
+    tracing::warn!(
+        "[AUDIO:{}] SKIP-AHEAD: drift {}ms > {}ms threshold, \
+         skipped {} utterance(s), queue_depth={}",
+        stream_id, drift_ms, threshold_ms, skipped, q.len()
+    );
 }
 
 /// Drain one tick of audio from the active utterance, or produce silence.

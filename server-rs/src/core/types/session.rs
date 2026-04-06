@@ -5,6 +5,9 @@ use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
 use crate::core::config::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
+use crate::core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use crate::core::latency_tracker::LatencyTracker;
+use crate::core::pipeline_counters::PipelineCounters;
 use crate::core::types::Lang;
 
 /// Type-erased RTMP manager handle.
@@ -13,6 +16,10 @@ use crate::core::types::Lang;
 /// Feature code stores `Arc<tokio::sync::Mutex<RtmpManager>>` erased as this
 /// type, and recovers the concrete type via `Arc::downcast`.
 pub type ErasedRtmpManager = Arc<dyn std::any::Any + Send + Sync>;
+
+/// Circuit breaker config for TTS and STT APIs.
+const CB_FAILURE_THRESHOLD: u32 = 5;
+const CB_RESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Session {
     pub id: String,
@@ -27,10 +34,18 @@ pub struct Session {
     pub rtmp_stop: Arc<AtomicBool>,
     pub video_codec: Option<String>,
     pub broadcast_delay_ms: u64,
+    pub pipeline_counters: Arc<PipelineCounters>,
+    pub latency_tracker: Arc<LatencyTracker>,
+    pub tts_circuit_breaker: Arc<CircuitBreaker>,
+    pub stt_circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl Session {
     pub fn new(id: String, source_lang: Lang, target_langs: Vec<Lang>, tier: u8) -> Self {
+        let cb_config = || CircuitBreakerConfig {
+            failure_threshold: CB_FAILURE_THRESHOLD,
+            reset_timeout: CB_RESET_TIMEOUT,
+        };
         Self {
             id,
             source_lang,
@@ -44,6 +59,10 @@ impl Session {
             rtmp_stop: Arc::new(AtomicBool::new(false)),
             video_codec: None,
             broadcast_delay_ms: DEFAULT_BROADCAST_DELAY_MS,
+            pipeline_counters: Arc::new(PipelineCounters::new()),
+            latency_tracker: Arc::new(LatencyTracker::new()),
+            tts_circuit_breaker: Arc::new(CircuitBreaker::new(cb_config())),
+            stt_circuit_breaker: Arc::new(CircuitBreaker::new(cb_config())),
         }
     }
 

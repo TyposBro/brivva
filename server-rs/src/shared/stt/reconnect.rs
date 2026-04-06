@@ -406,10 +406,17 @@ fn should_reconnect(env: &SessionEnv, loop_state: &mut ConnectionLoopState, lang
     loop_state.reconnect_count += 1;
     if loop_state.reconnect_count > crate::core::config::STT_RECONNECT_MAX {
         error!("[STT:{}] Exceeded max reconnects for {}", env.session_id, lang);
+        increment_stt_disconnect_counter(env);
         notify_stt_disconnected(env, lang);
         return false;
     }
     true
+}
+
+fn increment_stt_disconnect_counter(env: &SessionEnv) {
+    if let Some(session) = env.sessions.get(&env.session_id) {
+        session.pipeline_counters.increment_stt_disconnects();
+    }
 }
 
 fn notify_stt_disconnected(env: &SessionEnv, lang: &str) {

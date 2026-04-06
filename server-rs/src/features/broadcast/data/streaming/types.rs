@@ -68,6 +68,9 @@ pub(crate) const MAX_AUDIO_STALENESS: Duration = Duration::from_secs(6);
 pub(crate) const MAX_AUDIO_QUEUE_DEPTH: usize = 10;
 /// Drift warning threshold in milliseconds
 pub(crate) const DRIFT_WARN_THRESHOLD_MS: u64 = 50;
+/// When audio drift exceeds broadcast_delay * this factor, skip to newest
+/// complete utterance to prevent unbounded desync during prolonged TTS delays.
+pub(crate) const SKIP_AHEAD_DRIFT_FACTOR: f64 = 1.5;
 /// Check drift every N ticks (~5 seconds at 20ms ticks)
 pub(crate) const DRIFT_CHECK_INTERVAL_TICKS: u64 = 250;
 /// Rate-limit jitter warnings: log every Nth occurrence

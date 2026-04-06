@@ -67,6 +67,12 @@ pub enum ServerMsg {
         tts_timeouts: u64,
         #[serde(rename = "translateErrors")]
         translate_errors: u64,
+        #[serde(rename = "avgLatencyMs")]
+        avg_latency_ms: u64,
+        #[serde(rename = "ttsFailures")]
+        tts_failures: u64,
+        #[serde(rename = "sttDisconnects")]
+        stt_disconnects: u64,
     },
 
     #[serde(rename = "pipeline_warning")]
@@ -294,6 +300,9 @@ mod tests {
             dropped_chunks: 1,
             tts_timeouts: 2,
             translate_errors: 0,
+            avg_latency_ms: 150,
+            tts_failures: 3,
+            stt_disconnects: 1,
         };
 
         let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
@@ -304,6 +313,9 @@ mod tests {
         assert_eq!(json["droppedChunks"], 1);
         assert_eq!(json["ttsTimeouts"], 2);
         assert_eq!(json["translateErrors"], 0);
+        assert_eq!(json["avgLatencyMs"], 150);
+        assert_eq!(json["ttsFailures"], 3);
+        assert_eq!(json["sttDisconnects"], 1);
     }
 
     #[test]
