@@ -223,6 +223,13 @@ impl RtmpManager {
         streaming
     }
 
+    /// Return per-language drift in milliseconds (lang -> drift_ms).
+    pub fn drift_per_lang(&self) -> HashMap<String, u64> {
+        self.streams.values().map(|s| {
+            (s.lang.clone(), s.drift_ms.load(Ordering::Relaxed))
+        }).collect()
+    }
+
     pub fn max_drift_ms(&self) -> u64 {
         self.streams.values()
             .map(|s| s.drift_ms.load(Ordering::Relaxed))

@@ -61,6 +61,8 @@ pub enum ServerMsg {
         stt_connected: bool,
         #[serde(rename = "queueDepth")]
         queue_depth: HashMap<String, usize>,
+        #[serde(rename = "driftMs")]
+        drift_ms: HashMap<String, u64>,
         #[serde(rename = "droppedChunks")]
         dropped_chunks: u64,
         #[serde(rename = "ttsTimeouts")]
@@ -294,9 +296,12 @@ mod tests {
     fn should_serialize_pipeline_health_with_renamed_fields() {
         let mut queue = HashMap::new();
         queue.insert("ko".to_string(), 3_usize);
+        let mut drift = HashMap::new();
+        drift.insert("ko".to_string(), 150_u64);
         let msg = ServerMsg::PipelineHealth {
             stt_connected: true,
             queue_depth: queue,
+            drift_ms: drift,
             dropped_chunks: 1,
             tts_timeouts: 2,
             translate_errors: 0,
@@ -310,6 +315,7 @@ mod tests {
         assert_eq!(json["type"], "pipeline_health");
         assert_eq!(json["sttConnected"], true);
         assert_eq!(json["queueDepth"]["ko"], 3);
+        assert_eq!(json["driftMs"]["ko"], 150);
         assert_eq!(json["droppedChunks"], 1);
         assert_eq!(json["ttsTimeouts"], 2);
         assert_eq!(json["translateErrors"], 0);

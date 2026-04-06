@@ -1,4 +1,4 @@
-import { useRef, useMemo } from "react";
+import { useRef, useMemo, useEffect } from "react";
 import { PageLayout } from "../../../shared/ui-kit/page-layout";
 import { useBroadcastConfig } from "./hooks/use-broadcast-config";
 import { useWebcam } from "./hooks/use-webcam";
@@ -6,6 +6,8 @@ import { useVoiceClone } from "./hooks/use-voice-clone";
 import { useBroadcastSocket } from "./hooks/use-broadcast-socket";
 import { useMediaDevices } from "./hooks/use-media-devices";
 import { useBroadcastHandlers } from "./hooks/use-broadcast-handlers";
+import { usePipelineHealth } from "./hooks/use-pipeline-health";
+import { useDriftWarning } from "./hooks/use-drift-warning";
 import { TierSelector } from "./components/tier-selector";
 import { LanguageConfig } from "./components/language-config";
 import { RtmpDestinations } from "./components/rtmp-destinations";
@@ -16,12 +18,19 @@ import { BroadcastControls } from "./components/broadcast-controls";
 import { ErrorBanners } from "./components/error-banners";
 import { InfoFooter } from "./components/info-footer";
 import { PipelineHealthBadge } from "./components/pipeline-health-badge";
+import { HealthDashboard } from "./components/health-dashboard";
+import { DriftWarningBanner } from "./components/drift-warning-banner";
 
 export default function BroadcastPage() {
   const { config, update } = useBroadcastConfig();
   const devices = useMediaDevices();
   const videoRef = useRef<HTMLVideoElement>(null);
   const { startWebcam, stopWebcam } = useWebcam(videoRef);
+  const { health, handleHealthMessage, resetHealth } = usePipelineHealth();
+  const { showDriftWarning, checkDrift, dismissDriftWarning } =
+    useDriftWarning(config.broadcastDelay);
+
+  useEffect(() => { checkDrift(health); }, [health, checkDrift]);
 
   const socketParams = useMemo(() => ({
     sourceLang: config.sourceLang,
@@ -33,7 +42,8 @@ export default function BroadcastPage() {
     broadcastDelay: config.broadcastDelay,
     onStartWebcam: (ws: WebSocket) => startWebcam(ws, config.videoDeviceId),
     onStopWebcam: stopWebcam,
-  }), [config, startWebcam, stopWebcam]);
+    onHealthMessage: handleHealthMessage,
+  }), [config, startWebcam, stopWebcam, handleHealthMessage]);
 
   const { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError } =
     useBroadcastSocket(socketParams);
@@ -50,6 +60,10 @@ export default function BroadcastPage() {
     ? "w-full max-h-48 object-cover rounded-xl bg-black"
     : "hidden";
 
+  useEffect(() => {
+    if (!isLive) resetHealth();
+  }, [isLive, resetHealth]);
+
   return (
     <PageLayout
       maxWidth="3xl"
@@ -61,6 +75,7 @@ export default function BroadcastPage() {
       }
     >
       <ErrorBanners errors={errors} onDismiss={dismissError} />
+      {showDriftWarning && <DriftWarningBanner onDismiss={dismissDriftWarning} />}
 
       <TierSelector
         tier={config.tier}
@@ -110,6 +125,7 @@ export default function BroadcastPage() {
       />
 
       {isLive && <PipelineHealthBadge warnings={pipelineWarnings} />}
+      {isLive && health && <HealthDashboard health={health} />}
       {isLive && <LiveTranscript transcripts={transcripts} interim={interim} />}
       <InfoFooter tier={config.tier} hasRtmpStreams={hasRtmpStreams} />
     </PageLayout>
