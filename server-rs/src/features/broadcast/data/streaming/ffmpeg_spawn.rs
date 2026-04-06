@@ -5,7 +5,42 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use std::sync::LazyLock;
+
 use super::process::FFMPEG_BIN;
+
+const FONTCONFIG_PATH: &str = "/tmp/brivva_fonts.conf";
+
+/// Minimal Fontconfig XML that points at macOS / Linux system font directories.
+/// Written once to /tmp so the bundled FFmpeg sidecar can find it.
+const MINIMAL_FONTS_CONF: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>/System/Library/Fonts</dir>
+  <dir>/System/Library/Fonts/Supplemental</dir>
+  <dir>/Library/Fonts</dir>
+  <dir>/usr/share/fonts</dir>
+  <cachedir>/tmp/brivva_fontconfig_cache</cachedir>
+</fontconfig>
+"#;
+
+/// Write a minimal fonts.conf once; returns the path if successful.
+static FONTCONFIG_FILE: LazyLock<Option<String>> = LazyLock::new(|| {
+    match std::fs::write(FONTCONFIG_PATH, MINIMAL_FONTS_CONF) {
+        Ok(()) => {
+            tracing::debug!("[FFMPEG] Wrote minimal fontconfig to {}", FONTCONFIG_PATH);
+            Some(FONTCONFIG_PATH.to_string())
+        }
+        Err(e) => {
+            tracing::warn!("[FFMPEG] Failed to write fontconfig: {}", e);
+            None
+        }
+    }
+});
+
+fn ensure_fontconfig() -> Option<String> {
+    FONTCONFIG_FILE.clone()
+}
 
 /// Create a named FIFO for audio data at /tmp/brivva_audio_{stream_id}.
 pub(super) fn create_audio_fifo(stream_id: &str) -> Result<String, String> {
@@ -28,12 +63,16 @@ pub(super) fn spawn_ffmpeg_process(
         "[FFMPEG:{}] spawning: {} {}",
         stream_id, &*FFMPEG_BIN, args.join(" ")
     );
-    let mut child = std::process::Command::new(&*FFMPEG_BIN)
-        .args(args)
+    let fontconfig_file = ensure_fontconfig();
+    let mut cmd = std::process::Command::new(&*FFMPEG_BIN);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    if let Some(ref path) = fontconfig_file {
+        cmd.env("FONTCONFIG_FILE", path);
+    }
+    let mut child = cmd.spawn()
         .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
     tracing::info!("[FFMPEG:{}] spawned PID={}", stream_id, child.id());
 

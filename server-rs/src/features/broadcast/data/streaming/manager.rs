@@ -434,28 +434,13 @@ impl RtmpManager {
 
     fn build_video_encoding_args(&self, _lang: &str) -> Vec<String> {
         tracing::info!("[FFMPEG] Encoding {} -> H.264 (ultrafast)", self.video_codec);
-
-        // Subtitle overlay is available but disabled by default — the drawtext filter
-        // causes FFmpeg to produce output YouTube rejects ("Preparing stream" forever).
-        // Enable with BRIVVA_SUBTITLES=1 env var for local testing only.
         let mut args = Vec::new();
 
         if std::env::var("BRIVVA_SUBTITLES").is_ok() {
-            let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, _lang);
-            let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, _lang);
-            let _ = std::fs::write(&transcript_file, "");
-            let _ = std::fs::write(&translation_file, "");
-
-            let vf = format!(
-                "drawtext=textfile='{transcript}':reload=1:fontsize=24:fontcolor=white:\
-                 borderw=2:bordercolor=black:x=(w-tw)/2:y=30,\
-                 drawtext=textfile='{translation}':reload=1:fontsize=28:fontcolor=yellow:\
-                 borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70",
-                transcript = transcript_file,
-                translation = translation_file,
-            );
-            args.extend(["-vf".to_string(), vf]);
-            tracing::info!("[FFMPEG] Subtitle overlay enabled (BRIVVA_SUBTITLES=1)");
+            if let Some(vf) = self.build_subtitle_filter(_lang) {
+                args.extend(["-vf".to_string(), vf]);
+                tracing::info!("[FFMPEG] Subtitle overlay enabled (BRIVVA_SUBTITLES=1)");
+            }
         }
 
         args.extend([
@@ -483,6 +468,27 @@ impl RtmpManager {
             "-rtmp_live".to_string(), "live".to_string(),
             rtmp_url.to_string(),
         ]
+    }
+
+    fn build_subtitle_filter(&self, lang: &str) -> Option<String> {
+        let font_path = resolve_system_font()?;
+        let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, lang);
+        let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, lang);
+        let _ = std::fs::write(&transcript_file, "");
+        let _ = std::fs::write(&translation_file, "");
+
+        let vf = format!(
+            "drawtext=textfile='{transcript}':fontfile='{font}':\
+             reload=1:fontsize=24:fontcolor=white:\
+             borderw=2:bordercolor=black:x=(w-tw)/2:y=30,\
+             drawtext=textfile='{translation}':fontfile='{font}':\
+             reload=1:fontsize=28:fontcolor=yellow:\
+             borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70",
+            transcript = transcript_file,
+            translation = translation_file,
+            font = font_path,
+        );
+        Some(vf)
     }
 
     fn spawn_video_drain(
@@ -567,6 +573,38 @@ impl RtmpManager {
 }
 
 // ── Free functions ───────────────────────────────────────
+
+/// macOS font paths checked in order of preference (monospaced first for subtitles).
+const MACOS_FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
+];
+
+/// Linux font paths checked as fallback.
+const LINUX_FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+];
+
+/// Resolve a usable .ttf/.ttc font file on the system, bypassing Fontconfig entirely.
+fn resolve_system_font() -> Option<String> {
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        MACOS_FONT_CANDIDATES
+    } else {
+        LINUX_FONT_CANDIDATES
+    };
+    for path in candidates {
+        if std::path::Path::new(path).exists() {
+            tracing::debug!("[FFMPEG] Resolved subtitle font: {}", path);
+            return Some(path.to_string());
+        }
+    }
+    tracing::warn!("[FFMPEG] No system font found for subtitles, overlay disabled");
+    None
+}
 
 /// Cap play_at to prevent audio pile-up when TTS generation is slow.
 /// If utterance_start is more than (broadcast_delay + 2s) in the past,
@@ -789,5 +827,30 @@ mod tests {
         let recovered = downcast_rtmp_manager(&erased);
 
         assert!(recovered.is_some());
+    }
+
+    #[test]
+    fn should_resolve_system_font_on_macos() {
+        if cfg!(target_os = "macos") {
+            let font = resolve_system_font();
+            assert!(font.is_some(), "expected a system font on macOS");
+            let path = font.unwrap();
+            assert!(path.ends_with(".ttf") || path.ends_with(".ttc"));
+        }
+    }
+
+    #[test]
+    fn should_build_subtitle_filter_with_fontfile() {
+        let mgr = RtmpManager::new("test_sub".to_string());
+
+        let filter = mgr.build_subtitle_filter("en");
+
+        if let Some(vf) = filter {
+            assert!(vf.contains("fontfile="), "drawtext must include fontfile=");
+            assert!(vf.contains("reload=1"), "drawtext must reload subtitle files");
+            assert!(vf.contains("brivva_sub_test_sub_en_transcript.txt"));
+            assert!(vf.contains("brivva_sub_test_sub_en_translation.txt"));
+        }
+        // filter is None only when no system font is found (e.g. minimal Linux CI)
     }
 }
