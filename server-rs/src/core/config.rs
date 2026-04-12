@@ -36,5 +36,9 @@ pub const STT_RECONNECT_DELAY_SECS: u64 = 1;
 // Soniox
 pub const SONIOX_MAX_ENDPOINT_DELAY_MS: u64 = 1500;
 
+// Recording & dubbing
+pub const RECORDING_DIR: &str = "/tmp/brivva/recordings";
+pub const DUBBING_DIR: &str = "/tmp/brivva/dubbing";
+
 // Tier
 pub const TIER_SUBTITLES_ONLY: u8 = 1;

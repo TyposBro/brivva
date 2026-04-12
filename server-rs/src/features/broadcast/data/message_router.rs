@@ -41,12 +41,30 @@ async fn handle_binary(
 ) {
     if data.is_empty() { return; }
     match data[0] {
-        MSG_TAG_AUDIO => { let _ = audio_tx.send(data[1..].to_vec()); }
-        MSG_TAG_VIDEO => forward_video(data, sessions, session_id).await,
+        MSG_TAG_AUDIO => {
+            record_host_audio(sessions, session_id, &data[1..]);
+            let _ = audio_tx.send(data[1..].to_vec());
+        }
+        MSG_TAG_VIDEO => {
+            record_video_chunk(sessions, session_id, &data[1..]);
+            forward_video(data, sessions, session_id).await;
+        }
         tag => {
             tracing::warn!("[WS:{}] unknown tag 0x{:02x}, treating as audio: {}B", session_id, tag, data.len());
             let _ = audio_tx.send(data.to_vec());
         }
+    }
+}
+
+fn record_host_audio(sessions: &Sessions, session_id: &str, pcm: &[u8]) {
+    if let Some(ref recorder) = sessions.get(session_id).and_then(|s| s.recorder.clone()) {
+        recorder.write_host_audio(pcm);
+    }
+}
+
+fn record_video_chunk(sessions: &Sessions, session_id: &str, data: &[u8]) {
+    if let Some(ref recorder) = sessions.get(session_id).and_then(|s| s.recorder.clone()) {
+        recorder.write_video_chunk(data);
     }
 }
 

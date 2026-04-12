@@ -12,9 +12,17 @@ use crate::features::broadcast::domain::Sessions;
 pub async fn cleanup_session(session_id: &str, sessions: &Sessions) {
     tracing::info!("[WS] Session {} ending -- starting cleanup", session_id);
     if let Some((_, session)) = sessions.remove(session_id) {
+        finalize_recording(session_id, &session);
         stop_rtmp(session_id, &session).await;
     }
     tracing::info!("[WS] Session {} cleanup complete", session_id);
+}
+
+fn finalize_recording(session_id: &str, session: &crate::features::broadcast::domain::Session) {
+    if let Some(ref recorder) = session.recorder {
+        tracing::info!("[WS:{}] finalizing recording", session_id);
+        recorder.finalize();
+    }
 }
 
 async fn stop_rtmp(session_id: &str, session: &crate::features::broadcast::domain::Session) {

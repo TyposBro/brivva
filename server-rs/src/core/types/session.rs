@@ -9,6 +9,7 @@ use crate::core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::core::latency_tracker::LatencyTracker;
 use crate::core::pipeline_counters::PipelineCounters;
 use crate::core::types::Lang;
+use crate::shared::recording::SessionRecorder;
 
 /// Type-erased RTMP manager handle.
 ///
@@ -39,6 +40,7 @@ pub struct Session {
     pub latency_tracker: Arc<LatencyTracker>,
     pub tts_circuit_breaker: Arc<CircuitBreaker>,
     pub stt_circuit_breaker: Arc<CircuitBreaker>,
+    pub recorder: Option<Arc<SessionRecorder>>,
 }
 
 impl Session {
@@ -65,6 +67,7 @@ impl Session {
             latency_tracker: Arc::new(LatencyTracker::new()),
             tts_circuit_breaker: Arc::new(CircuitBreaker::new(cb_config())),
             stt_circuit_breaker: Arc::new(CircuitBreaker::new(cb_config())),
+            recorder: None,
         }
     }
 

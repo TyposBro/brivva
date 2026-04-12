@@ -3,9 +3,12 @@
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
+use std::sync::Arc;
+
 use crate::core::config::{DEFAULT_TTS_MODEL, DEFAULT_VOICE_ID, DASHSCOPE_TTS_MODEL_VC};
 use crate::core::types::Lang;
 use crate::features::broadcast::domain::{Session, Sessions};
+use crate::shared::recording::SessionRecorder;
 use crate::shared::voice_clone;
 
 use super::ws_handler::{WsQuery, BroadcastDeps};
@@ -114,8 +117,14 @@ fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
     );
     session.tts_model = tts_model;
     session.tts_provider = query.tts_provider.clone();
+    session.recorder = create_recorder(&params.session_id, query.tier);
     apply_persisted_voice(&mut session);
     session
+}
+
+fn create_recorder(session_id: &str, tier: u8) -> Option<Arc<SessionRecorder>> {
+    let recorder = SessionRecorder::new(session_id, tier);
+    if recorder.is_enabled() { Some(Arc::new(recorder)) } else { None }
 }
 
 fn apply_persisted_voice(session: &mut Session) {

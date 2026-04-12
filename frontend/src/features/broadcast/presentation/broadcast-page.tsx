@@ -20,6 +20,8 @@ import { InfoFooter } from "./components/info-footer";
 import { PipelineHealthBadge } from "./components/pipeline-health-badge";
 import { HealthDashboard } from "./components/health-dashboard";
 import { DriftWarningBanner } from "./components/drift-warning-banner";
+// PRAGMATIC: cross-feature UI integration — dubbing panel rendered within broadcast page
+import { DubbingPanel } from "../../dubbing/presentation/components/dubbing-panel";
 
 export default function BroadcastPage() {
   const { config, update } = useBroadcastConfig();
@@ -126,6 +128,14 @@ export default function BroadcastPage() {
         onStop={stop}
         onRtmpRestart={handleRtmpRestart}
       />
+
+      {!isLive && sessionId && config.tier >= 4 && (
+        <DubbingPanel
+          sessionId={sessionId}
+          targetLangs={config.targetLangs}
+          sourceLang={config.sourceLang}
+        />
+      )}
 
       {isLive && <PipelineHealthBadge warnings={pipelineWarnings} />}
       {isLive && health && <HealthDashboard health={health} />}
