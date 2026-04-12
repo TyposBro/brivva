@@ -39,7 +39,7 @@ async fn do_tts_dashscope_once(
     send_session_update(&mut ws, req.voice_id).await?;
     wait_session_updated(&mut ws, req.lang).await?;
     send_text(&mut ws, req.text).await?;
-    send_session_finish(&mut ws).await?;
+    send_commit(&mut ws).await?;
 
     let recv_ctx = RecvContext {
         lang: req.lang,
@@ -47,7 +47,11 @@ async fn do_tts_dashscope_once(
         streaming: req.streaming,
         tts_start: &tts_start,
     };
-    receive_audio(&mut ws, &recv_ctx).await
+    let result = receive_audio(&mut ws, &recv_ctx).await;
+
+    // Signal end only after all audio received
+    let _ = send_session_finish(&mut ws).await;
+    result
 }
 
 // ── Types ───
@@ -130,7 +134,7 @@ async fn wait_for_message_type(
             msg = ws.next() => {
                 let text = extract_text_from_ws_msg(msg, lang)?;
                 let Some(text) = text else { continue };
-                warn!("[TTS-DS:{}] handshake recv: {}", lang, &text[..text.len().min(300)]);
+                debug!("[TTS-DS:{}] handshake recv: {}", lang, &text[..text.len().min(300)]);
                 check_dashscope_error(&text)?;
                 if message_has_type(&text, expected_type) {
                     return Ok(());
@@ -179,13 +183,13 @@ async fn send_session_update(ws: &mut WsStream, voice_id: &str) -> Result<(), St
     let msg = serde_json::json!({
         "type": "session.update",
         "session": {
-            "model": DASHSCOPE_TTS_MODEL_VC,
             "voice": voice_id,
             "response_format": "pcm",
-            "mode": "server_commit"
+            "sample_rate": 24000,
+            "mode": "commit"
         }
     });
-    warn!("[TTS-DS] session.update: {}", serde_json::to_string(&msg).unwrap());
+    debug!("[TTS-DS] session.update: {}", serde_json::to_string(&msg).unwrap());
     ws.send(text_msg(&serde_json::to_string(&msg).unwrap()))
         .await
         .map_err(|e| format!("session.update send failed: {}", e))
@@ -196,11 +200,20 @@ async fn send_text(ws: &mut WsStream, text: &str) -> Result<(), String> {
 
     let msg = serde_json::json!({
         "type": "input_text_buffer.append",
-        "delta": text
+        "text": text
     });
     ws.send(text_msg(&serde_json::to_string(&msg).unwrap()))
         .await
         .map_err(|e| format!("input_text_buffer.append send failed: {}", e))
+}
+
+async fn send_commit(ws: &mut WsStream) -> Result<(), String> {
+    use futures_util::SinkExt;
+
+    let msg = serde_json::json!({ "type": "input_text_buffer.commit" });
+    ws.send(text_msg(&serde_json::to_string(&msg).unwrap()))
+        .await
+        .map_err(|e| format!("input_text_buffer.commit send failed: {}", e))
 }
 
 async fn send_session_finish(ws: &mut WsStream) -> Result<(), String> {
@@ -261,7 +274,7 @@ fn process_message(
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from));
     if msg_type.as_deref() != Some("response.audio.delta") {
-        warn!("[TTS-DS:{}] recv: {}", recv_ctx.lang, &text[..text.len().min(300)]);
+        debug!("[TTS-DS:{}] recv: {}", recv_ctx.lang, &text[..text.len().min(300)]);
     }
 
     check_dashscope_error(&text)?;
