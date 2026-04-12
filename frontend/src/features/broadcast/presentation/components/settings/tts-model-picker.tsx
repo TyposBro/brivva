@@ -1,4 +1,4 @@
-type TtsModel = "turbo" | "flash";
+type TtsModel = "v2" | "turbo" | "flash";
 
 type Props = {
   value: TtsModel;
@@ -7,6 +7,7 @@ type Props = {
 };
 
 const MODELS: { id: TtsModel; label: string; latency: string }[] = [
+  { id: "v2", label: "Multilingual V2", latency: "~200ms" },
   { id: "turbo", label: "Expressive", latency: "~300ms" },
   { id: "flash", label: "Fast", latency: "~75ms" },
 ];

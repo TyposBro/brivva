@@ -10,14 +10,14 @@ export type BroadcastConfig = {
   broadcastDelay: number;
   videoDeviceId: string;
   audioDeviceId: string;
-  ttsModel: "turbo" | "flash";
+  ttsModel: "v2" | "turbo" | "flash";
 };
 
 const DEFAULT_SOURCE_LANG = "en";
 const DEFAULT_TARGET_LANGS = ["ja", "ko"];
 const DEFAULT_TIER: TranslationTier = 2;
 const DEFAULT_BROADCAST_DELAY_MS = 5000;
-const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "turbo";
+const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "v2";
 
 function defaultConfig(): BroadcastConfig {
   return {

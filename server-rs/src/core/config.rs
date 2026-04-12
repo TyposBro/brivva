@@ -10,11 +10,12 @@ pub const BYTES_PER_SEC: f64 = 88200.0; // SAMPLE_RATE * (BITS_PER_SAMPLE/8) * C
 
 // Server
 pub const SERVER_ADDR: &str = "127.0.0.1:3000";
-pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
+pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024; // 20MB (3min @ 44100Hz 16-bit mono = ~15.1MB)
 
 // Defaults
 pub const DEFAULT_BROADCAST_DELAY_MS: u64 = 3000;
 pub const DEFAULT_TTS_MODEL: &str = "eleven_turbo_v2_5";
+pub const V2_TTS_MODEL: &str = "eleven_multilingual_v2";
 pub const DEFAULT_VOICE_ID: &str = "21m00Tcm4TlvDq8ikWAM";
 pub const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
 

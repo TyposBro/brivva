@@ -1,13 +1,23 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { appConfig } from "../../../../orchestration/config/app-config";
 import { float32ToInt16, mergePcmChunks } from "../../../../core/audio/pcm";
-import { CLONE_DURATION_SEC, CLONE_SAMPLE_RATE, CLONE_BUFFER_SIZE, CLONE_PROGRESS_INTERVAL_MS } from "../../domain/broadcast-constants";
+import {
+  CLONE_MIN_DURATION_SEC,
+  CLONE_MAX_DURATION_SEC,
+  CLONE_SAMPLE_RATE,
+  CLONE_BUFFER_SIZE,
+  CLONE_ELAPSED_INTERVAL_MS,
+} from "../../domain/broadcast-constants";
 import { checkVoiceStatus as fetchVoiceStatus, uploadVoiceClone } from "../../data/voice-clone-api-client";
 
+export type ClonePhase = "idle" | "recording" | "uploading";
+
 export function useVoiceClone(onError: (msg: string) => void) {
-  const [isCloning, setIsCloning] = useState(false);
-  const [cloneProgress, setCloneProgress] = useState(0);
+  const [phase, setPhase] = useState<ClonePhase>("idle");
+  const [elapsedSec, setElapsedSec] = useState(0);
   const [voiceReady, setVoiceReady] = useState(false);
+
+  const stopRef = useRef<(() => void) | null>(null);
 
   const checkVoiceStatus = useCallback(() => {
     fetchVoiceStatus(appConfig.apiBaseUrl)
@@ -18,31 +28,56 @@ export function useVoiceClone(onError: (msg: string) => void) {
   useEffect(() => { checkVoiceStatus(); }, [checkVoiceStatus]);
 
   const cloneVoice = useCallback(async () => {
-    setIsCloning(true);
-    setCloneProgress(0);
+    setPhase("recording");
+    setElapsedSec(0);
     setVoiceReady(false);
 
     const { chunks, cleanup } = await recordAudio();
-    const timer = startProgressTimer(setCloneProgress);
+    const timer = startElapsedTimer(setElapsedSec);
 
-    await waitForDuration();
+    const pcm = await waitForStopOrMax(chunks, cleanup, timer, stopRef);
 
-    clearInterval(timer);
-    cleanup();
-
-    const pcm = mergePcmChunks(chunks);
-    setCloneProgress(1);
-
+    setPhase("uploading");
     try {
       await uploadVoiceClone(appConfig.apiBaseUrl, pcm);
       setVoiceReady(true);
     } catch (e) {
       onError(`${e}`);
     }
-    setIsCloning(false);
+    setPhase("idle");
   }, [onError]);
 
-  return { isCloning, cloneProgress, voiceReady, setVoiceReady, cloneVoice };
+  const stopCloning = useCallback(() => {
+    stopRef.current?.();
+  }, []);
+
+  const isMinReached = elapsedSec >= CLONE_MIN_DURATION_SEC;
+
+  return { phase, elapsedSec, isMinReached, voiceReady, setVoiceReady, cloneVoice, stopCloning };
+}
+
+function waitForStopOrMax(
+  chunks: Int16Array[],
+  cleanup: () => void,
+  timer: number,
+  stopRef: React.MutableRefObject<(() => void) | null>,
+): Promise<Int16Array> {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      cleanup();
+      stopRef.current = null;
+      resolve(mergePcmChunks(chunks));
+    };
+
+    stopRef.current = finish;
+
+    setTimeout(finish, CLONE_MAX_DURATION_SEC * 1000);
+  });
 }
 
 async function recordAudio() {
@@ -68,14 +103,9 @@ async function recordAudio() {
   return { chunks, cleanup };
 }
 
-function startProgressTimer(setProgress: (p: number) => void) {
+function startElapsedTimer(setElapsed: (s: number) => void) {
   const start = Date.now();
   return window.setInterval(() => {
-    const elapsed = (Date.now() - start) / 1000;
-    setProgress(Math.min(elapsed / CLONE_DURATION_SEC, 1));
-  }, CLONE_PROGRESS_INTERVAL_MS);
-}
-
-function waitForDuration() {
-  return new Promise((resolve) => setTimeout(resolve, CLONE_DURATION_SEC * 1000));
+    setElapsed(Math.round((Date.now() - start) / 1000));
+  }, CLONE_ELAPSED_INTERVAL_MS);
 }

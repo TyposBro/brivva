@@ -157,6 +157,7 @@ fn send_transcript_final(state: &SttState, uid: u64, ctx: &SttContext) {
 
 async fn send_translation(state: &mut SttState, uid: u64, ctx: &SttContext) {
     let translated = state.translation_acc.clone();
+    let translated = translated.trim().to_string();
     if translated.is_empty() {
         increment_translation_empty(ctx);
         return;

@@ -48,7 +48,7 @@ export default function BroadcastPage() {
   const { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError } =
     useBroadcastSocket(socketParams);
 
-  const { isCloning, cloneProgress, voiceReady, setVoiceReady, cloneVoice } = useVoiceClone(addError);
+  const { phase, elapsedSec, isMinReached, voiceReady, setVoiceReady, cloneVoice, stopCloning } = useVoiceClone(addError);
 
   const {
     handleSourceChange, handleTargetToggle, handleRtmpChange,
@@ -105,10 +105,12 @@ export default function BroadcastPage() {
 
       {showVoiceCloning && (
         <VoiceCloning
-          isCloning={isCloning}
-          cloneProgress={cloneProgress}
+          phase={phase}
+          elapsedSec={elapsedSec}
+          isMinReached={isMinReached}
           voiceReady={voiceReady}
           onClone={cloneVoice}
+          onStop={stopCloning}
         />
       )}
 

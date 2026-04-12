@@ -3,7 +3,7 @@
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
-use crate::core::config::DEFAULT_TTS_MODEL;
+use crate::core::config::{DEFAULT_TTS_MODEL, V2_TTS_MODEL};
 use crate::core::types::Lang; use crate::features::broadcast::domain::{Session, Sessions};
 use crate::shared::voice_clone;
 
@@ -108,6 +108,7 @@ fn apply_persisted_voice(session: &mut Session) {
 fn resolve_tts_model(model: &str) -> String {
     match model {
         "flash" => "eleven_flash_v2_5",
+        "v2" => V2_TTS_MODEL,
         _ => DEFAULT_TTS_MODEL,
     }.to_string()
 }
