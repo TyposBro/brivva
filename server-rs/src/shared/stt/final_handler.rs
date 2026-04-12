@@ -131,6 +131,7 @@ fn spawn_tts_for_translation(
     }
     let voice_clone_id = session.voice_clone_id.clone();
     let tts_model = session.tts_model.clone();
+    let tts_provider = session.tts_provider.clone();
     let broadcast_delay_ms = session.broadcast_delay_ms;
     let erased = session.rtmp_manager.clone();
     let pipeline_counters = session.pipeline_counters.clone();
@@ -154,6 +155,7 @@ fn spawn_tts_for_translation(
         style_params: style_params.clone(),
         voice_clone_id,
         tts_model,
+        tts_provider,
         broadcast_delay_ms,
         erased_rtmp: erased,
         pipeline_counters,
@@ -177,6 +179,7 @@ struct TtsSpawnRequest {
     style_params: StyleParams,
     voice_clone_id: Option<String>,
     tts_model: String,
+    tts_provider: String,
     broadcast_delay_ms: u64,
     erased_rtmp: Option<crate::core::types::ErasedRtmpManager>,
     pipeline_counters: std::sync::Arc<crate::core::pipeline_counters::PipelineCounters>,
@@ -247,6 +250,19 @@ async fn execute_tts_with_fallback(
     streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>,
     tts_deadline: std::time::Duration,
 ) {
+    if req.tts_provider == "dashscope" {
+        execute_tts_dashscope(synth_req, req, streaming, tts_deadline).await;
+    } else {
+        execute_tts_elevenlabs(synth_req, req, streaming, tts_deadline).await;
+    }
+}
+
+async fn execute_tts_elevenlabs(
+    synth_req: &crate::shared::tts::SynthesisRequest<'_>,
+    req: &TtsSpawnRequest,
+    streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>,
+    tts_deadline: std::time::Duration,
+) {
     match tokio::time::timeout(tts_deadline, crate::shared::tts::do_tts_ws(synth_req)).await {
         Ok(Ok(bytes)) => {
             req.tts_circuit_breaker.record_success();
@@ -261,6 +277,32 @@ async fn execute_tts_with_fallback(
             req.pipeline_counters.increment_tts_timeouts();
             req.tts_circuit_breaker.record_failure();
             error!("[TTS] #{} {} TIMEOUT", req.uid, req.target_lang);
+            if let Some(s) = streaming { s.finish(); }
+        }
+    }
+}
+
+async fn execute_tts_dashscope(
+    synth_req: &crate::shared::tts::SynthesisRequest<'_>,
+    req: &TtsSpawnRequest,
+    streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>,
+    tts_deadline: std::time::Duration,
+) {
+    match tokio::time::timeout(tts_deadline, crate::shared::tts::do_tts_dashscope(synth_req)).await {
+        Ok(Ok(bytes)) => {
+            req.tts_circuit_breaker.record_success();
+            info!("[TTS] #{} {} dashscope = {}KB PCM", req.uid, req.target_lang, bytes / 1024);
+        }
+        Ok(Err(e)) => {
+            req.pipeline_counters.increment_tts_failures();
+            req.tts_circuit_breaker.record_failure();
+            error!("[TTS] #{} {} dashscope failed: {}", req.uid, req.target_lang, e);
+            if let Some(s) = streaming { s.finish(); }
+        }
+        Err(_) => {
+            req.pipeline_counters.increment_tts_timeouts();
+            req.tts_circuit_breaker.record_failure();
+            error!("[TTS] #{} {} TIMEOUT (dashscope)", req.uid, req.target_lang);
             if let Some(s) = streaming { s.finish(); }
         }
     }

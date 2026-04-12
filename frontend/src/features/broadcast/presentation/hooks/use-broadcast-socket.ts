@@ -11,6 +11,7 @@ type SocketParams = {
   targetLangs: string[];
   tier: TranslationTier;
   ttsModel: string;
+  ttsProvider: string;
   audioDeviceId: string;
   rtmpUrls: Record<string, string>;
   broadcastDelay: number;
@@ -110,7 +111,7 @@ function filterTargetLanguages(sourceLang: string, targetLangs: string[]): strin
 
 function buildWsUrl(params: SocketParams, targets: string[]): string {
   const base = appConfig.apiBaseUrl.replace(/^http/, "ws");
-  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}`;
+  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}&ttsProvider=${params.ttsProvider}`;
 }
 
 type ConnectConfig = {

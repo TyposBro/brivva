@@ -12,7 +12,7 @@ import { checkVoiceStatus as fetchVoiceStatus, uploadVoiceClone } from "../../da
 
 export type ClonePhase = "idle" | "recording" | "uploading";
 
-export function useVoiceClone(onError: (msg: string) => void) {
+export function useVoiceClone(onError: (msg: string) => void, provider = "elevenlabs") {
   const [phase, setPhase] = useState<ClonePhase>("idle");
   const [elapsedSec, setElapsedSec] = useState(0);
   const [voiceReady, setVoiceReady] = useState(false);
@@ -39,13 +39,13 @@ export function useVoiceClone(onError: (msg: string) => void) {
 
     setPhase("uploading");
     try {
-      await uploadVoiceClone(appConfig.apiBaseUrl, pcm);
+      await uploadVoiceClone(appConfig.apiBaseUrl, pcm, provider);
       setVoiceReady(true);
     } catch (e) {
       onError(`${e}`);
     }
     setPhase("idle");
-  }, [onError]);
+  }, [onError, provider]);
 
   const stopCloning = useCallback(() => {
     stopRef.current?.();

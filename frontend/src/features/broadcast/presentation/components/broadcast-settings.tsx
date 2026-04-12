@@ -48,8 +48,10 @@ export function BroadcastSettings({ config, devices, isLive, onConfigChange }: P
           />
           <TtsModelPicker
             value={config.ttsModel}
+            provider={config.ttsProvider}
             disabled={isLive}
             onChange={(v) => onConfigChange("ttsModel", v)}
+            onProviderChange={(v) => onConfigChange("ttsProvider", v)}
           />
         </div>
       )}

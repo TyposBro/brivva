@@ -35,8 +35,7 @@ Source language → passthrough (host audio queued directly to RTMP, zero TTS co
 
 **What needs to ship before Apr 16:**
 1. Voice recording extended: 30s minimum → up to 3 min optional (longer sample = better clone)
-2. ElevenLabs V2 model option (eleven_multilingual_v2 for cloned voices — higher quality than Flash)
-3. 30-minute endurance test passed
+2. 30-minute endurance test passed
 4. Backup demo recording captured
 
 **Architecture:** 69 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
@@ -69,13 +68,13 @@ server-rs/src/
 ## TTS — ElevenLabs
 
 - **Models available:**
-  - `eleven_flash_v2_5` — fast, good quality (current default)
-  - `eleven_multilingual_v2` — slower, higher quality for cloned voices (use for demo)
+  - `eleven_turbo_v2_5` — expressive, good quality (default)
+  - `eleven_flash_v2_5` — fast, lower latency
 - **Voice cloning:** 30s minimum sample, **extending to 2-3 min for higher quality**
   - Frontend: recording continues past 30s, "minimum reached" indicator, stop anytime up to 3 min
   - Backend: longer WAV → better clone fidelity
 - **Streaming:** WebSocket primary, REST fallback. IncrementalMp3Decoder for real-time MP3→PCM.
-- **TTFB:** ~75ms (Flash), ~150-200ms (V2)
+- **TTFB:** ~75ms (Flash), ~300ms (Turbo/Expressive)
 
 ## Key Technical Details
 

@@ -37,6 +37,7 @@ export default function BroadcastPage() {
     targetLangs: config.targetLangs,
     tier: config.tier,
     ttsModel: config.ttsModel,
+    ttsProvider: config.ttsProvider,
     audioDeviceId: config.audioDeviceId,
     rtmpUrls: config.rtmpUrls,
     broadcastDelay: config.broadcastDelay,
@@ -48,7 +49,7 @@ export default function BroadcastPage() {
   const { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError } =
     useBroadcastSocket(socketParams);
 
-  const { phase, elapsedSec, isMinReached, voiceReady, setVoiceReady, cloneVoice, stopCloning } = useVoiceClone(addError);
+  const { phase, elapsedSec, isMinReached, voiceReady, setVoiceReady, cloneVoice, stopCloning } = useVoiceClone(addError, config.ttsProvider);
 
   const {
     handleSourceChange, handleTargetToggle, handleRtmpChange,

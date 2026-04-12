@@ -9,8 +9,8 @@ export async function checkVoiceStatus(apiBaseUrl: string): Promise<boolean> {
   return body.active;
 }
 
-export async function uploadVoiceClone(apiBaseUrl: string, pcm: Int16Array): Promise<void> {
-  const response = await fetch(`${apiBaseUrl}/api/voice/clone`, {
+export async function uploadVoiceClone(apiBaseUrl: string, pcm: Int16Array, provider = "elevenlabs"): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/voice/clone?provider=${provider}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: new Uint8Array(pcm.buffer) as unknown as BodyInit,

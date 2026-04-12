@@ -20,6 +20,7 @@ pub struct TtsRequest<'a> {
     pub utterance_end: Instant,
     pub tts_model: &'a str,
     pub tts_api_key: &'a str,
+    pub tts_provider: &'a str,
     pub default_voice: &'a str,
 }
 
@@ -30,7 +31,7 @@ pub struct TtsEnv<'a> {
     pub session_id: &'a str,
 }
 
-/// ElevenLabs TTS -- WebSocket streaming with REST fallback.
+/// TTS entry point -- routes to ElevenLabs or DashScope based on provider.
 pub async fn do_tts(
     env: &TtsEnv<'_>,
     req: &TtsRequest<'_>,
@@ -46,7 +47,7 @@ pub async fn do_tts(
     notify_host(env.sessions, env.session_id, ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id: req.utterance_id });
 
     let synth_req = build_synthesis_request(req, &ctx, &lang_str, &streaming);
-    let tts_result = execute_tts_with_fallback(env.client, &synth_req, &ctx).await;
+    let tts_result = execute_tts_with_fallback(env.client, &synth_req, &ctx, req.tts_provider).await;
 
     let outcome = TtsOutcome {
         streaming,
@@ -154,9 +155,16 @@ async fn execute_tts_with_fallback(
     client: &reqwest::Client,
     synth_req: &SynthesisRequest<'_>,
     ctx: &TtsContext,
+    provider: &str,
 ) -> Result<Result<usize, String>, tokio::time::error::Elapsed> {
-    let synth = ElevenLabsSynthesizer::new(client.clone());
-    run_with_deadline(&synth, synth_req, ctx).await
+    if provider == "dashscope" {
+        tokio::time::timeout(ctx.tts_deadline, async {
+            super::dashscope_ws::do_tts_dashscope(synth_req).await
+        }).await
+    } else {
+        let synth = ElevenLabsSynthesizer::new(client.clone());
+        run_with_deadline(&synth, synth_req, ctx).await
+    }
 }
 
 async fn run_with_deadline(
@@ -220,7 +228,8 @@ fn notify_host(sessions: &Sessions, session_id: &str, msg: ServerMsg) {
 
 fn log_tts_start(req: &TtsRequest<'_>, ctx: &TtsContext) {
     info!(
-        "[TTS] elevenlabs WS voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
+        "[TTS] {} WS voice={}{} lang={} emotion={} speed={:.2} text='{}' [deadline={}ms]",
+        req.tts_provider,
         &ctx.voice_id[..8.min(ctx.voice_id.len())],
         if req.voice_clone_id.is_some() { " (cloned)" } else { "" },
         req.lang, req.style_params.emotion, req.style_params.speed, req.text,

@@ -15,9 +15,12 @@ pub const MAX_BODY_SIZE: usize = 20 * 1024 * 1024; // 20MB (3min @ 44100Hz 16-bi
 // Defaults
 pub const DEFAULT_BROADCAST_DELAY_MS: u64 = 3000;
 pub const DEFAULT_TTS_MODEL: &str = "eleven_turbo_v2_5";
-pub const V2_TTS_MODEL: &str = "eleven_multilingual_v2";
 pub const DEFAULT_VOICE_ID: &str = "21m00Tcm4TlvDq8ikWAM";
 pub const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
+
+// DashScope / Qwen3-TTS
+pub const DASHSCOPE_TTS_MODEL_VC: &str = "qwen3-tts-vc-realtime-2026-01-15";
+pub const DEFAULT_TTS_PROVIDER: &str = "elevenlabs";
 
 // TTS timing
 pub const TTS_DEADLINE_CAP_MS: u64 = 10_000;

@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import type { TranslationTier } from "../../domain/broadcast-types";
 import { STORAGE_KEY } from "../../domain/broadcast-constants";
 
+export type TtsProvider = "elevenlabs" | "dashscope";
+
 export type BroadcastConfig = {
   sourceLang: string;
   targetLangs: string[];
@@ -10,14 +12,16 @@ export type BroadcastConfig = {
   broadcastDelay: number;
   videoDeviceId: string;
   audioDeviceId: string;
-  ttsModel: "v2" | "turbo" | "flash";
+  ttsModel: "turbo" | "flash";
+  ttsProvider: TtsProvider;
 };
 
 const DEFAULT_SOURCE_LANG = "en";
 const DEFAULT_TARGET_LANGS = ["ja", "ko"];
 const DEFAULT_TIER: TranslationTier = 2;
 const DEFAULT_BROADCAST_DELAY_MS = 5000;
-const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "v2";
+const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "turbo";
+const DEFAULT_TTS_PROVIDER: TtsProvider = "elevenlabs";
 
 function defaultConfig(): BroadcastConfig {
   return {
@@ -29,13 +33,22 @@ function defaultConfig(): BroadcastConfig {
     videoDeviceId: "",
     audioDeviceId: "",
     ttsModel: DEFAULT_TTS_MODEL,
+    ttsProvider: DEFAULT_TTS_PROVIDER,
   };
 }
+
+const VALID_TTS_MODELS: BroadcastConfig["ttsModel"][] = ["turbo", "flash"];
+const VALID_TTS_PROVIDERS: TtsProvider[] = ["elevenlabs", "dashscope"];
 
 function loadConfig(): BroadcastConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...defaultConfig(), ...JSON.parse(raw) };
+    if (raw) {
+      const cfg = { ...defaultConfig(), ...JSON.parse(raw) };
+      if (!VALID_TTS_MODELS.includes(cfg.ttsModel)) cfg.ttsModel = DEFAULT_TTS_MODEL;
+      if (!VALID_TTS_PROVIDERS.includes(cfg.ttsProvider)) cfg.ttsProvider = DEFAULT_TTS_PROVIDER;
+      return cfg;
+    }
   } catch {}
   return defaultConfig();
 }

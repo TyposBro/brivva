@@ -31,16 +31,20 @@ pub(crate) struct WsQuery {
     pub(super) tier: u8,
     #[serde(rename = "ttsModel", default = "default_tts_model")]
     pub(super) tts_model: String,
+    #[serde(rename = "ttsProvider", default = "default_tts_provider")]
+    pub(super) tts_provider: String,
 }
 
 fn default_tier() -> u8 { 2 }
 fn default_tts_model() -> String { "turbo".to_string() }
+fn default_tts_provider() -> String { crate::core::config::DEFAULT_TTS_PROVIDER.to_string() }
 
 /// Dependencies injected from orchestration for broadcast WebSocket handlers.
 #[derive(Clone)]
 pub struct BroadcastDeps {
     pub stt_api_key: String,
     pub tts_api_key: String,
+    pub dashscope_api_key: String,
     pub default_voice: String,
     pub http_client: reqwest::Client,
 }

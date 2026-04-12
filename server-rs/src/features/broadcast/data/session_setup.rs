@@ -3,8 +3,9 @@
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
-use crate::core::config::{DEFAULT_TTS_MODEL, V2_TTS_MODEL};
-use crate::core::types::Lang; use crate::features::broadcast::domain::{Session, Sessions};
+use crate::core::config::{DEFAULT_TTS_MODEL, DEFAULT_VOICE_ID, DASHSCOPE_TTS_MODEL_VC};
+use crate::core::types::Lang;
+use crate::features::broadcast::domain::{Session, Sessions};
 use crate::shared::voice_clone;
 
 use super::ws_handler::{WsQuery, BroadcastDeps};
@@ -51,9 +52,18 @@ pub fn spawn_stt_pipeline(
     audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     deps: &BroadcastDeps,
 ) {
-    let target_langs = sessions.get(session_id)
+    let session_ref = sessions.get(session_id);
+    let target_langs = session_ref.as_ref()
         .map(|s| s.active_langs())
         .unwrap_or_default();
+    let tts_provider = session_ref.as_ref()
+        .map(|s| s.tts_provider.clone())
+        .unwrap_or_default();
+
+    spawn_tts_warmup(&session_ref, &tts_provider, deps);
+    drop(session_ref);
+
+    let tts_api_key = resolve_tts_api_key(&tts_provider, deps);
     let req = crate::shared::stt::SttStartRequest {
         session_id: session_id.to_string(),
         sessions: sessions.clone(),
@@ -61,13 +71,20 @@ pub fn spawn_stt_pipeline(
         target_langs,
         audio_rx,
         stt_api_key: deps.stt_api_key.clone(),
-        tts_api_key: deps.tts_api_key.clone(),
+        tts_api_key,
         default_voice: deps.default_voice.clone(),
         http_client: deps.http_client.clone(),
     };
     tokio::spawn(async move {
         crate::shared::stt::start_stt(req).await;
     });
+}
+
+fn resolve_tts_api_key(provider: &str, deps: &BroadcastDeps) -> String {
+    match provider {
+        "dashscope" => deps.dashscope_api_key.clone(),
+        _ => deps.tts_api_key.clone(),
+    }
 }
 
 // ── create_session helpers ──────────────────────────────────────────────────
@@ -79,15 +96,16 @@ fn parse_target_langs(raw: &str) -> Vec<Lang> {
 }
 
 fn log_session_start(params: &SessionParams, query: &WsQuery) {
-    let tts_model = resolve_tts_model(&query.tts_model);
+    let tts_model = resolve_tts_model(&query.tts_model, &query.tts_provider);
     tracing::info!(
-        "[WS] Session {} started: {} -> {:?} (tier {}, tts={})",
-        params.session_id, params.source_lang, params.target_langs, query.tier, tts_model,
+        "[WS] Session {} started: {} -> {:?} (tier {}, provider={}, tts={})",
+        params.session_id, params.source_lang, params.target_langs,
+        query.tier, query.tts_provider, tts_model,
     );
 }
 
 fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
-    let tts_model = resolve_tts_model(&query.tts_model);
+    let tts_model = resolve_tts_model(&query.tts_model, &query.tts_provider);
     let mut session = Session::new(
         params.session_id.clone(),
         params.source_lang.clone(),
@@ -95,6 +113,7 @@ fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
         query.tier,
     );
     session.tts_model = tts_model;
+    session.tts_provider = query.tts_provider.clone();
     apply_persisted_voice(&mut session);
     session
 }
@@ -105,10 +124,33 @@ fn apply_persisted_voice(session: &mut Session) {
     }
 }
 
-fn resolve_tts_model(model: &str) -> String {
-    match model {
-        "flash" => "eleven_flash_v2_5",
-        "v2" => V2_TTS_MODEL,
-        _ => DEFAULT_TTS_MODEL,
-    }.to_string()
+fn resolve_tts_model(model: &str, provider: &str) -> String {
+    match provider {
+        "dashscope" => DASHSCOPE_TTS_MODEL_VC.to_string(),
+        _ => match model {
+            "flash" => "eleven_flash_v2_5",
+            _ => DEFAULT_TTS_MODEL,
+        }.to_string(),
+    }
+}
+
+// ── TTS warm-up ─────────────────────────────────────────────────────────────
+
+fn spawn_tts_warmup(
+    session_ref: &Option<dashmap::mapref::one::Ref<'_, String, Session>>,
+    tts_provider: &str,
+    deps: &BroadcastDeps,
+) {
+    let Some(session) = session_ref.as_ref() else { return };
+    if session.tier < 2 { return; }
+    if tts_provider == "dashscope" { return; } // DashScope doesn't need warmup
+
+    let voice_id = session.voice_clone_id.clone()
+        .unwrap_or_else(|| DEFAULT_VOICE_ID.to_string());
+    let model_id = session.tts_model.clone();
+    let api_key = deps.tts_api_key.clone();
+
+    tokio::spawn(async move {
+        crate::shared::tts::warm_up_tts_ws(&voice_id, &model_id, &api_key).await;
+    });
 }

@@ -98,7 +98,7 @@ fn mark_utterance_start(state: &mut SttState) {
     }
 }
 
-async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
+pub(super) async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
     if state.target_lang.is_none() || state.transcript_acc.is_empty() {
         return;
     }

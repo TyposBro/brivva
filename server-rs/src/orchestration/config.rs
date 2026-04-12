@@ -7,6 +7,7 @@ use crate::core::config::{DEFAULT_VOICE_ID, SERVER_ADDR, MAX_BODY_SIZE};
 pub struct AppConfig {
     pub soniox_api_key: String,
     pub tts_api_key: String,
+    pub dashscope_api_key: String,
     pub default_voice: String,
     pub server_addr: String,
     pub max_body_size: usize,
@@ -18,6 +19,9 @@ impl AppConfig {
         Self {
             soniox_api_key: std::env::var("SONIOX_API_KEY").unwrap_or_default(),
             tts_api_key: std::env::var("TTS_API_KEY").unwrap_or_default(),
+            dashscope_api_key: std::env::var("DASHSCOPE_API_KEY")
+                .or_else(|_| std::env::var("ALIBABA_API_KEY"))
+                .unwrap_or_default(),
             default_voice: std::env::var("DEFAULT_VOICE")
                 .unwrap_or_else(|_| DEFAULT_VOICE_ID.to_string()),
             server_addr: SERVER_ADDR.to_string(),

@@ -2,6 +2,9 @@
 
 use serde::Deserialize;
 use tracing::{info, warn, error};
+use crate::core::config::{BYTES_PER_SEC, SAMPLE_RATE};
+
+const CLONE_SAMPLE_RATE: u32 = SAMPLE_RATE / 2; // 22050Hz — halves file size, well under 11MB limit
 
 /// Dependencies needed by the ElevenLabs cloner.
 pub struct ElevenLabsCloner<'a> {
@@ -10,7 +13,8 @@ pub struct ElevenLabsCloner<'a> {
 }
 
 impl<'a> super::VoiceCloner for ElevenLabsCloner<'a> {
-    async fn clone_voice(&self, wav: Vec<u8>) -> Result<String, String> {
+    async fn clone_voice(&self, pcm: Vec<u8>) -> Result<String, String> {
+        let wav = encode_pcm_to_wav(&pcm);
         let form = build_clone_form(wav);
         let resp = send_clone_request(self.client, self.api_key, form).await?;
         parse_clone_response(resp).await
@@ -27,9 +31,9 @@ impl<'a> super::VoiceCloner for ElevenLabsCloner<'a> {
 
 // ── Public facade ───────────────────────────────────────────────────────────
 
-pub async fn clone_voice(client: &reqwest::Client, api_key: &str, wav: Vec<u8>) -> Result<String, String> {
+pub async fn clone_voice(client: &reqwest::Client, api_key: &str, pcm: Vec<u8>) -> Result<String, String> {
     use super::VoiceCloner;
-    ElevenLabsCloner { api_key, client }.clone_voice(wav).await
+    ElevenLabsCloner { api_key, client }.clone_voice(pcm).await
 }
 
 pub async fn delete_voice(client: &reqwest::Client, api_key: &str, voice_id: &str) {
@@ -57,6 +61,34 @@ async fn cleanup_brivva_voices(client: &reqwest::Client, api_key: &str) {
         None => return,
     };
     delete_brivva_voices(client, api_key, &voices).await;
+}
+
+// ── PCM encoding ────────────────────────────────────────────────────────────
+
+fn encode_pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
+    let duration_secs = pcm.len() as f64 / BYTES_PER_SEC;
+    let downsampled = downsample_2x(pcm);
+    let wav = crate::core::audio::pcm_to_wav_at(&downsampled, CLONE_SAMPLE_RATE);
+    info!(
+        "[VOICE_CLONE] ElevenLabs: {}B PCM -> {}B WAV ({:.1}s audio, {}Hz)",
+        pcm.len(), wav.len(), duration_secs, CLONE_SAMPLE_RATE,
+    );
+    wav
+}
+
+fn downsample_2x(pcm: &[u8]) -> Vec<u8> {
+    let samples: &[u8] = pcm;
+    let sample_count = samples.len() / 2;
+    let pair_count = sample_count / 2;
+    let mut out = Vec::with_capacity(pair_count * 2);
+    for i in 0..pair_count {
+        let offset = i * 4;
+        let s0 = i16::from_le_bytes([samples[offset], samples[offset + 1]]);
+        let s1 = i16::from_le_bytes([samples[offset + 2], samples[offset + 3]]);
+        let avg = ((s0 as i32 + s1 as i32) / 2) as i16;
+        out.extend_from_slice(&avg.to_le_bytes());
+    }
+    out
 }
 
 // ── clone_voice helpers ─────────────────────────────────────────────────────

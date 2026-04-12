@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use axum::extract::ws::Message;
 
-use crate::core::config::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL};
+use crate::core::config::{DEFAULT_BROADCAST_DELAY_MS, DEFAULT_TTS_MODEL, DEFAULT_TTS_PROVIDER};
 use crate::core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::core::latency_tracker::LatencyTracker;
 use crate::core::pipeline_counters::PipelineCounters;
@@ -28,6 +28,7 @@ pub struct Session {
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
     pub voice_clone_id: Option<String>,
     pub tts_model: String,
+    pub tts_provider: String,
     pub tier: u8,
     pub rtmp_manager: Option<ErasedRtmpManager>,
     pub rtmp_langs: Vec<Lang>,
@@ -53,6 +54,7 @@ impl Session {
             host_tx: None,
             voice_clone_id: None,
             tts_model: DEFAULT_TTS_MODEL.to_string(),
+            tts_provider: DEFAULT_TTS_PROVIDER.to_string(),
             tier,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
