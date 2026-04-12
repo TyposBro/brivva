@@ -17,6 +17,7 @@ pub const DEFAULT_BROADCAST_DELAY_MS: u64 = 3000;
 pub const DEFAULT_TTS_MODEL: &str = "eleven_turbo_v2_5";
 pub const DEFAULT_VOICE_ID: &str = "21m00Tcm4TlvDq8ikWAM";
 pub const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
+pub const VOICE_CLONE_FILE_DASHSCOPE: &str = ".brivva_voice_clone_dashscope";
 
 // DashScope / Qwen3-TTS
 pub const DASHSCOPE_TTS_MODEL_VC: &str = "qwen3-tts-vc-realtime-2026-01-15";

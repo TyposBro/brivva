@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::{Json, body::Bytes, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::{BYTES_PER_SEC, VOICE_CLONE_FILE};
+use crate::core::config::BYTES_PER_SEC;
 use crate::shared::voice_clone;
 
 #[derive(Deserialize)]
@@ -26,8 +26,11 @@ pub struct VoiceStatus {
     voice_id: Option<String>,
 }
 
-pub async fn voice_status_handler() -> Json<VoiceStatus> {
-    let voice_id = voice_clone::load_persisted_voice();
+pub async fn voice_status_handler(
+    axum::extract::Query(params): axum::extract::Query<VoiceCloneQuery>,
+) -> Json<VoiceStatus> {
+    let provider = params.provider.as_deref().unwrap_or("elevenlabs");
+    let voice_id = voice_clone::persistence::load_persisted_voice_for(provider);
     Json(VoiceStatus { active: voice_id.is_some(), voice_id })
 }
 
@@ -59,8 +62,8 @@ pub async fn voice_delete_handler(
     axum::Extension(deps): axum::Extension<Arc<VoiceApiDeps>>,
     axum::extract::Query(params): axum::extract::Query<VoiceCloneQuery>,
 ) -> StatusCode {
-    if let Some(voice_id) = voice_clone::load_persisted_voice() {
-        let provider = params.provider.as_deref().unwrap_or("elevenlabs");
+    let provider = params.provider.as_deref().unwrap_or("elevenlabs");
+    if let Some(voice_id) = voice_clone::persistence::load_persisted_voice_for(provider) {
         match provider {
             "dashscope" => voice_clone::delete_cloned_voice_dashscope(
                 &deps.http_client, &deps.dashscope_api_key, &voice_id,
@@ -69,7 +72,8 @@ pub async fn voice_delete_handler(
                 &deps.http_client, &deps.tts_api_key, &voice_id,
             ).await,
         }
-        let _ = std::fs::remove_file(VOICE_CLONE_FILE);
+        let file = voice_clone::persistence::file_for_provider_pub(provider);
+        let _ = std::fs::remove_file(file);
         tracing::info!("[API] voice clone deleted ({}): {}", provider, voice_id);
     }
     StatusCode::NO_CONTENT

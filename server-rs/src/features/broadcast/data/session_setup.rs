@@ -119,7 +119,7 @@ fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
 }
 
 fn apply_persisted_voice(session: &mut Session) {
-    if let Some(vid) = voice_clone::load_persisted_voice() {
+    if let Some(vid) = voice_clone::persistence::load_persisted_voice_for(&session.tts_provider) {
         session.voice_clone_id = Some(vid);
     }
 }
