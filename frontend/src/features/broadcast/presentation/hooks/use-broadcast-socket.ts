@@ -12,6 +12,8 @@ type SocketParams = {
   tier: TranslationTier;
   ttsModel: string;
   ttsProvider: string;
+  ttsVoiceGender: string;
+  voiceDefaultLangs: string[];
   audioDeviceId: string;
   rtmpUrls: Record<string, string>;
   broadcastDelay: number;
@@ -65,6 +67,7 @@ export function useBroadcastSocket(params: SocketParams) {
   }, [addError, params.onHealthMessage]);
 
   const start = useCallback(async () => {
+    setSessionId(null); // clear previous session before establishing new one
     const available = filterTargetLanguages(params.sourceLang, params.targetLangs);
     if (available.length === 0) return;
 
@@ -97,7 +100,8 @@ export function useBroadcastSocket(params: SocketParams) {
     wsRef.current?.close();
     wsRef.current = null;
     setIsLive(false);
-    setSessionId(null);
+    // Preserve sessionId after stop so DubbingPanel can show post-session.
+    // Cleared at the start of the next session.
   }, [params]);
 
   return { isLive, sessionId, interim, transcripts, errors, pipelineWarnings, wsRef, start, stop, addError, dismissError };
@@ -111,7 +115,8 @@ function filterTargetLanguages(sourceLang: string, targetLangs: string[]): strin
 
 function buildWsUrl(params: SocketParams, targets: string[]): string {
   const base = appConfig.apiBaseUrl.replace(/^http/, "ws");
-  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}&ttsProvider=${params.ttsProvider}`;
+  const voiceDefaults = params.voiceDefaultLangs.join(",");
+  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}&ttsProvider=${params.ttsProvider}&voiceGender=${params.ttsVoiceGender}&voiceDefaultLangs=${voiceDefaults}`;
 }
 
 type ConnectConfig = {
@@ -149,12 +154,14 @@ function registerCloseHandler(
   { addError, setIsLive, setSessionId, reconnectCountRef, startRef }: CloseCallbacks,
 ): void {
   ws.onclose = (ev) => {
-    setSessionId(null);
-
     if (ev.code === 1000) {
+      // Normal stop — preserve sessionId for post-session UI (e.g. DubbingPanel).
       setIsLive(false);
       return;
     }
+
+    // Error or reconnect path — clear sessionId since a new one is coming.
+    setSessionId(null);
 
     if (reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
       reconnectCountRef.current += 1;

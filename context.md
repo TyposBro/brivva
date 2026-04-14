@@ -16,7 +16,7 @@ A Tauri v2 desktop app (Rust + React) for real-time multilingual live commerce b
 3. A/V sync perfection (<300ms offset)
 4. Latency (important but secondary)
 
-## Current State (v16.1 — Production Polish)
+## Current State (v16.1 — Production Polish, Apr 14 Morning)
 
 **Pipeline:**
 ```
@@ -24,19 +24,24 @@ Host Audio → N+1 Soniox v4 WebSocket connections (1 source transcript + 1 per 
            → Semantic endpointing (grammar-aware) + native translation (no external API)
            → 4-second force-chunk threshold for long monologues
            → Prosody analysis → emotion classification → voice style mapping
-           → ElevenLabs TTS (WebSocket streaming + REST fallback)
+           → ElevenLabs TTS (WebSocket streaming + REST fallback) + Qwen3 DashScope (backup, slower, better cloning)
            → StreamingPcm → FFmpeg audio drain (20ms ticks) → RTMP push
+           → Tier 4: Session recording (video.fmp4 + host_audio.pcm) → post-process via ElevenLabs Dubbing API
 
 Host Video → MediaRecorder (hardware VP8/H.264) → tagged binary WS (0x02)
-           → delayed buffer (broadcast_delay seconds) → FFmpeg → RTMP push
+           → delayed buffer (broadcast_delay seconds, 5s for DashScope) → FFmpeg → RTMP push
 
 Source language → passthrough (host audio queued directly to RTMP, zero TTS cost)
 ```
 
 **What needs to ship before Apr 16:**
-1. Voice recording extended: 30s minimum → up to 3 min optional (longer sample = better clone)
-2. 30-minute endurance test passed
-4. Backup demo recording captured
+1. ✅ Voice recording extended: 30s minimum → up to 3 min optional
+2. ✅ Tier 4 dubbing (ElevenLabs API client + SessionRecorder shipped)
+3. ✅ Qwen3 DashScope TTS integrated (70-90% clone quality but slower)
+4. 🔲 30-minute endurance test passed
+5. 🔲 Backup demo recording captured
+6. 🔲 Demo script practiced
+7. 🔲 Terms document finalized
 
 **Architecture:** 69 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
 

@@ -28,6 +28,10 @@ pub struct Session {
     pub target_langs: Vec<Lang>,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
     pub voice_clone_id: Option<String>,
+    /// Languages that skip clone and use the provider's built-in default voice.
+    pub use_default_voice_langs: std::collections::HashSet<String>,
+    /// "female" or "male" — selects built-in default voice when no clone is used.
+    pub tts_voice_gender: String,
     pub tts_model: String,
     pub tts_provider: String,
     pub tier: u8,
@@ -55,6 +59,8 @@ impl Session {
             target_langs,
             host_tx: None,
             voice_clone_id: None,
+            use_default_voice_langs: std::collections::HashSet::new(),
+            tts_voice_gender: "female".to_string(),
             tts_model: DEFAULT_TTS_MODEL.to_string(),
             tts_provider: DEFAULT_TTS_PROVIDER.to_string(),
             tier,

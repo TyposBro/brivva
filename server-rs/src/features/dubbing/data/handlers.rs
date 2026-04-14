@@ -25,6 +25,17 @@ pub struct StartDubbingRequest {
     pub session_id: String,
     pub lang: String,
     pub source_lang: String,
+    pub start_time: Option<u32>,
+    pub end_time: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct StartAllRequest {
+    pub session_id: String,
+    pub langs: Vec<String>,
+    pub source_lang: String,
+    pub start_time: Option<u32>,
+    pub end_time: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +64,8 @@ pub async fn start_handler(
         body.lang,
         deps,
         jobs,
+        body.start_time,
+        body.end_time,
     );
 
     Ok(Json(StartDubbingResponse {
@@ -144,6 +157,8 @@ fn spawn_job(
     target_lang: String,
     deps: Arc<DubbingDeps>,
     jobs: DubbingJobs,
+    start_time: Option<u32>,
+    end_time: Option<u32>,
 ) {
     tokio::spawn(async move {
         let result = job_runner::run_dubbing_job(
@@ -154,6 +169,8 @@ fn spawn_job(
             &deps.tts_api_key,
             &deps.http_client,
             &jobs,
+            start_time,
+            end_time,
         )
         .await;
         finalize_job(&jobs, &job_id, result);
@@ -194,4 +211,77 @@ fn get_output_path(
         StatusCode::BAD_REQUEST,
         "dubbing not yet complete".into(),
     ))
+}
+
+/// POST /api/dubbing/start-all — batch-start dubbing for multiple languages.
+pub async fn start_all_handler(
+    axum::Extension(deps): axum::Extension<Arc<DubbingDeps>>,
+    axum::Extension(jobs): axum::Extension<DubbingJobs>,
+    Json(body): Json<StartAllRequest>,
+) -> Result<Json<Vec<StartDubbingResponse>>, (StatusCode, String)> {
+    let recording_dir = PathBuf::from(RECORDING_DIR).join(&body.session_id);
+    validate_recording_dir(&recording_dir)?;
+
+    let mut responses = Vec::with_capacity(body.langs.len());
+    for lang in &body.langs {
+        let job_id = format!("{}_{}", body.session_id, lang);
+        let job = DubbingJob::new(job_id.clone(), body.session_id.clone(), lang.clone());
+        insert_job(&jobs, &job_id, job);
+
+        spawn_job(
+            job_id.clone(),
+            recording_dir.clone(),
+            body.source_lang.clone(),
+            lang.clone(),
+            deps.clone(),
+            jobs.clone(),
+            body.start_time,
+            body.end_time,
+        );
+
+        responses.push(StartDubbingResponse {
+            job_id,
+            status: DubbingJobStatus::Pending,
+        });
+    }
+    Ok(Json(responses))
+}
+
+/// DELETE /api/dubbing/cleanup/:session_id — delete recordings + dubbing artifacts.
+pub async fn cleanup_handler(
+    axum::Extension(jobs): axum::Extension<DubbingJobs>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Block cleanup if any job is still active
+    if let Ok(map) = jobs.lock() {
+        let active = map.values().any(|j| j.session_id == session_id && j.is_active());
+        if active {
+            return Err((StatusCode::CONFLICT, "active jobs exist for session".into()));
+        }
+    }
+
+    let recording_dir = PathBuf::from(RECORDING_DIR).join(&session_id);
+    if recording_dir.exists() {
+        std::fs::remove_dir_all(&recording_dir)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cleanup recordings: {e}")))?;
+        tracing::info!("[DUBBING] cleaned recordings for {}", session_id);
+    }
+
+    // Clean dubbing output dirs for all jobs belonging to this session
+    let dubbing_base = PathBuf::from(crate::core::config::DUBBING_DIR);
+    if let Ok(map) = jobs.lock() {
+        for job in map.values().filter(|j| j.session_id == session_id) {
+            let job_dir = dubbing_base.join(&job.id);
+            if job_dir.exists() {
+                let _ = std::fs::remove_dir_all(&job_dir);
+            }
+        }
+    }
+
+    // Remove finished jobs from memory
+    if let Ok(mut map) = jobs.lock() {
+        map.retain(|_, j| j.session_id != session_id);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

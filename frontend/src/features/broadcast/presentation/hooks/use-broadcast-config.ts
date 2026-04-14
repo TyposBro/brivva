@@ -14,6 +14,8 @@ export type BroadcastConfig = {
   audioDeviceId: string;
   ttsModel: "turbo" | "flash";
   ttsProvider: TtsProvider;
+  ttsVoiceGender: "female" | "male";
+  voiceDefaultLangs: string[];
 };
 
 const DEFAULT_SOURCE_LANG = "en";
@@ -22,6 +24,7 @@ const DEFAULT_TIER: TranslationTier = 2;
 const DEFAULT_BROADCAST_DELAY_MS = 5000;
 const DEFAULT_TTS_MODEL: BroadcastConfig["ttsModel"] = "turbo";
 const DEFAULT_TTS_PROVIDER: TtsProvider = "elevenlabs";
+const DEFAULT_VOICE_DEFAULT_LANGS: string[] = ["zh"];
 
 function defaultConfig(): BroadcastConfig {
   return {
@@ -34,6 +37,8 @@ function defaultConfig(): BroadcastConfig {
     audioDeviceId: "",
     ttsModel: DEFAULT_TTS_MODEL,
     ttsProvider: DEFAULT_TTS_PROVIDER,
+    ttsVoiceGender: "female" as const,
+    voiceDefaultLangs: DEFAULT_VOICE_DEFAULT_LANGS,
   };
 }
 
@@ -47,6 +52,8 @@ function loadConfig(): BroadcastConfig {
       const cfg = { ...defaultConfig(), ...JSON.parse(raw) };
       if (!VALID_TTS_MODELS.includes(cfg.ttsModel)) cfg.ttsModel = DEFAULT_TTS_MODEL;
       if (!VALID_TTS_PROVIDERS.includes(cfg.ttsProvider)) cfg.ttsProvider = DEFAULT_TTS_PROVIDER;
+      if (cfg.ttsVoiceGender !== "female" && cfg.ttsVoiceGender !== "male") cfg.ttsVoiceGender = "female";
+      if (!Array.isArray(cfg.voiceDefaultLangs)) cfg.voiceDefaultLangs = DEFAULT_VOICE_DEFAULT_LANGS;
       return cfg;
     }
   } catch {}

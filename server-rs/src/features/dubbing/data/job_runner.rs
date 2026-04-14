@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::core::config::DUBBING_DIR;
-use crate::shared::dubbing::{create_dubbing, poll_status, download_audio, DubbingStatus};
+use crate::shared::dubbing::{create_dubbing, poll_status, download_audio, DubbingStatus, CreateDubbingResult};
 use super::muxer;
 use crate::features::dubbing::domain::{DubbingJobStatus, DubbingJobs};
 
@@ -19,6 +19,8 @@ pub async fn run_dubbing_job(
     api_key: &str,
     client: &reqwest::Client,
     jobs: &DubbingJobs,
+    start_time: Option<u32>,
+    end_time: Option<u32>,
 ) -> Result<PathBuf, String> {
     let dub_dir = PathBuf::from(DUBBING_DIR).join(job_id);
     std::fs::create_dir_all(&dub_dir)
@@ -36,15 +38,22 @@ pub async fn run_dubbing_job(
 
     // Step 2: Upload to ElevenLabs Dubbing API
     update_status(jobs, job_id, DubbingJobStatus::Uploading);
-    let dubbing_id = create_dubbing(
+    let result: CreateDubbingResult = create_dubbing(
         client, api_key, &muxed_mp4, source_lang, target_lang,
+        start_time, end_time,
     ).await?;
-    set_dubbing_id(jobs, job_id, &dubbing_id);
+    set_dubbing_meta(jobs, job_id, &result);
 
     // Step 3: Poll until done or failed
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    update_dubbing_started(jobs, job_id, now);
     update_status(jobs, job_id, DubbingJobStatus::Dubbing);
+
     let final_status = poll_until_complete(
-        client, api_key, &dubbing_id,
+        client, api_key, &result.dubbing_id,
     ).await?;
 
     if let DubbingStatus::Failed(reason) = final_status {
@@ -55,8 +64,18 @@ pub async fn run_dubbing_job(
     update_status(jobs, job_id, DubbingJobStatus::Downloading);
     let dubbed_audio_path = dub_dir.join(format!("{target_lang}.mp3"));
     download_audio(
-        client, api_key, &dubbing_id, target_lang, &dubbed_audio_path,
+        client, api_key, &result.dubbing_id, target_lang, &dubbed_audio_path,
     ).await?;
+
+    // Cost tracking — structured log for billing
+    tracing::info!(
+        target: "dubbing_cost",
+        session_id = job_id.split('_').next().unwrap_or(job_id),
+        lang = target_lang,
+        expected_duration_sec = ?result.expected_duration_sec,
+        dubbing_id = %result.dubbing_id,
+        "dubbing job completed — billable usage"
+    );
 
     // Step 5: Mux original video + dubbed audio into final output
     update_status(jobs, job_id, DubbingJobStatus::MuxingFinal);
@@ -94,10 +113,19 @@ fn update_status(jobs: &DubbingJobs, job_id: &str, status: DubbingJobStatus) {
     }
 }
 
-fn set_dubbing_id(jobs: &DubbingJobs, job_id: &str, dubbing_id: &str) {
+fn set_dubbing_meta(jobs: &DubbingJobs, job_id: &str, result: &CreateDubbingResult) {
     if let Ok(mut map) = jobs.lock() {
         if let Some(job) = map.get_mut(job_id) {
-            job.dubbing_id = Some(dubbing_id.to_string());
+            job.dubbing_id = Some(result.dubbing_id.clone());
+            job.expected_duration_sec = result.expected_duration_sec;
+        }
+    }
+}
+
+fn update_dubbing_started(jobs: &DubbingJobs, job_id: &str, epoch: f64) {
+    if let Ok(mut map) = jobs.lock() {
+        if let Some(job) = map.get_mut(job_id) {
+            job.started_at = Some(epoch);
         }
     }
 }

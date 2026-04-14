@@ -6,7 +6,7 @@ const TIERS: TierOption[] = [
   { tier: 1, label: "Subtitles Only", desc: "No voice translation", cost: "Free", ready: true },
   { tier: 2, label: "Voice + Subtitles", desc: "AI-translated voice", cost: "$5/hr", ready: true },
   { tier: 3, label: "Voice + Lipsync (Live)", desc: "Real-time lipsync", cost: "$40/hr", ready: false },
-  { tier: 4, label: "Voice + Lipsync (Post)", desc: "Post-processed lipsync", cost: "$30-40/hr", ready: false },
+  { tier: 4, label: "Voice Dubbing (Post)", desc: "ElevenLabs post-dubbing", cost: "$30-40/hr", ready: true },
 ];
 
 type Props = { tier: TranslationTier; isLive: boolean; onTierChange: (t: TranslationTier) => void };

@@ -11,18 +11,26 @@ use super::types::{CreateDubbingResponse, DubbingStatus, DubbingStatusResponse};
 
 const BASE_URL: &str = "https://api.elevenlabs.io/v1/dubbing";
 
+/// Result of creating a dubbing job.
+pub struct CreateDubbingResult {
+    pub dubbing_id: String,
+    pub expected_duration_sec: Option<f64>,
+}
+
 /// Create a dubbing job from a video file.
-///
-/// Returns the `dubbing_id` on success.
 pub async fn create_dubbing(
     client: &reqwest::Client,
     api_key: &str,
     video_path: &Path,
     source_lang: &str,
     target_lang: &str,
-) -> Result<String, String> {
+    start_time: Option<u32>,
+    end_time: Option<u32>,
+) -> Result<CreateDubbingResult, String> {
     let file_bytes = read_video_file(video_path)?;
-    let form = build_dubbing_form(file_bytes, video_path, source_lang, target_lang);
+    let form = build_dubbing_form(
+        file_bytes, video_path, source_lang, target_lang, start_time, end_time,
+    );
     let resp = send_create_request(client, api_key, form).await?;
     parse_create_response(resp).await
 }
@@ -85,6 +93,8 @@ fn build_dubbing_form(
     video_path: &Path,
     source_lang: &str,
     target_lang: &str,
+    start_time: Option<u32>,
+    end_time: Option<u32>,
 ) -> reqwest::multipart::Form {
     let file_name = video_path
         .file_name()
@@ -97,10 +107,18 @@ fn build_dubbing_form(
         .mime_str("video/mp4")
         .unwrap();
 
-    reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("source_lang", source_lang.to_string())
-        .text("target_lang", target_lang.to_string())
+        .text("target_lang", target_lang.to_string());
+
+    if let Some(s) = start_time {
+        form = form.text("start_time", s.to_string());
+    }
+    if let Some(e) = end_time {
+        form = form.text("end_time", e.to_string());
+    }
+    form
 }
 
 async fn send_create_request(
@@ -116,7 +134,7 @@ async fn send_create_request(
         .map_err(|e| format!("create dubbing request error: {}", e))
 }
 
-async fn parse_create_response(resp: reqwest::Response) -> Result<String, String> {
+async fn parse_create_response(resp: reqwest::Response) -> Result<CreateDubbingResult, String> {
     if !resp.status().is_success() {
         return Err(format_api_error("create_dubbing", resp).await);
     }
@@ -124,8 +142,14 @@ async fn parse_create_response(resp: reqwest::Response) -> Result<String, String
         .await
         .map_err(|e| format!("create dubbing parse error: {}", e))?;
 
-    info!("[DUBBING] created dubbing_id={}", parsed.dubbing_id);
-    Ok(parsed.dubbing_id)
+    info!(
+        "[DUBBING] created dubbing_id={} expected_duration={:?}s",
+        parsed.dubbing_id, parsed.expected_duration_sec
+    );
+    Ok(CreateDubbingResult {
+        dubbing_id: parsed.dubbing_id,
+        expected_duration_sec: parsed.expected_duration_sec,
+    })
 }
 
 // ── download helpers ────────────────────────────────────────────────────────

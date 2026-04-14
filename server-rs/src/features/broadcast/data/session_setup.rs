@@ -117,8 +117,10 @@ fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
     );
     session.tts_model = tts_model;
     session.tts_provider = query.tts_provider.clone();
+    session.tts_voice_gender = query.voice_gender.clone();
     session.recorder = create_recorder(&params.session_id, query.tier);
     apply_persisted_voice(&mut session);
+    apply_voice_default_langs(&mut session, &query.voice_default_langs);
     session
 }
 
@@ -131,6 +133,15 @@ fn apply_persisted_voice(session: &mut Session) {
     if let Some(vid) = voice_clone::persistence::load_persisted_voice_for(&session.tts_provider) {
         session.voice_clone_id = Some(vid);
     }
+}
+
+fn apply_voice_default_langs(session: &mut Session, raw: &str) {
+    if raw.is_empty() { return; }
+    session.use_default_voice_langs = raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
 }
 
 fn resolve_tts_model(model: &str, provider: &str) -> String {

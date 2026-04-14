@@ -14,10 +14,14 @@ pub struct DubbingJob {
     pub status: DubbingJobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dubbing_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub output_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_duration_sec: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -45,6 +49,8 @@ impl DubbingJob {
             dubbing_id: None,
             output_path: None,
             error: None,
+            expected_duration_sec: None,
+            started_at: None,
         }
     }
 

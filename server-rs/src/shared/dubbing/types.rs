@@ -14,6 +14,7 @@ pub enum DubbingStatus {
 #[derive(Deserialize)]
 pub(super) struct CreateDubbingResponse {
     pub dubbing_id: String,
+    pub expected_duration_sec: Option<f64>,
 }
 
 /// Raw response from GET /v1/dubbing/{dubbing_id}.

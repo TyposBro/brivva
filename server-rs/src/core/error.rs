@@ -18,6 +18,8 @@ pub enum BrivvaError {
     Json(#[from] serde_json::Error),
     #[error("WebSocket: {0}")]
     WebSocket(String),
+    #[error("Dubbing: {0}")]
+    Dubbing(String),
 }
 
 pub type Result<T> = std::result::Result<T, BrivvaError>;

@@ -20,8 +20,19 @@ pub const VOICE_CLONE_FILE: &str = ".brivva_voice_clone";
 pub const VOICE_CLONE_FILE_DASHSCOPE: &str = ".brivva_voice_clone_dashscope";
 
 // DashScope / Qwen3-TTS
+/// Voice-clone realtime model — requires enrolled voice ID.
 pub const DASHSCOPE_TTS_MODEL_VC: &str = "qwen3-tts-vc-realtime-2026-01-15";
+/// Flash realtime model — supports built-in preset voices (used when no clone enrolled).
+pub const DASHSCOPE_TTS_MODEL_FLASH: &str = "qwen3-tts-flash-realtime";
+/// Native Mandarin female preset voice for flash model.
+pub const DASHSCOPE_DEFAULT_VOICE_FEMALE: &str = "Cherry";
+/// Native Mandarin male preset voice for flash model.
+pub const DASHSCOPE_DEFAULT_VOICE_MALE: &str = "Ethan";
 pub const DEFAULT_TTS_PROVIDER: &str = "elevenlabs";
+
+// ElevenLabs Chinese-native voices for default (non-clone) synthesis.
+pub const DEFAULT_VOICE_ID_FEMALE: &str = "9DMBSOAnMDPiFAsz1ZGK"; // Xiaoxi — Mandarin female
+pub const DEFAULT_VOICE_ID_MALE: &str = "WuLq5z7nEcrhppO0ZQJw";  // Martin Li — Mandarin male
 
 // TTS timing
 pub const TTS_DEADLINE_CAP_MS: u64 = 10_000;

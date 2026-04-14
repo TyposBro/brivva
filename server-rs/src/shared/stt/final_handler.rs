@@ -130,6 +130,8 @@ fn spawn_tts_for_translation(
         return;
     }
     let voice_clone_id = session.voice_clone_id.clone();
+    let use_default_voice = session.use_default_voice_langs.contains(target_lang);
+    let tts_voice_gender = session.tts_voice_gender.clone();
     let tts_model = session.tts_model.clone();
     let tts_provider = session.tts_provider.clone();
     let broadcast_delay_ms = session.broadcast_delay_ms;
@@ -154,6 +156,8 @@ fn spawn_tts_for_translation(
         utterance_start,
         style_params: style_params.clone(),
         voice_clone_id,
+        use_default_voice,
+        tts_voice_gender,
         tts_model,
         tts_provider,
         broadcast_delay_ms,
@@ -178,6 +182,8 @@ struct TtsSpawnRequest {
     utterance_start: Instant,
     style_params: StyleParams,
     voice_clone_id: Option<String>,
+    use_default_voice: bool,
+    tts_voice_gender: String,
     tts_model: String,
     tts_provider: String,
     broadcast_delay_ms: u64,
@@ -185,6 +191,33 @@ struct TtsSpawnRequest {
     pipeline_counters: std::sync::Arc<crate::core::pipeline_counters::PipelineCounters>,
     latency_tracker: std::sync::Arc<crate::core::latency_tracker::LatencyTracker>,
     tts_circuit_breaker: std::sync::Arc<crate::core::circuit_breaker::CircuitBreaker>,
+}
+
+fn resolve_voice_id(req: &TtsSpawnRequest) -> String {
+    if !req.use_default_voice {
+        return req.voice_clone_id.as_deref().unwrap_or(&req.default_voice).to_string();
+    }
+    let is_male = req.tts_voice_gender == "male";
+    if req.tts_provider == "dashscope" {
+        if is_male { crate::core::config::DASHSCOPE_DEFAULT_VOICE_MALE.to_string() }
+        else       { crate::core::config::DASHSCOPE_DEFAULT_VOICE_FEMALE.to_string() }
+    } else {
+        if is_male { crate::core::config::DEFAULT_VOICE_ID_MALE.to_string() }
+        else       { crate::core::config::DEFAULT_VOICE_ID_FEMALE.to_string() }
+    }
+}
+
+fn resolve_tts_model(req: &TtsSpawnRequest) -> String {
+    if req.tts_provider == "dashscope" {
+        // Flash model supports preset voices (Cherry/Ethan); VC model requires enrolled clone.
+        if req.use_default_voice {
+            crate::core::config::DASHSCOPE_TTS_MODEL_FLASH.to_string()
+        } else {
+            crate::core::config::DASHSCOPE_TTS_MODEL_VC.to_string()
+        }
+    } else {
+        req.tts_model.clone()
+    }
 }
 
 async fn run_tts_synthesis(req: TtsSpawnRequest) {
@@ -197,7 +230,8 @@ async fn run_tts_synthesis(req: TtsSpawnRequest) {
     notify_tts_start(&req);
     let tts_start = Instant::now();
 
-    let voice_id = req.voice_clone_id.as_deref().unwrap_or(&req.default_voice);
+    let voice_id_str = resolve_voice_id(&req);
+    let tts_model_str = resolve_tts_model(&req);
     let voice_settings = crate::shared::tts::VoiceStyle::from_emotion(&req.style_params.emotion)
         .to_voice_settings(req.style_params.speed);
     let max_bytes = crate::features::broadcast::domain::pipeline_budget::compute_streaming_max_bytes(
@@ -210,12 +244,12 @@ async fn run_tts_synthesis(req: TtsSpawnRequest) {
 
     let synth_req = crate::shared::tts::SynthesisRequest {
         text: &req.translated_text,
-        voice_id,
+        voice_id: &voice_id_str,
         lang: &req.target_lang,
         voice_settings: &voice_settings,
         max_bytes,
         streaming: streaming.as_ref(),
-        model_id: &req.tts_model,
+        model_id: &tts_model_str,
         api_key: &req.tts_api_key,
     };
 

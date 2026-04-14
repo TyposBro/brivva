@@ -14,4 +14,7 @@ export type DubbingJob = {
   lang: string;
   status: DubbingJobStatus;
   error?: string;
+  dubbing_id?: string;
+  expected_duration_sec?: number;
+  started_at?: number;
 };

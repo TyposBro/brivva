@@ -33,11 +33,18 @@ pub(crate) struct WsQuery {
     pub(super) tts_model: String,
     #[serde(rename = "ttsProvider", default = "default_tts_provider")]
     pub(super) tts_provider: String,
+    /// Comma-separated language codes that use default voice instead of the cloned voice.
+    #[serde(rename = "voiceDefaultLangs", default)]
+    pub(super) voice_default_langs: String,
+    /// "female" or "male" — picks built-in default voice when no clone is active.
+    #[serde(rename = "voiceGender", default = "default_voice_gender")]
+    pub(super) voice_gender: String,
 }
 
 fn default_tier() -> u8 { 2 }
 fn default_tts_model() -> String { "turbo".to_string() }
 fn default_tts_provider() -> String { crate::core::config::DEFAULT_TTS_PROVIDER.to_string() }
+fn default_voice_gender() -> String { "female".to_string() }
 
 /// Dependencies injected from orchestration for broadcast WebSocket handlers.
 #[derive(Clone)]

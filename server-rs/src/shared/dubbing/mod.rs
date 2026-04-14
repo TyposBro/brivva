@@ -4,4 +4,4 @@ mod types;
 mod client;
 
 pub use types::DubbingStatus;
-pub use client::{create_dubbing, poll_status, download_audio};
+pub use client::{create_dubbing, poll_status, download_audio, CreateDubbingResult};
