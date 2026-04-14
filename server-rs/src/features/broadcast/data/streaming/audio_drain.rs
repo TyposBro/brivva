@@ -365,16 +365,26 @@ impl DrainState {
     /// so the next utterance doesn't start before the host's original speech time
     /// has elapsed. Prevents translated audio from outrunning video on language
     /// pairs where translation is shorter (e.g., KO→EN, counting).
+    ///
+    /// Cap padding to a margin relative to broadcast delay to prevent audio
+    /// from exceeding the jitter buffer at low delays (e.g., 1.5s, 5s).
     fn schedule_speech_padding(&mut self) {
         let Some(active) = &self.active_audio else { return };
         let audio_secs = active.offset as f64 / BYTES_PER_SEC;
         let speech_secs = active.speech_duration.as_secs_f64();
         let remaining = speech_secs - audio_secs;
         if remaining > 0.5 {
-            let pad = Duration::from_secs_f64(remaining);
+            // Cap padding to a conservative margin based on broadcast delay.
+            // At low delays (1.5s), allow max ~500ms padding.
+            // At high delays (5s+), allow more padding proportional to delay.
+            let delay_ms = self.delay.as_millis() as f64;
+            let max_padding_ms = (delay_ms * 0.3).max(500.0).min(2500.0);
+            let max_padding = Duration::from_millis(max_padding_ms as u64);
+            let pad = Duration::from_secs_f64(remaining).min(max_padding);
+
             tracing::debug!(
-                "[AUDIO:{}] padding {:.1}s silence (speech={:.1}s, audio={:.1}s)",
-                self.stream_id, remaining, speech_secs, audio_secs
+                "[AUDIO:{}] padding {:.1}s silence (speech={:.1}s, audio={:.1}s, capped to {:.1}s by delay={}ms)",
+                self.stream_id, pad.as_secs_f64(), speech_secs, audio_secs, max_padding_ms/1000.0, delay_ms as u32
             );
             self.padding_until = Some(Instant::now() + pad);
         }
