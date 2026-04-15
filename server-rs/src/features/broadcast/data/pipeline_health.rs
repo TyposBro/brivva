@@ -64,7 +64,9 @@ impl PipelineHealthReporter {
 
     async fn collect_stream_metrics(&self) -> (HashMap<String, usize>, HashMap<String, u64>) {
         let mgr = self.deps.rtmp_manager.lock().await;
-        (mgr.queue_depths(), mgr.drift_per_lang())
+        let queue_depth = mgr.queue_depths();
+        let drift_ms = HashMap::new(); // A/V decoupled — no drift tracking
+        (queue_depth, drift_ms)
     }
 
     fn is_session_active(&self) -> bool {

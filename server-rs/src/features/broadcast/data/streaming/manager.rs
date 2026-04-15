@@ -1,7 +1,7 @@
 //! RtmpManager: manages all FFmpeg RTMP streams for a session.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,7 +44,6 @@ struct NewStream {
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     stop_flag: Arc<AtomicBool>,
     rtmp_error: Arc<AtomicBool>,
-    drift_ms: Arc<AtomicU64>,
 }
 
 /// Everything needed to spawn the video + audio drain threads.
@@ -55,7 +54,6 @@ struct DrainSetup {
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     audio_fifo: String,
     stop_flag: Arc<AtomicBool>,
-    drift_ms: Arc<AtomicU64>,
 }
 
 /// Config for the audio drain thread spawner.
@@ -63,9 +61,7 @@ struct AudioDrainSetup {
     stream_id: String,
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     fifo_path: String,
-    delay: Duration,
     stop: Arc<AtomicBool>,
-    drift_ms: Arc<AtomicU64>,
 }
 
 // ── RtmpManager ──────────────────────────────────────────
@@ -170,21 +166,15 @@ impl RtmpManager {
         }
     }
 
-    pub fn queue_audio(&mut self, lang: &str, pcm: Vec<u8>, utterance_start: Instant) {
+    pub fn queue_audio(&mut self, lang: &str, pcm: Vec<u8>) {
         self.activate_pending_for_lang(lang);
         let pcm_len = pcm.len();
-        let speech_duration = utterance_start.elapsed();
         let pcm_arc = Arc::new(StdMutex::new(pcm));
         let complete = Arc::new(AtomicBool::new(true));
         for stream in self.streams.values() {
             if stream.lang == lang {
                 let mut q = stream.audio_queue.lock().unwrap();
-                q.push_back(QueuedAudio {
-                    play_at: utterance_start,
-                    speech_duration,
-                    pcm: pcm_arc,
-                    complete,
-                });
+                q.push_back(QueuedAudio { pcm: pcm_arc, complete });
                 tracing::debug!(
                     "[AUDIO:{}] queued passthrough audio: {}KB ({:.1}s) queue_depth={}",
                     lang, pcm_len / 1024, pcm_len as f64 / BYTES_PER_SEC, q.len()
@@ -195,17 +185,13 @@ impl RtmpManager {
         tracing::warn!("[AUDIO] no stream found for lang={}, audio dropped", lang);
     }
 
-    pub fn queue_streaming_audio(&mut self, lang: &str, utterance_start: Instant) -> StreamingPcm {
+    pub fn queue_streaming_audio(&mut self, lang: &str) -> StreamingPcm {
         self.activate_pending_for_lang(lang);
-        let play_at = cap_stale_play_at(utterance_start, self.broadcast_delay);
-        let speech_duration = utterance_start.elapsed();
         let streaming = StreamingPcm::new();
         for stream in self.streams.values() {
             if stream.lang == lang {
                 let mut q = stream.audio_queue.lock().unwrap();
                 q.push_back(QueuedAudio {
-                    play_at,
-                    speech_duration,
                     pcm: streaming.pcm.clone(),
                     complete: streaming.complete.clone(),
                 });
@@ -218,20 +204,6 @@ impl RtmpManager {
         }
         tracing::warn!("[AUDIO] no stream found for lang={}, streaming slot orphaned", lang);
         streaming
-    }
-
-    /// Return per-language drift in milliseconds (lang -> drift_ms).
-    pub fn drift_per_lang(&self) -> HashMap<String, u64> {
-        self.streams.values().map(|s| {
-            (s.lang.clone(), s.drift_ms.load(Ordering::Relaxed))
-        }).collect()
-    }
-
-    pub fn max_drift_ms(&self) -> u64 {
-        self.streams.values()
-            .map(|s| s.drift_ms.load(Ordering::Relaxed))
-            .max()
-            .unwrap_or(0)
     }
 
     pub(crate) fn detect_crashed(&mut self) -> Vec<(StreamConfig, RestartState)> {
@@ -358,7 +330,6 @@ impl RtmpManager {
     ) -> Result<(), String> {
         let (child, stdin, rtmp_error, audio_fifo) = self.setup_ffmpeg(&config.stream_id, &config.rtmp_url, &config.lang)?;
         let (audio_queue, stop_flag, is_restart) = prepare_stream_state(existing_queue);
-        let drift_ms = Arc::new(AtomicU64::new(0));
         let setup = DrainSetup {
             stream_id: config.stream_id.clone(),
             is_restart,
@@ -366,12 +337,11 @@ impl RtmpManager {
             audio_queue: audio_queue.clone(),
             audio_fifo: audio_fifo.clone(),
             stop_flag: stop_flag.clone(),
-            drift_ms: drift_ms.clone(),
         };
         let (video_handle, audio_handle) = self.spawn_drain_threads(setup)?;
         let new_stream = NewStream {
             child, video_handle, audio_handle, audio_fifo,
-            audio_queue, stop_flag, rtmp_error, drift_ms,
+            audio_queue, stop_flag, rtmp_error,
         };
         self.register_stream(config, new_stream);
         Ok(())
@@ -406,9 +376,7 @@ impl RtmpManager {
             stream_id: setup.stream_id,
             audio_queue: setup.audio_queue,
             fifo_path: setup.audio_fifo,
-            delay: self.broadcast_delay,
             stop: setup.stop_flag,
-            drift_ms: setup.drift_ms,
         };
         let audio_handle = spawn_audio_drain(audio_setup)?;
         Ok((video_handle, audio_handle))
@@ -428,7 +396,6 @@ impl RtmpManager {
                 stop_flag: stream.stop_flag,
                 restart_count: 0,
                 rtmp_error: stream.rtmp_error,
-                drift_ms: stream.drift_ms,
             },
         );
     }
@@ -638,24 +605,6 @@ fn resolve_system_font() -> Option<String> {
     None
 }
 
-/// Cap play_at to prevent audio pile-up when TTS generation is slow.
-/// If utterance_start is more than (broadcast_delay + 2s) in the past,
-/// use current time so the audio drain adds a natural broadcast_delay gap.
-fn cap_stale_play_at(utterance_start: Instant, delay: Duration) -> Instant {
-    let now = Instant::now();
-    let max_age = delay + Duration::from_secs(2);
-    if now.duration_since(utterance_start) > max_age {
-        tracing::debug!(
-            "[AUDIO] capping stale play_at: {}ms old > {}ms threshold",
-            now.duration_since(utterance_start).as_millis(),
-            max_age.as_millis()
-        );
-        now
-    } else {
-        utterance_start
-    }
-}
-
 fn prepare_stream_state(
     existing_queue: Option<Arc<StdMutex<VecDeque<QueuedAudio>>>>,
 ) -> (Arc<StdMutex<VecDeque<QueuedAudio>>>, Arc<AtomicBool>, bool) {
@@ -672,9 +621,7 @@ fn spawn_audio_drain(setup: AudioDrainSetup) -> Result<thread::JoinHandle<()>, S
         stream_id: setup.stream_id,
         audio_queue: setup.audio_queue,
         fifo_path: setup.fifo_path,
-        delay: setup.delay,
         stop: setup.stop,
-        drift_ms: setup.drift_ms,
     };
     thread::Builder::new()
         .name(thread_name)
@@ -769,8 +716,6 @@ mod tests {
     fn should_reuse_existing_queue_on_restart() {
         let existing = Arc::new(StdMutex::new(VecDeque::new()));
         existing.lock().unwrap().push_back(QueuedAudio {
-            play_at: Instant::now(),
-            speech_duration: Duration::from_secs(1),
             pcm: Arc::new(StdMutex::new(vec![1, 2, 3])),
             complete: Arc::new(AtomicBool::new(true)),
         });

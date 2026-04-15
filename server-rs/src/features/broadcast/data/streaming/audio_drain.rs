@@ -1,8 +1,11 @@
 //! Dedicated OS thread: drains audio at 20ms ticks.
+//!
+//! Audio plays as soon as TTS completes — no A/V sync scheduling.
+//! Video is independently delayed by broadcast_delay in the video drain.
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,22 +16,18 @@ use super::{
     AUDIO_TICK, AUDIO_BYTES_PER_TICK,
     JITTER_WARN_THRESHOLD, JITTER_RECOVERY_THRESHOLD,
     MAX_RECOVERY_TICKS,
-    DRIFT_CHECK_INTERVAL_TICKS, DRIFT_WARN_THRESHOLD_MS,
     JITTER_WARN_LOG_INTERVAL,
-    MAX_AUDIO_STALENESS, MAX_AUDIO_QUEUE_DEPTH,
-    SKIP_AHEAD_DRIFT_FACTOR,
+    MAX_AUDIO_QUEUE_DEPTH,
 };
 
-// ── Config struct (keep every function ≤ 2 params) ───────
+// ── Config struct ────────────────────────────────────────
 
 /// Everything needed to start an audio drain thread.
 pub(crate) struct AudioDrainConfig {
     pub(crate) stream_id: String,
     pub(crate) audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     pub(crate) fifo_path: String,
-    pub(crate) delay: Duration,
     pub(crate) stop: Arc<AtomicBool>,
-    pub(crate) drift_ms: Arc<AtomicU64>,
 }
 
 /// State for draining queued audio chunk-by-chunk
@@ -36,7 +35,6 @@ struct ActiveAudio {
     pcm: Arc<StdMutex<Vec<u8>>>,
     complete: Arc<AtomicBool>,
     offset: usize,
-    speech_duration: Duration,
 }
 
 enum JitterLevel {
@@ -46,30 +44,24 @@ enum JitterLevel {
 }
 
 /// Holds all mutable state for the audio drain loop.
-///
-/// Methods on this struct replace free functions that previously took 8-10 params.
 struct DrainState {
     stream_id: String,
     fifo: std::fs::File,
     audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     stop: Arc<AtomicBool>,
-    delay: Duration,
     silence: Vec<u8>,
     active_audio: Option<ActiveAudio>,
-    last_utterance_play_at: Option<Instant>,
-    padding_until: Option<Instant>,
     tick_count: u64,
     next_tick: Instant,
     start_time: Instant,
     total_bytes_written: u64,
     jitter_warn_count: u64,
-    drift_ms: Arc<AtomicU64>,
 }
 
 impl DrainState {
     /// Main drain loop: check stop → sleep → classify jitter → handle.
     fn run(&mut self) {
-        self.log_start();
+        tracing::info!("[AUDIO:{}] drain thread started (20ms ticks)", self.stream_id);
         loop {
             if self.stop.load(Ordering::Acquire) { break; }
             self.sleep_until_next_tick();
@@ -78,14 +70,6 @@ impl DrainState {
         self.cleanup_and_log();
     }
 
-    fn log_start(&self) {
-        tracing::info!(
-            "[AUDIO:{}] drain thread started (20ms ticks, {}ms delay)",
-            self.stream_id, self.delay.as_millis()
-        );
-    }
-
-    /// Sleep until the next scheduled tick.
     fn sleep_until_next_tick(&self) {
         let now = Instant::now();
         if self.next_tick > now {
@@ -93,26 +77,23 @@ impl DrainState {
         }
     }
 
-    /// Classify jitter and dispatch to recovery, warn, or normal tick.
-    /// Returns `true` if the loop should break.
+    /// Classify jitter and dispatch. Returns `true` to break.
     fn handle_jitter(&mut self) -> bool {
         let actual = Instant::now();
         let jitter = actual.saturating_duration_since(self.next_tick);
         match classify_jitter(jitter, self.tick_count) {
             JitterLevel::Recovery(j) => self.handle_recovery(j),
-            JitterLevel::Warn(j) => { self.log_jitter_warn(j); self.advance_and_tick(actual) }
-            JitterLevel::Normal => self.advance_and_tick(actual),
+            JitterLevel::Warn(j) => { self.log_jitter_warn(j); self.advance_and_tick() }
+            JitterLevel::Normal => self.advance_and_tick(),
         }
     }
 
-    /// Advance tick counter and process a normal tick. Returns true to break.
-    fn advance_and_tick(&mut self, actual: Instant) -> bool {
+    fn advance_and_tick(&mut self) -> bool {
         self.next_tick += AUDIO_TICK;
         self.tick_count += 1;
-        self.process_tick(actual)
+        self.process_tick()
     }
 
-    /// Drop the FIFO and log exit.
     fn cleanup_and_log(&mut self) {
         drop(std::mem::replace(
             &mut self.fifo,
@@ -124,17 +105,14 @@ impl DrainState {
         );
     }
 
-    /// Process a normal tick: start utterance → drain audio → write → drift check.
-    /// Returns `true` if the loop should break (write error).
-    fn process_tick(&mut self, actual: Instant) -> bool {
-        let target_ts = actual - self.delay;
-        self.try_start_next_utterance(target_ts);
+    /// Process a normal tick: start utterance → drain audio → write.
+    fn process_tick(&mut self) -> bool {
+        self.try_start_next_utterance();
 
         let (data, should_clear) = drain_tick_audio(&mut self.active_audio, &self.silence);
 
         if should_clear {
-            self.schedule_speech_padding();
-            self.log_utterance_done("");
+            self.log_utterance_done();
             self.active_audio = None;
         }
 
@@ -143,12 +121,10 @@ impl DrainState {
         }
 
         self.total_bytes_written += AUDIO_BYTES_PER_TICK as u64;
-        self.check_drift();
         false
     }
 
     /// Handle severe jitter: write catch-up data and reset tick anchor.
-    /// Returns `true` if the loop should break (write error).
     fn handle_recovery(&mut self, jitter: Duration) -> bool {
         let actual = self.next_tick + jitter;
         let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
@@ -156,22 +132,25 @@ impl DrainState {
         let catch_up_bytes = write_ticks * AUDIO_BYTES_PER_TICK;
 
         let (buffer, audio_used) = self.build_catchup_buffer(catch_up_bytes);
-        self.log_recovery(jitter, write_ticks, skipped_ticks, audio_used, catch_up_bytes);
+        let silence_bytes = catch_up_bytes.saturating_sub(audio_used);
+        tracing::warn!(
+            "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} ticks ({}B audio + {}B silence)",
+            self.stream_id, jitter.as_millis(), self.tick_count, write_ticks,
+            audio_used, silence_bytes
+        );
 
         let should_break = self.write_catchup_and_advance(&buffer, actual);
         self.tick_count += skipped_ticks as u64;
         should_break
     }
 
-    /// Build catch-up buffer: drain any active audio first, fill rest with silence.
     fn build_catchup_buffer(&mut self, catch_up_bytes: usize) -> (Vec<u8>, usize) {
         let mut buffer = vec![0u8; catch_up_bytes];
         let audio_used = self.copy_active_audio(&mut buffer);
-        self.clear_if_complete("during recovery");
+        self.clear_if_complete();
         (buffer, audio_used)
     }
 
-    /// Copy available audio from the active utterance into `buffer`. Returns bytes copied.
     fn copy_active_audio(&mut self, buffer: &mut [u8]) -> usize {
         let Some(active) = self.active_audio.as_mut() else { return 0 };
         let guard = active.pcm.lock().unwrap();
@@ -184,141 +163,50 @@ impl DrainState {
         to_copy
     }
 
-    /// Clear the active utterance if it's fully drained and complete.
-    fn clear_if_complete(&mut self, context: &str) {
+    fn clear_if_complete(&mut self) {
         let should_clear = self.active_audio.as_ref().is_some_and(|a| {
             let len = a.pcm.lock().unwrap().len();
             a.offset >= len && a.complete.load(Ordering::Acquire)
         });
         if should_clear {
-            self.log_utterance_done(context);
+            self.log_utterance_done();
             self.active_audio = None;
         }
     }
 
-    /// Write catch-up buffer and advance the tick anchor.
-    /// Returns `true` if the loop should break (write error).
     fn write_catchup_and_advance(&mut self, buffer: &[u8], actual: Instant) -> bool {
         if self.fifo.write_all(buffer).is_err() {
             if !self.stop.load(Ordering::Acquire) {
-                tracing::error!(
-                    "[AUDIO:{}] write error during recovery, exiting",
-                    self.stream_id
-                );
+                tracing::error!("[AUDIO:{}] write error during recovery, exiting", self.stream_id);
             }
             return true;
         }
-
         self.next_tick = actual + AUDIO_TICK;
         self.total_bytes_written += buffer.len() as u64;
         false
     }
 
-    /// Log recovery details (capped vs uncapped).
-    fn log_recovery(
-        &self,
-        jitter: Duration,
-        write_ticks: usize,
-        skipped_ticks: u128,
-        audio_used: usize,
-        catch_up_bytes: usize,
-    ) {
-        let silence_bytes = catch_up_bytes.saturating_sub(audio_used);
-        if write_ticks < skipped_ticks as usize {
-            tracing::warn!(
-                "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} of {} ticks (capped, {}B audio + {}B silence), skipping {}",
-                self.stream_id, jitter.as_millis(), self.tick_count, write_ticks, skipped_ticks,
-                audio_used, silence_bytes,
-                skipped_ticks as usize - write_ticks
-            );
-        } else {
-            tracing::warn!(
-                "[AUDIO:{}] JITTER RECOVERY: {}ms behind at tick {}, writing {} ticks ({}B audio + {}B silence)",
-                self.stream_id, jitter.as_millis(), self.tick_count, write_ticks,
-                audio_used, silence_bytes
-            );
-        }
-    }
-
-    /// Try to pop next utterance from queue if ready.
-    /// Evicts stale and overflow items first to prevent unbounded desync.
-    /// When drift exceeds threshold, skips to newest complete utterance.
-    /// Respects padding_until: after a short TTS finishes, pads silence
-    /// until the original speech duration elapses so audio doesn't outrun video.
-    fn try_start_next_utterance(&mut self, target_ts: Instant) {
-        if self.active_audio.is_some() {
-            return;
-        }
-        if let Some(pad_until) = self.padding_until {
-            if Instant::now() < pad_until {
-                return;
-            }
-            self.padding_until = None;
-        }
+    /// Pop next utterance immediately — no play_at scheduling, no pacing.
+    fn try_start_next_utterance(&mut self) {
+        if self.active_audio.is_some() { return; }
         let queue_arc = self.audio_queue.clone();
         let mut q = queue_arc.lock().unwrap();
-        evict_stale_items(&self.stream_id, &mut q, target_ts);
         evict_overflow_items(&self.stream_id, &mut q);
-        self.skip_ahead_if_drifted(&mut q);
-        self.pop_ready_utterance(&mut q, target_ts);
-    }
-
-    /// When audio drift exceeds `broadcast_delay * SKIP_AHEAD_DRIFT_FACTOR`,
-    /// skip all but the newest complete utterance to prevent unbounded desync.
-    fn skip_ahead_if_drifted(&self, q: &mut VecDeque<QueuedAudio>) {
-        let drift = self.drift_ms.load(Ordering::Relaxed);
-        let threshold = (self.delay.as_millis() as f64 * SKIP_AHEAD_DRIFT_FACTOR) as u64;
-        if drift < threshold || q.len() < 2 {
-            return;
+        if let Some(audio) = q.pop_front() {
+            let pcm_len = audio.pcm.lock().unwrap().len();
+            let is_complete = audio.complete.load(Ordering::Acquire);
+            tracing::debug!(
+                "[AUDIO:{}] starting utterance: {}B available, complete={}, queue_depth={}",
+                self.stream_id, pcm_len, is_complete, q.len()
+            );
+            self.active_audio = Some(ActiveAudio {
+                pcm: audio.pcm,
+                complete: audio.complete,
+                offset: 0,
+            });
         }
-        skip_to_newest_complete(&self.stream_id, q, drift, threshold);
     }
 
-    /// Pop the front item if its play_at has arrived, start playing it.
-    fn pop_ready_utterance(
-        &mut self,
-        q: &mut VecDeque<QueuedAudio>,
-        target_ts: Instant,
-    ) {
-        let Some(front) = q.front() else { return };
-        if target_ts < front.play_at {
-            return;
-        }
-        let audio = q.pop_front().unwrap();
-        let pcm_len = audio.pcm.lock().unwrap().len();
-        let is_complete = audio.complete.load(Ordering::Acquire);
-        self.log_utterance_start(pcm_len, is_complete, q.len(), &audio.play_at);
-        self.last_utterance_play_at = Some(audio.play_at);
-        self.active_audio = Some(ActiveAudio {
-            pcm: audio.pcm,
-            complete: audio.complete,
-            offset: 0,
-            speech_duration: audio.speech_duration,
-        });
-    }
-
-    /// Log utterance start with audio-video drift metric.
-    fn log_utterance_start(
-        &self,
-        pcm_len: usize,
-        is_complete: bool,
-        remaining: usize,
-        play_at: &Instant,
-    ) {
-        let video_ts = Instant::now() - self.delay;
-        let behind_ms = video_ts
-            .checked_duration_since(*play_at)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        self.drift_ms.store(behind_ms as u64, Ordering::Relaxed);
-        tracing::debug!(
-            "[AUDIO:{}] starting utterance: {}B available, complete={}, \
-             queue_depth={}, audio_behind_video={}ms",
-            self.stream_id, pcm_len, is_complete, remaining, behind_ms
-        );
-    }
-
-    /// Write data to the FIFO. Returns `true` on error (caller should break).
     fn write_fifo(&mut self, data: &[u8]) -> bool {
         if self.fifo.write_all(data).is_err() {
             if !self.stop.load(Ordering::Acquire) {
@@ -329,25 +217,6 @@ impl DrainState {
         false
     }
 
-    /// Periodic drift check (every ~5 seconds = 250 ticks at 20ms).
-    fn check_drift(&self) {
-        if !self.tick_count.is_multiple_of(DRIFT_CHECK_INTERVAL_TICKS) {
-            return;
-        }
-        let elapsed = self.start_time.elapsed().as_secs_f64();
-        let expected_bytes = (elapsed * BYTES_PER_SEC) as u64;
-        let drift_bytes =
-            (self.total_bytes_written as i64 - expected_bytes as i64).unsigned_abs();
-        let drift_ms = (drift_bytes as f64 / BYTES_PER_SEC * 1000.0) as u64;
-        if drift_ms > DRIFT_WARN_THRESHOLD_MS {
-            tracing::warn!(
-                "[AUDIO:{}] drift warning: {}ms (written={}, expected={})",
-                self.stream_id, drift_ms, self.total_bytes_written, expected_bytes
-            );
-        }
-    }
-
-    /// Rate-limited jitter warning log.
     fn log_jitter_warn(&mut self, jitter: Duration) {
         self.jitter_warn_count += 1;
         if self.jitter_warn_count == 1
@@ -361,49 +230,18 @@ impl DrainState {
         }
     }
 
-    /// If TTS audio was shorter than original speech, schedule silence padding
-    /// so the next utterance doesn't start before the host's original speech time
-    /// has elapsed. Prevents translated audio from outrunning video on language
-    /// pairs where translation is shorter (e.g., KO→EN, counting).
-    ///
-    /// Cap padding to a margin relative to broadcast delay to prevent audio
-    /// from exceeding the jitter buffer at low delays (e.g., 1.5s, 5s).
-    fn schedule_speech_padding(&mut self) {
-        let Some(active) = &self.active_audio else { return };
-        let audio_secs = active.offset as f64 / BYTES_PER_SEC;
-        let speech_secs = active.speech_duration.as_secs_f64();
-        let remaining = speech_secs - audio_secs;
-        if remaining > 0.5 {
-            // Cap padding to a conservative margin based on broadcast delay.
-            // At low delays (1.5s), allow max ~500ms padding.
-            // At high delays (5s+), allow more padding proportional to delay.
-            let delay_ms = self.delay.as_millis() as f64;
-            let max_padding_ms = (delay_ms * 0.3).max(500.0).min(2500.0);
-            let max_padding = Duration::from_millis(max_padding_ms as u64);
-            let pad = Duration::from_secs_f64(remaining).min(max_padding);
-
-            tracing::debug!(
-                "[AUDIO:{}] padding {:.1}s silence (speech={:.1}s, audio={:.1}s, capped to {:.1}s by delay={}ms)",
-                self.stream_id, pad.as_secs_f64(), speech_secs, audio_secs, max_padding_ms/1000.0, delay_ms as u32
-            );
-            self.padding_until = Some(Instant::now() + pad);
-        }
-    }
-
-    /// Log that the current utterance finished.
-    fn log_utterance_done(&self, context: &str) {
+    fn log_utterance_done(&self) {
         if let Some(a) = self.active_audio.as_ref() {
             let total = a.pcm.lock().unwrap().len();
             let played_ms = (a.offset as f64 / BYTES_PER_SEC * 1000.0) as u64;
             tracing::debug!(
-                "[AUDIO:{}] utterance finished {}: played {}B/{}B ({}ms audio)",
-                self.stream_id, context, a.offset, total, played_ms
+                "[AUDIO:{}] utterance finished: played {}B/{}B ({}ms audio)",
+                self.stream_id, a.offset, total, played_ms
             );
         }
     }
 }
 
-/// Classify jitter level based on threshold constants.
 fn classify_jitter(jitter: Duration, tick_count: u64) -> JitterLevel {
     if jitter > JITTER_RECOVERY_THRESHOLD && tick_count > 0 {
         JitterLevel::Recovery(jitter)
@@ -414,36 +252,7 @@ fn classify_jitter(jitter: Duration, tick_count: u64) -> JitterLevel {
     }
 }
 
-/// Drop complete items whose `play_at` is older than MAX_AUDIO_STALENESS.
-/// Audio this far behind video will never resync — evict to prevent unbounded desync.
-fn evict_stale_items(
-    stream_id: &str,
-    q: &mut VecDeque<QueuedAudio>,
-    target_ts: Instant,
-) {
-    let stale_threshold = target_ts - MAX_AUDIO_STALENESS;
-    let mut dropped_count = 0usize;
-    let mut dropped_bytes = 0usize;
-    q.retain(|item| {
-        let is_stale = item.play_at < stale_threshold;
-        let is_complete = item.complete.load(Ordering::Acquire);
-        if is_stale && is_complete {
-            dropped_bytes += item.pcm.lock().unwrap().len();
-            dropped_count += 1;
-            return false;
-        }
-        true
-    });
-    if dropped_count > 0 {
-        tracing::warn!(
-            "[AUDIO:{}] evicted {} stale utterance(s) ({}B total)",
-            stream_id, dropped_count, dropped_bytes
-        );
-    }
-}
-
 /// If queue exceeds MAX_AUDIO_QUEUE_DEPTH, drop oldest complete items.
-/// Prevents unbounded memory growth during continuous host speech.
 fn evict_overflow_items(stream_id: &str, q: &mut VecDeque<QueuedAudio>) {
     let mut dropped = 0usize;
     while q.len() > MAX_AUDIO_QUEUE_DEPTH {
@@ -461,30 +270,6 @@ fn evict_overflow_items(stream_id: &str, q: &mut VecDeque<QueuedAudio>) {
             stream_id, dropped, q.len()
         );
     }
-}
-
-/// Skip to the newest complete utterance in the queue.
-/// Removes all items except the last complete one, preventing unbounded desync.
-fn skip_to_newest_complete(
-    stream_id: &str,
-    q: &mut VecDeque<QueuedAudio>,
-    drift_ms: u64,
-    threshold_ms: u64,
-) {
-    let newest_complete_idx = q.iter().rposition(|item| {
-        item.complete.load(Ordering::Acquire)
-    });
-    let Some(keep_idx) = newest_complete_idx else { return };
-    if keep_idx == 0 {
-        return;
-    }
-    let skipped = keep_idx;
-    q.drain(..keep_idx);
-    tracing::warn!(
-        "[AUDIO:{}] SKIP-AHEAD: drift {}ms > {}ms threshold, \
-         skipped {} utterance(s), queue_depth={}",
-        stream_id, drift_ms, threshold_ms, skipped, q.len()
-    );
 }
 
 /// Drain one tick of audio from the active utterance, or produce silence.
@@ -508,7 +293,6 @@ fn drain_tick_audio(
     }
 }
 
-/// Enough data: copy one full tick and advance offset.
 fn drain_full_tick(guard: &[u8], offset: &mut usize, is_complete: bool) -> (Vec<u8>, bool) {
     let data = guard[*offset..*offset + AUDIO_BYTES_PER_TICK].to_vec();
     *offset += AUDIO_BYTES_PER_TICK;
@@ -516,7 +300,6 @@ fn drain_full_tick(guard: &[u8], offset: &mut usize, is_complete: bool) -> (Vec<
     (data, done)
 }
 
-/// Complete but less than a full tick: pad remaining with silence.
 fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &[u8]) -> Vec<u8> {
     if available > 0 {
         let mut chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
@@ -531,8 +314,8 @@ fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &
 
 /// Dedicated OS thread: drains audio at 20ms ticks.
 ///
-/// Independent from the video thread — shares only the delayed clock reference.
-/// Tracks cumulative samples written to detect drift over long sessions.
+/// Audio plays immediately as queued — no A/V sync delay.
+/// Video is independently delayed by broadcast_delay in the video drain.
 pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
     let fifo = match open_fifo(&config) {
         Some(f) => f,
@@ -545,23 +328,18 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         fifo,
         audio_queue: config.audio_queue,
         stop: config.stop,
-        delay: config.delay,
         silence: vec![0u8; AUDIO_BYTES_PER_TICK],
         active_audio: None,
-        last_utterance_play_at: None,
-        padding_until: None,
         tick_count: 0,
         next_tick: now + AUDIO_TICK,
         start_time: now,
         total_bytes_written: 0,
         jitter_warn_count: 0,
-        drift_ms: config.drift_ms,
     };
 
     state.run();
 }
 
-/// Open FIFO for writing (blocks until FFmpeg opens it for reading).
 fn open_fifo(config: &AudioDrainConfig) -> Option<std::fs::File> {
     tracing::info!("[AUDIO:{}] opening FIFO (blocks until FFmpeg reads)...", config.stream_id);
     match std::fs::OpenOptions::new().write(true).open(&config.fifo_path) {

@@ -381,7 +381,7 @@ async fn create_streaming_slot(
         }
     };
     let mut locked = mgr.lock().await;
-    Some(locked.queue_streaming_audio(&req.target_lang, req.utterance_start))
+    Some(locked.queue_streaming_audio(&req.target_lang))
 }
 
 fn finish_streaming(streaming: Option<&crate::features::broadcast::data::streaming::StreamingPcm>) {

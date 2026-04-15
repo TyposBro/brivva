@@ -214,11 +214,10 @@ fn queue_source_passthrough(ctx: &SttContext, state: &SttState) {
 
     let host_audio = drain_host_audio(ctx);
     let lang_str = ctx.source_lang.to_string();
-    let start = state.utterance_start.unwrap_or_else(Instant::now);
 
     tokio::spawn(async move {
         let mut locked = mgr.lock().await;
-        locked.queue_audio(&lang_str, host_audio, start);
+        locked.queue_audio(&lang_str, host_audio);
     });
 }
 

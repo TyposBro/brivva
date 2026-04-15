@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // ── Constants ─────────────────────────────────────────────
 
@@ -60,19 +60,9 @@ pub(super) const STALE_CHUNK_MARGIN_SECS: u64 = 1;
 
 // ── Audio Drain ─────────────────────────────────────────
 
-/// Max age for queued audio before eviction (2x default broadcast delay).
-/// If audio is 6+ seconds stale, it will never sync with video.
-pub(crate) const MAX_AUDIO_STALENESS: Duration = Duration::from_secs(6);
 /// Max queued utterances before oldest complete items are dropped.
 /// Prevents unbounded memory growth during continuous host speech.
 pub(crate) const MAX_AUDIO_QUEUE_DEPTH: usize = 10;
-/// Drift warning threshold in milliseconds
-pub(crate) const DRIFT_WARN_THRESHOLD_MS: u64 = 50;
-/// When audio drift exceeds broadcast_delay * this factor, skip to newest
-/// complete utterance to prevent unbounded desync during prolonged TTS delays.
-pub(crate) const SKIP_AHEAD_DRIFT_FACTOR: f64 = 1.5;
-/// Check drift every N ticks (~5 seconds at 20ms ticks)
-pub(crate) const DRIFT_CHECK_INTERVAL_TICKS: u64 = 250;
 /// Rate-limit jitter warnings: log every Nth occurrence
 pub(crate) const JITTER_WARN_LOG_INTERVAL: u64 = 25;
 
@@ -128,14 +118,9 @@ impl StreamingPcm {
     }
 }
 
-/// Audio waiting to be played at the right point in the delayed timeline
+/// Audio waiting to be played. Played immediately in FIFO order — no scheduling.
+/// Video is independently delayed by broadcast_delay in the video drain.
 pub(crate) struct QueuedAudio {
-    /// Source timestamp when this utterance started (host speaking)
-    pub(crate) play_at: Instant,
-    /// How long the host originally spoke this utterance.
-    /// Used to pace playback: after TTS audio finishes, pad silence until
-    /// speech_duration elapses so translated audio doesn't outrun video.
-    pub(crate) speech_duration: Duration,
     /// Shared PCM buffer (may still be growing if TTS is streaming)
     pub(crate) pcm: Arc<StdMutex<Vec<u8>>>,
     /// True when all audio data has been written
