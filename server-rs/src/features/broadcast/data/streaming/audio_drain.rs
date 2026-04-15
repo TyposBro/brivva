@@ -53,8 +53,6 @@ struct DrainState {
     active_audio: Option<ActiveAudio>,
     tick_count: u64,
     next_tick: Instant,
-    start_time: Instant,
-    total_bytes_written: u64,
     jitter_warn_count: u64,
 }
 
@@ -120,7 +118,6 @@ impl DrainState {
             return true;
         }
 
-        self.total_bytes_written += AUDIO_BYTES_PER_TICK as u64;
         false
     }
 
@@ -182,7 +179,6 @@ impl DrainState {
             return true;
         }
         self.next_tick = actual + AUDIO_TICK;
-        self.total_bytes_written += buffer.len() as u64;
         false
     }
 
@@ -332,8 +328,6 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         active_audio: None,
         tick_count: 0,
         next_tick: now + AUDIO_TICK,
-        start_time: now,
-        total_bytes_written: 0,
         jitter_warn_count: 0,
     };
 

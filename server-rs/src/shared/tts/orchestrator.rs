@@ -42,7 +42,7 @@ pub async fn do_tts(
 
     log_tts_start(req, &ctx);
 
-    let streaming = allocate_rtmp_slot(env.sessions, env.session_id, &lang_str, req.utterance_start).await;
+    let streaming = allocate_rtmp_slot(env.sessions, env.session_id, &lang_str).await;
     log_streaming_slot(req.utterance_id, &lang_str, ctx.max_bytes, &streaming);
     notify_host(env.sessions, env.session_id, ServerMsg::TtsStart { lang: lang_str.clone(), utterance_id: req.utterance_id });
 
@@ -202,7 +202,6 @@ async fn allocate_rtmp_slot(
     sessions: &Sessions,
     session_id: &str,
     lang: &str,
-    utterance_start: Instant,
 ) -> Option<crate::features::broadcast::data::streaming::StreamingPcm> {
     let erased = sessions.get(session_id)?.rtmp_manager.clone()?;
     let rtmp_mgr = crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased)?;
