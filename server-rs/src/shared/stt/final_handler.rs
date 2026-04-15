@@ -131,7 +131,9 @@ fn spawn_tts_for_translation(
     }
     let voice_clone_id = session.voice_clone_id.clone();
     let use_default_voice = session.use_default_voice_langs.contains(target_lang);
-    let tts_voice_gender = session.tts_voice_gender.clone();
+    let tts_voice_gender = session.voice_gender_map.get(target_lang)
+        .cloned()
+        .unwrap_or_else(|| session.tts_voice_gender.clone());
     let tts_model = session.tts_model.clone();
     let tts_provider = session.tts_provider.clone();
     let broadcast_delay_ms = session.broadcast_delay_ms;
@@ -198,13 +200,12 @@ fn resolve_voice_id(req: &TtsSpawnRequest) -> String {
         return req.voice_clone_id.as_deref().unwrap_or(&req.default_voice).to_string();
     }
     let is_male = req.tts_voice_gender == "male";
-    if req.tts_provider == "dashscope" {
-        if is_male { crate::core::config::DASHSCOPE_DEFAULT_VOICE_MALE.to_string() }
-        else       { crate::core::config::DASHSCOPE_DEFAULT_VOICE_FEMALE.to_string() }
+    let (female, male) = if req.tts_provider == "dashscope" {
+        crate::core::config::dashscope_default_voices(&req.target_lang)
     } else {
-        if is_male { crate::core::config::DEFAULT_VOICE_ID_MALE.to_string() }
-        else       { crate::core::config::DEFAULT_VOICE_ID_FEMALE.to_string() }
-    }
+        crate::core::config::elevenlabs_default_voices(&req.target_lang)
+    };
+    if is_male { male.to_string() } else { female.to_string() }
 }
 
 fn resolve_tts_model(req: &TtsSpawnRequest) -> String {

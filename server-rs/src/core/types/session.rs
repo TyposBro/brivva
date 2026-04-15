@@ -30,8 +30,10 @@ pub struct Session {
     pub voice_clone_id: Option<String>,
     /// Languages that skip clone and use the provider's built-in default voice.
     pub use_default_voice_langs: std::collections::HashSet<String>,
-    /// "female" or "male" — selects built-in default voice when no clone is used.
+    /// "female" or "male" — global fallback for default voice gender.
     pub tts_voice_gender: String,
+    /// Per-language gender override. Key = lang code, value = "female" | "male".
+    pub voice_gender_map: std::collections::HashMap<String, String>,
     pub tts_model: String,
     pub tts_provider: String,
     pub tier: u8,
@@ -61,6 +63,7 @@ impl Session {
             voice_clone_id: None,
             use_default_voice_langs: std::collections::HashSet::new(),
             tts_voice_gender: "female".to_string(),
+            voice_gender_map: std::collections::HashMap::new(),
             tts_model: DEFAULT_TTS_MODEL.to_string(),
             tts_provider: DEFAULT_TTS_PROVIDER.to_string(),
             tier,

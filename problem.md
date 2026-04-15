@@ -141,11 +141,19 @@ Multiple TTS chunks for same utterance could accumulate pipeline overhead, causi
 - For **longer translations** (EN→JA): no padding needed; audio naturally runs slightly behind, self-corrects
 - For **similar-length pairs**: minimal/no padding, existing sync preserved
 
-### Subtitle overlay (drawtext) breaks YouTube — OPEN
+### Subtitle overlay (drawtext) breaks YouTube — FIXED (Apr 15)
 
-**Symptom:** `-vf drawtext` causes YouTube "Preparing stream" indefinitely. Fontconfig error in bundled FFmpeg.
+**Root cause:** `reload=1` triggered file re-reads on every frame (~120 reads/sec at 60fps for 2 filters). Combined with fontconfig initialization issues in bundled FFmpeg (missing cache dir, periodic re-scanning), frames stalled → YouTube RTMP ingest timed out.
 
-**Status:** Disabled by default (`BRIVVA_SUBTITLES=1` to enable). Needs fontconfig bundling or alternative subtitle approach.
+**Fix (4 changes):**
+- `reload=1` → `reload=30` (re-read every 0.5s instead of every frame, ~2 reads/sec)
+- Pre-create fontconfig cache dir (`/tmp/brivva_fontconfig_cache`) before FFmpeg spawns
+- `<rescan><int>0</int></rescan>` in fonts.conf disables periodic fontconfig re-scanning
+- `FONTCONFIG_PATH=/tmp` + `FC_DEBUG=0` env vars set on FFmpeg process
+- CJK fonts prioritized: Arial Unicode MS → PingFang → Hiragino Sans (Chinese/Japanese support)
+- `subtitle_path()` helper extracted to fix path mismatch between `update_subtitles` and `build_subtitle_filter`
+
+**Status:** Disabled by default (`BRIVVA_SUBTITLES=1` to enable).
 
 ## Known Limitation: Soniox Translation Accumulation
 

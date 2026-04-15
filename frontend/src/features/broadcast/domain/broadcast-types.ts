@@ -8,6 +8,8 @@ export const LANGS: Lang[] = [
   { code: "ru", label: "Russian", flag: "\uD83C\uDDF7\uD83C\uDDFA" },
 ] as const;
 
+export type VoiceMode = "cloned" | "default-female" | "default-male";
+
 export type TranslationTier = 1 | 2 | 3 | 4;
 
 export type TranscriptEntry = {

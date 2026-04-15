@@ -118,6 +118,7 @@ fn build_session(params: &SessionParams, query: &WsQuery) -> Session {
     session.tts_model = tts_model;
     session.tts_provider = query.tts_provider.clone();
     session.tts_voice_gender = query.voice_gender.clone();
+    apply_voice_gender_map(&mut session, &query.voice_gender_map);
     session.recorder = create_recorder(&params.session_id, query.tier);
     apply_persisted_voice(&mut session);
     apply_voice_default_langs(&mut session, &query.voice_default_langs);
@@ -142,6 +143,20 @@ fn apply_voice_default_langs(session: &mut Session, raw: &str) {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
+}
+
+/// Parse "ja:female,zh:male" into per-language gender map.
+fn apply_voice_gender_map(session: &mut Session, raw: &str) {
+    if raw.is_empty() { return; }
+    for pair in raw.split(',') {
+        if let Some((lang, gender)) = pair.trim().split_once(':') {
+            let lang = lang.trim();
+            let gender = gender.trim();
+            if !lang.is_empty() && (gender == "female" || gender == "male") {
+                session.voice_gender_map.insert(lang.to_string(), gender.to_string());
+            }
+        }
+    }
 }
 
 fn resolve_tts_model(model: &str, provider: &str) -> String {

@@ -119,22 +119,19 @@ impl RtmpManager {
         }).collect()
     }
 
-    /// Update the subtitle overlay text for a specific stream.
+    /// Update the subtitle overlay text for a specific language.
     /// `transcript` = original speech, `translation` = translated text.
-    pub fn update_subtitles(&self, stream_id: &str, transcript: &str, translation: &str) {
-        let transcript_file = format!("/tmp/brivva_sub_{}_transcript.txt", stream_id);
-        let translation_file = format!("/tmp/brivva_sub_{}_translation.txt", stream_id);
+    /// Writes to the session+lang-qualified files that `build_subtitle_filter` created.
+    pub fn update_subtitles(&self, lang: &str, transcript: &str, translation: &str) {
+        let transcript_file = subtitle_path(&self.session_id, lang, "transcript");
+        let translation_file = subtitle_path(&self.session_id, lang, "translation");
         let _ = std::fs::write(&transcript_file, transcript);
         let _ = std::fs::write(&translation_file, translation);
     }
 
     /// Update subtitles for all streams matching a given language.
     pub fn update_subtitles_for_lang(&self, lang: &str, transcript: &str, translation: &str) {
-        for (id, stream) in &self.streams {
-            if stream.lang == lang {
-                self.update_subtitles(id, transcript, translation);
-            }
-        }
+        self.update_subtitles(lang, transcript, translation);
     }
 
     pub fn set_video_codec(&mut self, codec: &str) {
@@ -495,17 +492,19 @@ impl RtmpManager {
 
     fn build_subtitle_filter(&self, lang: &str) -> Option<String> {
         let font_path = resolve_system_font()?;
-        let transcript_file = format!("/tmp/brivva_sub_{}_{}_transcript.txt", self.session_id, lang);
-        let translation_file = format!("/tmp/brivva_sub_{}_{}_translation.txt", self.session_id, lang);
+        let transcript_file = subtitle_path(&self.session_id, lang, "transcript");
+        let translation_file = subtitle_path(&self.session_id, lang, "translation");
         let _ = std::fs::write(&transcript_file, "");
         let _ = std::fs::write(&translation_file, "");
 
+        // reload=30 → re-read every 0.5s at 60fps (not every frame).
+        // Cuts I/O from ~120 reads/sec to ~2 reads/sec per filter.
         let vf = format!(
             "drawtext=textfile='{transcript}':fontfile='{font}':\
-             reload=1:fontsize=24:fontcolor=white:\
+             reload=30:fontsize=24:fontcolor=white:\
              borderw=2:bordercolor=black:x=(w-tw)/2:y=30,\
              drawtext=textfile='{translation}':fontfile='{font}':\
-             reload=1:fontsize=28:fontcolor=yellow:\
+             reload=30:fontsize=28:fontcolor=yellow:\
              borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70",
             transcript = transcript_file,
             translation = translation_file,
@@ -597,8 +596,18 @@ impl RtmpManager {
 
 // ── Free functions ───────────────────────────────────────
 
-/// macOS font paths checked in order of preference (monospaced first for subtitles).
+/// Build the subtitle text-file path: `/tmp/brivva_sub_{session}_{lang}_{kind}.txt`
+fn subtitle_path(session_id: &str, lang: &str, kind: &str) -> String {
+    format!("/tmp/brivva_sub_{}_{}_{}.txt", session_id, lang, kind)
+}
+
+/// macOS font paths checked in order of preference.
+/// CJK-capable fonts first (PingFang, Hiragino, Arial Unicode) for Chinese/Japanese support,
+/// then standard Latin fonts as fallback.
 const MACOS_FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Arial Unicode MS.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Courier New.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
@@ -870,7 +879,8 @@ mod tests {
 
         if let Some(vf) = filter {
             assert!(vf.contains("fontfile="), "drawtext must include fontfile=");
-            assert!(vf.contains("reload=1"), "drawtext must reload subtitle files");
+            assert!(vf.contains("reload=30"), "drawtext must reload at 30-frame interval");
+            assert!(!vf.contains("reload=1,"), "reload=1 causes excessive I/O");
             assert!(vf.contains("brivva_sub_test_sub_en_transcript.txt"));
             assert!(vf.contains("brivva_sub_test_sub_en_translation.txt"));
         }

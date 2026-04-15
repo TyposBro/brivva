@@ -13,6 +13,7 @@ const FONTCONFIG_PATH: &str = "/tmp/brivva_fonts.conf";
 
 /// Minimal Fontconfig XML that points at macOS / Linux system font directories.
 /// Written once to /tmp so the bundled FFmpeg sidecar can find it.
+/// `<rescan><int>0</int></rescan>` disables periodic re-scanning (avoids I/O stalls).
 const MINIMAL_FONTS_CONF: &str = r#"<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
@@ -21,11 +22,15 @@ const MINIMAL_FONTS_CONF: &str = r#"<?xml version="1.0"?>
   <dir>/Library/Fonts</dir>
   <dir>/usr/share/fonts</dir>
   <cachedir>/tmp/brivva_fontconfig_cache</cachedir>
+  <config><rescan><int>0</int></rescan></config>
 </fontconfig>
 "#;
 
-/// Write a minimal fonts.conf once; returns the path if successful.
+const FONTCONFIG_CACHE_DIR: &str = "/tmp/brivva_fontconfig_cache";
+
+/// Write a minimal fonts.conf once and pre-create the cache dir.
 static FONTCONFIG_FILE: LazyLock<Option<String>> = LazyLock::new(|| {
+    let _ = std::fs::create_dir_all(FONTCONFIG_CACHE_DIR);
     match std::fs::write(FONTCONFIG_PATH, MINIMAL_FONTS_CONF) {
         Ok(()) => {
             tracing::debug!("[FFMPEG] Wrote minimal fontconfig to {}", FONTCONFIG_PATH);
@@ -71,7 +76,9 @@ pub(super) fn spawn_ffmpeg_process(
         .stderr(Stdio::piped());
     if let Some(ref path) = fontconfig_file {
         cmd.env("FONTCONFIG_FILE", path);
+        cmd.env("FONTCONFIG_PATH", "/tmp");
     }
+    cmd.env("FC_DEBUG", "0");
     let mut child = cmd.spawn()
         .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
     tracing::info!("[FFMPEG:{}] spawned PID={}", stream_id, child.id());

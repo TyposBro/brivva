@@ -137,15 +137,17 @@ Returns binary audio/video stream. Save to file.
 3. **Error recovery** — if ElevenLabs returns error, surface message to frontend clearly.
 
 ### Should Improve
-4. **Multi-language** — support dubbing same session into multiple languages simultaneously (parallel jobs).
-5. **Progress feedback** — ElevenLabs doesn't give percentage. Estimate from `expected_duration_sec`.
-6. **Storage cleanup** — delete raw recordings after dubbing complete + downloaded.
 7. **Cost tracking** — log dubbing API usage per session for billing.
 
 ### Nice to Have
-8. **Partial dubbing** — use `start_time`/`end_time` for clips instead of full session.
 9. **Dubbing Studio link** — deep-link to ElevenLabs web editor for manual transcript correction.
-10. **Batch dubbing** — auto-trigger Tier 4 for all target languages when session ends.
+
+### Completed
+4. ✅ **Multi-language** — `POST /api/dubbing/start-all` endpoint + "Dub All" button in frontend.
+5. ✅ **Progress feedback** — ETA countdown derived from `expected_duration_sec` in dubbing-panel.tsx.
+6. ✅ **Storage cleanup** — `DELETE /api/dubbing/cleanup/{session_id}` endpoint.
+8. ✅ **Partial dubbing** — `startDubbing()` accepts `startTime`/`endTime` params.
+10. ✅ **Batch dubbing** — `start-all` endpoint + "Dub All" UI.
 
 ## Architecture Rules
 
@@ -165,6 +167,33 @@ cargo test -p server-rs dubbing
 # Unit tests (recorder)
 cargo test -p server-rs recorder
 
-# E2E: start a tier-4 session, stream for 30s, stop, trigger dubbing, wait for complete
-# Manual test — no automated E2E yet
+# Subtitle overlay
+cargo test -p server-rs subtitle
 ```
+
+### Local RTMP Testing
+
+`test-rtmp.sh` starts a local mediamtx RTMP server + mpv player.
+
+```bash
+./test-rtmp.sh              # server + mpv player for Japanese stream
+./test-rtmp.sh --server     # server only (no player)
+```
+
+**RTMP URLs for Brivva UI:**
+
+| Language | RTMP URL |
+|----------|----------|
+| Japanese (ja) | `rtmp://localhost:1935/live/ja` |
+| Chinese (zh) | YouTube: `rtmp://a.rtmp.youtube.com/live2/YOUR_STREAM_KEY` |
+
+**Subtitle overlay:** Set `BRIVVA_SUBTITLES=1` env var to enable. CJK fonts (PingFang, Hiragino) auto-resolved on macOS.
+
+### E2E Manual Test
+
+1. `./test-rtmp.sh` — start local RTMP server + player
+2. Start Brivva session with ja + zh targets, tier 4
+3. Stream 30s+ with speech
+4. Stop session → trigger dubbing from UI
+5. Verify: mpv shows Japanese stream, YouTube shows Chinese stream
+6. Download dubbed video after dubbing completes

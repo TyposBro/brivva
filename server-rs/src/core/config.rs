@@ -24,15 +24,28 @@ pub const VOICE_CLONE_FILE_DASHSCOPE: &str = ".brivva_voice_clone_dashscope";
 pub const DASHSCOPE_TTS_MODEL_VC: &str = "qwen3-tts-vc-realtime-2026-01-15";
 /// Flash realtime model — supports built-in preset voices (used when no clone enrolled).
 pub const DASHSCOPE_TTS_MODEL_FLASH: &str = "qwen3-tts-flash-realtime";
-/// Native Mandarin female preset voice for flash model.
-pub const DASHSCOPE_DEFAULT_VOICE_FEMALE: &str = "Cherry";
-/// Native Mandarin male preset voice for flash model.
-pub const DASHSCOPE_DEFAULT_VOICE_MALE: &str = "Ethan";
 pub const DEFAULT_TTS_PROVIDER: &str = "elevenlabs";
 
-// ElevenLabs Chinese-native voices for default (non-clone) synthesis.
-pub const DEFAULT_VOICE_ID_FEMALE: &str = "9DMBSOAnMDPiFAsz1ZGK"; // Xiaoxi — Mandarin female
-pub const DEFAULT_VOICE_ID_MALE: &str = "WuLq5z7nEcrhppO0ZQJw";  // Martin Li — Mandarin male
+/// Per-language default voice for ElevenLabs (built-in/library voices).
+/// Returns (female_voice_id, male_voice_id).
+pub fn elevenlabs_default_voices(lang: &str) -> (&'static str, &'static str) {
+    match lang {
+        "zh" => ("9lHjugDhwqoxA5MhX0az", "brChkoggsUHF1stW6omH"),
+        "ja" => ("xwDy9oDEtzWzFo6FqAI9", "LIisRj2veIKEBdr6KZ5y"),
+        "ko" => ("zgDzx5jLLCqEp6Fl7Kl7", "m3gJBS8OofDJfycyA2Ip"), // Jessica (ko), Eric (ko)
+        "ru" => ("gelrownZgbRhxH6LI78J", "85bJFRap3VIXOThFHxk3"),
+        _    => ("4CrZuIW9am7gYAxgo2Af", "JdwJ7jL68CWmQZuo7KgG"),
+    }
+}
+
+/// Per-language default voice for DashScope/Qwen3-TTS (preset voices).
+pub fn dashscope_default_voices(lang: &str) -> (&'static str, &'static str) {
+    match lang {
+        "zh" => ("Cherry", "Ethan"),
+        // Qwen3 presets are Chinese-native; use same for other langs until better options exist.
+        _    => ("Cherry", "Ethan"),
+    }
+}
 
 // TTS timing
 pub const TTS_DEADLINE_CAP_MS: u64 = 10_000;

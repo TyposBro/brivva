@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, type MutableRefObject } from "react";
 import { appConfig } from "../../../../orchestration/config/app-config";
 import { AudioPipeline } from "../../../../shared/media/audio-pipeline";
-import type { TranscriptEntry, TranslationTier } from "../../domain/broadcast-types";
+import type { TranscriptEntry, TranslationTier, VoiceMode } from "../../domain/broadcast-types";
 import type { PipelineHealthMsg } from "../../data/dtos";
 import { AUDIO_TAG } from "../../data/dtos";
 import { useDeduplicatedErrors } from "./use-deduplicated-errors";
+import { deriveVoiceDefaultLangs, deriveVoiceGenderMap } from "./use-broadcast-config";
 
 type SocketParams = {
   sourceLang: string;
@@ -12,8 +13,7 @@ type SocketParams = {
   tier: TranslationTier;
   ttsModel: string;
   ttsProvider: string;
-  ttsVoiceGender: string;
-  voiceDefaultLangs: string[];
+  voiceConfig: Record<string, VoiceMode>;
   audioDeviceId: string;
   rtmpUrls: Record<string, string>;
   broadcastDelay: number;
@@ -115,8 +115,9 @@ function filterTargetLanguages(sourceLang: string, targetLangs: string[]): strin
 
 function buildWsUrl(params: SocketParams, targets: string[]): string {
   const base = appConfig.apiBaseUrl.replace(/^http/, "ws");
-  const voiceDefaults = params.voiceDefaultLangs.join(",");
-  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}&ttsProvider=${params.ttsProvider}&voiceGender=${params.ttsVoiceGender}&voiceDefaultLangs=${voiceDefaults}`;
+  const voiceDefaults = deriveVoiceDefaultLangs(params.voiceConfig).join(",");
+  const genderMap = deriveVoiceGenderMap(params.voiceConfig);
+  return `${base}/ws?sourceLang=${params.sourceLang}&targetLangs=${targets.join(",")}&tier=${params.tier}&ttsModel=${params.ttsModel}&ttsProvider=${params.ttsProvider}&voiceDefaultLangs=${voiceDefaults}&voiceGenderMap=${genderMap}`;
 }
 
 type ConnectConfig = {

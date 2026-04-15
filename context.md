@@ -43,7 +43,7 @@ Source language → passthrough (host audio queued directly to RTMP, zero TTS co
 6. 🔲 Demo script practiced
 7. 🔲 Terms document finalized
 
-**Architecture:** 69 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
+**Architecture:** ~73 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
 
 ```
 server-rs/src/
@@ -86,9 +86,9 @@ server-rs/src/
 - **Audio format:** 44.1kHz PCM, 16-bit mono
 - **Video:** MediaRecorder hardware encoding → libx264 ultrafast → FLV → RTMP
 - **Protocol:** Tagged binary WebSocket — 0x01=audio, 0x02=video. JSON for control messages.
-- **Broadcast delay:** Default 3000ms, configurable 1-10s
+- **Broadcast delay:** Backend default 3000ms, frontend defaults to 5000ms. Configurable 1-10s.
 - **Audio drain:** OS thread, 20ms ticks, 1764 bytes/tick. PCM → named FIFO → FFmpeg
-- **Translation tiers:** tier 1 = subtitles only, tier 2 = voice + subtitles. Tiers 3-4 (lipsync) designed not implemented.
+- **Translation tiers:** tier 1 = subtitles only, tier 2 = voice + subtitles. Tier 3 (live lipsync) designed not implemented. Tier 4 (post-processed dubbing via ElevenLabs Dubbing API) fully implemented.
 - **Crash recovery:** FFmpeg health monitor, 50 retries, 2s delay
 - **Staleness eviction:** Audio queue items >6s old evicted. Queue depth limit 10.
 - **Speech pacing:** Drain pads silence until original speech duration elapses after TTS finishes.
@@ -103,6 +103,10 @@ server-rs/src/
 - **Force-chunk stall** — fires on transcript duration, not translation presence
 - **Audio pile-up** — caps stale play_at timestamps
 - **Speech-duration pacing** — pads silence after short TTS to prevent audio outrunning video
+
+## Recently Fixed Bugs (v16.2, Apr 15)
+
+- **Subtitle overlay YouTube hang** — `reload=1` → `reload=30` (cuts I/O 60x), fontconfig cache pre-created, re-scanning disabled, CJK fonts prioritized. `BRIVVA_SUBTITLES=1` to enable.
 
 ## Pipeline is Commodity — Moat is Elsewhere
 

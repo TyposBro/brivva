@@ -39,6 +39,9 @@ pub(crate) struct WsQuery {
     /// "female" or "male" — picks built-in default voice when no clone is active.
     #[serde(rename = "voiceGender", default = "default_voice_gender")]
     pub(super) voice_gender: String,
+    /// Per-language gender overrides: "ja:female,zh:male".
+    #[serde(rename = "voiceGenderMap", default)]
+    pub(super) voice_gender_map: String,
 }
 
 fn default_tier() -> u8 { 2 }

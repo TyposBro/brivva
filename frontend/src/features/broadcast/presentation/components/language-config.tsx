@@ -1,16 +1,22 @@
-import { LANGS } from "../../domain/broadcast-types";
+import { LANGS, type VoiceMode } from "../../domain/broadcast-types";
 
 type Props = {
   sourceLang: string;
   targetLangs: string[];
-  voiceDefaultLangs: string[];
+  voiceConfig: Record<string, VoiceMode>;
   isLive: boolean;
   onSourceChange: (code: string) => void;
   onTargetToggle: (code: string) => void;
-  onVoiceDefaultToggle: (code: string) => void;
+  onVoiceModeChange: (code: string, mode: VoiceMode) => void;
 };
 
-export function LanguageConfig({ sourceLang, targetLangs, voiceDefaultLangs, isLive, onSourceChange, onTargetToggle, onVoiceDefaultToggle }: Props) {
+const VOICE_OPTIONS: { mode: VoiceMode; label: string; short: string }[] = [
+  { mode: "cloned",         label: "Cloned Voice",  short: "Cloned" },
+  { mode: "default-female", label: "Default Female", short: "Female" },
+  { mode: "default-male",   label: "Default Male",   short: "Male" },
+];
+
+export function LanguageConfig({ sourceLang, targetLangs, voiceConfig, isLive, onSourceChange, onTargetToggle, onVoiceModeChange }: Props) {
   const availableTargets = LANGS.filter((l) => l.code !== sourceLang);
   const selectedCount = targetLangs.filter((l) => l !== sourceLang).length;
   const sourceName = LANGS.find((l) => l.code === sourceLang)?.label;
@@ -43,16 +49,16 @@ export function LanguageConfig({ sourceLang, targetLangs, voiceDefaultLangs, isL
         <h2 className="font-headline text-sm font-semibold text-on-surface-variant uppercase tracking-wider mb-2">
           Translate To
         </h2>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col gap-2">
           {availableTargets.map((l) => {
             const isSelected = targetLangs.includes(l.code);
-            const isDefaultVoice = voiceDefaultLangs.includes(l.code);
+            const currentMode = voiceConfig[l.code] ?? "cloned";
             return (
-              <div key={l.code} className="flex flex-col gap-1">
+              <div key={l.code} className="flex items-center gap-2">
                 <button
                   disabled={isLive}
                   onClick={() => onTargetToggle(l.code)}
-                  className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                  className={`w-28 px-3 py-1.5 rounded-lg text-sm transition-colors shrink-0 ${
                     isSelected
                       ? "bg-secondary-container text-on-secondary-container font-semibold"
                       : "bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
@@ -61,18 +67,25 @@ export function LanguageConfig({ sourceLang, targetLangs, voiceDefaultLangs, isL
                   {l.flag} {l.label}
                 </button>
                 {isSelected && (
-                  <button
-                    disabled={isLive}
-                    onClick={() => onVoiceDefaultToggle(l.code)}
-                    title={isDefaultVoice ? "Using default voice — click to use clone" : "Using cloned voice — click to use default"}
-                    className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                      isDefaultVoice
-                        ? "bg-tertiary-container text-on-tertiary-container"
-                        : "bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest"
-                    }`}
-                  >
-                    {isDefaultVoice ? "default voice" : "clone"}
-                  </button>
+                  <div className="flex gap-1">
+                    {VOICE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.mode}
+                        disabled={isLive}
+                        onClick={() => onVoiceModeChange(l.code, opt.mode)}
+                        title={opt.label}
+                        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                          currentMode === opt.mode
+                            ? opt.mode === "cloned"
+                              ? "bg-tertiary text-on-tertiary"
+                              : "bg-primary text-on-primary"
+                            : "bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
+                        }`}
+                      >
+                        {opt.short}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
             );

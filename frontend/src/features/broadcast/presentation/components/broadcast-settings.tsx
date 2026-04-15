@@ -49,11 +49,9 @@ export function BroadcastSettings({ config, devices, isLive, onConfigChange }: P
           <TtsModelPicker
             value={config.ttsModel}
             provider={config.ttsProvider}
-            voiceGender={config.ttsVoiceGender}
             disabled={isLive}
             onChange={(v) => onConfigChange("ttsModel", v)}
             onProviderChange={(v) => onConfigChange("ttsProvider", v)}
-            onVoiceGenderChange={(v) => onConfigChange("ttsVoiceGender", v)}
           />
         </div>
       )}

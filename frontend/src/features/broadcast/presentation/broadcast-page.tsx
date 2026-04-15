@@ -40,8 +40,7 @@ export default function BroadcastPage() {
     tier: config.tier,
     ttsModel: config.ttsModel,
     ttsProvider: config.ttsProvider,
-    ttsVoiceGender: config.ttsVoiceGender,
-    voiceDefaultLangs: config.voiceDefaultLangs,
+    voiceConfig: config.voiceConfig,
     audioDeviceId: config.audioDeviceId,
     rtmpUrls: config.rtmpUrls,
     broadcastDelay: config.broadcastDelay,
@@ -90,15 +89,12 @@ export default function BroadcastPage() {
       <LanguageConfig
         sourceLang={config.sourceLang}
         targetLangs={config.targetLangs}
-        voiceDefaultLangs={config.voiceDefaultLangs}
+        voiceConfig={config.voiceConfig}
         isLive={isLive}
         onSourceChange={handleSourceChange}
         onTargetToggle={handleTargetToggle}
-        onVoiceDefaultToggle={(code) => {
-          const updated = config.voiceDefaultLangs.includes(code)
-            ? config.voiceDefaultLangs.filter((l) => l !== code)
-            : [...config.voiceDefaultLangs, code];
-          update("voiceDefaultLangs", updated);
+        onVoiceModeChange={(code, mode) => {
+          update("voiceConfig", { ...config.voiceConfig, [code]: mode });
         }}
       />
       <RtmpDestinations
