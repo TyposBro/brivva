@@ -1,0 +1,112 @@
+use std::{path::PathBuf, sync::Arc, time::Instant};
+
+use axum::extract::ws::{Message, WebSocket};
+use futures_util::StreamExt;
+use tokio::{
+    sync::{oneshot, Mutex},
+    time::{self, Duration},
+};
+
+use crate::{
+    output::{ChunkVideoSink, FfmpegProcessConfig, PcmAudioSink},
+    protocol::{parse_message, Message as ProtocolMessage},
+    session::{SessionConfig, SourceSession},
+};
+
+pub type SharedSourceSession = Arc<Mutex<SourceSession>>;
+
+pub fn new_source_session(delay_ms: u64) -> SharedSourceSession {
+    Arc::new(Mutex::new(SourceSession::new(
+        Instant::now(),
+        SessionConfig { delay_ms },
+    )))
+}
+
+pub struct SourceStreamRuntime {
+    pub session: SharedSourceSession,
+    pub stop_tx: oneshot::Sender<()>,
+}
+
+pub fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<SourceStreamRuntime, String> {
+    let session = new_source_session(delay_ms);
+    let ffmpeg = FfmpegProcessConfig {
+        output_url,
+        audio_fifo: PathBuf::from(format!("/tmp/brivva_audio_{}", uuid_like())),
+        copy_video: false,
+        ..FfmpegProcessConfig::default()
+    }
+    .spawn()
+    .map_err(|e| e.to_string())?;
+
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let tick_session = session.clone();
+    tokio::spawn(async move {
+        let mut ffmpeg = ffmpeg;
+        let mut audio_sink = PcmAudioSink::new(ffmpeg.audio_writer);
+        let mut video_sink = ChunkVideoSink::new(ffmpeg.video_stdin);
+        let mut interval = time::interval(Duration::from_millis(10));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let mut locked = tick_session.lock().await;
+                    locked.tick(Instant::now(), &mut audio_sink, &mut video_sink);
+                }
+                _ = &mut stop_rx => {
+                    break;
+                }
+            }
+        }
+
+        let audio_writer = audio_sink.into_inner();
+        let video_stdin = video_sink.into_inner();
+        ffmpeg.audio_writer = audio_writer;
+        ffmpeg.video_stdin = video_stdin;
+        ffmpeg.shutdown();
+    });
+
+    Ok(SourceStreamRuntime { session, stop_tx })
+}
+
+pub async fn handle_source_socket(mut socket: WebSocket, session: SharedSourceSession) {
+    while let Some(Ok(message)) = socket.next().await {
+        match message {
+            Message::Binary(bytes) => {
+                let parsed = match parse_message(&bytes) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        let _ = socket
+                            .send(Message::Text(format!("protocol error: {err}").into()))
+                            .await;
+                        continue;
+                    }
+                };
+
+                let mut locked = session.lock().await;
+                match parsed {
+                    ProtocolMessage::SessionInit(_) => {}
+                    ProtocolMessage::AudioFrame(frame) => {
+                        let _ = locked.push_audio(frame);
+                    }
+                    ProtocolMessage::VideoChunk(chunk) => {
+                        let _ = locked.push_video(chunk);
+                    }
+                    ProtocolMessage::StreamEnd(_) => break,
+                    ProtocolMessage::Ping(_) => {}
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+}
+
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos:x}")
+}

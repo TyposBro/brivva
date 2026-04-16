@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brivva Source Stream</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: #111;
+        color: #eee;
+        margin: 0;
+        padding: 24px;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 0 auto;
+      }
+      video {
+        width: 100%;
+        max-width: 720px;
+        background: #000;
+        border: 1px solid #333;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      input, button {
+        background: #1c1c1c;
+        color: #eee;
+        border: 1px solid #444;
+        padding: 10px 12px;
+      }
+      input {
+        min-width: 280px;
+        flex: 1;
+      }
+      button {
+        cursor: pointer;
+      }
+      pre {
+        background: #171717;
+        border: 1px solid #333;
+        padding: 12px;
+        min-height: 120px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Brivva Source Stream</h1>
+      <div class="row">
+        <input id="ws-base" value="ws://127.0.0.1:3000/ws/source" />
+        <input id="output-url" placeholder="rtmp://..." />
+        <input id="delay-ms" value="1000" />
+      </div>
+      <div class="row">
+        <button id="start">Start</button>
+        <button id="stop">Stop</button>
+      </div>
+      <video id="preview" autoplay playsinline muted></video>
+      <pre id="log"></pre>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+  </html>

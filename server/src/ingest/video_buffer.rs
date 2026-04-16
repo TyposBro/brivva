@@ -63,7 +63,7 @@ impl VideoBuffer {
         while self
             .chunks
             .front()
-            .is_some_and(|chunk| chunk.capture_ts_ms + chunk.duration_ms as u64 < oldest_allowed_ts_ms)
+            .is_some_and(|chunk| chunk.capture_ts_ms + (chunk.duration_ms as u64) < oldest_allowed_ts_ms)
         {
             self.chunks.pop_front();
         }
