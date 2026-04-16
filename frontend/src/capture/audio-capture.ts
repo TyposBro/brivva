@@ -18,6 +18,7 @@ export class AudioCapture {
   private processor: ScriptProcessorNode | null = null;
   private stream: MediaStream | null = null;
   private pending = new Float32Array(0);
+  private nextCaptureTsMs: bigint | null = null;
 
   constructor(private readonly clock: SessionClock) {}
 
@@ -47,6 +48,7 @@ export class AudioCapture {
     this.stream = null;
     this.ctx = null;
     this.pending = new Float32Array(0);
+    this.nextCaptureTsMs = null;
   }
 
   private pushSamples(input: Float32Array, onFrame: AudioFrameHandler): void {
@@ -59,8 +61,9 @@ export class AudioCapture {
       const slice = combined.subarray(offset, offset + AUDIO_SAMPLES_PER_FRAME);
       const pcm = float32ToInt16Pcm(slice);
       const payload = pcm.buffer.slice(0, AUDIO_BYTES_PER_FRAME);
+      const captureTsMs = this.nextFrameTimestamp();
       onFrame({
-        captureTsMs: this.clock.nowMs(),
+        captureTsMs,
         durationMs: AUDIO_FRAME_DURATION_MS,
         payload: payload as ArrayBuffer,
       });
@@ -68,5 +71,14 @@ export class AudioCapture {
     }
 
     this.pending = combined.slice(offset);
+  }
+
+  private nextFrameTimestamp(): bigint {
+    if (this.nextCaptureTsMs === null) {
+      this.nextCaptureTsMs = this.clock.nowMs();
+    }
+    const current = this.nextCaptureTsMs;
+    this.nextCaptureTsMs += BigInt(AUDIO_FRAME_DURATION_MS);
+    return current;
   }
 }

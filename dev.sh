@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PIDS=()
 
+kill_port_if_busy() {
+    local port="$1"
+    local pids
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+        echo "[dev] freeing port :$port ($pids)"
+        kill $pids 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 cleanup() {
     echo ""
     echo "[dev] shutting down..."
@@ -14,6 +25,11 @@ cleanup() {
     echo "[dev] done"
 }
 trap cleanup EXIT INT TERM
+
+kill_port_if_busy 3000
+kill_port_if_busy 5173
+kill_port_if_busy 1935
+kill_port_if_busy 8888
 
 # ── 1. Local RTMP server (mediamtx) ──────────────────────────────
 echo "[dev] starting mediamtx (RTMP on :1935, HLS on :8888)..."
@@ -43,7 +59,11 @@ echo "  RTMP URL (paste into frontend):"
 echo "    rtmp://localhost:1935/live/test"
 echo ""
 echo "  Watch stream (paste in browser or VLC):"
-echo "    http://localhost:8888/live/test"
+echo "    http://localhost:8888/live/test/index.m3u8"
+echo ""
+echo "  Note:"
+echo "    HLS manifest appears only after publisher is sending media."
+echo "    Many browsers need an HLS-capable player; VLC works directly."
 echo "═══════════════════════════════════════════════════════"
 echo ""
 echo "Press Ctrl+C to stop all services"
