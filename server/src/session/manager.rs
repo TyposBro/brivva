@@ -37,6 +37,10 @@ impl SourceSession {
         }
     }
 
+    pub fn reset_session_start(&mut self, now: Instant) {
+        self.scheduler.reset_session_start(now);
+    }
+
     pub fn push_audio(&mut self, frame: AudioFrame) -> AudioInsertOutcome {
         self.scheduler.initialize_audio_cursor(&frame);
         let play_cursor_ms = self.scheduler.metrics().current_audio_play_ts_ms;

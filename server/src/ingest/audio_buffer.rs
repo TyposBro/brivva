@@ -69,10 +69,6 @@ impl AudioBuffer {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.frames.len()
-    }
-
     fn prune_depth(&mut self) {
         while self.depth_ms() > self.max_depth_ms {
             self.frames.pop_front();

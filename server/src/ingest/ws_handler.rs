@@ -27,16 +27,18 @@ pub struct SourceStreamRuntime {
     pub stop_tx: oneshot::Sender<()>,
 }
 
-pub fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<SourceStreamRuntime, String> {
+pub async fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<SourceStreamRuntime, String> {
     let session = new_source_session(delay_ms);
-    let ffmpeg = FfmpegProcessConfig {
+    let config = FfmpegProcessConfig {
         output_url,
         audio_fifo: PathBuf::from(format!("/tmp/brivva_audio_{}", uuid_like())),
         copy_video: false,
         ..FfmpegProcessConfig::default()
-    }
-    .spawn()
-    .map_err(|e| e.to_string())?;
+    };
+    let ffmpeg = tokio::task::spawn_blocking(move || config.spawn())
+        .await
+        .map_err(|e| format!("spawn_blocking panic: {e}"))?
+        .map_err(|e| e.to_string())?;
 
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
     let tick_session = session.clone();
@@ -69,6 +71,7 @@ pub fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<SourceS
 }
 
 pub async fn handle_source_socket(mut socket: WebSocket, session: SharedSourceSession) {
+    let mut session_initialized = false;
     while let Some(Ok(message)) = socket.next().await {
         match message {
             Message::Binary(bytes) => {
@@ -76,19 +79,40 @@ pub async fn handle_source_socket(mut socket: WebSocket, session: SharedSourceSe
                     Ok(parsed) => parsed,
                     Err(err) => {
                         let _ = socket
-                            .send(Message::Text(format!("protocol error: {err}").into()))
+                            .send(Message::Text(format!("protocol error: {err}")))
                             .await;
                         continue;
                     }
                 };
 
-                let mut locked = session.lock().await;
                 match parsed {
-                    ProtocolMessage::SessionInit(_) => {}
+                    ProtocolMessage::SessionInit(_) => {
+                        let mut locked = session.lock().await;
+                        locked.reset_session_start(Instant::now());
+                        session_initialized = true;
+                    }
                     ProtocolMessage::AudioFrame(frame) => {
+                        if !session_initialized {
+                            let _ = socket
+                                .send(Message::Text(
+                                    "protocol error: session_init required before media".into(),
+                                ))
+                                .await;
+                            break;
+                        }
+                        let mut locked = session.lock().await;
                         let _ = locked.push_audio(frame);
                     }
                     ProtocolMessage::VideoChunk(chunk) => {
+                        if !session_initialized {
+                            let _ = socket
+                                .send(Message::Text(
+                                    "protocol error: session_init required before media".into(),
+                                ))
+                                .await;
+                            break;
+                        }
+                        let mut locked = session.lock().await;
                         let _ = locked.push_video(chunk);
                     }
                     ProtocolMessage::StreamEnd(_) => break,

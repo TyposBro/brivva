@@ -63,6 +63,12 @@ impl Scheduler {
         );
     }
 
+    pub fn reset_session_start(&mut self, now: Instant) {
+        self.clock.reset_session_start(now);
+        self.next_audio_play_ts_ms = None;
+        self.metrics.current_audio_play_ts_ms = 0;
+    }
+
     pub fn metrics(&self) -> &SchedulerMetrics {
         &self.metrics
     }
@@ -98,6 +104,17 @@ mod tests {
             chunk_kind: ChunkKind::Media,
             bytes: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn reset_session_start_resets_audio_cursor() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start, 1_000);
+        let audio = audio_frame(1, 0);
+        scheduler.initialize_audio_cursor(&audio);
+        assert!(scheduler.next_audio_play_ts_ms.is_some());
+        scheduler.reset_session_start(start + Duration::from_millis(50));
+        assert!(scheduler.next_audio_play_ts_ms.is_none());
     }
 
     #[test]

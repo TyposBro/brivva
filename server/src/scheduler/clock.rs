@@ -24,6 +24,10 @@ impl SchedulerClock {
             .as_millis()
             .saturating_sub(self.configured_delay_ms as u128) as u64
     }
+
+    pub fn reset_session_start(&mut self, new_start: Instant) {
+        self.server_session_start = new_start;
+    }
 }
 
 #[cfg(test)]
@@ -40,5 +44,14 @@ mod tests {
         let deadline = clock.play_deadline(500);
 
         assert_eq!(deadline.duration_since(start), Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn reset_session_start_changes_deadline() {
+        let start = Instant::now();
+        let mut clock = SchedulerClock::new(start, 1_000);
+        let new_start = start + Duration::from_millis(100);
+        clock.reset_session_start(new_start);
+        assert_eq!(clock.play_deadline(0), new_start + Duration::from_millis(1_000));
     }
 }

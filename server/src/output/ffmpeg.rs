@@ -108,7 +108,7 @@ impl FfmpegProcessConfig {
             .args(self.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(FfmpegError::Spawn)?;
 
@@ -144,10 +144,9 @@ fn create_fifo(path: &PathBuf) -> Result<(), FfmpegError> {
     if status.success() {
         Ok(())
     } else {
-        Err(FfmpegError::Fifo(io::Error::new(
-            io::ErrorKind::Other,
-            format!("mkfifo exited with status {status}"),
-        )))
+        Err(FfmpegError::Fifo(io::Error::other(format!(
+            "mkfifo exited with status {status}"
+        ))))
     }
 }
 

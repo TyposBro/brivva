@@ -79,10 +79,6 @@ impl VideoBuffer {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.chunks.len()
-    }
-
     fn prune_depth(&mut self) {
         while self.depth_ms() > self.max_depth_ms {
             self.chunks.pop_front();

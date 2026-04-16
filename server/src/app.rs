@@ -47,7 +47,7 @@ async fn ws_source(
     Query(params): Query<SourceParams>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    match spawn_source_runtime(params.output_url, params.delay_ms.unwrap_or(1_000)) {
+    match spawn_source_runtime(params.output_url, params.delay_ms.unwrap_or(1_000)).await {
         Ok(runtime) => {
             let id = format!("source-{}", NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed));
             ws.on_upgrade(move |socket| async move {
