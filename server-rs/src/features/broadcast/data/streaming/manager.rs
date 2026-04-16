@@ -11,7 +11,7 @@ use super::types::{
     StreamingPcm, QueuedAudio,
     MAX_VIDEO_CHUNKS, MAX_FFMPEG_RESTARTS,
     VIDEO_CRF, VIDEO_MAX_BITRATE, VIDEO_BUFSIZE, VIDEO_GOP_SIZE,
-    AUDIO_BITRATE, AUDIO_CHANNELS_OUT,
+    AUDIO_BITRATE, AUDIO_CHANNELS_OUT, AUDIO_BYTES_PER_TICK, AUDIO_TICK,
 };
 use super::{video_drain, audio_drain};
 use super::ffmpeg_spawn::{create_audio_fifo, spawn_ffmpeg_process};
@@ -97,6 +97,10 @@ pub struct RtmpManager {
     /// Per-target-stream host audio queues (stream_id → queue).
     /// Source streams receive host audio directly in their audio_queue.
     host_audio_queues: HashMap<String, Arc<StdMutex<VecDeque<Vec<u8>>>>>,
+    /// Partial host PCM until enough bytes exist for one exact 20ms audio tick.
+    host_audio_pending: Vec<u8>,
+    /// Scheduled playback clock per source stream.
+    source_next_ready_at: HashMap<String, Instant>,
 }
 
 impl Default for RtmpManager {
@@ -117,6 +121,8 @@ impl RtmpManager {
             video_init_segment: Arc::new(StdMutex::new(None)),
             video_codec: "vp8".to_string(),
             host_audio_queues: HashMap::new(),
+            host_audio_pending: Vec::new(),
+            source_next_ready_at: HashMap::new(),
         }
     }
 
@@ -171,8 +177,7 @@ impl RtmpManager {
     }
 
     /// Push raw host PCM to all active/pending streams.
-    /// Source streams get it queued as passthrough audio.
-    /// Target streams get it placed in their host_audio_queue for 20% mixing.
+    /// Re-chunks host PCM to exact 20ms frames before fanout.
     pub fn push_host_audio(&mut self, pcm: &[u8]) {
         // Activate any pending source streams on first host audio.
         let source_pending: Vec<String> = self.pending_streams.iter()
@@ -183,25 +188,39 @@ impl RtmpManager {
             self.activate_pending_for_lang(&lang);
         }
 
-        // Queue host PCM directly to active source streams.
-        for stream in self.streams.values() {
-            if stream.is_source {
-                let pcm_arc = Arc::new(StdMutex::new(pcm.to_vec()));
-                let complete = Arc::new(AtomicBool::new(true));
-                let mut q = stream.audio_queue.lock().unwrap();
-                q.push_back(QueuedAudio {
-                    pcm: pcm_arc,
-                    complete,
-                    ready_at: Some(Instant::now() + Duration::from_millis(stream.delay_ms)),
-                });
+        self.host_audio_pending.extend_from_slice(pcm);
+        while self.host_audio_pending.len() >= AUDIO_BYTES_PER_TICK {
+            let chunk = self.host_audio_pending.drain(..AUDIO_BYTES_PER_TICK).collect::<Vec<u8>>();
+            self.push_host_audio_tick(chunk);
+        }
+    }
+
+    fn push_host_audio_tick(&mut self, chunk: Vec<u8>) {
+        let now = Instant::now();
+
+        for (stream_id, stream) in &self.streams {
+            if !stream.is_source {
+                continue;
             }
+            let ready_at = self.source_next_ready_at
+                .entry(stream_id.clone())
+                .and_modify(|next| *next += AUDIO_TICK)
+                .or_insert_with(|| now + Duration::from_millis(stream.delay_ms))
+                .to_owned();
+            let pcm_arc = Arc::new(StdMutex::new(chunk.clone()));
+            let complete = Arc::new(AtomicBool::new(true));
+            let mut q = stream.audio_queue.lock().unwrap();
+            q.push_back(QueuedAudio {
+                pcm: pcm_arc,
+                complete,
+                ready_at: Some(ready_at),
+            });
         }
 
-        // Push to target stream host queues (bounded — drop if full).
         for q in self.host_audio_queues.values() {
             let mut guard = q.lock().unwrap();
             if guard.len() < MAX_HOST_AUDIO_QUEUE {
-                guard.push_back(pcm.to_vec());
+                guard.push_back(chunk.clone());
             }
         }
     }
@@ -265,6 +284,7 @@ impl RtmpManager {
         exhausted_ids.into_iter().filter_map(|id| {
             let stream = self.streams.remove(&id)?;
             self.host_audio_queues.remove(&id);
+            self.source_next_ready_at.remove(&id);
             Some((stream.lang.clone(), stream.restart_count))
         }).collect()
     }
@@ -316,6 +336,8 @@ impl RtmpManager {
 impl RtmpManager {
     async fn drain_active_streams(&mut self) {
         self.host_audio_queues.clear();
+        self.source_next_ready_at.clear();
+        self.host_audio_pending.clear();
         for (id, mut stream) in self.streams.drain() {
             stream.stop_flag.store(true, Ordering::Release);
             kill_ffmpeg_process(&id, &mut stream.child);
@@ -336,6 +358,9 @@ impl RtmpManager {
                     "[FFMPEG] Activated stream {} ({}) — first audio queued",
                     config.stream_id, config.lang
                 );
+                if config.is_source {
+                    self.source_next_ready_at.remove(&config.stream_id);
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -597,6 +622,7 @@ impl RtmpManager {
             .filter_map(|info| {
                 let mut old = self.streams.remove(&info.id)?;
                 self.host_audio_queues.remove(&info.id);
+                self.source_next_ready_at.remove(&info.id);
                 let (prev_count, audio_queue) = cleanup_single_stream(&mut old);
                 let config = StreamConfig {
                     stream_id: info.id,
