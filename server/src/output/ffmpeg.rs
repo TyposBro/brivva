@@ -49,12 +49,14 @@ pub enum FfmpegError {
 
 impl FfmpegProcessConfig {
     pub fn args(&self) -> Vec<String> {
+        // Audio FIFO must be input 0 so FFmpeg opens it before probing stdin.
+        // FFmpeg probes inputs sequentially — if stdin (video) is input 0,
+        // it blocks waiting for data before opening the FIFO, deadlocking
+        // against our write-open of the FIFO.
         let mut args = vec![
             "-y".to_string(),
             "-loglevel".to_string(),
             "warning".to_string(),
-            "-i".to_string(),
-            self.video_input.clone(),
             "-f".to_string(),
             "s16le".to_string(),
             "-ar".to_string(),
@@ -63,6 +65,8 @@ impl FfmpegProcessConfig {
             "1".to_string(),
             "-i".to_string(),
             self.audio_fifo.display().to_string(),
+            "-i".to_string(),
+            self.video_input.clone(),
         ];
 
         if self.copy_video {
@@ -86,9 +90,9 @@ impl FfmpegProcessConfig {
             "-b:a".to_string(),
             "128k".to_string(),
             "-map".to_string(),
-            "0:v".to_string(),
+            "1:v".to_string(),
             "-map".to_string(),
-            "1:a".to_string(),
+            "0:a".to_string(),
             "-f".to_string(),
             "flv".to_string(),
             "-flvflags".to_string(),
@@ -161,6 +165,8 @@ mod tests {
 
         assert!(args.contains(&"copy".to_string()));
         assert!(args.contains(&"aac".to_string()));
+        assert!(args.contains(&"1:v".to_string()));
+        assert!(args.contains(&"0:a".to_string()));
         assert_eq!(args.last().unwrap(), &cfg.output_url);
     }
 
@@ -174,5 +180,14 @@ mod tests {
 
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"ultrafast".to_string()));
+    }
+
+    #[test]
+    fn audio_fifo_is_input_zero() {
+        let cfg = FfmpegProcessConfig::default();
+        let args = cfg.args();
+        let fifo_pos = args.iter().position(|a| a == &cfg.audio_fifo.display().to_string()).unwrap();
+        let stdin_pos = args.iter().position(|a| a == "pipe:0").unwrap();
+        assert!(fifo_pos < stdin_pos);
     }
 }
