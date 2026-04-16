@@ -511,17 +511,26 @@ impl RtmpManager {
         ]
     }
 
-    fn build_video_encoding_args(&self, _lang: &str) -> Vec<String> {
-        tracing::info!("[FFMPEG] Encoding {} -> H.264 (ultrafast)", self.video_codec);
+    fn build_video_encoding_args(&self, lang: &str) -> Vec<String> {
         let mut args = Vec::new();
+        let subtitles_enabled = std::env::var("BRIVVA_SUBTITLES").is_ok();
 
-        if std::env::var("BRIVVA_SUBTITLES").is_ok() {
-            if let Some(vf) = self.build_subtitle_filter(_lang) {
+        if subtitles_enabled {
+            if let Some(vf) = self.build_subtitle_filter(lang) {
                 args.extend(["-vf".to_string(), vf]);
                 tracing::info!("[FFMPEG] Subtitle overlay enabled (BRIVVA_SUBTITLES=1)");
             }
         }
 
+        if self.video_codec == "h264" && !subtitles_enabled {
+            tracing::info!("[FFMPEG] Video passthrough: H.264 copy");
+            args.extend([
+                "-c:v".to_string(), "copy".to_string(),
+            ]);
+            return args;
+        }
+
+        tracing::info!("[FFMPEG] Encoding {} -> H.264 (ultrafast)", self.video_codec);
         args.extend([
             "-c:v".to_string(), "libx264".to_string(),
             "-preset".to_string(), "ultrafast".to_string(),
@@ -767,6 +776,17 @@ mod tests {
 
         let args = mgr.build_video_encoding_args("en");
 
+        assert!(args.contains(&"copy".to_string()));
+        assert!(!args.contains(&"libx264".to_string()));
+    }
+
+    #[test]
+    fn should_build_video_encoding_args_with_ultrafast_preset_when_reencoding() {
+        let mut mgr = RtmpManager::new("test".to_string());
+        mgr.set_video_codec("vp8");
+
+        let args = mgr.build_video_encoding_args("en");
+
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"ultrafast".to_string()));
         assert!(args.contains(&"zerolatency".to_string()));
@@ -798,7 +818,7 @@ mod tests {
         let args = mgr.build_ffmpeg_args(fifo, url, "test_stream");
 
         assert!(args.contains(&fifo.to_string()), "should contain fifo path");
-        assert!(args.contains(&"libx264".to_string()), "should contain video codec");
+        assert!(args.contains(&"copy".to_string()), "should contain passthrough video codec");
         assert_eq!(args.last().unwrap(), url, "should end with rtmp url");
     }
 
@@ -817,6 +837,7 @@ mod tests {
         existing.lock().unwrap().push_back(QueuedAudio {
             pcm: Arc::new(StdMutex::new(vec![1, 2, 3])),
             complete: Arc::new(AtomicBool::new(true)),
+            ready_at: None,
         });
 
         let (queue, _stop_flag, is_restart) = prepare_stream_state(Some(existing));
