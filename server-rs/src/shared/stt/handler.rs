@@ -186,7 +186,7 @@ fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
     }
 }
 
-fn queue_source_passthrough(ctx: &SttContext, state: &SttState) {
+fn queue_source_passthrough(ctx: &SttContext, _state: &SttState) {
     let session = match ctx.sessions.get(&ctx.session_id) {
         Some(s) => s,
         None => {
