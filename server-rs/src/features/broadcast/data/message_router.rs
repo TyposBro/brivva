@@ -42,8 +42,10 @@ async fn handle_binary(
     if data.is_empty() { return; }
     match data[0] {
         MSG_TAG_AUDIO => {
-            record_host_audio(sessions, session_id, &data[1..]);
-            let _ = audio_tx.send(data[1..].to_vec());
+            let pcm = &data[1..];
+            record_host_audio(sessions, session_id, pcm);
+            forward_host_audio(pcm, sessions, session_id).await;
+            let _ = audio_tx.send(pcm.to_vec());
         }
         MSG_TAG_VIDEO => {
             record_video_chunk(sessions, session_id, &data[1..]);
@@ -65,6 +67,16 @@ fn record_host_audio(sessions: &Sessions, session_id: &str, pcm: &[u8]) {
 fn record_video_chunk(sessions: &Sessions, session_id: &str, data: &[u8]) {
     if let Some(ref recorder) = sessions.get(session_id).and_then(|s| s.recorder.clone()) {
         recorder.write_video_chunk(data);
+    }
+}
+
+async fn forward_host_audio(pcm: &[u8], sessions: &Sessions, session_id: &str) {
+    let erased = sessions.get(session_id).and_then(|s| s.rtmp_manager.clone());
+    if let Some(erased) = erased {
+        if let Some(mgr) = super::streaming::downcast_rtmp_manager(&erased) {
+            let mut locked = mgr.lock().await;
+            locked.push_host_audio(pcm);
+        }
     }
 }
 

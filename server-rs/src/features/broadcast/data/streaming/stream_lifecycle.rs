@@ -20,10 +20,26 @@ pub(super) struct RtmpStream {
     pub(super) stop_flag: Arc<AtomicBool>,
     pub(super) restart_count: u32,
     pub(super) rtmp_error: Arc<AtomicBool>,
+    /// Per-stream video delay (ms). 0 for source stream, typically 1000-3000 for targets.
+    pub(super) delay_ms: u64,
+    /// True when this stream carries the original source language (host audio, no TTS).
+    pub(super) is_source: bool,
+    /// Host audio volume (0–100). 0 = no host audio; 100 = full volume passthrough.
+    pub(super) host_volume_pct: u8,
+}
+
+/// Crash info needed to rebuild a StreamConfig for restart.
+pub(super) struct CrashedStreamInfo {
+    pub(super) id: String,
+    pub(super) lang: String,
+    pub(super) rtmp_url: String,
+    pub(super) delay_ms: u64,
+    pub(super) is_source: bool,
+    pub(super) host_volume_pct: u8,
 }
 
 /// Check a single stream's health. Returns restart info if it needs restarting.
-pub(super) fn check_stream_health(id: &str, stream: &mut RtmpStream) -> Option<(String, String, String)> {
+pub(super) fn check_stream_health(id: &str, stream: &mut RtmpStream) -> Option<CrashedStreamInfo> {
     match stream.child.try_wait() {
         Ok(Some(status)) => check_exited_process(id, stream, status),
         Ok(None) => check_rtmp_error(id, stream),
@@ -38,7 +54,7 @@ fn check_exited_process(
     id: &str,
     stream: &mut RtmpStream,
     status: std::process::ExitStatus,
-) -> Option<(String, String, String)> {
+) -> Option<CrashedStreamInfo> {
     if stream.stop_flag.load(Ordering::Acquire) {
         return None;
     }
@@ -50,10 +66,17 @@ fn check_exited_process(
     if !can_restart(stream) {
         return None;
     }
-    Some((id.to_string(), stream.lang.clone(), stream.rtmp_url.clone()))
+    Some(CrashedStreamInfo {
+        id: id.to_string(),
+        lang: stream.lang.clone(),
+        rtmp_url: stream.rtmp_url.clone(),
+        delay_ms: stream.delay_ms,
+        is_source: stream.is_source,
+        host_volume_pct: stream.host_volume_pct,
+    })
 }
 
-fn check_rtmp_error(id: &str, stream: &mut RtmpStream) -> Option<(String, String, String)> {
+fn check_rtmp_error(id: &str, stream: &mut RtmpStream) -> Option<CrashedStreamInfo> {
     if !stream.rtmp_error.load(Ordering::Acquire) {
         return None;
     }
@@ -69,7 +92,14 @@ fn check_rtmp_error(id: &str, stream: &mut RtmpStream) -> Option<(String, String
     if !can_restart(stream) {
         return None;
     }
-    Some((id.to_string(), stream.lang.clone(), stream.rtmp_url.clone()))
+    Some(CrashedStreamInfo {
+        id: id.to_string(),
+        lang: stream.lang.clone(),
+        rtmp_url: stream.rtmp_url.clone(),
+        delay_ms: stream.delay_ms,
+        is_source: stream.is_source,
+        host_volume_pct: stream.host_volume_pct,
+    })
 }
 
 fn can_restart(stream: &mut RtmpStream) -> bool {

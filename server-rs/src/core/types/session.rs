@@ -42,6 +42,9 @@ pub struct Session {
     pub rtmp_stop: Arc<AtomicBool>,
     pub video_codec: Option<String>,
     pub broadcast_delay_ms: u64,
+    /// Per-language video delay (ms). Used for TTS deadline + video hold.
+    /// Overrides broadcast_delay_ms when present for a given language.
+    pub lang_delay_ms: std::collections::HashMap<String, u64>,
     pub pipeline_counters: Arc<PipelineCounters>,
     pub latency_tracker: Arc<LatencyTracker>,
     pub tts_circuit_breaker: Arc<CircuitBreaker>,
@@ -72,6 +75,7 @@ impl Session {
             rtmp_stop: Arc::new(AtomicBool::new(false)),
             video_codec: None,
             broadcast_delay_ms: DEFAULT_BROADCAST_DELAY_MS,
+            lang_delay_ms: std::collections::HashMap::new(),
             pipeline_counters: Arc::new(PipelineCounters::new()),
             latency_tracker: Arc::new(LatencyTracker::new()),
             tts_circuit_breaker: Arc::new(CircuitBreaker::new(cb_config())),

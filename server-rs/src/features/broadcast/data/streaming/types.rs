@@ -10,8 +10,6 @@ pub(crate) const AUDIO_TICK: Duration = Duration::from_millis(20);
 pub(crate) const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// Max video chunks to buffer (~60s at 10 chunks/sec)
 pub(super) const MAX_VIDEO_CHUNKS: usize = 600;
-/// Default broadcast delay (3s gives chunked utterances enough pipeline budget)
-pub(super) const DEFAULT_DELAY_MS: u64 = 3000;
 /// Max FFmpeg restart attempts per stream
 pub(super) const MAX_FFMPEG_RESTARTS: u32 = 50;
 /// Delay between FFmpeg restart attempts

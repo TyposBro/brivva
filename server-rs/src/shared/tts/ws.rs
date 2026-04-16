@@ -93,10 +93,19 @@ async fn connect_elevenlabs(req: &SynthesisRequest<'_>) -> Result<WsStream, Stri
 }
 
 fn build_ws_url(req: &SynthesisRequest<'_>) -> String {
-    format!(
-        "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128&language_code={}",
-        req.voice_id, req.model_id, req.lang
-    )
+    if req.is_cloned_voice {
+        // Omit language_code for cloned voices: passing language_code=en on a
+        // Korean-accented clone causes ElevenLabs to produce Indian-accented output.
+        format!(
+            "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128",
+            req.voice_id, req.model_id
+        )
+    } else {
+        format!(
+            "wss://api.elevenlabs.io/v1/text-to-speech/{}/stream-input?model_id={}&output_format=mp3_44100_128&language_code={}",
+            req.voice_id, req.model_id, req.lang
+        )
+    }
 }
 
 // ── Sending ───

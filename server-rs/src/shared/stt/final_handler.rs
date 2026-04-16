@@ -136,7 +136,11 @@ fn spawn_tts_for_translation(
         .unwrap_or_else(|| session.tts_voice_gender.clone());
     let tts_model = session.tts_model.clone();
     let tts_provider = session.tts_provider.clone();
-    let broadcast_delay_ms = session.broadcast_delay_ms;
+    // Use per-lang delay for tighter TTS deadline; fall back to global.
+    let broadcast_delay_ms = session.lang_delay_ms
+        .get(target_lang)
+        .copied()
+        .unwrap_or(session.broadcast_delay_ms);
     let erased = session.rtmp_manager.clone();
     let pipeline_counters = session.pipeline_counters.clone();
     let latency_tracker = session.latency_tracker.clone();
@@ -252,6 +256,7 @@ async fn run_tts_synthesis(req: TtsSpawnRequest) {
         streaming: streaming.as_ref(),
         model_id: &tts_model_str,
         api_key: &req.tts_api_key,
+        is_cloned_voice: req.voice_clone_id.is_some() && !req.use_default_voice,
     };
 
     execute_tts_with_fallback(&synth_req, &req, streaming.as_ref(), tts_deadline).await;

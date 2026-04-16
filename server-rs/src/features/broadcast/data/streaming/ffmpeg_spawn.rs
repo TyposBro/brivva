@@ -7,7 +7,6 @@ use std::thread;
 
 use std::sync::LazyLock;
 
-use super::process::FFMPEG_BIN;
 
 const FONTCONFIG_PATH: &str = "/tmp/brivva_fonts.conf";
 
@@ -66,6 +65,7 @@ pub(super) fn spawn_ffmpeg_process(
     args: &[String],
     rtmp_url: &str,
 ) -> Result<(std::process::Child, std::process::ChildStdin, Arc<AtomicBool>), String> {
+    validate_rtmps_support(rtmp_url)?;
     let bin = pick_ffmpeg_bin(rtmp_url);
     tracing::info!(
         "[FFMPEG:{}] spawning: {} {}",
@@ -90,6 +90,18 @@ pub(super) fn spawn_ffmpeg_process(
     let rtmp_error = Arc::new(AtomicBool::new(false));
     spawn_stderr_reader(stream_id, &mut child, &rtmp_error);
     Ok((child, stdin, rtmp_error))
+}
+
+/// Fail early when RTMPS is requested but no system FFmpeg with TLS is available.
+/// Bundled FFmpeg uses SecureTransport (macOS) which doesn't support RTMPS properly.
+fn validate_rtmps_support(rtmp_url: &str) -> Result<(), String> {
+    if rtmp_url.starts_with("rtmps://") && super::process::FFMPEG_SYSTEM.is_none() {
+        return Err(
+            "RTMPS requires system FFmpeg with TLS/OpenSSL support, but none was found in PATH. \
+             Install: `brew install ffmpeg` (macOS) or `apt-get install ffmpeg` (Linux).".to_string()
+        );
+    }
+    Ok(())
 }
 
 /// RTMPS needs OpenSSL (system FFmpeg). Bundled FFmpeg uses SecureTransport = broken RTMPS.

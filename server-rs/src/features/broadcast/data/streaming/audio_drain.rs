@@ -28,6 +28,11 @@ pub(crate) struct AudioDrainConfig {
     pub(crate) audio_queue: Arc<StdMutex<VecDeque<QueuedAudio>>>,
     pub(crate) fifo_path: String,
     pub(crate) stop: Arc<AtomicBool>,
+    /// Continuous host PCM chunks (20ms each) for mixing under TTS audio.
+    /// None for source streams (they receive host audio directly in audio_queue).
+    pub(crate) host_audio_queue: Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
+    /// Host volume percentage (0–100). 20 for target streams, 0 for source.
+    pub(crate) host_volume_pct: u8,
 }
 
 /// State for draining queued audio chunk-by-chunk
@@ -55,6 +60,8 @@ struct DrainState {
     next_tick: Instant,
     started: bool,
     jitter_warn_count: u64,
+    host_audio_queue: Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
+    host_volume_pct: u8,
 }
 
 impl DrainState {
@@ -124,11 +131,17 @@ impl DrainState {
         );
     }
 
-    /// Process a normal tick: start utterance → drain audio → write.
+    /// Process a normal tick: start utterance → drain audio → mix host → write.
     fn process_tick(&mut self) -> bool {
         self.try_start_next_utterance();
 
-        let (data, should_clear) = drain_tick_audio(&mut self.active_audio, &self.silence);
+        let (tts_data, should_clear) = drain_tick_audio(&mut self.active_audio, &self.silence);
+
+        let data = if self.host_volume_pct > 0 {
+            mix_with_host_audio(&tts_data, &self.host_audio_queue, self.host_volume_pct)
+        } else {
+            tts_data
+        };
 
         if should_clear {
             self.log_utterance_done();
@@ -156,6 +169,9 @@ impl DrainState {
             self.stream_id, jitter.as_millis(), self.tick_count, write_ticks,
             audio_used, silence_bytes
         );
+
+        // Drain stale host audio to stay in sync.
+        drain_host_audio_catchup(&self.host_audio_queue, write_ticks);
 
         let should_break = self.write_catchup_and_advance(&buffer, actual);
         self.tick_count += skipped_ticks as u64;
@@ -332,7 +348,7 @@ fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &
 /// Dedicated OS thread: drains audio at 20ms ticks.
 ///
 /// Audio plays immediately as queued — no A/V sync delay.
-/// Video is independently delayed by broadcast_delay in the video drain.
+/// Video is independently delayed by per-stream delay_ms in the video drain.
 pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
     let fifo = match open_fifo(&config) {
         Some(f) => f,
@@ -351,9 +367,61 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         next_tick: now + AUDIO_TICK,
         started: false,
         jitter_warn_count: 0,
+        host_audio_queue: config.host_audio_queue,
+        host_volume_pct: config.host_volume_pct,
     };
 
     state.run();
+}
+
+// ── Host audio mixing ─────────────────────────────────────
+
+/// Pop one host PCM chunk and mix it under `tts` at `host_volume_pct`%.
+/// If no host chunk is available, returns `tts` unchanged.
+fn mix_with_host_audio(
+    tts: &[u8],
+    host_queue: &Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
+    host_volume_pct: u8,
+) -> Vec<u8> {
+    let Some(queue) = host_queue else { return tts.to_vec() };
+    let host_chunk = queue.lock().unwrap().pop_front();
+    match host_chunk {
+        Some(host) => mix_pcm_samples(tts, &host, host_volume_pct as i32),
+        None => tts.to_vec(),
+    }
+}
+
+/// Mix two s16le mono buffers. `tts` at 100%, `host` at `host_vol`%.
+/// Samples are clamped to i16 range to prevent clipping.
+fn mix_pcm_samples(tts: &[u8], host: &[u8], host_vol: i32) -> Vec<u8> {
+    let n = tts.len() / 2;
+    let mut result = Vec::with_capacity(tts.len());
+    for i in 0..n {
+        let t = i16::from_le_bytes([tts[i * 2], tts[i * 2 + 1]]) as i32;
+        let h = if i * 2 + 1 < host.len() {
+            i16::from_le_bytes([host[i * 2], host[i * 2 + 1]]) as i32
+        } else {
+            0
+        };
+        let mixed = (t + h * host_vol / 100).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let bytes = mixed.to_le_bytes();
+        result.push(bytes[0]);
+        result.push(bytes[1]);
+    }
+    result
+}
+
+/// During jitter recovery, discard stale host chunks to stay aligned.
+fn drain_host_audio_catchup(
+    host_queue: &Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
+    ticks: usize,
+) {
+    let Some(queue) = host_queue else { return };
+    let mut guard = queue.lock().unwrap();
+    let to_drain = ticks.min(guard.len());
+    for _ in 0..to_drain {
+        guard.pop_front();
+    }
 }
 
 fn open_fifo(config: &AudioDrainConfig) -> Option<std::fs::File> {

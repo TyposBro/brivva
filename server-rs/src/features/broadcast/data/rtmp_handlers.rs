@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::core::config::DEFAULT_BROADCAST_DELAY_MS;
-use crate::core::types::Lang; use crate::features::broadcast::domain::{Sessions, ServerMsg};
+use crate::core::types::Lang;
+use crate::features::broadcast::domain::{Sessions, ServerMsg};
 use super::streaming;
 
 use super::ws_handler::to_ws_msg;
@@ -26,9 +27,13 @@ pub async fn handle_rtmp_config(json: &serde_json::Value, sessions: &Sessions, s
     };
     tracing::info!("[WS:{}] rtmp:config received: {} stream(s)", session_id, streams.len());
 
-    let delay_ms = parse_broadcast_delay(json);
-    let mut manager = create_and_configure_manager(sessions, session_id, delay_ms);
-    let rtmp_langs = start_all_streams(&mut manager, streams, sessions, session_id);
+    // Global broadcastDelay as fallback for streams that don't specify delayMs.
+    let global_delay_ms = parse_broadcast_delay(json);
+    store_broadcast_delay(sessions, session_id, global_delay_ms);
+
+    let source_lang = sessions.get(session_id).map(|s| s.source_lang.to_string());
+    let mut manager = create_and_configure_manager(sessions, session_id);
+    let rtmp_langs = start_all_streams(&mut manager, streams, sessions, session_id, global_delay_ms, source_lang.as_deref());
     let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
 
     setup_health_monitoring(sessions, session_id, shared_mgr.clone());
@@ -71,6 +76,12 @@ fn store_broadcast_delay(sessions: &Sessions, session_id: &str, delay_ms: u64) {
     }
 }
 
+fn store_lang_delay(sessions: &Sessions, session_id: &str, lang: &str, delay_ms: u64) {
+    if let Some(mut session) = sessions.get_mut(session_id) {
+        session.lang_delay_ms.insert(lang.to_string(), delay_ms);
+    }
+}
+
 fn apply_existing_codec(sessions: &Sessions, session_id: &str, manager: &mut streaming::RtmpManager) {
     if let Some(codec) = sessions.get(session_id).and_then(|s| s.video_codec.clone()) {
         manager.set_video_codec(&codec);
@@ -81,9 +92,8 @@ fn parse_broadcast_delay(json: &serde_json::Value) -> u64 {
     json.get("broadcastDelay").and_then(|d| d.as_u64()).unwrap_or(DEFAULT_BROADCAST_DELAY_MS)
 }
 
-fn create_and_configure_manager(sessions: &Sessions, session_id: &str, delay_ms: u64) -> streaming::RtmpManager {
-    store_broadcast_delay(sessions, session_id, delay_ms);
-    let mut manager = streaming::RtmpManager::with_delay(session_id.to_string(), delay_ms);
+fn create_and_configure_manager(sessions: &Sessions, session_id: &str) -> streaming::RtmpManager {
+    let mut manager = streaming::RtmpManager::new(session_id.to_string());
     apply_existing_codec(sessions, session_id, &mut manager);
     manager
 }
@@ -111,8 +121,12 @@ fn start_all_streams(
     streams: &[serde_json::Value],
     sessions: &Sessions,
     session_id: &str,
+    global_delay_ms: u64,
+    source_lang: Option<&str>,
 ) -> Vec<Lang> {
-    streams.iter().filter_map(|cfg| try_start_stream(manager, cfg, sessions, session_id)).collect()
+    streams.iter().filter_map(|cfg| {
+        try_start_stream(manager, cfg, sessions, session_id, global_delay_ms, source_lang)
+    }).collect()
 }
 
 fn try_start_stream(
@@ -120,11 +134,32 @@ fn try_start_stream(
     cfg: &serde_json::Value,
     sessions: &Sessions,
     session_id: &str,
+    global_delay_ms: u64,
+    source_lang: Option<&str>,
 ) -> Option<Lang> {
     let lang = cfg.get("lang").and_then(|l| l.as_str())?;
     let url = cfg.get("url").and_then(|u| u.as_str())?;
+
+    // Per-stream delay: use delayMs field, fall back to global broadcastDelay.
+    let delay_ms = cfg.get("delayMs")
+        .and_then(|d| d.as_u64())
+        .unwrap_or(global_delay_ms);
+
+    let is_source = source_lang.map(|sl| sl == lang).unwrap_or(false);
+
+    // Per-stream host volume: frontend can override per stream. Defaults: 100 for source, 20 for target.
+    let default_vol: u8 = if is_source { 100 } else { 20 };
+    let host_volume_pct = cfg.get("hostVolume")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.min(100) as u8)
+        .unwrap_or(default_vol);
+
     let stream_id = format!("{}_{}", session_id, lang);
-    match manager.start_stream(&stream_id, lang, url) {
+
+    // Store per-lang delay for TTS deadline calculation.
+    store_lang_delay(sessions, session_id, lang, delay_ms);
+
+    match manager.start_stream(&stream_id, lang, url, delay_ms, is_source, host_volume_pct) {
         Ok(_) => Lang::from_str(lang),
         Err(e) => {
             tracing::error!("[RTMP] Failed to start {}: {}", lang, e);

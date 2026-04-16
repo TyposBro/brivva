@@ -148,6 +148,7 @@ fn build_synthesis_request<'a>(
         streaming: streaming.as_ref(),
         model_id: req.tts_model,
         api_key: req.tts_api_key,
+        is_cloned_voice: req.voice_clone_id.is_some(),
     }
 }
 

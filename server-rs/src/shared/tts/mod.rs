@@ -27,6 +27,10 @@ pub struct SynthesisRequest<'a> {
     pub streaming: Option<&'a crate::features::broadcast::data::streaming::StreamingPcm>,
     pub model_id: &'a str,
     pub api_key: &'a str,
+    /// True when voice_id is a user-cloned voice. Skips language_code in the
+    /// ElevenLabs WS URL to avoid accent mixing (Korean clone + language_code=en
+    /// produces Indian-accented English).
+    pub is_cloned_voice: bool,
 }
 
 /// Abstraction over TTS providers.
