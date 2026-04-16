@@ -49,14 +49,18 @@ pub enum FfmpegError {
 
 impl FfmpegProcessConfig {
     pub fn args(&self) -> Vec<String> {
-        // Audio FIFO must be input 0 so FFmpeg opens it before probing stdin.
-        // FFmpeg probes inputs sequentially — if stdin (video) is input 0,
-        // it blocks waiting for data before opening the FIFO, deadlocking
-        // against our write-open of the FIFO.
+        // Audio FIFO is input 0 so FFmpeg opens it before stdin.
+        // Both inputs use explicit formats (-f) to skip probing, and
+        // -thread_queue_size so FFmpeg reads them concurrently. Without
+        // this, FFmpeg probes stdin sequentially, blocks waiting for
+        // video data, never reads the FIFO, the FIFO buffer fills, and
+        // our blocking write_all deadlocks against the session mutex.
         let mut args = vec![
             "-y".to_string(),
             "-loglevel".to_string(),
             "warning".to_string(),
+            "-thread_queue_size".to_string(),
+            "512".to_string(),
             "-f".to_string(),
             "s16le".to_string(),
             "-ar".to_string(),
@@ -65,6 +69,10 @@ impl FfmpegProcessConfig {
             "1".to_string(),
             "-i".to_string(),
             self.audio_fifo.display().to_string(),
+            "-thread_queue_size".to_string(),
+            "512".to_string(),
+            "-f".to_string(),
+            "webm".to_string(),
             "-i".to_string(),
             self.video_input.clone(),
         ];

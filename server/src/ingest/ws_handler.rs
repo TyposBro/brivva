@@ -8,7 +8,10 @@ use tokio::{
 };
 
 use crate::{
-    output::{ChunkVideoSink, FfmpegProcessConfig, PcmAudioSink},
+    output::{
+        channel_sink::{run_sink_writer, ChannelAudioSink, ChannelVideoSink, SinkCommand},
+        FfmpegProcess, FfmpegProcessConfig,
+    },
     protocol::{parse_message, Message as ProtocolMessage},
     session::{SessionConfig, SourceSession},
 };
@@ -27,7 +30,10 @@ pub struct SourceStreamRuntime {
     pub stop_tx: oneshot::Sender<()>,
 }
 
-pub async fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<SourceStreamRuntime, String> {
+pub async fn spawn_source_runtime(
+    output_url: String,
+    delay_ms: u64,
+) -> Result<SourceStreamRuntime, String> {
     let session = new_source_session(delay_ms);
     let config = FfmpegProcessConfig {
         output_url,
@@ -40,12 +46,29 @@ pub async fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<S
         .map_err(|e| format!("spawn_blocking panic: {e}"))?
         .map_err(|e| e.to_string())?;
 
+    let (sink_tx, sink_rx) = std::sync::mpsc::channel::<SinkCommand>();
+
+    // Destructure — writer thread owns I/O handles and FFmpeg child
+    let FfmpegProcess {
+        mut child,
+        audio_writer,
+        video_stdin,
+        audio_fifo,
+    } = ffmpeg;
+
+    std::thread::spawn(move || {
+        run_sink_writer(sink_rx, audio_writer, video_stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&audio_fifo);
+    });
+
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
     let tick_session = session.clone();
+
     tokio::spawn(async move {
-        let mut ffmpeg = ffmpeg;
-        let mut audio_sink = PcmAudioSink::new(ffmpeg.audio_writer);
-        let mut video_sink = ChunkVideoSink::new(ffmpeg.video_stdin);
+        let mut audio_sink = ChannelAudioSink::new(sink_tx.clone());
+        let mut video_sink = ChannelVideoSink::new(sink_tx);
         let mut interval = time::interval(Duration::from_millis(10));
 
         loop {
@@ -54,17 +77,10 @@ pub async fn spawn_source_runtime(output_url: String, delay_ms: u64) -> Result<S
                     let mut locked = tick_session.lock().await;
                     locked.tick(Instant::now(), &mut audio_sink, &mut video_sink);
                 }
-                _ = &mut stop_rx => {
-                    break;
-                }
+                _ = &mut stop_rx => break,
             }
         }
-
-        let audio_writer = audio_sink.into_inner();
-        let video_stdin = video_sink.into_inner();
-        ffmpeg.audio_writer = audio_writer;
-        ffmpeg.video_stdin = video_stdin;
-        ffmpeg.shutdown();
+        // Sinks drop here → channel closes → writer thread exits → FFmpeg killed
     });
 
     Ok(SourceStreamRuntime { session, stop_tx })
