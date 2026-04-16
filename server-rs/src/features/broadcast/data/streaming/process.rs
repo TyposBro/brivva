@@ -24,6 +24,18 @@ const SIDECAR_NAME: &str = "ffmpeg-x86_64-unknown-linux-gnu";
 )))]
 const SIDECAR_NAME: &str = "ffmpeg";
 
+/// System FFmpeg from PATH (has OpenSSL for RTMPS). None if not found.
+pub(crate) static FFMPEG_SYSTEM: LazyLock<Option<String>> = LazyLock::new(|| {
+    let output = std::process::Command::new("which")
+        .arg("ffmpeg")
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { return None; }
+    tracing::info!("[FFMPEG] System ffmpeg found: {}", path);
+    Some(path)
+});
+
 pub(crate) static FFMPEG_BIN: LazyLock<String> = LazyLock::new(|| {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {

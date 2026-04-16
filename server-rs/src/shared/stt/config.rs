@@ -37,16 +37,6 @@ pub const SONIOX_CONNECT_RETRY_DELAY_SECS: u64 = 2;
 
 // ── Progressive Chunking ──────────────────────────────
 
-/// Force-emit partial translation if utterance exceeds this duration
-/// without a semantic endpoint. Prevents long continuous speech from
-/// accumulating into a single giant chunk.
-pub const FORCE_CHUNK_AFTER_SECS: u64 = 4;
-
-/// Wall-clock interval (seconds) for the force-chunk safety timer.
-/// Runs independently of incoming STT tokens so force-chunk still fires
-/// even when Soniox goes silent (e.g., music, code-switching).
-pub const FORCE_CHUNK_CHECK_INTERVAL_SECS: u64 = 1;
-
 // ── Source-Lang Passthrough ─────────────────────────────
 
 pub const PASSTHROUGH_PADDING_SECS: f64 = 2.0;
@@ -146,18 +136,6 @@ mod tests {
     #[test]
     fn should_have_valid_soniox_ws_url() {
         assert!(SONIOX_WS_URL.starts_with("wss://"));
-    }
-
-    // ── Progressive Chunking Constants ────────────────────
-
-    #[test]
-    fn should_have_force_chunk_check_interval_shorter_than_force_chunk_threshold() {
-        assert!(FORCE_CHUNK_CHECK_INTERVAL_SECS < FORCE_CHUNK_AFTER_SECS);
-    }
-
-    #[test]
-    fn should_have_positive_force_chunk_check_interval() {
-        assert!(FORCE_CHUNK_CHECK_INTERVAL_SECS > 0);
     }
 
     // ── Source-Lang Passthrough ────────────────────────────

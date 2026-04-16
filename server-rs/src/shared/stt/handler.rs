@@ -67,7 +67,6 @@ async fn process_tokens(
             handle_original_token(token, state, ctx);
         }
     }
-    maybe_force_chunk(state, ctx).await;
     MessageAction::Continue
 }
 
@@ -96,38 +95,6 @@ fn mark_utterance_start(state: &mut SttState) {
     if state.utterance_start.is_none() {
         state.utterance_start = Some(Instant::now());
     }
-}
-
-pub(super) async fn maybe_force_chunk(state: &mut SttState, ctx: &SttContext) {
-    if state.target_lang.is_none() || state.transcript_acc.is_empty() {
-        return;
-    }
-    let elapsed = match state.utterance_start {
-        Some(t) => t.elapsed().as_secs(),
-        None => return,
-    };
-    if elapsed < super::config::FORCE_CHUNK_AFTER_SECS {
-        return;
-    }
-
-    state.utterance_counter += 1;
-    let uid = state.utterance_counter;
-
-    if state.is_transcript_provider {
-        send_transcript_final(state, uid, ctx);
-    }
-
-    if state.translation_acc.is_empty() {
-        increment_translation_empty(ctx);
-        info!("[STT] #{} force-chunk after {}s but no translation yet, resetting", uid, elapsed);
-    } else {
-        send_translation(state, uid, ctx).await;
-        info!("[STT] #{} force-chunk after {}s of continuous speech", uid, elapsed);
-    }
-
-    state.transcript_acc.clear();
-    state.translation_acc.clear();
-    state.utterance_start = Some(Instant::now());
 }
 
 async fn handle_endpoint(state: &mut SttState, ctx: &SttContext) {

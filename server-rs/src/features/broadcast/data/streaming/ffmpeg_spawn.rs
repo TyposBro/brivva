@@ -60,16 +60,19 @@ pub(super) fn create_audio_fifo(stream_id: &str) -> Result<String, String> {
 }
 
 /// Spawn the FFmpeg process. Returns the child, its stdin, and an RTMP error flag.
+/// Uses system FFmpeg for RTMPS URLs (needs OpenSSL), bundled for everything else.
 pub(super) fn spawn_ffmpeg_process(
     stream_id: &str,
     args: &[String],
+    rtmp_url: &str,
 ) -> Result<(std::process::Child, std::process::ChildStdin, Arc<AtomicBool>), String> {
+    let bin = pick_ffmpeg_bin(rtmp_url);
     tracing::info!(
         "[FFMPEG:{}] spawning: {} {}",
-        stream_id, &*FFMPEG_BIN, args.join(" ")
+        stream_id, bin, args.join(" ")
     );
     let fontconfig_file = ensure_fontconfig();
-    let mut cmd = std::process::Command::new(&*FFMPEG_BIN);
+    let mut cmd = std::process::Command::new(bin);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -87,6 +90,18 @@ pub(super) fn spawn_ffmpeg_process(
     let rtmp_error = Arc::new(AtomicBool::new(false));
     spawn_stderr_reader(stream_id, &mut child, &rtmp_error);
     Ok((child, stdin, rtmp_error))
+}
+
+/// RTMPS needs OpenSSL (system FFmpeg). Bundled FFmpeg uses SecureTransport = broken RTMPS.
+fn pick_ffmpeg_bin(rtmp_url: &str) -> &str {
+    if rtmp_url.starts_with("rtmps://") {
+        if let Some(sys) = super::process::FFMPEG_SYSTEM.as_deref() {
+            tracing::info!("[FFMPEG] Using system ffmpeg for RTMPS (OpenSSL)");
+            return sys;
+        }
+        tracing::warn!("[FFMPEG] RTMPS URL but no system ffmpeg found, using bundled (may fail)");
+    }
+    &super::process::FFMPEG_BIN
 }
 
 fn spawn_stderr_reader(

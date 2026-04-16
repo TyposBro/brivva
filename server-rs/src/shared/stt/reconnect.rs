@@ -12,7 +12,7 @@ use crate::core::types::{Lang, Sessions};
 
 use super::state::{ExitReason, SttState, SttCarryOver, SttContext, MessageAction, WsStream};
 use super::connection::{connect_soniox, ConnectSession, SonioxConfig};
-use super::handler::{process_soniox_message, maybe_force_chunk};
+use super::handler::process_soniox_message;
 
 // ── Types ────────────────────────────────────────────────
 
@@ -364,28 +364,15 @@ async fn recv_loop(
     stt_stream: &mut WsRecvStream,
     ctx: &SttContext,
 ) {
-    let check_interval = Duration::from_secs(
-        super::config::FORCE_CHUNK_CHECK_INTERVAL_SECS,
-    );
-    let mut force_chunk_timer = tokio::time::interval(check_interval);
-    force_chunk_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     loop {
-        tokio::select! {
-            msg_opt = stt_stream.next() => {
-                match msg_opt {
-                    Some(msg_result) => {
-                        match handle_ws_message(msg_result, state, ctx).await {
-                            MessageAction::Continue => {}
-                            MessageAction::Break => break,
-                        }
-                    }
-                    None => break,
+        match stt_stream.next().await {
+            Some(msg_result) => {
+                match handle_ws_message(msg_result, state, ctx).await {
+                    MessageAction::Continue => {}
+                    MessageAction::Break => break,
                 }
             }
-            _ = force_chunk_timer.tick() => {
-                maybe_force_chunk(state, ctx).await;
-            }
+            None => break,
         }
     }
 }

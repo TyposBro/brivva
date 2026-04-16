@@ -53,19 +53,40 @@ struct DrainState {
     active_audio: Option<ActiveAudio>,
     tick_count: u64,
     next_tick: Instant,
+    started: bool,
     jitter_warn_count: u64,
 }
 
 impl DrainState {
-    /// Main drain loop: check stop → sleep → classify jitter → handle.
+    /// Main drain loop: wait for first audio → then tick at 20ms.
     fn run(&mut self) {
         tracing::info!("[AUDIO:{}] drain thread started (20ms ticks)", self.stream_id);
+        self.wait_for_first_audio();
         loop {
             if self.stop.load(Ordering::Acquire) { break; }
             self.sleep_until_next_tick();
             if self.handle_jitter() { break; }
         }
         self.cleanup_and_log();
+    }
+
+    /// Block until first audio arrives in queue. Prevents silence build-up
+    /// that causes audio to run 30-45s ahead of video.
+    fn wait_for_first_audio(&mut self) {
+        tracing::info!("[AUDIO:{}] waiting for first audio before starting ticks...", self.stream_id);
+        loop {
+            if self.stop.load(Ordering::Acquire) { return; }
+            {
+                let q = self.audio_queue.lock().unwrap();
+                if !q.is_empty() { break; }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        // Reset tick anchor to now so no catch-up silence is generated.
+        let now = Instant::now();
+        self.next_tick = now + AUDIO_TICK;
+        self.started = true;
+        tracing::info!("[AUDIO:{}] first audio arrived, starting ticks", self.stream_id);
     }
 
     fn sleep_until_next_tick(&self) {
@@ -328,6 +349,7 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         active_audio: None,
         tick_count: 0,
         next_tick: now + AUDIO_TICK,
+        started: false,
         jitter_warn_count: 0,
     };
 

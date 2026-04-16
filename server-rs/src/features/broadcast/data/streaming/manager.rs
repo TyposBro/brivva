@@ -355,7 +355,7 @@ impl RtmpManager {
     ) -> Result<(std::process::Child, std::process::ChildStdin, Arc<AtomicBool>, String), String> {
         let audio_fifo = create_audio_fifo(stream_id)?;
         let args = self.build_ffmpeg_args(&audio_fifo, rtmp_url, lang);
-        let (child, stdin, rtmp_error) = spawn_ffmpeg_process(stream_id, &args)?;
+        let (child, stdin, rtmp_error) = spawn_ffmpeg_process(stream_id, &args, rtmp_url)?;
         Ok((child, stdin, rtmp_error, audio_fifo))
     }
 
