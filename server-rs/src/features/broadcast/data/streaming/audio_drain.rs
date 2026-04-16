@@ -20,6 +20,8 @@ use super::{
     MAX_AUDIO_QUEUE_DEPTH,
 };
 
+const STARTUP_RECOVERY_GRACE_TICKS: u64 = 150;
+
 // ── Config struct ────────────────────────────────────────
 
 /// Everything needed to start an audio drain thread.
@@ -172,8 +174,15 @@ impl DrainState {
 
     /// Handle severe jitter: write catch-up data and reset tick anchor.
     fn handle_recovery(&mut self, jitter: Duration) -> bool {
+        if self.tick_count < STARTUP_RECOVERY_GRACE_TICKS {
+            return self.handle_startup_realign(jitter);
+        }
         if self.is_source {
             return self.handle_source_recovery(jitter);
+        }
+
+        if self.active_audio.is_none() {
+            return self.handle_idle_realign(jitter);
         }
 
         let actual = self.next_tick + jitter;
@@ -197,6 +206,19 @@ impl DrainState {
         should_break
     }
 
+    fn handle_startup_realign(&mut self, jitter: Duration) -> bool {
+        let actual = self.next_tick + jitter;
+        tracing::warn!(
+            "[AUDIO:{}] STARTUP REALIGN: {}ms behind at tick {}, resetting tick anchor",
+            self.stream_id,
+            jitter.as_millis(),
+            self.tick_count,
+        );
+        self.next_tick = actual + AUDIO_TICK;
+        self.tick_count += jitter.as_millis() as u64 / AUDIO_TICK.as_millis() as u64;
+        false
+    }
+
     /// Source streams preserve their configured delay instead of burst-playing backlog.
     fn handle_source_recovery(&mut self, jitter: Duration) -> bool {
         let actual = self.next_tick + jitter;
@@ -210,6 +232,19 @@ impl DrainState {
             dropped
         );
 
+        self.next_tick = actual + AUDIO_TICK;
+        self.tick_count += jitter.as_millis() as u64 / AUDIO_TICK.as_millis() as u64;
+        false
+    }
+
+    fn handle_idle_realign(&mut self, jitter: Duration) -> bool {
+        let actual = self.next_tick + jitter;
+        tracing::warn!(
+            "[AUDIO:{}] IDLE REALIGN: {}ms behind at tick {}, no active audio, resetting tick anchor",
+            self.stream_id,
+            jitter.as_millis(),
+            self.tick_count,
+        );
         self.next_tick = actual + AUDIO_TICK;
         self.tick_count += jitter.as_millis() as u64 / AUDIO_TICK.as_millis() as u64;
         false

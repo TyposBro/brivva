@@ -157,6 +157,7 @@ fn write_init_segment_on_first_spawn(
                     );
                     return Err(());
                 }
+                drop_matching_buffered_init(config, seg);
                 state.stats.total_bytes_written += seg.len() as u64;
                 return Ok(());
             }
@@ -174,6 +175,22 @@ fn write_init_segment_on_first_spawn(
         }
         thread::sleep(VIDEO_POLL_INTERVAL);
     }
+}
+
+fn drop_matching_buffered_init(
+    config: &VideoDrainConfig,
+    init_segment: &[u8],
+) -> bool {
+    let mut buf = config.chunk_buffer.lock().unwrap();
+    let should_drop = buf.front().is_some_and(|(_, data)| data.as_slice() == init_segment);
+    if should_drop {
+        buf.pop_front();
+        tracing::info!(
+            "[VIDEO:{}] dropped duplicated buffered init segment after first-spawn write",
+            config.stream_id
+        );
+    }
+    should_drop
 }
 
 /// Replay the init segment so FFmpeg can parse the fMP4 container.
