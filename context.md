@@ -1,255 +1,203 @@
-# Brivva Tech — LLM Collaborator Context (Apr 16, 2026)
+# Brivva Rebuild Context
 
-## What This Is
+**Date:** April 16, 2026  
+**Mode:** Reset  
+**Assumption:** Empty repo. No legacy code constraints.
 
-**SaaS platform** for real-time multilingual live commerce broadcasting. Host speaks → N platforms receive translated audio + delayed video per language. Competes with Prism Live (broadcast) + Dubly (post-processing dubbing).
+## Product Goal
 
-**Pivoting from Tauri desktop app → cloud SaaS.** Pipeline moves to AWS Fargate. Auth/billing/dashboard on Cloudflare.
+Brivva = real-time multilingual live streaming system.
 
-## What Matters — Read This First
+Host speaks on camera. System outputs:
+- source-language RTMP stream
+- translated RTMP streams
 
-**DEAL CONFIRMED Apr 16.** Demo successful — team liked translation quality + default voices. Aziz accepted to team. Technical issues found but all fixable.
+But rebuild order matters:
+- first make source stream stable
+- then add translated streams
 
-**Business model:**
+## Current Decision
 
-- Charge: $1-2 per OUTPUT minute (not per language, not per source minute)
-- Cost: ~$0.1 per output minute (Soniox + ElevenLabs + Fargate ~$0.001/min)
-- Margin: ~90%
-- 10 existing clients, 200 SOURCE min/mo each, Korean → Chinese guaranteed
-- Output min = source min × N target languages (200 source × 3 langs = 600 output min)
-- SEA languages (Thai, Vietnamese, Indonesian) = expansion multiplier
-- Aziz: 30% profit, Simon+MJ: 70% (B2B sales)
-- Baseline (Chinese only): $2,800/mo profit → $840 for Aziz
-- At 3 langs avg: $8,400/mo profit → $2,520 for Aziz
+Do not continue patching old streaming core.
 
-**Demo failures (Apr 16) — all must be fixed:**
+Reason:
+- too many timing hacks
+- audio and video used different scheduling models
+- buffering and drift became hard to reason about
+- new features stacked on unstable base
 
-1. Voice came out 45s before video (A/V sync completely broken)
-2. iPhone camera not detected as media input (need capture card or OBS virtual cam)
-3. No dedicated camera/mic (hardware gap, client studio will have gear)
-4. Cloned voice threw Indian accent in English (voice ID or language detection bug)
-5. Only streamed to YouTube, couldn't stream to Grip Live (no RTMPS support)
+So context now assumes:
+- old implementation discarded
+- new implementation designed from first principles
 
-## SaaS Architecture
+## Core Technical Goal
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    CLOUDFLARE                             │
-│                                                           │
-│  Pages ─── React Dashboard (login, settings, billing)     │
-│  Workers ── Auth API (Google OAuth)                        │
-│  Workers ── Session API (create/stop/manage sessions)      │
-│  Workers ── Billing API (usage metering, invoicing)        │
-│  D1 ─────── Users, sessions, usage records, invoices       │
-│  R2 ─────── Voice samples, recordings, dubbed outputs      │
-│                                                           │
-└──────────────────────┬────────────────────────────────────┘
-                       │ HTTPS (session create/stop)
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                  AWS FARGATE                               │
-│                                                           │
-│  ┌─────────────────────────────────┐                      │
-│  │  Pipeline Container (per session) │                    │
-│  │                                   │                    │
-│  │  Browser ──WebSocket──► Rust server                    │
-│  │    (audio 0x01, video 0x02)       │                    │
-│  │                                   │                    │
-│  │  Rust server ──► Soniox WS (STT + translation)        │
-│  │             ──► ElevenLabs WS (TTS)                    │
-│  │             ──► FFmpeg (per-language RTMP out)          │
-│  │                                   │                    │
-│  │  Per-language streams:            │                    │
-│  │    Source: video+audio (0 delay)  │                    │
-│  │    Target: video (delayed) +      │                    │
-│  │            host audio 20% +       │                    │
-│  │            TTS audio 100%         │                    │
-│  └─────────────────────────────────┘                      │
-│                                                           │
-│  Auto-scale: 0 → N containers based on active sessions    │
-│  Scale to zero when idle (no cost)                        │
-│                                                           │
-└─────────────────────────────────────────────────────────┘
-```
+Single shared media timeline.
 
-### Cloudflare Layer (Auth + Billing + Dashboard)
+Both source audio and source video must obey:
 
-| Component   | Service    | Purpose                                                          |
-| ----------- | ---------- | ---------------------------------------------------------------- |
-| Dashboard   | CF Pages   | React SPA — login, session management, billing, voice settings   |
-| Auth        | CF Workers | Google OAuth → JWT tokens. User management.                      |
-| Session API | CF Workers | Create session → spin up Fargate task. Stop session → kill task. |
-| Billing API | CF Workers | Track output minutes per session. Aggregate per client. Invoice. |
-| Database    | CF D1      | Users, sessions, usage_records, invoices, voice_configs          |
-| Storage     | CF R2      | Voice samples (WAV), session recordings, dubbed outputs          |
+`play_time = capture_time + configured_delay`
 
-### AWS Fargate Layer (Pipeline)
+Not:
+- audio FIFO with video timestamps
+- startup buffering hacks
+- special-case recovery as primary sync method
 
-| Component       | Details                                                                                        |
-| --------------- | ---------------------------------------------------------------------------------------------- |
-| Container image | Rust binary + FFmpeg sidecar. Same code as current Tauri backend.                              |
-| Lifecycle       | 1 container per active session. Spun up by CF Workers via AWS SDK. Killed on session end.      |
-| Networking      | Public IP for WebSocket (browser → container). Outbound to Soniox, ElevenLabs, RTMP endpoints. |
-| Scaling         | ECS Service with desired_count managed by CF Workers. Scale to zero = $0 when idle.            |
-| Cost            | ~$0.049/hr per container (1 vCPU, 2GB RAM). ~$0.001/min. Negligible vs API costs.              |
-| Logs            | CloudWatch → forward to CF for dashboard.                                                      |
+## V1 Scope
 
-### Data Flow
+Build only enough to prove stable source streaming:
+- browser capture
+- timestamped transport
+- server ingest
+- audio/video buffering
+- deterministic scheduler
+- RTMP output
 
-1. User logs in via Google OAuth (CF Workers)
-2. User creates session: selects languages, RTMP destinations, voice settings (CF Dashboard)
-3. CF Workers calls AWS ECS RunTask → Fargate container starts (~30s cold start)
-4. Container returns WebSocket URL → browser connects
-5. Browser sends audio (0x01) + video (0x02) via WebSocket
-6. Container processes: STT → Translation → TTS → FFmpeg → RTMP out
-7. Container reports usage (output minutes) to CF Workers billing endpoint
-8. Session ends → container stops → CF Workers updates billing
+Skip for now:
+- translation
+- TTS underlay
+- subtitles
+- voice cloning
+- multi-destination complexity
+- infra/billing/dashboard
 
-### Per-Language Video Delay Model
+## Required Properties
 
-**Source language stream (Korean → Korean):**
+### Source stream
+- stable video FPS
+- stable bitrate
+- no visible buffering on platform
+- no frequent RTMP disconnects
+- no growing A/V drift
+- predictable configured delay
 
-- Video: ZERO delay, passthrough
-- Audio: original host voice at 100%, ZERO delay
-- Just a rebroadcast — no processing
+### Translation later
+- must consume same delayed video timeline
+- must not break source stream if STT/TTS slow or fail
 
-**Target language streams (Korean → Chinese, Korean → Japanese, etc.):**
+## Recommended Architecture
 
-- Video: delayed by per-language setting (benchmark: ja=1s, zh=3s, configurable)
-- Audio: original host voice at 20% volume (immediate) + TTS at 100% (arrives when ready)
-- 1-2s delay between video and translated voice = acceptable for live commerce
+## 1. Browser Sender
 
-**Frontend config per language:**
+Browser sends two timestamped feeds:
 
-```json
-{
-  "languages": [
-    { "code": "ko", "type": "source", "delay_ms": 0 },
-    {
-      "code": "zh",
-      "type": "target",
-      "delay_ms": 3000,
-      "voice_id": "default_zh_female"
-    },
-    {
-      "code": "ja",
-      "type": "target",
-      "delay_ms": 1000,
-      "voice_id": "default_ja_male"
-    }
-  ]
-}
-```
+- `audio_frame`
+  - PCM or encoded audio
+  - capture timestamp
+  - sequence number
 
-## Current Codebase (migrating from desktop → SaaS)
+- `video_chunk`
+  - encoded video chunk
+  - capture timestamp
+  - keyframe/init metadata if needed
+  - sequence number
 
-**What stays (Rust pipeline):**
+Browser should not decide playback timing.
+Browser only captures and timestamps.
 
-- Soniox v4 STT integration (N+1 connections, semantic endpointing, force chunking)
-- ElevenLabs TTS (WebSocket streaming, REST fallback)
-- Audio drain (20ms ticks, staleness eviction, jitter recovery)
-- FFmpeg RTMP output + crash recovery
-- Voice clone API
+## 2. Server Ingest
 
-**What changes:**
+Server responsibilities:
+- receive websocket messages
+- validate timestamps and ordering
+- push into ring buffers
+- measure late/early arrival
 
-- Remove Tauri/desktop shell → standalone Rust HTTP/WS server
-- Add per-language video delay (replace global broadcast_delay)
-- Add audio mixing (host 20% + TTS 100%)
-- Add usage reporting (output minutes → CF billing API)
-- Dockerize for Fargate
-- Add RTMPS support (TLS for Grip Live etc.)
+Data structures:
+- audio ring buffer
+- video ring buffer
+- monotonic session clock
 
-**What's new (Cloudflare):**
+## 3. Scheduler
 
-- Google OAuth (CF Workers)
-- Dashboard (CF Pages + React)
-- Session management API
-- Billing/metering (D1 tables: users, sessions, usage_records)
-- R2 storage for voice samples + recordings
+One scheduler decides what should play now.
 
-```
-server-rs/src/
-├── core/           # Pure types, config, audio utils
-├── shared/
-│   ├── stt/        # Soniox v4 (10 files)
-│   ├── tts/        # ElevenLabs (6 files)
-│   ├── dubbing/    # ElevenLabs Dubbing API (Tier 4)
-│   ├── recording/  # SessionRecorder
-│   └── voice_clone/ # ElevenLabs clone API
-├── features/broadcast/
-│   ├── domain/     # Session, messages
-│   └── data/       # WebSocket handler, RTMP streaming, audio drain
-├── orchestration/  # DI, config, router
-├── lib.rs          # run_server()
-└── main.rs         # Entry point
-```
+For each output stream:
+- choose target wall-clock playback time
+- read media whose `capture_ts + delay <= now`
+- emit synchronized audio/video
 
-## Soniox v4 Integration
+This scheduler owns sync.
+Not drain threads guessing independently.
 
-- **WebSocket:** `wss://stt-rt.soniox.com/transcribe-websocket`
-- **Model:** `stt-rt-v4`
-- **N+1 connections:** 1 source (transcript) + 1 per target language (translation)
-- **Semantic endpointing:** Grammar-aware `<end>` token
-- **Force chunking:** >4s without endpoint → emit anyway
-- **Reconnect:** 5 attempts, 1s delay
+## 4. RTMP Output
 
-## TTS — ElevenLabs
+FFmpeg should be dumb mux/output layer.
 
-- **Real-time models:** `eleven_turbo_v2_5` (default), `eleven_flash_v2_5` (fast)
-- **Tier 4 model:** `eleven_multilingual_v3_enhanced` (80% human, post-processing only)
-- **Voice cloning:** Up to 3 min sample. BROKEN in demo (Indian accent — fix needed).
-- **Default voices:** Per-language from voice library. Chinese = 75/25 human/robotic.
-- **TTFB:** ~75ms (Flash), ~300ms (Turbo)
+Prefer:
+- minimal transcoding
+- passthrough when source already compatible
+- explicit CPU budgeting
 
-## Post-Demo Priorities
+Do not rely on FFmpeg stalls to shape timing.
+Timing must come from scheduler.
 
-### Phase 1: Fix Demo Failures (Week 1)
+## Translation Later
 
-1. Per-language video delay (replace global broadcast_delay)
-2. Audio mixing (host 20% + TTS 100%)
-3. Source language zero-delay passthrough
-4. Voice cloning Indian accent bug
-5. RTMPS support for Grip Live
+When source path stable:
 
-### Phase 2: SaaS Migration (Week 2-3)
+1. STT converts source speech to text
+2. translation creates target text
+3. TTS generates target audio chunks
+4. translated output stream uses:
+   - same delayed source video timeline
+   - translated audio aligned to utterance timing
 
-1. Strip Tauri shell → standalone Rust server
-2. Dockerize pipeline (Rust + FFmpeg)
-3. Deploy to Fargate with ECS task definitions
-4. CF Workers: Google OAuth + session API
-5. CF Pages: React dashboard (login, create session, manage languages)
-6. CF D1: users, sessions, usage tables
-7. Usage reporting: container → CF billing endpoint
+First translated version should be simple:
+- no host underlay
+- no mixed bilingual audio
+- translated TTS only
 
-### Phase 3: Production (Week 4+)
+## Non-Goals Right Now
 
-1. Per-minute billing integration
-2. Client onboarding flow
-3. Voice library browser in dashboard
-4. Multi-RTMP output per language
-5. Tier 4 dubbing from dashboard
-6. Monitoring + alerting
+Ignore for rebuild start:
+- old file layout
+- old queue semantics
+- old jitter recovery behavior
+- old FFmpeg thread model
+- old Tauri assumptions
+- old SaaS migration docs
 
-## Environment
+These may come back later, but not as constraints.
 
-- **API keys:** `SONIOX_API_KEY`, `TTS_API_KEY` (held server-side, never exposed to client)
-- **Build:** `cargo build --release` → Docker image → ECR → Fargate
-- **Dev:** `cargo run` or `./dev.sh` (local mode, same as before)
-- **CF Dev:** `wrangler dev` for Workers, `npm run dev` for Pages
-- **Infra:** Terraform for all AWS resources (ECR, ECS, Fargate, VPC, security groups, IAM, CloudWatch)
-- **Architecture rules:** `claude.md` — 4-layer clean architecture
+## Measurement First
 
-## Cost
+New system must expose:
+- audio queue depth
+- video queue depth
+- oldest buffered timestamp
+- current playback timestamp
+- drift between scheduled audio/video
+- dropped frames/chunks count
+- RTMP send health
 
-| Service        | Per Session | Monthly (100 sessions) |
-| -------------- | ----------- | ---------------------- |
-| Soniox v4      | ~$0.10      | ~$10                   |
-| ElevenLabs TTS | ~$2-5       | ~$200-500              |
-| AWS Fargate    | ~$0.03      | ~$3                    |
-| Cloudflare     | Free tier   | $0-5                   |
-| **Total**      | **~$2-5**   | **~$213-518**          |
+If not measurable, not controllable.
 
-## Tone
+## Design Rules
 
-Grounded, direct, technical. Ship quality, not features. When in doubt, ask — don't guess.
+1. Source path sacred.
+- never let translation logic destabilize source output
+
+2. One sync owner.
+- one place decides playback timing
+
+3. Recovery simple.
+- on overload, drop late media explicitly
+- do not hide overload behind complex catch-up hacks
+
+4. Start narrow.
+- one output first
+- then many outputs
+
+5. Long-run stability > feature count.
+
+## Immediate Next Step
+
+Write clean technical blueprint for:
+- message format
+- timing model
+- buffer model
+- scheduler loop
+- FFmpeg handoff
+
+Then implement source-only path.
