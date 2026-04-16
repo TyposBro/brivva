@@ -1,132 +1,124 @@
-# Brivva — Apr 16 Demo Plan
+# Brivva Tech — SaaS Migration Plan
 
-**Date:** April 13, 2026
-**Demo:** April 16 (Wednesday), 1-4pm with Korean show hosts + videographer
-**Goal:** Flawless live demo → finalize partnership terms
+**Date:** April 16, 2026
+**Status:** Deal confirmed. Pivoting desktop app → cloud SaaS.
 
 ---
 
-## Pre-Demo Build (Apr 13-15)
+## Phase 1: Fix Demo Failures (Apr 17-20)
 
-### Must Ship
-
-| # | Task | Details | Deadline |
+| # | Task | Details | Effort |
 |---|---|---|---|
-| 1 | **Extended voice recording** | 30s minimum, up to 3 min. Frontend: timer continues past 30s, "minimum reached" at 30s, stop button always visible. Backend: longer WAV → ElevenLabs clone API. | Apr 14 (Mon) |
-| 2 | **ElevenLabs V2 model** | Add `eleven_multilingual_v2` as TTS model for cloned voices. Higher quality, ~150-200ms TTFB vs 75ms. Worth the tradeoff for demo quality. Keep Flash as fallback. | Apr 14 (Mon) |
-| 3 | **30-min endurance test** | Run continuous Korean→Japanese stream. Monitor: crashes, drift, FIFO starvation, audio pile-up. Fix anything that breaks. | Apr 15 (Tue) |
-| 4 | **Korean voice clone test** | Record or find 2-3 min clean Korean speech sample. Clone it. Evaluate quality — must sound human, not robotic. | Apr 15 (Tue) |
-| 5 | **Backup demo recording** | Screen-record a flawless 5-min session. Insurance for Wednesday. | Apr 15 (Tue) |
+| 1 | **Per-language video delay** | Replace global `broadcast_delay` with per-language `delay_ms` in stream config. Source lang = 0ms. Each target lang configurable (ja=1000, zh=3000). | 2 days |
+| 2 | **Audio mixing** | Each target stream: host audio at 20% volume (passthrough) + TTS at 100%. Mix in audio drain before FFmpeg. Source stream: host audio at 100%, no TTS. | 1 day |
+| 3 | **Voice cloning bug** | Indian accent in English. Reproduce: check voice_id resolution, language param passed to TTS, clone vs default voice selection logic. | 1 day |
+| 4 | **RTMPS support** | FFmpeg supports `rtmps://` natively. Update RTMP URL validation to accept `rtmps://`. Test with Grip Live. | 0.5 day |
 
-### Do NOT Build
-
-- AWS deployment (desktop works)
-- Frontend polish (D1-D4 from todo.md)
-- Resilience tasks (B3, C1-C4)
-- Skip-ahead logic
-- Tier 3-4 lipsync
-- Subtitle overlay
-- Any new feature not on the list above
+**Do NOT build during Phase 1:**
+- SaaS migration
+- Dashboard
+- Billing
+- New features
 
 ---
 
-## Demo Day Script (Apr 16, 1-4pm)
+## Phase 2: SaaS Architecture (Apr 21 - May 4)
 
-### Setup (1:00-1:15pm)
-- Launch app on laptop
-- Connect to venue wifi, verify RTMP push works
-- Have backup screen recording ready on phone
-- Have terms document on phone/printed
+### Week 1: Pipeline Containerization (Apr 21-27)
 
-### Demo Phase (1:15-3:00pm)
-1. **Intro** (5 min): "Let me show you what the product does now."
-2. **Voice clone** (5 min): Record Korean host for 2-3 minutes → clone → show it works
-3. **Live stream test** (30-45 min):
-   - Korean host speaks naturally (live commerce style)
-   - Show translated streams: Japanese, English (or Chinese)
-   - Source-language passthrough on Korean stream
-   - Monitor quality, sync, stability
-4. **Q&A from hosts/videographer** (15-30 min): Let them react, ask questions, try speaking themselves
+| # | Task | Details |
+|---|---|---|
+| 1 | **Strip Tauri** | Remove `src-tauri/`, Tauri dependencies. Keep `server-rs/` as standalone Axum server + `frontend/` as React SPA. |
+| 2 | **Dockerfile** | Multi-stage: build Rust binary → runtime with FFmpeg. Alpine or Debian slim. |
+| 3 | **Terraform infra** | `infra/` directory. Modules: VPC, ECR, ECS cluster, Fargate task definition (1 vCPU, 2GB RAM), security groups (inbound WS, outbound all), IAM roles (task execution + task role), CloudWatch log group. State in S3 backend. |
+| 4 | **Terraform deploy** | `terraform apply` → ECR repo + ECS cluster ready. Push Docker image. Test: RunTask → connect WS → 30min session → verify RTMP output. |
+| 5 | **Usage reporting** | Container POST output_minutes to billing endpoint on session end. |
 
-### Terms Phase (3:00-4:00pm)
-- Wait for natural break after demo
-- "Now that you've seen what this does — let's talk about how we work together."
-- Present two options:
-  - **Option A:** ₩100M salary, no equity
-  - **Option B:** 30% profit share, ₩5M/mo minimum guarantee
-- Non-negotiables: Aziz owns code, Brivva pays API costs, written contract
-- Don't fill silence. Let them respond.
-- If they push back: "What would work for you?" Then negotiate from there.
+### Week 2: Cloudflare Layer (Apr 28 - May 4)
+
+| # | Task | Details |
+|---|---|---|
+| 1 | **D1 schema** | `users`, `sessions`, `usage_records`, `voice_configs`, `invoices` tables. |
+| 2 | **Google OAuth** | CF Worker: OAuth flow → JWT. Session tokens. User creation on first login. |
+| 3 | **Session API** | `POST /api/sessions` → RunTask on Fargate → return WS URL. `DELETE /api/sessions/:id` → StopTask. |
+| 4 | **Dashboard** | CF Pages: React SPA. Login → session list → create session (language config, RTMP URLs) → live session view. |
+| 5 | **R2 integration** | Voice samples upload to R2. Container downloads from R2 on session start. |
 
 ---
 
-## Demo Checklist
+## Phase 3: Production Polish (May 5-18)
 
-Before leaving for the meeting:
-
-- [ ] App launches without crash
-- [ ] Korean voice clone sounds human (2-3 min sample used)
-- [ ] V2 model active for cloned voice
-- [ ] RTMP stream starts within 10 seconds
-- [ ] Translation appears within 3-5 seconds of speech
-- [ ] A/V stays synced for 30+ minutes
-- [ ] No audio pile-up or gaps
-- [ ] Source-language passthrough works (host's own voice on Korean stream)
-- [ ] Backup recording on phone
-- [ ] Terms document accessible
-- [ ] Laptop fully charged + charger packed
-- [ ] Test venue wifi before demo (or tether from phone as backup)
+| # | Task | Details |
+|---|---|---|
+| 1 | **Billing metering** | Track output minutes per session per client. Monthly aggregation. Invoice generation. |
+| 2 | **Client onboarding** | Sign up → configure languages → upload voice sample → set RTMP destinations → first stream. |
+| 3 | **Voice library** | Browse ElevenLabs voices from dashboard. Preview. Select per language. |
+| 4 | **Cold start optimization** | Fargate cold start ~30s. Pre-warm strategy: keep 1 container warm during business hours. |
+| 5 | **RTMPS + multi-platform** | Multiple RTMP destinations per language (YouTube + Grip Live + Coupang simultaneously). |
+| 6 | **Monitoring** | CloudWatch alarms: container crashes, high latency, API errors. Forward to dashboard. |
 
 ---
 
-## Post-Demo (depends on outcome)
+## Phase 4: Scale (May 18+)
 
-**If they say yes (either option):**
-- Get terms in writing within 1 week
-- Start full-time after F-2-7 (Jun-Aug)
-- First paid project: China test stream in May
-
-**If they want to think about it:**
-- Don't chase. Demo speaks for itself.
-- Follow up once in 3 days: "Let me know when you're ready to move forward."
-
-**If they say no:**
-- You have a portfolio piece, Brivva streaming engine on your resume
-- Focus on Spiko + Triptych + own company after F-2-7
-- Offer Brivva tech as B2B service to other live commerce companies
+- Tier 4 dubbing from dashboard (post-session, v3 enhanced model)
+- Auto-language detection (skip manual config)
+- Per-host voice profiles (save voice settings across sessions)
+- Analytics dashboard (minutes used, quality scores, cost breakdown)
+- Multi-region Fargate (ap-northeast-1 for Korea, ap-southeast-1 for SEA)
 
 ---
 
-## File Changes for Pre-Demo Build
+## Architecture Decisions
 
-### Frontend (voice recording extension)
-```
-frontend/src/features/broadcast/presentation/components/voice-clone-card.tsx
-- Recording timer: continues past 30s
-- Progress indicator: "Minimum reached ✓" at 30s
-- Stop button: always visible after 30s
-- Max recording: 3 minutes
-- Save longer WAV to backend
-```
+| Decision | Choice | Why |
+|---|---|---|
+| Pipeline hosting | AWS Fargate | Long-running sessions (40min+), FFmpeg, WebSockets. Can't run on CF Workers. |
+| Auth/billing/dashboard | Cloudflare (Workers + Pages + D1 + R2) | Aziz knows CF stack (Spiko uses it). Free/cheap. Fast. |
+| Container per session | Yes | Isolation. No noisy neighbors. Clean shutdown. Simple scaling. |
+| Scale to zero | Yes | No cost when no sessions active. Fargate charges per second. |
+| API keys | Server-side only | Never exposed to client. Container has env vars from ECS task definition. |
+| Frontend | React SPA on CF Pages | Existing frontend code, just strip Tauri-specific parts. |
+| Database | CF D1 | Good enough for billing + session management. Aziz has 107 tables in Spiko on D1. |
 
-### Backend (V2 model + longer clone)
-```
-server-rs/src/shared/tts/config.rs
-- Add eleven_multilingual_v2 as model option
-- Default to V2 for cloned voices, Flash for defaults
+---
 
-server-rs/src/shared/voice_clone/
-- Accept WAV up to 3 min (currently caps at 30s?)
-- Verify ElevenLabs API accepts longer samples
+## Migration Checklist
 
-server-rs/src/features/broadcast/data/voice_api.rs
-- Pass tts_model selection from session config
-```
+**From desktop app:**
+- [ ] Strip Tauri shell (keep server-rs + frontend)
+- [ ] Standalone Axum server (no Tauri invoke, direct HTTP/WS)
+- [ ] Dockerfile builds and runs locally
+- [ ] FFmpeg sidecar works in container
+- [ ] WebSocket connection from browser to container works
+- [ ] RTMP output works from container
+- [ ] 30min endurance test passes in container
 
-### Testing
-```
-- 30-min continuous stream test (Korean→Japanese)
-- Voice clone quality comparison: 30s sample vs 2-3 min sample
-- V2 vs Flash quality comparison on same clone
-- Record backup demo video
-```
+**Terraform (infra/):**
+- [ ] S3 backend for state
+- [ ] VPC + subnets (public, for Fargate tasks with public IP)
+- [ ] ECR repository
+- [ ] ECS cluster + Fargate task definition
+- [ ] IAM roles (task execution + task role with R2/secrets access)
+- [ ] Security groups (inbound WS port, outbound all)
+- [ ] CloudWatch log group
+- [ ] `terraform plan` clean, `terraform apply` succeeds
+- [ ] CF Workers: Google OAuth working
+- [ ] CF D1: schema deployed
+- [ ] CF Pages: dashboard deploys
+- [ ] Session API: create → Fargate task → WS URL
+- [ ] Session API: stop → kill task → report usage
+- [ ] R2: voice sample upload/download working
+
+---
+
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `context.md` | Full technical context for LLM collaborators |
+| `plan.md` | This file — migration roadmap |
+| `tier-4.md` | ElevenLabs Dubbing API integration docs |
+| `claude.md` | Architecture rules (4-layer, dependency direction) |
+| `todo.md` | Granular task tracking |
+| `infra/` | Terraform modules (VPC, ECR, ECS, Fargate, IAM, CloudWatch) |

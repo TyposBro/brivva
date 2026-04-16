@@ -1,143 +1,255 @@
-# Brivva — LLM Collaborator Context (Apr 13, 2026)
+# Brivva Tech — LLM Collaborator Context (Apr 16, 2026)
 
 ## What This Is
 
-A Tauri v2 desktop app (Rust + React) for real-time multilingual live commerce broadcasting. One host speaks → N platforms receive translated audio in the host's cloned voice. Single binary, no cloud infra, FFmpeg bundled as sidecar.
+**SaaS platform** for real-time multilingual live commerce broadcasting. Host speaks → N platforms receive translated audio + delayed video per language. Competes with Prism Live (broadcast) + Dubly (post-processing dubbing).
+
+**Pivoting from Tauri desktop app → cloud SaaS.** Pipeline moves to AWS Fargate. Auth/billing/dashboard on Cloudflare.
 
 ## What Matters — Read This First
 
-**This is NOT an MVP.** Brivva's business already works without this product — they use multiple influencers/studios per language. This app is a **cost optimization tool** that replaces 5 influencers with 1 host + tech. The quality bar is: "better than hiring 4 more humans." If the voice sounds robotic, stream drops, or sync is off — they're better off with humans and will say no.
+**DEAL CONFIRMED Apr 16.** Demo successful — team liked translation quality + default voices. Aziz accepted to team. Technical issues found but all fixable.
 
-**DEMO ON APRIL 16 (Wednesday), 1-4pm** with real Korean show hosts + videographer. This is the meeting that determines the partnership. Product must be flawless.
+**Business model:**
 
-**Priority order for demo:**
-1. Voice cloning quality — use ElevenLabs V2 model + 2-3 min voice sample (not 30s)
-2. Reliability — 30+ min session, zero crashes
-3. A/V sync perfection (<300ms offset)
-4. Latency (important but secondary)
+- Charge: $1-2 per OUTPUT minute (not per language, not per source minute)
+- Cost: ~$0.1 per output minute (Soniox + ElevenLabs + Fargate ~$0.001/min)
+- Margin: ~90%
+- 10 existing clients, 200 SOURCE min/mo each, Korean → Chinese guaranteed
+- Output min = source min × N target languages (200 source × 3 langs = 600 output min)
+- SEA languages (Thai, Vietnamese, Indonesian) = expansion multiplier
+- Aziz: 30% profit, Simon+MJ: 70% (B2B sales)
+- Baseline (Chinese only): $2,800/mo profit → $840 for Aziz
+- At 3 langs avg: $8,400/mo profit → $2,520 for Aziz
 
-## Current State (v16.1 — Production Polish, Apr 14 Morning)
+**Demo failures (Apr 16) — all must be fixed:**
 
-**Pipeline:**
+1. Voice came out 45s before video (A/V sync completely broken)
+2. iPhone camera not detected as media input (need capture card or OBS virtual cam)
+3. No dedicated camera/mic (hardware gap, client studio will have gear)
+4. Cloned voice threw Indian accent in English (voice ID or language detection bug)
+5. Only streamed to YouTube, couldn't stream to Grip Live (no RTMPS support)
+
+## SaaS Architecture
+
 ```
-Host Audio → N+1 Soniox v4 WebSocket connections (1 source transcript + 1 per target language)
-           → Semantic endpointing (grammar-aware) + native translation (no external API)
-           → 4-second force-chunk threshold for long monologues
-           → Prosody analysis → emotion classification → voice style mapping
-           → ElevenLabs TTS (WebSocket streaming + REST fallback) + Qwen3 DashScope (backup, slower, better cloning)
-           → StreamingPcm → FFmpeg audio drain (20ms ticks) → RTMP push
-           → Tier 4: Session recording (video.fmp4 + host_audio.pcm) → post-process via ElevenLabs Dubbing API
-
-Host Video → MediaRecorder (hardware VP8/H.264) → tagged binary WS (0x02)
-           → delayed buffer (broadcast_delay seconds, 5s for DashScope) → FFmpeg → RTMP push
-
-Source language → passthrough (host audio queued directly to RTMP, zero TTS cost)
+┌─────────────────────────────────────────────────────────┐
+│                    CLOUDFLARE                             │
+│                                                           │
+│  Pages ─── React Dashboard (login, settings, billing)     │
+│  Workers ── Auth API (Google OAuth)                        │
+│  Workers ── Session API (create/stop/manage sessions)      │
+│  Workers ── Billing API (usage metering, invoicing)        │
+│  D1 ─────── Users, sessions, usage records, invoices       │
+│  R2 ─────── Voice samples, recordings, dubbed outputs      │
+│                                                           │
+└──────────────────────┬────────────────────────────────────┘
+                       │ HTTPS (session create/stop)
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│                  AWS FARGATE                               │
+│                                                           │
+│  ┌─────────────────────────────────┐                      │
+│  │  Pipeline Container (per session) │                    │
+│  │                                   │                    │
+│  │  Browser ──WebSocket──► Rust server                    │
+│  │    (audio 0x01, video 0x02)       │                    │
+│  │                                   │                    │
+│  │  Rust server ──► Soniox WS (STT + translation)        │
+│  │             ──► ElevenLabs WS (TTS)                    │
+│  │             ──► FFmpeg (per-language RTMP out)          │
+│  │                                   │                    │
+│  │  Per-language streams:            │                    │
+│  │    Source: video+audio (0 delay)  │                    │
+│  │    Target: video (delayed) +      │                    │
+│  │            host audio 20% +       │                    │
+│  │            TTS audio 100%         │                    │
+│  └─────────────────────────────────┘                      │
+│                                                           │
+│  Auto-scale: 0 → N containers based on active sessions    │
+│  Scale to zero when idle (no cost)                        │
+│                                                           │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**What needs to ship before Apr 16:**
-1. ✅ Voice recording extended: 30s minimum → up to 3 min optional
-2. ✅ Tier 4 dubbing (ElevenLabs API client + SessionRecorder shipped)
-3. ✅ Qwen3 DashScope TTS integrated (70-90% clone quality but slower)
-4. 🔲 30-minute endurance test passed
-5. 🔲 Backup demo recording captured
-6. 🔲 Demo script practiced
-7. 🔲 Terms document finalized
+### Cloudflare Layer (Auth + Billing + Dashboard)
 
-**Architecture:** ~73 Rust files, 4 layers (Core → Shared → Features → Orchestration). See `claude.md` for rules.
+| Component   | Service    | Purpose                                                          |
+| ----------- | ---------- | ---------------------------------------------------------------- |
+| Dashboard   | CF Pages   | React SPA — login, session management, billing, voice settings   |
+| Auth        | CF Workers | Google OAuth → JWT tokens. User management.                      |
+| Session API | CF Workers | Create session → spin up Fargate task. Stop session → kill task. |
+| Billing API | CF Workers | Track output minutes per session. Aggregate per client. Invoice. |
+| Database    | CF D1      | Users, sessions, usage_records, invoices, voice_configs          |
+| Storage     | CF R2      | Voice samples (WAV), session recordings, dubbed outputs          |
+
+### AWS Fargate Layer (Pipeline)
+
+| Component       | Details                                                                                        |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| Container image | Rust binary + FFmpeg sidecar. Same code as current Tauri backend.                              |
+| Lifecycle       | 1 container per active session. Spun up by CF Workers via AWS SDK. Killed on session end.      |
+| Networking      | Public IP for WebSocket (browser → container). Outbound to Soniox, ElevenLabs, RTMP endpoints. |
+| Scaling         | ECS Service with desired_count managed by CF Workers. Scale to zero = $0 when idle.            |
+| Cost            | ~$0.049/hr per container (1 vCPU, 2GB RAM). ~$0.001/min. Negligible vs API costs.              |
+| Logs            | CloudWatch → forward to CF for dashboard.                                                      |
+
+### Data Flow
+
+1. User logs in via Google OAuth (CF Workers)
+2. User creates session: selects languages, RTMP destinations, voice settings (CF Dashboard)
+3. CF Workers calls AWS ECS RunTask → Fargate container starts (~30s cold start)
+4. Container returns WebSocket URL → browser connects
+5. Browser sends audio (0x01) + video (0x02) via WebSocket
+6. Container processes: STT → Translation → TTS → FFmpeg → RTMP out
+7. Container reports usage (output minutes) to CF Workers billing endpoint
+8. Session ends → container stops → CF Workers updates billing
+
+### Per-Language Video Delay Model
+
+**Source language stream (Korean → Korean):**
+
+- Video: ZERO delay, passthrough
+- Audio: original host voice at 100%, ZERO delay
+- Just a rebroadcast — no processing
+
+**Target language streams (Korean → Chinese, Korean → Japanese, etc.):**
+
+- Video: delayed by per-language setting (benchmark: ja=1s, zh=3s, configurable)
+- Audio: original host voice at 20% volume (immediate) + TTS at 100% (arrives when ready)
+- 1-2s delay between video and translated voice = acceptable for live commerce
+
+**Frontend config per language:**
+
+```json
+{
+  "languages": [
+    { "code": "ko", "type": "source", "delay_ms": 0 },
+    {
+      "code": "zh",
+      "type": "target",
+      "delay_ms": 3000,
+      "voice_id": "default_zh_female"
+    },
+    {
+      "code": "ja",
+      "type": "target",
+      "delay_ms": 1000,
+      "voice_id": "default_ja_male"
+    }
+  ]
+}
+```
+
+## Current Codebase (migrating from desktop → SaaS)
+
+**What stays (Rust pipeline):**
+
+- Soniox v4 STT integration (N+1 connections, semantic endpointing, force chunking)
+- ElevenLabs TTS (WebSocket streaming, REST fallback)
+- Audio drain (20ms ticks, staleness eviction, jitter recovery)
+- FFmpeg RTMP output + crash recovery
+- Voice clone API
+
+**What changes:**
+
+- Remove Tauri/desktop shell → standalone Rust HTTP/WS server
+- Add per-language video delay (replace global broadcast_delay)
+- Add audio mixing (host 20% + TTS 100%)
+- Add usage reporting (output minutes → CF billing API)
+- Dockerize for Fargate
+- Add RTMPS support (TLS for Grip Live etc.)
+
+**What's new (Cloudflare):**
+
+- Google OAuth (CF Workers)
+- Dashboard (CF Pages + React)
+- Session management API
+- Billing/metering (D1 tables: users, sessions, usage_records)
+- R2 storage for voice samples + recordings
 
 ```
 server-rs/src/
-├── core/           # Pure types, config, audio utils, pipeline budget
+├── core/           # Pure types, config, audio utils
 ├── shared/
-│   ├── stt/        # Soniox v4 (10 files) — connection, handler, prosody, reconnect
-│   ├── tts/        # ElevenLabs (6 files) — WebSocket streaming + REST fallback
-│   └── voice_clone/ # ElevenLabs clone API + disk persistence
+│   ├── stt/        # Soniox v4 (10 files)
+│   ├── tts/        # ElevenLabs (6 files)
+│   ├── dubbing/    # ElevenLabs Dubbing API (Tier 4)
+│   ├── recording/  # SessionRecorder
+│   └── voice_clone/ # ElevenLabs clone API
 ├── features/broadcast/
-│   ├── domain/     # Session, messages, pipeline budget
-│   └── data/       # WebSocket handler, RTMP streaming (11 files), pipeline helpers, voice API
+│   ├── domain/     # Session, messages
+│   └── data/       # WebSocket handler, RTMP streaming, audio drain
 ├── orchestration/  # DI, config, router
-├── lib.rs          # run_server() + logging + env loading
+├── lib.rs          # run_server()
 └── main.rs         # Entry point
 ```
 
-## Soniox v4 Integration Details
+## Soniox v4 Integration
 
 - **WebSocket:** `wss://stt-rt.soniox.com/transcribe-websocket`
 - **Model:** `stt-rt-v4`
-- **N+1 connection strategy:** 1 source (transcript + interims) + 1 per target language (translation). Audio fanout to all.
-- **Semantic endpointing:** Grammar-aware, not silence-based. `<end>` token with `is_final=true`.
-- **Native translation:** `translation.type = "one_way"`, tokens arrive with `translation_status`. No external API.
-- **Force chunking:** >4s without semantic endpoint → emit anyway.
-- **Reconnect:** 5 attempts, 1s delay. Utterance counter preserved.
+- **N+1 connections:** 1 source (transcript) + 1 per target language (translation)
+- **Semantic endpointing:** Grammar-aware `<end>` token
+- **Force chunking:** >4s without endpoint → emit anyway
+- **Reconnect:** 5 attempts, 1s delay
 
 ## TTS — ElevenLabs
 
-- **Models available:**
-  - `eleven_turbo_v2_5` — expressive, good quality (default)
-  - `eleven_flash_v2_5` — fast, lower latency
-- **Voice cloning:** 30s minimum sample, **extending to 2-3 min for higher quality**
-  - Frontend: recording continues past 30s, "minimum reached" indicator, stop anytime up to 3 min
-  - Backend: longer WAV → better clone fidelity
-- **Streaming:** WebSocket primary, REST fallback. IncrementalMp3Decoder for real-time MP3→PCM.
-- **TTFB:** ~75ms (Flash), ~300ms (Turbo/Expressive)
+- **Real-time models:** `eleven_turbo_v2_5` (default), `eleven_flash_v2_5` (fast)
+- **Tier 4 model:** `eleven_multilingual_v3_enhanced` (80% human, post-processing only)
+- **Voice cloning:** Up to 3 min sample. BROKEN in demo (Indian accent — fix needed).
+- **Default voices:** Per-language from voice library. Chinese = 75/25 human/robotic.
+- **TTFB:** ~75ms (Flash), ~300ms (Turbo)
 
-## Key Technical Details
+## Post-Demo Priorities
 
-- **Audio format:** 44.1kHz PCM, 16-bit mono
-- **Video:** MediaRecorder hardware encoding → libx264 ultrafast → FLV → RTMP
-- **Protocol:** Tagged binary WebSocket — 0x01=audio, 0x02=video. JSON for control messages.
-- **Broadcast delay:** Backend default 3000ms, frontend defaults to 5000ms. Configurable 1-10s.
-- **Audio drain:** OS thread, 20ms ticks, 1764 bytes/tick. PCM → named FIFO → FFmpeg
-- **Translation tiers:** tier 1 = subtitles only, tier 2 = voice + subtitles. Tier 3 (live lipsync) designed not implemented. Tier 4 (post-processed dubbing via ElevenLabs Dubbing API) fully implemented.
-- **Crash recovery:** FFmpeg health monitor, 50 retries, 2s delay
-- **Staleness eviction:** Audio queue items >6s old evicted. Queue depth limit 10.
-- **Speech pacing:** Drain pads silence until original speech duration elapses after TTS finishes.
-- **Drift tracking:** `Arc<AtomicU64>` per stream, `max_drift_ms()` API
-- **Logging:** `tracing_subscriber` → stderr + `/tmp/brivva/server.log`
+### Phase 1: Fix Demo Failures (Week 1)
 
-## Recently Fixed Bugs (v16.1, Apr 6)
+1. Per-language video delay (replace global broadcast_delay)
+2. Audio mixing (host 20% + TTS 100%)
+3. Source language zero-delay passthrough
+4. Voice cloning Indian accent bug
+5. RTMPS support for Grip Live
 
-- **FFmpeg init segment crash** — writes init segment before data chunks on first spawn
-- **TTS cold-start 0 bytes** — retry once + REST fallback
-- **TTS timeout at low delay** — 3s floor regardless of broadcast delay
-- **Force-chunk stall** — fires on transcript duration, not translation presence
-- **Audio pile-up** — caps stale play_at timestamps
-- **Speech-duration pacing** — pads silence after short TTS to prevent audio outrunning video
+### Phase 2: SaaS Migration (Week 2-3)
 
-## Recently Fixed Bugs (v16.2, Apr 15)
+1. Strip Tauri shell → standalone Rust server
+2. Dockerize pipeline (Rust + FFmpeg)
+3. Deploy to Fargate with ECS task definitions
+4. CF Workers: Google OAuth + session API
+5. CF Pages: React dashboard (login, create session, manage languages)
+6. CF D1: users, sessions, usage tables
+7. Usage reporting: container → CF billing endpoint
 
-- **Subtitle overlay YouTube hang** — `reload=1` → `reload=30` (cuts I/O 60x), fontconfig cache pre-created, re-scanning disabled, CJK fonts prioritized. `BRIVVA_SUBTITLES=1` to enable.
+### Phase 3: Production (Week 4+)
 
-## Pipeline is Commodity — Moat is Elsewhere
-
-SOTA voice cloning is now open source (LongCat-AudioDiT). STT/translation providers are interchangeable. The pipeline will keep getting commoditized.
-
-**The real engineering value** no API provides:
-- RTMP muxer with fixed-delay jitter buffer
-- Audio drain at 20ms ticks with staleness eviction + jitter recovery
-- StreamingPcm accumulator (multiple TTS chunks → single buffer)
-- FFmpeg crash recovery + health monitor
-- A/V sync across delayed video + translated audio
-- Source-language passthrough (zero API cost)
-- N+1 connection orchestration with audio fanout
-
-**Don't over-invest in pipeline sophistication.** Keep providers swappable. The streaming engine is the moat.
+1. Per-minute billing integration
+2. Client onboarding flow
+3. Voice library browser in dashboard
+4. Multi-RTMP output per language
+5. Tier 4 dubbing from dashboard
+6. Monitoring + alerting
 
 ## Environment
 
-- **API keys in `.env.local`:** `SONIOX_API_KEY`, `TTS_API_KEY`
-- **Build:** `cargo tauri build` → `.app` + `.dmg`
-- **Dev:** `cargo tauri dev` or `./dev.sh`
+- **API keys:** `SONIOX_API_KEY`, `TTS_API_KEY` (held server-side, never exposed to client)
+- **Build:** `cargo build --release` → Docker image → ECR → Fargate
+- **Dev:** `cargo run` or `./dev.sh` (local mode, same as before)
+- **CF Dev:** `wrangler dev` for Workers, `npm run dev` for Pages
+- **Infra:** Terraform for all AWS resources (ECR, ECS, Fargate, VPC, security groups, IAM, CloudWatch)
 - **Architecture rules:** `claude.md` — 4-layer clean architecture
 
 ## Cost
 
-| Service | Monthly (30 sessions) |
-|---|---|
-| Soniox v4 | ~$19 |
-| ElevenLabs TTS | ~$250-350 |
-| **Total** | **~$270-370** |
+| Service        | Per Session | Monthly (100 sessions) |
+| -------------- | ----------- | ---------------------- |
+| Soniox v4      | ~$0.10      | ~$10                   |
+| ElevenLabs TTS | ~$2-5       | ~$200-500              |
+| AWS Fargate    | ~$0.03      | ~$3                    |
+| Cloudflare     | Free tier   | $0-5                   |
+| **Total**      | **~$2-5**   | **~$213-518**          |
 
 ## Tone
 
-Grounded, direct, technical. This is a production system for a business that generates ₩100M per contract. Ship quality, not features. When in doubt, ask — don't guess.
+Grounded, direct, technical. Ship quality, not features. When in doubt, ask — don't guess.
