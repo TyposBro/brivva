@@ -1,4 +1,6 @@
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+use serde::Serialize;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct SchedulerMetrics {
     pub audio_frames_played: u64,
     pub audio_frames_silence_filled: u64,

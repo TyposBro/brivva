@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use serde::Serialize;
+
 use crate::{
     ingest::{AudioBuffer, AudioInsertOutcome, VideoBuffer, VideoInsertOutcome},
     protocol::{AudioFrame, VideoChunk},
@@ -7,6 +9,20 @@ use crate::{
 };
 
 use super::state::SessionConfig;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceSessionSnapshot {
+    pub delay_ms: u64,
+    pub audio_buffer_depth_ms: u64,
+    pub video_buffer_depth_ms: u64,
+    pub audio_frames_played: u64,
+    pub audio_frames_silence_filled: u64,
+    pub audio_frames_late_dropped: u64,
+    pub video_chunks_emitted: u64,
+    pub video_chunks_late_dropped: u64,
+    pub current_audio_play_ts_ms: u64,
+    pub current_video_play_ts_ms: u64,
+}
 
 pub struct SourceSession {
     scheduler: Scheduler,
@@ -55,6 +71,22 @@ impl SourceSession {
 
     pub fn metrics(&self) -> &crate::scheduler::SchedulerMetrics {
         self.scheduler.metrics()
+    }
+
+    pub fn snapshot(&self) -> SourceSessionSnapshot {
+        let metrics = self.scheduler.metrics();
+        SourceSessionSnapshot {
+            delay_ms: self.config.delay_ms,
+            audio_buffer_depth_ms: self.scheduler.audio_buffer.depth_ms(),
+            video_buffer_depth_ms: self.scheduler.video_buffer.depth_ms(),
+            audio_frames_played: metrics.audio_frames_played,
+            audio_frames_silence_filled: metrics.audio_frames_silence_filled,
+            audio_frames_late_dropped: metrics.audio_frames_late_dropped,
+            video_chunks_emitted: metrics.video_chunks_emitted,
+            video_chunks_late_dropped: metrics.video_chunks_late_dropped,
+            current_audio_play_ts_ms: metrics.current_audio_play_ts_ms,
+            current_video_play_ts_ms: metrics.current_video_play_ts_ms,
+        }
     }
 }
 
