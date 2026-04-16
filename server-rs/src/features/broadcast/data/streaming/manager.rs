@@ -32,7 +32,7 @@ pub(crate) struct StreamConfig {
     pub(crate) stream_id: String,
     pub(crate) lang: String,
     pub(crate) rtmp_url: String,
-    /// Per-stream video delay (ms). 0 for source stream.
+    /// Per-stream delay budget (ms), typically shared by source video and passthrough audio.
     pub(crate) delay_ms: u64,
     /// True when this is the source-language passthrough stream (host audio only, no TTS).
     pub(crate) is_source: bool,
@@ -81,6 +81,7 @@ struct AudioDrainSetup {
     stop: Arc<AtomicBool>,
     host_audio_queue: Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
     host_volume_pct: u8,
+    is_source: bool,
 }
 
 // ── RtmpManager ──────────────────────────────────────────
@@ -188,7 +189,11 @@ impl RtmpManager {
                 let pcm_arc = Arc::new(StdMutex::new(pcm.to_vec()));
                 let complete = Arc::new(AtomicBool::new(true));
                 let mut q = stream.audio_queue.lock().unwrap();
-                q.push_back(QueuedAudio { pcm: pcm_arc, complete });
+                q.push_back(QueuedAudio {
+                    pcm: pcm_arc,
+                    complete,
+                    ready_at: Some(Instant::now() + Duration::from_millis(stream.delay_ms)),
+                });
             }
         }
 
@@ -209,7 +214,7 @@ impl RtmpManager {
         for stream in self.streams.values() {
             if stream.lang == lang {
                 let mut q = stream.audio_queue.lock().unwrap();
-                q.push_back(QueuedAudio { pcm: pcm_arc, complete });
+                q.push_back(QueuedAudio { pcm: pcm_arc, complete, ready_at: None });
                 tracing::debug!(
                     "[AUDIO:{}] queued passthrough audio: {}KB ({:.1}s) queue_depth={}",
                     lang, pcm_len / 1024, pcm_len as f64 / BYTES_PER_SEC, q.len()
@@ -229,6 +234,7 @@ impl RtmpManager {
                 q.push_back(QueuedAudio {
                     pcm: streaming.pcm.clone(),
                     complete: streaming.complete.clone(),
+                    ready_at: None,
                 });
                 tracing::debug!(
                     "[AUDIO:{}] queued streaming TTS slot, queue_depth={}",
@@ -430,6 +436,7 @@ impl RtmpManager {
             stop: setup.stop_flag,
             host_audio_queue: setup.host_audio_queue,
             host_volume_pct: setup.host_volume_pct,
+            is_source: setup.is_source,
         };
         let audio_handle = spawn_audio_drain(audio_setup)?;
         Ok((video_handle, audio_handle))
@@ -687,6 +694,7 @@ fn spawn_audio_drain(setup: AudioDrainSetup) -> Result<thread::JoinHandle<()>, S
         stop: setup.stop,
         host_audio_queue: setup.host_audio_queue,
         host_volume_pct: setup.host_volume_pct,
+        is_source: setup.is_source,
     };
     thread::Builder::new()
         .name(thread_name)

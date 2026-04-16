@@ -1,7 +1,7 @@
 //! Dedicated OS thread: drains audio at 20ms ticks.
 //!
-//! Audio plays as soon as TTS completes — no A/V sync scheduling.
-//! Video is independently delayed by broadcast_delay in the video drain.
+//! Source-stream audio uses scheduled playback timestamps so it stays aligned
+//! with delayed video. Target-stream TTS still plays as soon as it is ready.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -33,6 +33,8 @@ pub(crate) struct AudioDrainConfig {
     pub(crate) host_audio_queue: Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
     /// Host volume percentage (0–100). 20 for target streams, 0 for source.
     pub(crate) host_volume_pct: u8,
+    /// Source streams carry continuous passthrough PCM that should honor scheduled ready_at times.
+    pub(crate) is_source: bool,
 }
 
 /// State for draining queued audio chunk-by-chunk
@@ -62,6 +64,7 @@ struct DrainState {
     jitter_warn_count: u64,
     host_audio_queue: Option<Arc<StdMutex<VecDeque<Vec<u8>>>>>,
     host_volume_pct: u8,
+    is_source: bool,
 }
 
 impl DrainState {
@@ -77,15 +80,27 @@ impl DrainState {
         self.cleanup_and_log();
     }
 
-    /// Block until first audio arrives in queue. Prevents silence build-up
-    /// that causes audio to run 30-45s ahead of video.
+    /// Block until the first playable audio item exists.
     fn wait_for_first_audio(&mut self) {
-        tracing::info!("[AUDIO:{}] waiting for first audio before starting ticks...", self.stream_id);
+        if self.is_source {
+            tracing::info!(
+                "[AUDIO:{}] waiting for first scheduled source audio before starting ticks...",
+                self.stream_id
+            );
+        } else {
+            tracing::info!("[AUDIO:{}] waiting for first audio before starting ticks...", self.stream_id);
+        }
         loop {
             if self.stop.load(Ordering::Acquire) { return; }
             {
                 let q = self.audio_queue.lock().unwrap();
-                if !q.is_empty() { break; }
+                if self.is_source {
+                    if q.front().and_then(|item| item.ready_at).is_some() {
+                        break;
+                    }
+                } else if !q.is_empty() {
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -157,6 +172,10 @@ impl DrainState {
 
     /// Handle severe jitter: write catch-up data and reset tick anchor.
     fn handle_recovery(&mut self, jitter: Duration) -> bool {
+        if self.is_source {
+            return self.handle_source_recovery(jitter);
+        }
+
         let actual = self.next_tick + jitter;
         let skipped_ticks = jitter.as_millis() / AUDIO_TICK.as_millis();
         let write_ticks = (skipped_ticks as usize).min(MAX_RECOVERY_TICKS);
@@ -176,6 +195,24 @@ impl DrainState {
         let should_break = self.write_catchup_and_advance(&buffer, actual);
         self.tick_count += skipped_ticks as u64;
         should_break
+    }
+
+    /// Source streams preserve their configured delay instead of burst-playing backlog.
+    fn handle_source_recovery(&mut self, jitter: Duration) -> bool {
+        let actual = self.next_tick + jitter;
+        let dropped = self.drop_stale_scheduled_audio(actual);
+
+        tracing::warn!(
+            "[AUDIO:{}] JITTER REALIGN: {}ms behind at tick {}, dropped {} stale source chunk(s) and reset schedule anchor",
+            self.stream_id,
+            jitter.as_millis(),
+            self.tick_count,
+            dropped
+        );
+
+        self.next_tick = actual + AUDIO_TICK;
+        self.tick_count += jitter.as_millis() as u64 / AUDIO_TICK.as_millis() as u64;
+        false
     }
 
     fn build_catchup_buffer(&mut self, catch_up_bytes: usize) -> (Vec<u8>, usize) {
@@ -208,6 +245,16 @@ impl DrainState {
         }
     }
 
+    fn drop_stale_scheduled_audio(&mut self, now: Instant) -> usize {
+        let mut dropped = 0usize;
+        let mut q = self.audio_queue.lock().unwrap();
+        while q.front().is_some_and(|item| item.ready_at.is_some_and(|ready_at| ready_at < now)) {
+            q.pop_front();
+            dropped += 1;
+        }
+        dropped
+    }
+
     fn write_catchup_and_advance(&mut self, buffer: &[u8], actual: Instant) -> bool {
         if self.fifo.write_all(buffer).is_err() {
             if !self.stop.load(Ordering::Acquire) {
@@ -219,13 +266,20 @@ impl DrainState {
         false
     }
 
-    /// Pop next utterance immediately — no play_at scheduling, no pacing.
+    /// Pop next utterance when it is ready to play.
     fn try_start_next_utterance(&mut self) {
         if self.active_audio.is_some() { return; }
         let queue_arc = self.audio_queue.clone();
         let mut q = queue_arc.lock().unwrap();
-        evict_overflow_items(&self.stream_id, &mut q);
-        if let Some(audio) = q.pop_front() {
+        if !self.is_source {
+            evict_overflow_items(&self.stream_id, &mut q);
+        }
+        let now = Instant::now();
+        let next_ready = q.front().is_some_and(|audio| {
+            audio.ready_at.is_none_or(|ready_at| ready_at <= now)
+        });
+        if next_ready {
+            let audio = q.pop_front().expect("front exists when ready");
             let pcm_len = audio.pcm.lock().unwrap().len();
             let is_complete = audio.complete.load(Ordering::Acquire);
             tracing::debug!(
@@ -347,8 +401,9 @@ fn drain_final_partial(guard: &[u8], offset: usize, available: usize, silence: &
 
 /// Dedicated OS thread: drains audio at 20ms ticks.
 ///
-/// Audio plays immediately as queued — no A/V sync delay.
-/// Video is independently delayed by per-stream delay_ms in the video drain.
+/// Source streams optionally wait for an initial delay buffer so passthrough
+/// audio lines up with delayed video. Target-stream TTS still plays immediately
+/// once queued so the broadcast delay can absorb synthesis latency.
 pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
     let fifo = match open_fifo(&config) {
         Some(f) => f,
@@ -369,6 +424,7 @@ pub(crate) fn audio_drain_loop(config: AudioDrainConfig) {
         jitter_warn_count: 0,
         host_audio_queue: config.host_audio_queue,
         host_volume_pct: config.host_volume_pct,
+        is_source: config.is_source,
     };
 
     state.run();

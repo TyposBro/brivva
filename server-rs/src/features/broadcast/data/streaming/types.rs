@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ── Constants ─────────────────────────────────────────────
 
@@ -117,12 +117,14 @@ impl StreamingPcm {
 }
 
 /// Audio waiting to be played. Played immediately in FIFO order — no scheduling.
-/// Video is independently delayed by broadcast_delay in the video drain.
+/// Source passthrough may carry a scheduled ready_at timestamp to align with delayed video.
 pub(crate) struct QueuedAudio {
     /// Shared PCM buffer (may still be growing if TTS is streaming)
     pub(crate) pcm: Arc<StdMutex<Vec<u8>>>,
     /// True when all audio data has been written
     pub(crate) complete: Arc<AtomicBool>,
+    /// Optional playback deadline for source passthrough audio.
+    pub(crate) ready_at: Option<Instant>,
 }
 
 // ── Shared Helpers ─────────────────────────────────────────

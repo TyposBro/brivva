@@ -103,7 +103,6 @@ async fn handle_endpoint(state: &mut SttState, ctx: &SttContext) {
 
     if state.is_transcript_provider {
         send_transcript_final(state, uid, ctx);
-        queue_source_passthrough(ctx, state);
     }
 
     if state.target_lang.is_some() {
@@ -151,46 +150,6 @@ fn send_final_to_host(ctx: &SttContext, transcript: &str, uid: u64) {
             ),
         );
     }
-}
-
-fn queue_source_passthrough(ctx: &SttContext, _state: &SttState) {
-    let session = match ctx.sessions.get(&ctx.session_id) {
-        Some(s) => s,
-        None => {
-            tracing::warn!("[PASSTHROUGH] session {} gone, skipping", ctx.session_id);
-            return;
-        }
-    };
-    if !session.active_langs().contains(&ctx.source_lang) {
-        return;
-    }
-    let erased = match session.rtmp_manager.clone() {
-        Some(m) => m,
-        None => {
-            tracing::warn!("[PASSTHROUGH] no RTMP manager for {}, audio dropped", ctx.source_lang);
-            return;
-        }
-    };
-    let mgr = match crate::features::broadcast::data::streaming::downcast_rtmp_manager(&erased) {
-        Some(m) => m,
-        None => {
-            tracing::error!("[PASSTHROUGH] RTMP manager downcast failed for {}", ctx.source_lang);
-            return;
-        }
-    };
-
-    let host_audio = drain_host_audio(ctx);
-    let lang_str = ctx.source_lang.to_string();
-
-    tokio::spawn(async move {
-        let mut locked = mgr.lock().await;
-        locked.queue_audio(&lang_str, host_audio);
-    });
-}
-
-fn drain_host_audio(ctx: &SttContext) -> Vec<u8> {
-    let mut acc = ctx.audio_acc.lock().unwrap();
-    acc.drain(..).flatten().collect()
 }
 
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
