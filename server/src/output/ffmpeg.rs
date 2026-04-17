@@ -58,7 +58,7 @@ impl FfmpegProcessConfig {
         let mut args = vec![
             "-y".to_string(),
             "-loglevel".to_string(),
-            "warning".to_string(),
+            "info".to_string(),
             "-thread_queue_size".to_string(),
             "512".to_string(),
             "-f".to_string(),
@@ -72,7 +72,11 @@ impl FfmpegProcessConfig {
             "-thread_queue_size".to_string(),
             "512".to_string(),
             "-f".to_string(),
-            "webm".to_string(),
+            "image2pipe".to_string(),
+            "-framerate".to_string(),
+            "30".to_string(),
+            "-vcodec".to_string(),
+            "mjpeg".to_string(),
             "-i".to_string(),
             self.video_input.clone(),
         ];

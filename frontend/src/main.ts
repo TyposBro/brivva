@@ -43,8 +43,8 @@ startBtn.onclick = async () => {
 
   try {
     await sender.connect(wsUrl, JSON.stringify({
-      video_codec: "vp8",
-      video_container: "webm",
+      video_codec: "mjpeg",
+      video_container: "image2pipe",
       audio_codec: "pcm_s16le",
       source_lang: "en",
     }));

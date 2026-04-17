@@ -12,12 +12,15 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::ingest::ws_handler::{handle_source_socket, spawn_source_runtime};
+use crate::ingest::ws_handler::{
+    handle_source_socket, spawn_source_runtime, PublisherDebugSnapshot, SharedPublisherDebug,
+};
 use crate::session::SourceSessionSnapshot;
 
 #[derive(Clone, Default)]
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, crate::ingest::ws_handler::SharedSourceSession>>>,
+    publishers: Arc<Mutex<HashMap<String, SharedPublisherDebug>>>,
 }
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -34,6 +37,7 @@ pub fn app() -> Router {
         .route("/", get(health))
         .route("/sessions", get(list_sessions))
         .route("/sessions/:id", get(get_session))
+        .route("/debug/publisher", get(list_publishers))
         .route("/ws/source", get(ws_source))
         .with_state(state)
 }
@@ -55,11 +59,19 @@ async fn ws_source(
                 let mut sessions = state.sessions.lock().await;
                 sessions.insert(id.clone(), runtime.session.clone());
             }
+            {
+                let mut publishers = state.publishers.lock().await;
+                publishers.insert(id.clone(), runtime.debug.clone());
+            }
             let session = runtime.session.clone();
             handle_source_socket(socket, session).await;
             let _ = runtime.stop_tx.send(());
-            let mut sessions = state.sessions.lock().await;
-            sessions.remove(&id);
+            {
+                let mut sessions = state.sessions.lock().await;
+                sessions.remove(&id);
+            }
+            let mut publishers = state.publishers.lock().await;
+            publishers.remove(&id);
         }).into_response()
         }
         Err(err) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
@@ -90,4 +102,15 @@ async fn get_session(
 
     let snapshot = session.lock().await.snapshot();
     Ok(Json(snapshot))
+}
+
+async fn list_publishers(
+    State(state): State<AppState>,
+) -> Json<HashMap<String, PublisherDebugSnapshot>> {
+    let publishers = state.publishers.lock().await;
+    let out = publishers
+        .iter()
+        .map(|(id, debug)| (id.clone(), debug.snapshot()))
+        .collect();
+    Json(out)
 }
