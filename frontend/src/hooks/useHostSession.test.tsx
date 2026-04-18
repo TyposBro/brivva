@@ -71,10 +71,10 @@ const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } = vi.hois
 });
 
 vi.mock("../lib/AudioPipeline", () => ({ AudioPipeline: FakePipeline }));
-vi.mock("../lib/RoomSocket", () => ({ RoomSocket: FakeSocket }));
+vi.mock("../lib/SessionSocket", () => ({ SessionSocket: FakeSocket }));
 
 import * as api from "../lib/api";
-import { useHostRoom } from "./useHostRoom";
+import { useHostSession } from "./useHostSession";
 
 const mockedGetAuthToken = api.getAuthToken as unknown as ReturnType<typeof vi.fn>;
 const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<typeof vi.fn>;
@@ -111,7 +111,7 @@ function installMedia() {
   });
 }
 
-describe("useHostRoom", () => {
+describe("useHostSession", () => {
   beforeEach(() => {
     pipelineInstances.length = 0;
     socketInstances.length = 0;
@@ -121,7 +121,7 @@ describe("useHostRoom", () => {
   });
 
   it("initial state is idle", () => {
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
     expect(result.current.status).toBe("idle");
     expect(result.current.utterances).toEqual([]);
     expect(result.current.translations).toEqual({});
@@ -129,21 +129,21 @@ describe("useHostRoom", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("createRoom w/o userId → dispatches error, skips WS connect (sad)", async () => {
-    const { result } = renderHook(() => useHostRoom());
+  it("connectSession w/o userId → dispatches error, skips WS connect (sad)", async () => {
+    const { result } = renderHook(() => useHostSession());
     await act(async () => {
-      await result.current.createRoom({ userId: "" });
+      await result.current.connectSession({ userId: "" });
     });
     expect(result.current.error).toContain("user_id");
     expect(socketInstances.filter((s) => s.callbacks)).toHaveLength(0);
   });
 
-  it("createRoom happy path → reset, token fetched, WS connected, status→voice_setup on open", async () => {
+  it("connectSession happy path → reset, token fetched, WS connected, status→voice_setup on open", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "tok_1" });
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
-      await result.current.createRoom({ userId: "u1", sessionId: "s1", sourceLang: "en" });
+      await result.current.connectSession({ userId: "u1", sessionId: "s1", sourceLang: "en" });
     });
 
     expect(mockedGetAuthToken).toHaveBeenCalledWith("u1");
@@ -160,10 +160,10 @@ describe("useHostRoom", () => {
 
   it("auth token fetch failure (sad)", async () => {
     mockedGetAuthToken.mockRejectedValueOnce(new Error("401 unauthorized"));
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
-      await result.current.createRoom({ userId: "u1" });
+      await result.current.connectSession({ userId: "u1" });
     });
     expect(result.current.error).toContain("Auth token fetch failed");
     expect(result.current.error).toContain("401");
@@ -172,8 +172,8 @@ describe("useHostRoom", () => {
 
   it("skipVoiceSetup → ready", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     expect(result.current.status).toBe("ready");
@@ -184,10 +184,10 @@ describe("useHostRoom", () => {
     mockedCloneSessionVoice.mockResolvedValueOnce({
       voice: { id: "v1", user_id: "u1", elevenlabs_voice_id: "el1", name: "n", created_at: 1 },
     });
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
-      await result.current.createRoom({ userId: "u1", sessionId: "s1" });
+      await result.current.connectSession({ userId: "u1", sessionId: "s1" });
     });
     act(() => socketInstances[0].fireOpen());
 
@@ -209,7 +209,7 @@ describe("useHostRoom", () => {
   });
 
   it("startRecording bails silently if socket not open (sad)", async () => {
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.startRecording(); });
     expect(result.current.status).toBe("idle");
     expect(pipelineInstances.every((p) => !p.started)).toBe(true);
@@ -217,8 +217,8 @@ describe("useHostRoom", () => {
 
   it("startRecording when open → pipeline starts, status=recording, audio forwarded", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
 
@@ -234,8 +234,8 @@ describe("useHostRoom", () => {
 
   it("stopRecording → pipeline stop + status=ready", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     await act(async () => { await result.current.startRecording(); });
@@ -247,9 +247,9 @@ describe("useHostRoom", () => {
 
   it("full pipeline: interim → final → translation → tts_end populates timings + transcripts", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
+    const { result } = renderHook(() => useHostSession());
     act(() => result.current.setActiveTargetLangs(["ja"]));
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     await act(async () => { await result.current.startRecording(); });
@@ -277,8 +277,8 @@ describe("useHostRoom", () => {
 
   it("WS disconnect mid-recording → status=disconnected, pipeline stopped (sad)", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     await act(async () => { await result.current.startRecording(); });
@@ -290,30 +290,30 @@ describe("useHostRoom", () => {
 
   it("error message → error field populated, status unchanged (sad)", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => socketInstances[0].fireMessage({ type: "error", message: "backend blew up" }));
     expect(result.current.error).toBe("backend blew up");
   });
 
-  it("closeRoom sends host:end + closes WS + stops pipeline", async () => {
+  it("closeSession sends host:end + closes WS + stops pipeline", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     await act(async () => { await result.current.startRecording(); });
 
-    act(() => result.current.closeRoom());
+    act(() => result.current.closeSession());
     expect(socketInstances[0].sent[0]).toEqual({ type: "host:end" });
     expect(pipelineInstances[0].stopped).toBe(true);
   });
 
   it("unknown msg.type ignored (sad: forward compat)", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
     const before = { ...result.current };
     act(() => socketInstances[0].fireMessage({ type: "future_event_xyz" }));

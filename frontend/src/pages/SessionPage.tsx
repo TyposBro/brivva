@@ -259,7 +259,7 @@ export default function SessionPage() {
               }
             >
               <Radio className="w-5 h-5" />
-              {session.room_id ? "Rejoin Broadcast" : "Start Broadcasting"}
+              {session.live_session_id ? "Resume Broadcast" : "Start Broadcasting"}
             </button>
           )}
 

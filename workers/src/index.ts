@@ -341,7 +341,7 @@ app.get("/internal/voices/:id", async (c) => {
   return c.json(v);
 });
 
-// Session + streams bundle for Fargate to bootstrap a room. Voice is joined
+// Session + streams bundle for Fargate to bootstrap a live session. Voice is joined
 // in-line so Fargate doesn't need a second call.
 app.get("/internal/sessions/:id", async (c) => {
   const err = requireInternal(c);
@@ -354,14 +354,14 @@ app.get("/internal/sessions/:id", async (c) => {
   return c.json({ session, streams, voice });
 });
 
-// Status update (Fargate → Workers when room goes live / ends).
+// Status update (Fargate → Workers when a live session starts / ends).
 app.patch("/internal/sessions/:id", async (c) => {
   const err = requireInternal(c);
   if (err) return err;
   const id = c.req.param("id");
-  const body = await c.req.json<{ status?: string; room_id?: string | null }>();
+  const body = await c.req.json<{ status?: string; live_session_id?: string | null }>();
   if (!body.status) return c.json({ error: "status required" }, 400);
-  await db.updateSessionStatus(c.env.DB, id, body.status, body.room_id ?? null);
+  await db.updateSessionStatus(c.env.DB, id, body.status, body.live_session_id ?? null);
   return c.json({ status: "ok" });
 });
 

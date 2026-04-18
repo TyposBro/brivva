@@ -132,7 +132,7 @@ export async function createSession(
     source_lang: sourceLang,
     target_langs: targetLangs,
     status: "setup",
-    room_id: null,
+    live_session_id: null,
     created_at: createdAt,
   };
 }
@@ -157,11 +157,11 @@ export async function updateSessionStatus(
   db: D1Database,
   id: string,
   status: string,
-  roomId: string | null,
+  liveSessionId: string | null,
 ): Promise<void> {
   await db
-    .prepare("UPDATE sessions SET status=?, room_id=? WHERE id=?")
-    .bind(status, roomId, id)
+    .prepare("UPDATE sessions SET status=?, live_session_id=? WHERE id=?")
+    .bind(status, liveSessionId, id)
     .run();
 }
 

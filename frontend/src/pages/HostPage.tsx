@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useHostRoom } from "../hooks/useHostRoom";
+import { useHostSession } from "../hooks/useHostSession";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { LatencyDashboard } from "../components/LatencyDashboard";
 import {
@@ -37,14 +37,14 @@ export default function HostPage() {
     error,
     timings,
     videoRef,
-    createRoom,
+    connectSession,
     startRecording,
     stopRecording,
-    closeRoom,
+    closeSession,
     startVoiceRecording,
     skipVoiceSetup,
     setActiveTargetLangs,
-  } = useHostRoom();
+  } = useHostSession();
 
   const listRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(false);
@@ -70,7 +70,7 @@ export default function HostPage() {
   useEffect(() => {
     if (createdRef.current) return;
     createdRef.current = true;
-    void createRoom({ sessionId, sourceLang, userId });
+    void connectSession({ sessionId, sourceLang, userId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -90,7 +90,7 @@ export default function HostPage() {
   }, [utterances, liveTranscript]);
 
   const handleBack = () => {
-    closeRoom();
+    closeSession();
     navigate(sessionId ? `/session/${sessionId}` : "/dashboard");
   };
 
@@ -145,7 +145,7 @@ export default function HostPage() {
             BRIVVA
           </h1>
           <p className="text-on-surface-variant font-label text-sm truncate max-w-[200px]">
-            {session ? session.title : "Quick Room"}
+            {session ? session.title : "Quick Session"}
           </p>
         </div>
       </header>
@@ -162,7 +162,7 @@ export default function HostPage() {
         {status === "creating" && (
           <div className="flex items-center gap-3 text-on-surface-variant font-label">
             <Loader2 className="w-4 h-4 animate-spin" />
-            Creating room...
+            Connecting broadcast...
           </div>
         )}
 

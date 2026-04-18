@@ -17,7 +17,7 @@ pub struct SessionRow {
     pub source_lang: String,
     pub target_langs: String,
     pub status: String,
-    pub room_id: Option<String>,
+    pub live_session_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -112,13 +112,13 @@ pub async fn fetch_session_bundle(session_id: &str) -> Result<SessionBundle, Str
 #[derive(Serialize)]
 struct StatusUpdate<'a> {
     status: &'a str,
-    room_id: Option<&'a str>,
+    live_session_id: Option<&'a str>,
 }
 
 pub async fn update_session_status(
     session_id: &str,
     status: &str,
-    room_id: Option<&str>,
+    live_session_id: Option<&str>,
 ) -> Result<(), String> {
     let url = format!("{}/internal/sessions/{}", base()?, session_id);
     let resp = client()
@@ -127,7 +127,10 @@ pub async fn update_session_status(
             "X-Internal-Secret",
             std::env::var("INTERNAL_SECRET").unwrap_or_default(),
         )
-        .json(&StatusUpdate { status, room_id })
+        .json(&StatusUpdate {
+            status,
+            live_session_id,
+        })
         .send()
         .await
         .map_err(|e| format!("workers status update error: {e}"))?;

@@ -97,7 +97,7 @@ async fn get_session_json(
             "source_lang": "en",
             "target_langs": "ja,ko",
             "status": "scheduled",
-            "room_id": null,
+            "live_session_id": null,
             "created_at": 1
         },
         "streams": [],
@@ -179,7 +179,7 @@ async fn spawn_app() -> (String, server_rs::AppState, JoinHandle<()>) {
     (format!("http://{}", addr), state, handle)
 }
 
-async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
+async fn wait_for_live_session_count(state: &server_rs::AppState, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if state.live_sessions.len() == expected {
@@ -189,7 +189,7 @@ async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
         }
     })
     .await
-    .expect("room count update");
+    .expect("live session count update");
 }
 
 async fn wait_for_requests(state: &MockWorkersState, expected_len: usize) -> Vec<RecordedRequest> {
@@ -207,7 +207,7 @@ async fn wait_for_requests(state: &MockWorkersState, expected_len: usize) -> Vec
 }
 
 #[tokio::test]
-async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
+async fn happy_path_session_lifecycle_updates_workers_and_cleans_live_session() {
     let (_guard, workers_url, workers_state, workers_server, app_url, app_state, app_server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (workers_url, workers_state, workers_server) =
@@ -237,7 +237,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
     );
     let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
-    wait_for_room_count(&app_state, 1).await;
+    wait_for_live_session_count(&app_state, 1).await;
     let live_session = app_state
         .live_sessions
         .iter()
@@ -258,7 +258,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
         .expect("send host:end");
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
 
-    wait_for_room_count(&app_state, 0).await;
+    wait_for_live_session_count(&app_state, 0).await;
     let requests = wait_for_requests(&workers_state, 3).await;
 
     assert_eq!(requests[0].method, "GET");
@@ -281,7 +281,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
         requests[1]
             .body
             .as_ref()
-            .and_then(|b| b.get("room_id"))
+            .and_then(|b| b.get("live_session_id"))
             .and_then(Value::as_str),
         Some(runtime_id.as_str())
     );
@@ -296,7 +296,10 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
         Some("ended")
     );
     assert_eq!(
-        requests[2].body.as_ref().and_then(|b| b.get("room_id")),
+        requests[2]
+            .body
+            .as_ref()
+            .and_then(|b| b.get("live_session_id")),
         Some(&Value::Null)
     );
     assert_eq!(runtime_id.len(), 6);
@@ -312,7 +315,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
 }
 
 #[tokio::test]
-async fn sad_path_owner_mismatch_rejects_connection_before_room_creation() {
+async fn sad_path_owner_mismatch_rejects_connection_before_live_session_creation() {
     let (_guard, workers_state, workers_server, app_url, app_state, app_server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (workers_url, workers_state, workers_server) =
@@ -353,7 +356,7 @@ async fn sad_path_owner_mismatch_rejects_connection_before_room_creation() {
 }
 
 #[tokio::test]
-async fn edge_case_workers_fetch_failure_rejects_before_room_creation() {
+async fn edge_case_workers_fetch_failure_rejects_before_live_session_creation() {
     let (_guard, workers_state, workers_server, app_url, app_state, app_server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (workers_url, workers_state, workers_server) = spawn_workers_mock("host-1", true).await;

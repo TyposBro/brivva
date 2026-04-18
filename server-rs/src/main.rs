@@ -11,6 +11,6 @@ async fn main() {
 
     println!("Listening on http://localhost:3000");
     println!("WebSocket at ws://localhost:3000/api/session");
-    println!("Compatibility WebSocket at ws://localhost:3000/api/room");
+    println!("Compatibility WebSocket alias at ws://localhost:3000/api/room");
     axum::serve(listener, app).await.unwrap();
 }

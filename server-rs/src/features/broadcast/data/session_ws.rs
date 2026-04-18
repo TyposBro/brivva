@@ -18,7 +18,7 @@ use crate::features::broadcast::data::{auth, pipeline, workers_api};
 use crate::features::broadcast::domain::{Lang, LiveSession, SessionQuery};
 use crate::orchestration::state::AppState;
 
-/// WS entry. Accepts only authenticated hosts — no guests, no room codes.
+/// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<SessionQuery>,

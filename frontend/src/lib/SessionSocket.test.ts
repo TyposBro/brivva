@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { RoomSocket } from "./RoomSocket";
+import { SessionSocket } from "./SessionSocket";
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -38,7 +38,7 @@ class FakeWebSocket {
   }
 }
 
-describe("RoomSocket", () => {
+describe("SessionSocket", () => {
   let OrigWS: typeof WebSocket;
 
   beforeEach(() => {
@@ -55,7 +55,7 @@ describe("RoomSocket", () => {
   });
 
   it("connect builds URL w/ params", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     s.connect(
       { sourceLang: "en", token: "t1", sessionId: "s1" },
       { onMessage: () => {}, onClose: () => {} },
@@ -68,7 +68,7 @@ describe("RoomSocket", () => {
   });
 
   it("onOpen fires after socket opens (happy)", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onOpen = vi.fn();
     s.connect({}, { onOpen, onMessage: () => {}, onClose: () => {} });
     FakeWebSocket.instances[0].open();
@@ -76,7 +76,7 @@ describe("RoomSocket", () => {
   });
 
   it("routes JSON strings to onMessage as parsed objects", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onMessage = vi.fn();
     s.connect({}, { onMessage, onClose: () => {} });
     FakeWebSocket.instances[0].fireMessage(JSON.stringify({ type: "final", utteranceId: 1 }));
@@ -84,7 +84,7 @@ describe("RoomSocket", () => {
   });
 
   it("routes ArrayBuffer to onBinary", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onBinary = vi.fn();
     s.connect({}, { onMessage: () => {}, onBinary, onClose: () => {} });
     const buf = new ArrayBuffer(8);
@@ -93,7 +93,7 @@ describe("RoomSocket", () => {
   });
 
   it("ignores binary if no onBinary callback (sad)", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onMessage = vi.fn();
     s.connect({}, { onMessage, onClose: () => {} });
     FakeWebSocket.instances[0].fireMessage(new ArrayBuffer(4));
@@ -101,7 +101,7 @@ describe("RoomSocket", () => {
   });
 
   it("sendJson writes stringified when open", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     s.connect({}, { onMessage: () => {}, onClose: () => {} });
     FakeWebSocket.instances[0].open();
     s.sendJson({ type: "host:end" });
@@ -109,14 +109,14 @@ describe("RoomSocket", () => {
   });
 
   it("sendJson drops when not open (sad)", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     s.connect({}, { onMessage: () => {}, onClose: () => {} });
     s.sendJson({ type: "x" });
     expect(FakeWebSocket.instances[0].sent).toEqual([]);
   });
 
   it("sendAudio writes buffer when open", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     s.connect({}, { onMessage: () => {}, onClose: () => {} });
     FakeWebSocket.instances[0].open();
     const buf = new ArrayBuffer(16);
@@ -125,7 +125,7 @@ describe("RoomSocket", () => {
   });
 
   it("isOpen reflects readyState", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     expect(s.isOpen).toBe(false);
     s.connect({}, { onMessage: () => {}, onClose: () => {} });
     expect(s.isOpen).toBe(false);
@@ -134,7 +134,7 @@ describe("RoomSocket", () => {
   });
 
   it("double connect closes previous w/o firing onClose", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onClose = vi.fn();
     s.connect({}, { onMessage: () => {}, onClose });
     const first = FakeWebSocket.instances[0];
@@ -145,7 +145,7 @@ describe("RoomSocket", () => {
   });
 
   it("onclose fires user callback (sad: server drop)", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onClose = vi.fn();
     s.connect({}, { onMessage: () => {}, onClose });
     FakeWebSocket.instances[0].close();
@@ -153,7 +153,7 @@ describe("RoomSocket", () => {
   });
 
   it("onerror triggers close", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     const onClose = vi.fn();
     s.connect({}, { onMessage: () => {}, onClose });
     FakeWebSocket.instances[0].fireError();
@@ -161,12 +161,12 @@ describe("RoomSocket", () => {
   });
 
   it("close() on already-null socket is safe", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     expect(() => s.close()).not.toThrow();
   });
 
   it("binaryType set to arraybuffer", () => {
-    const s = new RoomSocket();
+    const s = new SessionSocket();
     s.connect({}, { onMessage: () => {}, onClose: () => {} });
     expect(FakeWebSocket.instances[0].binaryType).toBe("arraybuffer");
   });

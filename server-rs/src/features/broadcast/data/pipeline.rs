@@ -1,5 +1,7 @@
 mod soniox;
 mod stt;
+mod stt_response;
+mod stt_transport;
 mod tts;
 
 use crate::features::broadcast::domain::ServerMsg;

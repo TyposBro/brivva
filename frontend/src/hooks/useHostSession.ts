@@ -1,7 +1,7 @@
 import { useReducer, useRef, useCallback } from "react";
 import * as api from "../lib/api";
 import { AudioPipeline } from "../lib/AudioPipeline";
-import { RoomSocket } from "../lib/RoomSocket";
+import { SessionSocket } from "../lib/SessionSocket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
 import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
 import { createMessageHandler } from "../state/host/messageHandler";
@@ -12,12 +12,12 @@ export type { HostStatus, HostUtterance } from "../state/host/reducer";
 const VOICE_SAMPLE_SECONDS = 30;
 const VOICE_SAMPLE_RATE = 44100;
 
-export function useHostRoom() {
+export function useHostSession() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);
   const { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize, reset: resetTimings } = useTimings();
 
   const audio = useRef(new AudioPipeline());
-  const socket = useRef(new RoomSocket());
+  const socket = useRef(new SessionSocket());
   const streamRef = useRef<MediaStream | null>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -202,7 +202,7 @@ export function useHostRoom() {
     dispatch({ type: "recording_stopped" });
   };
 
-  const createRoom = async (opts?: {
+  const connectSession = async (opts?: {
     sessionId?: string;
     sourceLang?: string;
     userId: string;
@@ -235,7 +235,7 @@ export function useHostRoom() {
     };
     if (opts.sessionId) params.sessionId = opts.sessionId;
     socket.current.connect(params, {
-      // Backend no longer sends a RoomCreated event — treat WS open as
+      // Backend no longer sends a created event — treat WS open as
       // "ready for voice setup" and move the UI forward.
       onOpen: () => dispatch({ type: "connected" }),
       onMessage: (msg) => handleMessage(msg),
@@ -253,7 +253,7 @@ export function useHostRoom() {
     startFrameStreaming();
   };
 
-  const closeRoom = () => {
+  const closeSession = () => {
     socket.current.sendJson({ type: "host:end" });
     socket.current.close();
     stopRecording();
@@ -263,7 +263,7 @@ export function useHostRoom() {
 
   return {
     ...state, timings, videoRef,
-    createRoom, startRecording, stopRecording, closeRoom,
+    connectSession, startRecording, stopRecording, closeSession,
     startVoiceRecording, stopVoiceRecording, skipVoiceSetup,
     setActiveTargetLangs,
   };

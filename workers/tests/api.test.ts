@@ -399,7 +399,7 @@ describe("/internal/* authentication", () => {
         "Content-Type": "application/json",
         "X-Internal-Secret": env.INTERNAL_SECRET,
       },
-      body: JSON.stringify({ status: "live", room_id: "ROOM1" }),
+      body: JSON.stringify({ status: "live", live_session_id: "ROOM1" }),
     });
     expect(patch.status).toBe(200);
 
@@ -407,10 +407,10 @@ describe("/internal/* authentication", () => {
       headers: { "X-Internal-Secret": env.INTERNAL_SECRET },
     });
     const body = (await get.json()) as {
-      session: { status: string; room_id: string };
+      session: { status: string; live_session_id: string };
     };
     expect(body.session.status).toBe("live");
-    expect(body.session.room_id).toBe("ROOM1");
+    expect(body.session.live_session_id).toBe("ROOM1");
   });
 });
 

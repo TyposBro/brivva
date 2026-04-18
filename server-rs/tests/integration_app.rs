@@ -47,7 +47,7 @@ async fn spawn_app() -> (String, server_rs::AppState, JoinHandle<()>) {
     (format!("http://{}", addr), state, handle)
 }
 
-async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
+async fn wait_for_live_session_count(state: &server_rs::AppState, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if state.live_sessions.len() == expected {
@@ -57,7 +57,7 @@ async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
         }
     })
     .await
-    .expect("room count update");
+    .expect("live session count update");
 }
 
 #[tokio::test]
@@ -76,7 +76,7 @@ async fn root_route_returns_banner() {
 }
 
 #[tokio::test]
-async fn websocket_without_token_is_rejected_and_never_creates_room() {
+async fn websocket_without_token_is_rejected_and_never_creates_live_session() {
     let (_guard, base_url, state, server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -117,7 +117,7 @@ async fn websocket_with_valid_token_uses_default_en_for_invalid_source_lang() {
     );
     let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
-    wait_for_room_count(&state, 1).await;
+    wait_for_live_session_count(&state, 1).await;
     let live_session = state
         .live_sessions
         .iter()
@@ -135,7 +135,7 @@ async fn websocket_with_valid_token_uses_default_en_for_invalid_source_lang() {
         ))
         .await
         .expect("send host:end");
-    wait_for_room_count(&state, 0).await;
+    wait_for_live_session_count(&state, 0).await;
 
     server.abort();
 }

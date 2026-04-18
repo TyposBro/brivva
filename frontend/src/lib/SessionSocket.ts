@@ -2,21 +2,21 @@ const WS_BASE = (
   import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787"
 ).replace(/^http/, "ws");
 
-export type RoomMessage = { type: string; [k: string]: unknown };
+export type SessionMessage = { type: string; [k: string]: unknown };
 
-export type RoomSocketCallbacks = {
+export type SessionSocketCallbacks = {
   onOpen?: () => void;
-  onMessage: (msg: RoomMessage) => void;
+  onMessage: (msg: SessionMessage) => void;
   onBinary?: (data: ArrayBuffer) => void;
   onClose: () => void;
 };
 
-export class RoomSocket {
+export class SessionSocket {
   private ws: WebSocket | null = null;
 
   connect(
     params: Record<string, string>,
-    callbacks: RoomSocketCallbacks
+    callbacks: SessionSocketCallbacks
   ): void {
     // Close any existing connection to prevent duplicate pipelines
     if (this.ws) {
@@ -42,7 +42,7 @@ export class RoomSocket {
     onMessage,
     onBinary,
     onClose,
-  }: RoomSocketCallbacks): void {
+  }: SessionSocketCallbacks): void {
     if (onOpen) this.ws!.onopen = () => onOpen();
     this.ws!.onmessage = (e) => this.routeMessage(e, onMessage, onBinary);
     this.ws!.onclose = onClose;
@@ -51,8 +51,8 @@ export class RoomSocket {
 
   private routeMessage(
     e: MessageEvent,
-    onMessage: RoomSocketCallbacks["onMessage"],
-    onBinary?: RoomSocketCallbacks["onBinary"]
+    onMessage: SessionSocketCallbacks["onMessage"],
+    onBinary?: SessionSocketCallbacks["onBinary"]
   ): void {
     if (typeof e.data === "string") onMessage(JSON.parse(e.data));
     else if (e.data instanceof ArrayBuffer && onBinary) onBinary(e.data);

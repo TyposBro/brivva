@@ -1,5 +1,5 @@
 import { type Dispatch } from "react";
-import { type RoomMessage } from "../../lib/RoomSocket";
+import { type SessionMessage } from "../../lib/SessionSocket";
 import { type HostAction } from "./reducer";
 
 type Stopwatch = {
@@ -19,7 +19,7 @@ export function createMessageHandler(
   getActiveTargetLangs: () => string[],
   stopwatch: Stopwatch,
 ) {
-  return (msg: RoomMessage) => {
+  return (msg: SessionMessage) => {
     switch (msg.type) {
       case "interim":
         dispatch({ type: "interim", transcript: (msg.transcript as string) ?? "" });

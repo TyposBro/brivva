@@ -72,7 +72,7 @@ export default function HomePage() {
             >
               <Users className="w-10 h-10 mb-4 text-primary" />
               <span className="font-headline font-bold text-lg text-on-surface">
-                Quick Room
+                Quick Session
               </span>
               <span className="text-on-surface-variant text-xs mt-2 uppercase tracking-widest font-label">
                 No setup required

@@ -27,7 +27,7 @@ export type Session = {
   source_lang: string;
   target_langs: string; // JSON-encoded array
   status: string; // 'setup' | 'live' | 'ended'
-  room_id: string | null;
+  live_session_id: string | null;
   created_at: number;
 };
 

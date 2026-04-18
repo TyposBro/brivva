@@ -105,23 +105,23 @@ describe("db.sessions + streams", () => {
       JSON.stringify(["ja", "ko"]),
     );
     expect(s.status).toBe("setup");
-    expect(s.room_id).toBeNull();
+    expect(s.live_session_id).toBeNull();
     expect(JSON.parse(s.target_langs)).toEqual(["ja", "ko"]);
   });
 
-  it("updateSessionStatus flips status + room_id", async () => {
+  it("updateSessionStatus flips status + live_session_id", async () => {
     await db.getOrCreateUser(env.DB, "u-s");
     const s = await db.createSession(env.DB, "u-s", null, "D", "en", "[]");
 
     await db.updateSessionStatus(env.DB, s.id, "live", "ROOM01");
     const live = await db.getSession(env.DB, s.id);
     expect(live?.status).toBe("live");
-    expect(live?.room_id).toBe("ROOM01");
+    expect(live?.live_session_id).toBe("ROOM01");
 
     await db.updateSessionStatus(env.DB, s.id, "ended", null);
     const ended = await db.getSession(env.DB, s.id);
     expect(ended?.status).toBe("ended");
-    expect(ended?.room_id).toBeNull();
+    expect(ended?.live_session_id).toBeNull();
   });
 
   it("deleteSessionRow cascades: child streams are removed with the session", async () => {
