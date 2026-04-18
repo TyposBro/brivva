@@ -63,6 +63,8 @@ pub struct RoomQuery {
     pub lang: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
+    /// JWT from Workers (host role only). Verified in handle_socket.
+    pub token: Option<String>,
 }
 
 // ── Guest ─────────────────────────────────────────────────

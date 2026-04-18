@@ -67,6 +67,8 @@ resource "aws_secretsmanager_secret_version" "env" {
     GOOGLE_CLIENT_ID     = var.google_client_id
     GOOGLE_CLIENT_SECRET = var.google_client_secret
     TUNNEL_CREDS         = var.tunnel_creds
+    JWT_SECRET           = var.jwt_secret
+    INTERNAL_SECRET      = var.internal_secret
   })
 }
 
@@ -134,18 +136,18 @@ locals {
       { containerPort = 3000, hostPort = 3000, protocol = "tcp" }
     ]
     environment = [
-      # Ephemeral storage — SQLite lost on task restart. Add EFS mount when
-      # YouTube tokens + voice clones need to survive redeploys.
-      { name = "DATABASE_URL", value = "sqlite:/tmp/brivva.db?mode=rwc" },
+      # Phase 3: Fargate is stateless. State lives in D1 via the Workers API.
+      # Fargate calls ${WORKERS_API_URL}/internal/* with INTERNAL_SECRET and
+      # verifies host JWTs with JWT_SECRET — both shared with the Worker.
       { name = "BROADCAST_DELAY_MS", value = tostring(var.broadcast_delay_ms) },
-      { name = "GOOGLE_REDIRECT_URI", value = "https://${var.domain}/auth/youtube/callback" },
       { name = "FRONTEND_URL", value = var.frontend_url },
+      { name = "WORKERS_API_URL", value = var.workers_api_url },
     ]
     secrets = [
       { name = "SONIOX_API_KEY", valueFrom = "${local.secret_arn}:SONIOX_API_KEY::" },
       { name = "ELEVENLABS_API_KEY", valueFrom = "${local.secret_arn}:ELEVENLABS_API_KEY::" },
-      { name = "GOOGLE_CLIENT_ID", valueFrom = "${local.secret_arn}:GOOGLE_CLIENT_ID::" },
-      { name = "GOOGLE_CLIENT_SECRET", valueFrom = "${local.secret_arn}:GOOGLE_CLIENT_SECRET::" },
+      { name = "JWT_SECRET", valueFrom = "${local.secret_arn}:JWT_SECRET::" },
+      { name = "INTERNAL_SECRET", valueFrom = "${local.secret_arn}:INTERNAL_SECRET::" },
     ]
     logConfiguration = {
       logDriver = "awslogs"

@@ -1,0 +1,34 @@
+name = "brivva-api"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── Routing ───────────────────────────────────────────────
+# After first deploy, attach a custom domain in the Cloudflare dashboard
+# (Workers → brivva-api → Triggers) for a stable FE base URL.
+# For now the *.workers.dev hostname works out of the box.
+
+# ── Bindings ──────────────────────────────────────────────
+# D1 database id is filled in by wrangler after `d1 create`.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "brivva"
+database_id = "4e4ddf3c-aa0f-4716-bd2e-b5fc711805d7"
+migrations_dir = "migrations"
+
+# ── Vars (non-secret) ─────────────────────────────────────
+[vars]
+FRONTEND_URL = "https://brivva.pages.dev"
+# IMPORTANT: OAUTH_REDIRECT_URI must be added to the Google OAuth Client's
+# "Authorized redirect URIs" list. After first deploy, the default URL is
+# https://brivva-api.<subdomain>.workers.dev/auth/youtube/callback — use that
+# until a custom domain is attached.
+OAUTH_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/youtube/callback"
+
+# ── Secrets (set via `wrangler secret put`) ───────────────
+# ELEVENLABS_API_KEY
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# JWT_SECRET
+# INTERNAL_SECRET

@@ -85,3 +85,21 @@ variable "tunnel_id" {
   type        = string
   default     = ""
 }
+
+variable "jwt_secret" {
+  description = "HS256 secret shared with brivva-api Worker for JWT verification."
+  type        = string
+  sensitive   = true
+}
+
+variable "internal_secret" {
+  description = "Shared secret for Fargate→Workers /internal/* HTTP calls."
+  type        = string
+  sensitive   = true
+}
+
+variable "workers_api_url" {
+  description = "brivva-api Worker base URL (no trailing slash)."
+  type        = string
+  default     = "https://brivva-api.milliytechnology.workers.dev"
+}

@@ -1,4 +1,11 @@
-const API_BASE = import.meta.env.VITE_WORKER_URL ?? "http://localhost:3000";
+// VITE_API_URL points at the Workers CRUD API (D1-backed, global edge).
+// VITE_WORKER_URL is reserved for the Fargate media WS (long-lived audio).
+// Fallback to VITE_WORKER_URL for local dev when running against a single-process
+// legacy backend.
+const API_BASE =
+  import.meta.env.VITE_API_URL ??
+  import.meta.env.VITE_WORKER_URL ??
+  "http://localhost:3000";
 
 async function request<T>(path: string, opts?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {

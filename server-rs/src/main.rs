@@ -1,38 +1,29 @@
-mod db;
+mod auth;
 mod ffmpeg;
 mod pipeline;
 mod room;
-mod routes;
 mod types;
-mod youtube;
+mod workers_api;
 
-use axum::{
-    Router,
-    routing::{delete, get, post},
-};
+use axum::{Router, routing::get};
 use dashmap::DashMap;
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-/// Shared application state: rooms + database pool
+/// Shared application state. DB moved to Workers + D1 (Phase 3) —
+/// only the live in-memory Rooms map lives on Fargate now.
 #[derive(Clone)]
 pub struct AppState {
     pub rooms: Arc<DashMap<String, types::Room>>,
-    pub db: SqlitePool,
 }
 
 #[tokio::main]
 async fn main() {
-    // Kill any orphan FFmpeg processes from a previous crash before accepting connections
+    // Kill any orphan FFmpeg processes from a previous crash.
     ffmpeg::kill_orphan_ffmpeg();
 
-    let pool = db::init_db().await;
-    let rooms = Arc::new(DashMap::new());
-
     let state = AppState {
-        rooms: rooms.clone(),
-        db: pool,
+        rooms: Arc::new(DashMap::new()),
     };
 
     let cors = CorsLayer::new()
@@ -41,29 +32,8 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
-        // Existing
-        .route("/", get(|| async { "Brivva Translation Server" }))
+        .route("/", get(|| async { "Brivva Translation Server (media-only)" }))
         .route("/api/room", get(room::ws_handler))
-        // YouTube OAuth
-        .route("/auth/youtube", get(routes::youtube_auth))
-        .route("/auth/youtube/callback", get(routes::youtube_callback))
-        // User
-        .route("/api/user", get(routes::get_user))
-        // Sessions
-        .route("/api/sessions", post(routes::create_session))
-        .route("/api/sessions", get(routes::list_sessions))
-        .route("/api/sessions/{id}", get(routes::get_session))
-        .route("/api/sessions/{id}", delete(routes::delete_session))
-        .route("/api/sessions/{id}/streams", post(routes::add_stream))
-        .route("/api/sessions/{session_id}/streams/{stream_id}", delete(routes::remove_stream))
-        // Voices
-        .route("/api/voices", post(routes::create_voice))
-        .route("/api/voices", get(routes::list_voices))
-        .route("/api/voices/{id}", delete(routes::delete_voice))
-        // Platform Credentials
-        .route("/api/credentials", get(routes::list_credentials))
-        .route("/api/credentials", post(routes::save_credential))
-        .route("/api/credentials", delete(routes::delete_credential))
         .layer(cors)
         .with_state(state);
 

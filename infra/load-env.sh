@@ -29,6 +29,8 @@ tf_str() {
     echo "google_client_secret = \"$(tf_str "${GOOGLE_CLIENT_SECRET:-}")\""
     echo "tunnel_creds         = \"$(tf_str "${TUNNEL_CREDS:-}")\""
     echo "tunnel_id            = \"$(tf_str "${TUNNEL_ID:-}")\""
+    echo "jwt_secret           = \"$(tf_str "${JWT_SECRET:-}")\""
+    echo "internal_secret      = \"$(tf_str "${INTERNAL_SECRET:-}")\""
 } > terraform.tfvars
 
 echo "wrote terraform.tfvars"
