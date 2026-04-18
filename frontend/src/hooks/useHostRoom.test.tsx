@@ -179,16 +179,6 @@ describe("useHostRoom", () => {
     expect(result.current.status).toBe("ready");
   });
 
-  it("voice:ready message → voiceReady=true + ready", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
-    const { result } = renderHook(() => useHostRoom());
-    await act(async () => { await result.current.createRoom({ userId: "u1" }); });
-    act(() => socketInstances[0].fireOpen());
-    act(() => socketInstances[0].fireMessage({ type: "voice:ready", voiceId: "v1" }));
-    expect(result.current.status).toBe("ready");
-    expect(result.current.voiceReady).toBe(true);
-  });
-
   it("stopVoiceRecording clones through Workers for the active session", async () => {
     mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
     mockedCloneSessionVoice.mockResolvedValueOnce({

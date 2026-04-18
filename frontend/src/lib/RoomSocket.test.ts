@@ -61,7 +61,7 @@ describe("RoomSocket", () => {
       { onMessage: () => {}, onClose: () => {} },
     );
     const url = FakeWebSocket.instances[0].url;
-    expect(url).toContain("/api/room");
+    expect(url).toContain("/api/session");
     expect(url).toContain("sourceLang=en");
     expect(url).toContain("token=t1");
     expect(url).toContain("sessionId=s1");

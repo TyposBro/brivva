@@ -82,11 +82,6 @@ describe("createMessageHandler", () => {
     expect(h.stopwatch.finalize).toHaveBeenCalledWith("1", 0);
   });
 
-  it("voice:ready → dispatch voice_ready", () => {
-    h.handler({ type: "voice:ready", voiceId: "v1" });
-    expect(h.dispatch).toHaveBeenCalledWith({ type: "voice_ready" });
-  });
-
   it("error → dispatch w/ message", () => {
     h.handler({ type: "error", message: "boom" });
     expect(h.dispatch).toHaveBeenCalledWith({ type: "error", message: "boom" });

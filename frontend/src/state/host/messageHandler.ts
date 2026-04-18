@@ -60,11 +60,6 @@ export function createMessageHandler(
         stopwatch.finalize(String(msg.utteranceId), (msg.lipsyncMs as number) ?? 0);
         break;
 
-      case "voice:ready":
-        console.log("[HOST] voice cloned:", msg.voiceId);
-        dispatch({ type: "voice_ready" });
-        break;
-
       case "error":
         dispatch({ type: "error", message: (msg.message as string) ?? "Unknown error" });
         break;

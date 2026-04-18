@@ -156,12 +156,6 @@ pub enum ServerMsg {
         tts_ms: u64,
     },
 
-    #[serde(rename = "voice:ready")]
-    VoiceReady {
-        #[serde(rename = "voiceId")]
-        voice_id: String,
-    },
-
     /// Per-utterance pipeline-done marker; host UI uses it to finalize latency.
     #[serde(rename = "video_end")]
     VideoEnd {
