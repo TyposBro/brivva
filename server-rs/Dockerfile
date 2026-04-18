@@ -1,33 +1,49 @@
-# Multi-stage build for server-rs (workspace member)
-FROM rust:1.85-slim AS builder
+# ── Multi-stage build for server-rs with cargo-chef ──────────
+# Layer model:
+#   1. chef    — base image + cargo-chef install (rarely rebuilt)
+#   2. planner — reads Cargo.toml/Cargo.lock/sources, emits recipe.json
+#   3. builder — cooks deps (big, cached), then compiles app src (small, fast)
+#   4. runtime — slim debian with ffmpeg + fonts for drawtext subtitle overlay
+#
+# Result: source-only edits rebuild in ~30s vs ~8min. Deps layer invalidates
+# only when Cargo.lock or Cargo.toml change.
 
+FROM --platform=$BUILDPLATFORM rust:1.85-slim AS chef
+RUN cargo install cargo-chef --locked --version 0.1.68
 WORKDIR /app
 
-# Copy workspace root and stub missing members
+# ── planner: extract dep recipe without building ─────────────
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY server-rs/Cargo.toml server-rs/Cargo.toml
-RUN mkdir -p frame-extraction/src && \
-    echo '[package]\nname = "frame-extraction"\nversion = "0.1.0"\nedition = "2021"' > frame-extraction/Cargo.toml && \
-    echo "fn main() {}" > frame-extraction/src/main.rs
+COPY server-rs/src server-rs/src
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Install SQLite dev libs for sqlx
+# ── builder: cook deps (cached), then build app src ──────────
+FROM chef AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Create dummy src to cache deps
-RUN mkdir -p server-rs/src && echo "fn main() {}" > server-rs/src/main.rs
-RUN cargo build --release --manifest-path server-rs/Cargo.toml || true
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
-# Copy real source and rebuild (touch to bust cache on dummy main)
+COPY Cargo.toml Cargo.lock ./
+COPY server-rs/Cargo.toml server-rs/Cargo.toml
 COPY server-rs/src server-rs/src
-RUN touch server-rs/src/main.rs && cargo build --release --manifest-path server-rs/Cargo.toml
+RUN cargo build --release --manifest-path server-rs/Cargo.toml --bin server-rs
 
-# Runtime stage
+# ── runtime: slim image with ffmpeg + subtitle fonts ─────────
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libsqlite3-0 ffmpeg \
+    ca-certificates \
+    libsqlite3-0 \
+    ffmpeg \
+    fontconfig \
+    fonts-dejavu-core \
+    fonts-noto-cjk \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/server-rs /usr/local/bin/server-rs
