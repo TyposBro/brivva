@@ -49,8 +49,8 @@ if [[ "$SKIP_BUILD" == false ]]; then
     aws ecr get-login-password --region "$AWS_REGION" \
         | docker login --username AWS --password-stdin "$ECR_BASE"
 
-    # Fargate requires linux/amd64 — cross-compile from Apple Silicon
-    PLATFORM="linux/amd64"
+    # Fargate Graviton (ARM64) = native build on Apple Silicon, no QEMU.
+    PLATFORM="linux/arm64"
     IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
 
     echo "==> Building server-rs ($PLATFORM) → $IMAGE"

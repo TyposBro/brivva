@@ -190,6 +190,12 @@ resource "aws_ecs_task_definition" "app" {
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.exec.arn
 
+  # Fargate Graviton (ARM64): native build on Apple Silicon → no QEMU, faster builds + ~20% cheaper.
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
   container_definitions = jsonencode(local.containers)
 }
 
