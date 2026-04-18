@@ -183,11 +183,22 @@ async fn handle_host(
                     let pipeline_rooms = rooms.clone();
                     let pipeline_rid = room_id.clone();
                     let source_lang = source_lang.clone();
+                    let target_langs = rooms
+                        .get(&room_id)
+                        .map(|r| r.rtmp_langs.clone())
+                        .unwrap_or_default();
                     tokio::spawn(async move {
-                        pipeline::start_stt(pipeline_rid, pipeline_rooms, source_lang, rx).await;
+                        pipeline::start_stt_pipelines(
+                            pipeline_rid,
+                            pipeline_rooms,
+                            source_lang,
+                            target_langs,
+                            rx,
+                        )
+                        .await;
                     });
                     eprintln!(
-                        "[HOST] First audio received, STT pipeline started for room {}",
+                        "[HOST] First audio received, STT pipelines started for room {}",
                         room_id
                     );
                 }

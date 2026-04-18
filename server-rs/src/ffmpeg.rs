@@ -43,6 +43,9 @@ const TTS_QUEUE_CAP_BYTES: usize = 5 * 88_200;
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
 const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
+/// Minimum time a burn-in caption stays on screen before we overwrite it.
+/// Prevents rapid-fire translations from flashing through unreadably.
+const MIN_CAPTION_DWELL_MS: u64 = 1_500;
 
 // ── Per-stream shared state ───────────────────────────────
 
@@ -77,8 +80,80 @@ struct RtmpStream {
     is_source: bool,
     host_gain: f32,
     buffers: StreamBuffers,
+    caption: Option<CaptionState>,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
+}
+
+/// Per-stream burn-in caption state. Source streams don't have one (nothing
+/// to burn in — they're the host's own audio). Target streams get a textfile
+/// that drawtext reads with `reload=1`; writes are rate-limited via a tokio
+/// task so a fresh translation always gets at least MIN_CAPTION_DWELL_MS on
+/// screen before being replaced.
+struct CaptionState {
+    path: String,
+    sender: tokio::sync::mpsc::UnboundedSender<String>,
+    writer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CaptionState {
+    fn spawn(stream_id: &str) -> Self {
+        let path = format!("/tmp/brivva_caption_{}.txt", stream_id);
+        // Empty initial file so drawtext reads cleanly from the first frame.
+        let _ = std::fs::write(&path, "");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let path_clone = path.clone();
+        let writer = tokio::spawn(async move {
+            let min_dwell = Duration::from_millis(MIN_CAPTION_DWELL_MS);
+            let mut last_written = Instant::now()
+                .checked_sub(min_dwell)
+                .unwrap_or_else(Instant::now);
+            while let Some(mut text) = rx.recv().await {
+                // Wait out any remaining minimum-dwell budget for the previous caption.
+                let elapsed = last_written.elapsed();
+                if elapsed < min_dwell {
+                    tokio::time::sleep(min_dwell - elapsed).await;
+                }
+                // Coalesce any updates that piled up during the sleep — only the
+                // latest translation is worth showing.
+                while let Ok(newer) = rx.try_recv() {
+                    text = newer;
+                }
+                let sanitized = sanitize_caption(&text);
+                write_caption_atomic(&path_clone, &sanitized);
+                last_written = Instant::now();
+            }
+        });
+        Self {
+            path,
+            sender: tx,
+            writer: Some(writer),
+        }
+    }
+
+    fn push(&self, text: &str) {
+        let _ = self.sender.send(text.to_string());
+    }
+}
+
+/// Remove control chars and cap caption length so drawtext stays legible.
+fn sanitize_caption(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .take(200)
+        .collect()
+}
+
+/// Write the caption atomically so FFmpeg's `reload=1` never sees a torn file.
+fn write_caption_atomic(path: &str, text: &str) {
+    let tmp = format!("{}.tmp", path);
+    if let Err(e) = std::fs::write(&tmp, text) {
+        eprintln!("[CAPTION] write tmp failed ({}): {}", path, e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        eprintln!("[CAPTION] rename failed ({}): {}", path, e);
+    }
 }
 
 pub struct RtmpManager {
@@ -161,6 +236,20 @@ impl RtmpManager {
         }
     }
 
+    /// Update the burn-in caption for a target-language stream. Write is
+    /// rate-limited to MIN_CAPTION_DWELL_MS so each line gets read time.
+    /// Source streams have no caption track — this is a no-op for them.
+    pub fn push_caption(&self, lang: &str, text: String) {
+        for stream in self.streams.values() {
+            if stream.lang == lang && !stream.is_source {
+                if let Some(cap) = &stream.caption {
+                    cap.push(&text);
+                }
+                return;
+            }
+        }
+    }
+
     /// Scan for crashed FFmpeg processes and surface the restart context.
     pub(crate) fn detect_crashed(
         &mut self,
@@ -200,6 +289,14 @@ impl RtmpManager {
                 let _ = old.child.kill();
                 let _ = old.child.wait();
                 let _ = std::fs::remove_file(&old.audio_fifo);
+                // Captions get reborn by spawn_stream_inner — tear down the old one.
+                if let Some(mut cap) = old.caption.take() {
+                    let _ = std::fs::remove_file(&cap.path);
+                    drop(cap.sender);
+                    if let Some(handle) = cap.writer.take() {
+                        handle.abort();
+                    }
+                }
                 result.push((
                     id,
                     old.lang,
@@ -260,33 +357,55 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
+        // Target streams get a burn-in caption textfile + drawtext filter.
+        // Source streams skip both (no translation to display).
+        let caption = if is_source {
+            None
+        } else {
+            Some(CaptionState::spawn(stream_id))
+        };
+
+        // Compose FFmpeg args. Only target streams apply the drawtext filter.
+        let mut args: Vec<String> = vec![
+            "-y".into(), "-loglevel".into(), "warning".into(),
+            "-f".into(), "image2pipe".into(),
+            "-framerate".into(), "30".into(),
+            "-i".into(), "pipe:0".into(),
+            "-f".into(), "s16le".into(),
+            "-ar".into(), "44100".into(),
+            "-ac".into(), "1".into(),
+            "-i".into(), audio_fifo.clone(),
+        ];
+        if let Some(cap) = &caption {
+            // Escape the textfile path for drawtext — it uses `\` as an escape
+            // and `:` as a filter-option separator.
+            let escaped = cap.path.replace('\\', "\\\\").replace(':', "\\:");
+            let drawtext = format!(
+                "drawtext=textfile={}:reload=1:fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=10:x=(w-text_w)/2:y=h-120",
+                escaped
+            );
+            args.extend_from_slice(&["-vf".into(), drawtext]);
+        }
+        args.extend_from_slice(&[
+            "-c:v".into(), "libx264".into(),
+            "-preset".into(), "ultrafast".into(),
+            "-tune".into(), "zerolatency".into(),
+            "-crf".into(), "20".into(),
+            "-maxrate".into(), "35000k".into(),
+            "-bufsize".into(), "70000k".into(),
+            "-pix_fmt".into(), "yuv420p".into(),
+            "-g".into(), "60".into(),
+            "-c:a".into(), "aac".into(),
+            "-ac:a".into(), "2".into(),
+            "-b:a".into(), "128k".into(),
+            "-map".into(), "0:v".into(),
+            "-map".into(), "1:a".into(),
+            "-f".into(), "flv".into(),
+            rtmp_url.into(),
+        ]);
+
         let mut child = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-loglevel", "warning",
-                "-f", "image2pipe",
-                "-framerate", "30",
-                "-i", "pipe:0",
-                "-f", "s16le",
-                "-ar", "44100",
-                "-ac", "1",
-                "-i", &audio_fifo,
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-crf", "20",
-                "-maxrate", "35000k",
-                "-bufsize", "70000k",
-                "-pix_fmt", "yuv420p",
-                "-g", "60",
-                "-c:a", "aac",
-                "-ac:a", "2",
-                "-b:a", "128k",
-                "-map", "0:v",
-                "-map", "1:a",
-                "-f", "flv",
-                rtmp_url,
-            ])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -333,6 +452,7 @@ impl RtmpManager {
                 is_source,
                 host_gain,
                 buffers,
+                caption,
                 stop_flag,
                 restart_count: 0,
             },
@@ -371,6 +491,14 @@ impl RtmpManager {
                 }
             }
             let _ = std::fs::remove_file(&stream.audio_fifo);
+            if let Some(mut cap) = stream.caption.take() {
+                let _ = std::fs::remove_file(&cap.path);
+                // Dropping the sender closes the channel so the writer task exits.
+                drop(cap.sender);
+                if let Some(handle) = cap.writer.take() {
+                    handle.abort();
+                }
+            }
         }
     }
 }
@@ -655,9 +783,9 @@ pub fn kill_orphan_ffmpeg() {
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("brivva_audio_") {
+                if name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_") {
                     let _ = std::fs::remove_file(entry.path());
-                    eprintln!("[STARTUP] removed stale FIFO: {}", name);
+                    eprintln!("[STARTUP] removed stale file: {}", name);
                 }
             }
         }

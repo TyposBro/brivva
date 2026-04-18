@@ -1,14 +1,14 @@
-//! Translation pipeline: STT → Translate → TTS
+//! Translation pipeline: Soniox STT + translation → ElevenLabs TTS.
 //!
-//! Host audio flows through:
-//! 1. STT (Soniox v4, direct WS) — `wss://stt-rt.soniox.com/transcribe-websocket`
-//!    - Raw 44.1 kHz PCM s16le frames pushed as binary WS messages
-//!    - Source-language transcription only here; per-target translation is a
-//!      separate concern (Phase 2+ — either open one Soniox WS per target with
-//!      `translation.type=one_way` or use a dedicated translate provider).
-//! 2. Translation — currently pass-through stub (see `run_pipeline`). The stub
-//!    will be replaced by Soniox per-target WS or a translate provider.
-//! 3. ElevenLabs TTS — streaming MP3 response (with optional cloned voice).
+//! One host WS produces a single audio stream. We fan that stream out to N+1
+//! Soniox WS sessions:
+//! - 1 **source** session (no `translation` config) that emits Interim/Final
+//!   transcripts back to the host UI.
+//! - N **translate** sessions (one per target lang, `translation.one_way` set)
+//!   that emit a Translation event and drive ElevenLabs TTS for that lang.
+//!
+//! Source-lang RTMP output doesn't need a translate session — the per-stream
+//! delay buffer + mixer in `ffmpeg.rs` handles it as a pure passthrough.
 
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
@@ -37,11 +37,15 @@ static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
 
 // ── Soniox v4 wire format ─────────────────────────────────
 //
-// First message from client: JSON config (api_key + audio format + model).
-// Then: binary audio frames.
-// Responses from server: JSON with `tokens` array (interim + final tokens)
-// and optional `error_code`/`error_message`. A token with `text == "<end>"`
-// signals end-of-utterance (endpoint detection).
+// First client message = JSON config (API key + audio format + optional
+// translation). Then the client sends binary audio frames. The server replies
+// with JSON: a `tokens` array plus an optional `error_code`/`error_message`.
+// A token with `text == "<end>"` is Soniox's endpoint-detection sentinel.
+//
+// Per-token `translation_status`:
+//   - `Some("original")`    — source-lang text (emitted by translate sessions)
+//   - `Some("translation")` — target-lang text (emitted by translate sessions)
+//   - `None`                — transcription-only tokens (source session)
 
 #[derive(Debug, Serialize)]
 struct SonioxConfig<'a> {
@@ -52,6 +56,15 @@ struct SonioxConfig<'a> {
     num_channels: u32,
     language_hints: Vec<String>,
     enable_endpoint_detection: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    translation: Option<SonioxTranslation>,
+}
+
+#[derive(Debug, Serialize)]
+struct SonioxTranslation {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    target_language: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,39 +83,70 @@ struct SonioxToken {
     text: String,
     #[serde(default)]
     is_final: bool,
+    #[serde(default)]
+    translation_status: Option<String>,
 }
 
-// ── STT Connection ────────────────────────────────────────
+// ── Session modes ─────────────────────────────────────────
 
-/// Emit a final transcript: echo to the host WS and spawn per-target TTS.
-/// Original audio has already flowed to RTMP continuously via the mixer, so
-/// the pipeline no longer needs host PCM or utterance timestamps here.
-fn emit_final(
-    rooms: &Rooms,
-    room_id: &str,
-    transcript: &str,
-    uid: u64,
-    source_lang: &Lang,
-) {
-    if let Some(room) = rooms.get(room_id) {
-        room.send_to_host(to_ws(&ServerMsg::Final {
-            transcript: transcript.to_string(),
-            utterance_id: uid,
-        }));
+#[derive(Clone)]
+enum SonioxMode {
+    /// Pure transcription of the source lang. Emits Interim + Final to host.
+    Source { lang: Lang },
+    /// Translation source → target. Emits Translation + fires TTS.
+    Translate { source_lang: Lang, target_lang: Lang },
+}
 
-        let active = room.active_langs();
-        println!("[PIPELINE] active langs: {:?}", active);
-        if !active.is_empty() {
-            let rooms_clone = rooms.clone();
-            let rid = room_id.to_string();
-            let src = source_lang.clone();
-            let text = transcript.to_string();
-            tokio::spawn(async move {
-                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid).await;
-            });
+impl SonioxMode {
+    fn tag(&self) -> String {
+        match self {
+            SonioxMode::Source { lang } => format!("src:{}", lang),
+            SonioxMode::Translate { source_lang, target_lang } => {
+                format!("{}→{}", source_lang, target_lang)
+            }
+        }
+    }
+
+    fn build_config<'a>(&self, api_key: &'a str) -> SonioxConfig<'a> {
+        let (hint_lang, translation) = match self {
+            SonioxMode::Source { lang } => (lang.to_string(), None),
+            SonioxMode::Translate { source_lang, target_lang } => (
+                source_lang.to_string(),
+                Some(SonioxTranslation {
+                    kind: "one_way",
+                    target_language: target_lang.to_string(),
+                }),
+            ),
+        };
+        SonioxConfig {
+            api_key,
+            model: SONIOX_MODEL,
+            audio_format: "pcm_s16le",
+            sample_rate: HOST_SAMPLE_RATE,
+            num_channels: 1,
+            language_hints: vec![hint_lang],
+            enable_endpoint_detection: true,
+            translation,
+        }
+    }
+
+    /// Decide whether this session should process a token. Translate sessions
+    /// only consume tokens with `translation_status == "translation"` (the
+    /// `"original"` ones are handled by the dedicated Source session).
+    fn accepts(&self, tok: &SonioxToken) -> bool {
+        if tok.text == SONIOX_END_TOKEN {
+            return true;
+        }
+        match self {
+            SonioxMode::Source { .. } => true,
+            SonioxMode::Translate { .. } => {
+                matches!(tok.translation_status.as_deref(), Some("translation"))
+            }
         }
     }
 }
+
+// ── STT pipelines entry ──────────────────────────────────
 
 /// Max reconnect attempts for the Soniox WebSocket mid-session.
 const STT_RECONNECT_MAX: u32 = 5;
@@ -111,20 +155,90 @@ const STT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Soniox's end-of-utterance sentinel token (endpoint detection).
 const SONIOX_END_TOKEN: &str = "<end>";
 
-/// Connect to Soniox, stream host audio, receive transcription tokens.
-/// Automatic reconnect on mid-session drop (up to STT_RECONNECT_MAX attempts).
-pub async fn start_stt(
+/// Fan host audio out to one Source session (transcript → host UI) and one
+/// Translate session per target language (→ TTS).
+pub async fn start_stt_pipelines(
     room_id: String,
     rooms: Rooms,
     source_lang: Lang,
-    audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    target_langs: Vec<Lang>,
+    mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     if SONIOX_API_KEY.is_empty() {
         eprintln!("[STT] SONIOX_API_KEY not set — STT pipeline disabled");
         return;
     }
 
-    // Wrap audio_rx in Arc<Mutex> so it survives reconnects without losing frames.
+    // Dedupe + drop source from targets (no self-translation).
+    let mut seen = std::collections::HashSet::new();
+    let targets: Vec<Lang> = target_langs
+        .into_iter()
+        .filter(|l| *l != source_lang && seen.insert(l.clone()))
+        .collect();
+
+    // One mpsc per Soniox session. Producer fans every chunk to each.
+    let (source_tx, source_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let mut target_senders: Vec<mpsc::UnboundedSender<Vec<u8>>> = Vec::new();
+    let mut target_receivers: Vec<(Lang, mpsc::UnboundedReceiver<Vec<u8>>)> = Vec::new();
+    for lang in &targets {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        target_senders.push(tx);
+        target_receivers.push((lang.clone(), rx));
+    }
+
+    tokio::spawn(async move {
+        while let Some(chunk) = audio_rx.recv().await {
+            let _ = source_tx.send(chunk.clone());
+            for tx in &target_senders {
+                let _ = tx.send(chunk.clone());
+            }
+        }
+    });
+
+    // Source session: transcript-only.
+    {
+        let rid = room_id.clone();
+        let rooms = rooms.clone();
+        let src = source_lang.clone();
+        tokio::spawn(async move {
+            run_soniox_session(rid, rooms, SonioxMode::Source { lang: src }, source_rx).await;
+        });
+    }
+
+    // Per-target translate sessions.
+    for (target_lang, target_rx) in target_receivers {
+        let rid = room_id.clone();
+        let rooms = rooms.clone();
+        let src = source_lang.clone();
+        tokio::spawn(async move {
+            run_soniox_session(
+                rid,
+                rooms,
+                SonioxMode::Translate {
+                    source_lang: src,
+                    target_lang,
+                },
+                target_rx,
+            )
+            .await;
+        });
+    }
+}
+
+/// Single Soniox session loop. Reconnects on mid-session drops up to
+/// STT_RECONNECT_MAX. Token handling branches on `mode`:
+///
+/// - `Source`: emit Interim to the host on every response, emit Final on
+///   endpoint detection.
+/// - `Translate`: collect only translation tokens, emit one `Translation`
+///   event per utterance + fire TTS for this target lang.
+async fn run_soniox_session(
+    room_id: String,
+    rooms: Rooms,
+    mode: SonioxMode,
+    audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let tag = mode.tag();
     let audio_rx = Arc::new(tokio::sync::Mutex::new(audio_rx));
     let mut utterance_counter: u64 = 0;
     let mut reconnect_count: u32 = 0;
@@ -135,23 +249,16 @@ pub async fn start_stt(
 
         for attempt in 1..=max_attempts {
             if !rooms.contains_key(&room_id) {
-                eprintln!("[STT] Room {} gone, stopping Soniox pipeline", room_id);
+                eprintln!("[STT {}] room gone, stopping", tag);
                 return;
-            }
-
-            if reconnect_count > 0 {
-                eprintln!(
-                    "[STT] Reconnecting to Soniox (attempt {}/{})...",
-                    attempt, STT_RECONNECT_MAX
-                );
             }
 
             match tokio_tungstenite::connect_async(SONIOX_WS_URL).await {
                 Ok((stream, _)) => {
                     if reconnect_count > 0 {
-                        eprintln!("[STT] Reconnected to Soniox (attempt {})", attempt);
+                        eprintln!("[STT {}] reconnected (attempt {})", tag, attempt);
                     } else {
-                        println!("[STT] Connected to Soniox (attempt {})", attempt);
+                        println!("[STT {}] connected (attempt {})", tag, attempt);
                     }
                     ws_stream = Some(stream);
                     break;
@@ -163,8 +270,8 @@ pub async fn start_stt(
                         STT_RECONNECT_DELAY
                     };
                     eprintln!(
-                        "[STT] connect attempt {}/{} failed: {}",
-                        attempt, max_attempts, e
+                        "[STT {}] connect attempt {}/{} failed: {}",
+                        tag, attempt, max_attempts, e
                     );
                     tokio::time::sleep(delay).await;
                 }
@@ -174,30 +281,19 @@ pub async fn start_stt(
         let ws_stream = match ws_stream {
             Some(s) => s,
             None => {
-                eprintln!(
-                    "[STT] Failed to reach Soniox after {} attempts, stopping pipeline",
-                    max_attempts
-                );
+                eprintln!("[STT {}] giving up after {} attempts", tag, max_attempts);
                 return;
             }
         };
 
         let (mut stt_sink, mut stt_stream) = ws_stream.split();
 
-        // Send Soniox config as the first WS message.
-        let config = SonioxConfig {
-            api_key: &SONIOX_API_KEY,
-            model: SONIOX_MODEL,
-            audio_format: "pcm_s16le",
-            sample_rate: HOST_SAMPLE_RATE,
-            num_channels: 1,
-            language_hints: vec![source_lang.to_string()],
-            enable_endpoint_detection: true,
-        };
+        // Mode-specific config.
+        let config = mode.build_config(&SONIOX_API_KEY);
         let config_json = match serde_json::to_string(&config) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[STT] config serialize error: {}", e);
+                eprintln!("[STT {}] config serialize error: {}", tag, e);
                 return;
             }
         };
@@ -205,14 +301,14 @@ pub async fn start_stt(
             .send(tungstenite::Message::Text(config_json.into()))
             .await
         {
-            eprintln!("[STT] Failed to send Soniox config: {}", e);
+            eprintln!("[STT {}] config send failed: {}", tag, e);
             reconnect_count += 1;
-            if reconnect_count > STT_RECONNECT_MAX { break; }
+            if reconnect_count > STT_RECONNECT_MAX {
+                break;
+            }
             continue;
         }
 
-        // Task 1: Forward host audio → Soniox. Host PCM also flows to the RTMP
-        // mixer via handler.rs::push_host_audio, independent of STT.
         let audio_rx_clone = audio_rx.clone();
         let send_task = tokio::spawn(async move {
             let mut rx = audio_rx_clone.lock().await;
@@ -227,24 +323,23 @@ pub async fn start_stt(
             }
         });
 
-        // Task 2: Read Soniox tokens, emit Interim/Final events to the host.
         let rooms_ref = rooms.clone();
         let rid = room_id.clone();
-        let source_lang_clone = source_lang.clone();
+        let mode_recv = mode.clone();
+        let tag_recv = tag.clone();
         let mut uc = utterance_counter;
 
         let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disc_flag = disconnected_unexpectedly.clone();
 
         let recv_task = tokio::spawn(async move {
-            // Running transcript of fully-committed text for the current utterance.
             let mut final_text = String::new();
 
             while let Some(msg_result) = stt_stream.next().await {
                 let msg = match msg_result {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!("[STT] WebSocket read error: {}", e);
+                        eprintln!("[STT {}] WebSocket read error: {}", tag_recv, e);
                         disc_flag.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
@@ -253,7 +348,7 @@ pub async fn start_stt(
                 let text = match msg {
                     tungstenite::Message::Text(t) => t.to_string(),
                     tungstenite::Message::Close(_) => {
-                        eprintln!("[STT] Soniox closed the connection");
+                        eprintln!("[STT {}] Soniox closed the connection", tag_recv);
                         disc_flag.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
@@ -263,14 +358,15 @@ pub async fn start_stt(
                 let resp: SonioxResponse = match serde_json::from_str(&text) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("[STT] Soniox parse error: {} — raw: {}", e, text);
+                        eprintln!("[STT {}] parse error: {} — raw: {}", tag_recv, e, text);
                         continue;
                     }
                 };
 
                 if let Some(code) = resp.error_code {
                     eprintln!(
-                        "[STT] Soniox error {}: {}",
+                        "[STT {}] Soniox error {}: {}",
+                        tag_recv,
                         code,
                         resp.error_message.unwrap_or_default()
                     );
@@ -278,16 +374,16 @@ pub async fn start_stt(
                     break;
                 }
 
-                let room = match rooms_ref.get(&rid) {
-                    Some(r) => r,
-                    None => break, // room gone = normal shutdown
-                };
+                if !rooms_ref.contains_key(&rid) {
+                    break; // room gone = normal shutdown
+                }
 
-                // Collect non-final tokens as the current interim tail so we can
-                // emit one Interim per response instead of per-token.
                 let mut interim_tail = String::new();
                 let mut endpoint_hit = false;
                 for tok in resp.tokens.iter() {
+                    if !mode_recv.accepts(tok) {
+                        continue;
+                    }
                     if tok.text == SONIOX_END_TOKEN {
                         endpoint_hit = true;
                         continue;
@@ -299,26 +395,77 @@ pub async fn start_stt(
                     }
                 }
 
-                // Emit an Interim (only when there's something to show — drops empty keep-alives).
-                let interim = format!("{}{}", final_text, interim_tail);
-                if !interim.is_empty() {
-                    room.send_to_host(to_ws(&ServerMsg::Interim {
-                        transcript: interim,
-                    }));
+                // Interim: only the source session pushes this to the host UI.
+                // Interim translations would spam the host — we commit on <end>.
+                if let SonioxMode::Source { .. } = mode_recv {
+                    let interim = format!("{}{}", final_text, interim_tail);
+                    if !interim.is_empty() {
+                        if let Some(room) = rooms_ref.get(&rid) {
+                            room.send_to_host(to_ws(&ServerMsg::Interim {
+                                transcript: interim,
+                            }));
+                        }
+                    }
                 }
 
-                // Endpoint detected → commit the utterance.
                 if endpoint_hit && !final_text.trim().is_empty() {
                     uc += 1;
                     let uid = uc;
                     let committed = std::mem::take(&mut final_text);
-                    println!("[FINAL #{}] {}", uid, committed);
-                    drop(room);
-                    emit_final(&rooms_ref, &rid, &committed, uid, &source_lang_clone);
+                    match &mode_recv {
+                        SonioxMode::Source { .. } => {
+                            println!("[FINAL src #{}] {}", uid, committed);
+                            if let Some(room) = rooms_ref.get(&rid) {
+                                room.send_to_host(to_ws(&ServerMsg::Final {
+                                    transcript: committed,
+                                    utterance_id: uid,
+                                }));
+                            }
+                        }
+                        SonioxMode::Translate { target_lang, .. } => {
+                            println!("[FINAL {} #{}] {}", target_lang, uid, committed);
+                            let voice_clone_id =
+                                rooms_ref.get(&rid).and_then(|r| r.voice_clone_id.clone());
+                            let rtmp_mgr = rooms_ref
+                                .get(&rid)
+                                .and_then(|r| r.rtmp_manager.clone());
+                            if let Some(room) = rooms_ref.get(&rid) {
+                                room.send_to_host(to_ws(&ServerMsg::Translation {
+                                    text: committed.clone(),
+                                    utterance_id: uid,
+                                    target_lang: target_lang.to_string(),
+                                    translate_ms: 0,
+                                }));
+                            }
+                            // Fire burn-in caption immediately — the mixer's
+                            // writer task handles min-dwell spacing.
+                            if let Some(mgr) = rtmp_mgr.clone() {
+                                let lang_s = target_lang.to_string();
+                                let text = committed.clone();
+                                tokio::spawn(async move {
+                                    mgr.lock().await.push_caption(&lang_s, text);
+                                });
+                            }
+                            let rooms = rooms_ref.clone();
+                            let rid = rid.clone();
+                            let target = target_lang.clone();
+                            tokio::spawn(async move {
+                                do_tts_and_broadcast(
+                                    &committed,
+                                    uid,
+                                    &target,
+                                    &rooms,
+                                    &rid,
+                                    voice_clone_id.as_deref(),
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                } else if endpoint_hit {
+                    // Endpoint on silence / keep-alive — just reset.
+                    final_text.clear();
                 }
-                // Endpoints with no text (silence) are no-ops; the mixer has
-                // already been forwarding the original audio.
-                let _ = endpoint_hit;
             }
             uc
         });
@@ -333,90 +480,22 @@ pub async fn start_stt(
         }
 
         if !disconnected_unexpectedly.load(std::sync::atomic::Ordering::Acquire) {
-            break; // normal shutdown (room removed, host disconnected, audio_rx closed)
+            break;
         }
-
         if !rooms.contains_key(&room_id) {
             break;
         }
 
         reconnect_count += 1;
         if reconnect_count > STT_RECONNECT_MAX {
-            eprintln!(
-                "[STT] Exceeded max reconnect attempts ({}), giving up",
-                STT_RECONNECT_MAX
-            );
+            eprintln!("[STT {}] exceeded max reconnects", tag);
             break;
         }
-
         eprintln!(
-            "[STT] Will attempt reconnect {}/{}",
-            reconnect_count, STT_RECONNECT_MAX
+            "[STT {}] will reconnect {}/{}",
+            tag, reconnect_count, STT_RECONNECT_MAX
         );
         tokio::time::sleep(STT_RECONNECT_DELAY).await;
-    }
-}
-
-// ── Translation Pipeline ──
-//
-// Each translated target spawns one task: translate (stub) + TTS. The host's
-// original audio/video flows to RTMP continuously via the per-stream delay
-// buffers in ffmpeg.rs, so there's no source-language passthrough branch and
-// no host_audio / utterance_* timestamps to thread through.
-
-/// Run the per-target TTS pipeline for one utterance.
-async fn run_pipeline(
-    transcript: &str,
-    utterance_id: u64,
-    source_lang: &Lang,
-    target_langs: &[Lang],
-    rooms: &Rooms,
-    room_id: &str,
-) {
-    let mut handles = Vec::new();
-    let voice_clone_id = rooms.get(room_id).and_then(|r| r.voice_clone_id.clone());
-
-    for lang in target_langs {
-        // Source-language RTMP output is handled by the per-stream delay
-        // buffer + mixer (passthrough, no TTS). Skip TTS for source here.
-        if lang == source_lang {
-            continue;
-        }
-
-        let transcript = transcript.to_string();
-        let target = lang.clone();
-        let rooms = rooms.clone();
-        let room_id = room_id.to_string();
-        let voice_clone_id = voice_clone_id.clone();
-
-        handles.push(tokio::spawn(async move {
-            // Translation stub: pass-through until Soniox per-target WS lands.
-            let translated_text = transcript;
-            let translate_ms: u64 = 0;
-
-            if let Some(room) = rooms.get(&room_id) {
-                room.send_to_host(to_ws(&ServerMsg::Translation {
-                    text: translated_text.clone(),
-                    utterance_id,
-                    target_lang: target.to_string(),
-                    translate_ms,
-                }));
-            }
-
-            do_tts_and_broadcast(
-                &translated_text,
-                utterance_id,
-                &target,
-                &rooms,
-                &room_id,
-                voice_clone_id.as_deref(),
-            )
-            .await;
-        }));
-    }
-
-    for handle in handles {
-        let _ = handle.await;
     }
 }
 
