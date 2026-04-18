@@ -14,5 +14,3 @@ target/
 .venv/
 __pycache__/
 *.pyc
-src-tauri/binaries/
-src-tauri/binaries/
