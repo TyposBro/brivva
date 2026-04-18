@@ -101,11 +101,6 @@ impl RtmpManager {
         }
     }
 
-    /// Returns the broadcast delay for TTS timeout calculations
-    pub fn broadcast_delay(&self) -> Duration {
-        self.broadcast_delay
-    }
-
     /// Start an FFmpeg RTMP process with dedicated video and audio drain threads
     pub fn start_stream(
         &mut self,

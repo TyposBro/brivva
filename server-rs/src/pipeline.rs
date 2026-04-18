@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
-use crate::types::{FrameBuffer, Lang, Rooms, ServerMsg, TimestampedFrame};
+use crate::types::{Lang, Rooms, ServerMsg};
 
 // ── Service config ────────────────────────────────────────
 
@@ -34,39 +34,6 @@ static SONIOX_API_KEY: LazyLock<String> = LazyLock::new(|| {
 static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
     std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
 });
-
-// ── STT Events (from stt-wrapper) ─────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StyleParams {
-    #[serde(default = "default_stability")]
-    pub stability: f64,
-    #[serde(default = "default_similarity")]
-    pub similarity_boost: f64,
-    #[serde(default)]
-    pub style: f64,
-    #[serde(default = "default_speed")]
-    pub speed: f64,
-    #[serde(default = "default_true")]
-    pub use_speaker_boost: bool,
-}
-
-fn default_stability() -> f64 { 0.5 }
-fn default_similarity() -> f64 { 0.75 }
-fn default_speed() -> f64 { 1.0 }
-fn default_true() -> bool { true }
-
-impl Default for StyleParams {
-    fn default() -> Self {
-        Self {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.0,
-            speed: 1.0,
-            use_speaker_boost: true,
-        }
-    }
-}
 
 // ── Soniox v4 wire format ─────────────────────────────────
 //
@@ -116,7 +83,6 @@ fn emit_final(
     transcript: &str,
     uid: u64,
     source_lang: &Lang,
-    style_params: Option<StyleParams>,
     utterance_start: Instant,
     host_audio: Vec<u8>,
 ) {
@@ -131,9 +97,7 @@ fn emit_final(
         room.send_to_all_guests(final_msg);
 
         let active = room.active_langs();
-        let sp = style_params.unwrap_or_default();
-        let frame_buffer = room.frame_buffer.clone();
-        println!("[PIPELINE] active langs: {:?}, style: {:.2}", active, sp.style);
+        println!("[PIPELINE] active langs: {:?}", active);
         if !active.is_empty() {
             let rooms_clone = rooms.clone();
             let rid = room_id.to_string();
@@ -141,8 +105,8 @@ fn emit_final(
             let text = transcript.to_string();
             tokio::spawn(async move {
                 run_pipeline(
-                    &text, uid, &src, &active, &rooms_clone, &rid, &sp,
-                    utterance_start, utterance_end, &frame_buffer, host_audio,
+                    &text, uid, &src, &active, &rooms_clone, &rid,
+                    utterance_start, utterance_end, host_audio,
                 ).await;
             });
         }
@@ -381,14 +345,12 @@ pub async fn start_stt(
                     };
                     println!("[FINAL #{}] {}", uid, committed);
                     drop(room);
-                    // Soniox doesn't emit style_params — TTS falls back to defaults.
                     emit_final(
                         &rooms_ref,
                         &rid,
                         &committed,
                         uid,
                         &source_lang_clone,
-                        None,
                         start,
                         host_audio,
                     );
@@ -443,9 +405,12 @@ pub async fn start_stt(
 // already-translated text per target). Stage below is currently a
 // pass-through stub until the Soniox WS client lands — do NOT ship to prod.
 
-/// Run the full translation + TTS pipeline for one utterance.
-/// `host_audio` is raw 44.1kHz PCM of the host's voice during this utterance,
-/// used for source-language passthrough on RTMP streams.
+/// Run the per-target pipeline for one utterance.
+///
+/// For the source language, queue the host's native audio directly to RTMP
+/// (passthrough — no TTS round trip). For every other target, broadcast a
+/// translation event (stub: pass-through until Soniox per-target WS lands)
+/// then hand off to ElevenLabs TTS.
 async fn run_pipeline(
     transcript: &str,
     utterance_id: u64,
@@ -453,96 +418,57 @@ async fn run_pipeline(
     target_langs: &[Lang],
     rooms: &Rooms,
     room_id: &str,
-    style_params: &StyleParams,
     utterance_start: Instant,
     utterance_end: Instant,
-    frame_buffer: &FrameBuffer,
     host_audio: Vec<u8>,
 ) {
-    let client = reqwest::Client::new();
     let mut handles = Vec::new();
 
-    // Get cloned voice ID if available
     let voice_clone_id = rooms.get(room_id).and_then(|r| r.voice_clone_id.clone());
-
-    // Grab the video frames for this utterance ONCE (shared across all languages)
-    let frames = {
-        if let Ok(buf) = frame_buffer.lock() {
-            buf.iter()
-                .filter(|f| f.timestamp >= utterance_start && f.timestamp <= utterance_end)
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        }
-    };
-    let frames = Arc::new(frames);
-    eprintln!(
-        "[PIPELINE] utterance {} captured {} video frames ({:.0}ms window)",
-        utterance_id,
-        frames.len(),
-        utterance_end.duration_since(utterance_start).as_millis()
-    );
 
     for lang in target_langs {
         if lang == source_lang {
-            // Source-language passthrough: host audio is already 44.1kHz PCM (matches FFmpeg).
-            // Queue directly to RTMP streams. No TTS needed — it's the host's own voice.
+            // Source passthrough: host audio is 44.1 kHz PCM already — queue directly to RTMP.
             let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
             if let Some(manager) = rtmp_mgr {
-                if !host_audio.is_empty() {
-                    let mut pcm = host_audio.clone();
-                    let pcm_len = pcm.len();
-                    let lang_str = lang.to_string();
-                    let mgr = manager.clone();
-                    handles.push(tokio::spawn(async move {
-                        // Apply same truncation as translated audio
-                        let utterance_dur = utterance_end.duration_since(utterance_start);
-                        let max_dur = utterance_dur + Duration::from_millis(2000);
-                        let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
-                        if pcm.len() > max_bytes {
-                            crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-                        }
-                        let locked = mgr.lock().await;
-                        locked.queue_audio(&lang_str, pcm, utterance_start);
-                        eprintln!(
-                            "[PASSTHROUGH] Queued host audio for {} ({}KB, 44.1kHz native)",
-                            lang_str,
-                            pcm_len / 1024
-                        );
-                    }));
-                } else {
+                if host_audio.is_empty() {
                     eprintln!("[PASSTHROUGH] no host audio captured for source lang {}", lang);
+                    continue;
                 }
+                let mut pcm = host_audio.clone();
+                let pcm_len = pcm.len();
+                let lang_str = lang.to_string();
+                let mgr = manager.clone();
+                handles.push(tokio::spawn(async move {
+                    let utterance_dur = utterance_end.duration_since(utterance_start);
+                    let max_dur = utterance_dur + Duration::from_millis(2000);
+                    let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
+                    if pcm.len() > max_bytes {
+                        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
+                    }
+                    let locked = mgr.lock().await;
+                    locked.queue_audio(&lang_str, pcm, utterance_start);
+                    eprintln!(
+                        "[PASSTHROUGH] Queued host audio for {} ({}KB, 44.1kHz native)",
+                        lang_str,
+                        pcm_len / 1024
+                    );
+                }));
             }
             continue;
         }
 
         let transcript = transcript.to_string();
-        let source = source_lang.clone();
         let target = lang.clone();
-        let client = client.clone();
         let rooms = rooms.clone();
         let room_id = room_id.to_string();
         let voice_clone_id = voice_clone_id.clone();
-        let sp = style_params.clone();
-        let frames = frames.clone();
 
         handles.push(tokio::spawn(async move {
-            // 1. Translate — STUB: pass-through source transcript.
-            //    TODO(soniox): replace with Soniox v4 per-target translation
-            //    (translations arrive on the STT WS, keyed by target lang).
-            let _ = &source;
-            let start = Instant::now();
-            let translated_text = transcript.clone();
-            let translate_ms = start.elapsed().as_millis() as u64;
-            println!(
-                "[TRANSLATE] {} → {} = '{}' ({}ms)",
-                source, target, translated_text, translate_ms
-            );
-            println!("[METRIC] translate_ms={} lang={}", translate_ms, target);
+            // Translation stub: pass-through until Soniox per-target WS lands.
+            let translated_text = transcript;
+            let translate_ms: u64 = 0;
 
-            // 2. Broadcast translation text
             if let Some(room) = rooms.get(&room_id) {
                 let msg = to_ws(&ServerMsg::Translation {
                     text: translated_text.clone(),
@@ -553,20 +479,14 @@ async fn run_pipeline(
                 room.send_to_host(msg);
             }
 
-            // 3. TTS + send synced audio+video
             do_tts_and_broadcast(
-                &client,
                 &translated_text,
-                translate_ms,
                 utterance_id,
                 &target,
                 &rooms,
                 &room_id,
                 voice_clone_id.as_deref(),
-                &sp,
-                &frames,
                 utterance_start,
-                utterance_end,
             )
             .await;
         }));
@@ -579,67 +499,48 @@ async fn run_pipeline(
 
 /// Call ElevenLabs TTS and send synced audio + video to guests.
 /// Has a hard timeout at broadcast_delay - 500ms to prevent sync slips.
+/// Call ElevenLabs TTS and stream the resulting audio to guests + RTMP.
+/// Hard timeout = broadcast_delay − 500 ms (capped at 5 s) to keep A/V in sync
+/// — if ElevenLabs is slow, we drop this utterance to silence rather than slip.
 async fn do_tts_and_broadcast(
-    client: &reqwest::Client,
     text: &str,
-    _translate_ms: u64,
     utterance_id: u64,
     lang: &Lang,
     rooms: &Rooms,
     room_id: &str,
     voice_clone_id: Option<&str>,
-    style_params: &StyleParams,
-    utterance_frames: &[TimestampedFrame],
     utterance_start: Instant,
-    utterance_end: Instant,
 ) {
     let tts_start = Instant::now();
 
-    // Hard TTS deadline: min(broadcast_delay - 500ms, 5s absolute cap)
     let tts_deadline = {
         let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5000);
         let sync_deadline = Duration::from_millis(delay_ms.saturating_sub(500));
-        let hard_cap = Duration::from_secs(5);
-        sync_deadline.min(hard_cap)
+        sync_deadline.min(Duration::from_secs(5))
     };
 
-    // Use cloned voice if available, otherwise fall back to default per-language voice
-    let voice_id = match voice_clone_id {
-        Some(id) => id.to_string(),
-        None => lang.voice_id().to_string(),
-    };
+    let is_cloned = voice_clone_id.is_some();
+    let voice_id = voice_clone_id
+        .map(str::to_string)
+        .unwrap_or_else(|| lang.voice_id().to_string());
+    let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
         &voice_id
     );
-
-    let is_cloned = voice_clone_id.is_some();
-    // Use higher-quality model for cloned voices, flash for defaults
-    let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
     println!(
-        "[TTS] requesting ElevenLabs voice={}{} model={} for '{}' ({}) [style={:.2} stability={:.2} speed={:.2}] [deadline={}ms]",
-        &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, text, lang,
-        style_params.style, style_params.stability, style_params.speed,
-        tts_deadline.as_millis()
+        "[TTS] voice={}{} model={} lang={} deadline={}ms text='{}'",
+        &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, lang,
+        tts_deadline.as_millis(), text
     );
 
-    let tts_body = serde_json::json!({
-        "text": text,
-        "model_id": model_id,
-        "voice_settings": {
-            "stability": style_params.stability,
-            "similarity_boost": style_params.similarity_boost,
-            "style": style_params.style,
-            "use_speaker_boost": style_params.use_speaker_boost
-        }
-    });
-
-    // Wrap entire TTS call + streaming in a hard timeout.
-    // If ElevenLabs exceeds the deadline, drop this utterance to silence.
+    let client = reqwest::Client::new();
+    let tts_body = serde_json::json!({ "text": text, "model_id": model_id });
     let lang_str = lang.to_string();
+
     let tts_result = tokio::time::timeout(tts_deadline, async {
         let mut audio_buffer: Vec<u8> = Vec::new();
         let resp = client
@@ -652,7 +553,6 @@ async fn do_tts_and_broadcast(
 
         match resp {
             Ok(r) if r.status().is_success() => {
-                println!("[TTS] buffering MP3 for {}", lang_str);
                 let mut stream = r.bytes_stream();
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
@@ -673,82 +573,51 @@ async fn do_tts_and_broadcast(
 
     let audio_buffer = match tts_result {
         Ok(buf) if !buf.is_empty() => buf,
-        Ok(_) => return, // empty buffer (TTS failed but didn't timeout)
+        Ok(_) => return,
         Err(_) => {
-            let preview: String = text.chars().take(10).collect();
             eprintln!(
-                "[TTS] Timeout for utterance \"{}...\", skipping",
-                preview
-            );
-            eprintln!(
-                "[TTS] TIMEOUT: utterance {} for {} exceeded {}ms deadline — dropping to silence",
-                utterance_id, lang, tts_deadline.as_millis()
+                "[TTS] TIMEOUT utterance {} lang={} — dropped to silence (>{:?})",
+                utterance_id, lang, tts_deadline
             );
             return;
         }
     };
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
-    println!("[TTS] buffered {}KB in {}ms for {}", audio_buffer.len() / 1024, tts_ms, lang);
-    println!("[METRIC] tts_ms={} lang={} size_kb={}", tts_ms, lang, audio_buffer.len() / 1024);
+    println!(
+        "[TTS] buffered {}KB in {}ms lang={}",
+        audio_buffer.len() / 1024,
+        tts_ms,
+        lang
+    );
 
-    // Push to RTMP streams (decode MP3 → PCM, queue for synced playback)
+    // RTMP path: decode MP3 → PCM, truncate to utterance + 2s margin, queue.
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
             Ok(mut pcm) => {
-                // Truncate TTS audio that exceeds source utterance + 2s margin.
-                // Prevents long translations (e.g., German) from bleeding into next segment.
-                let utterance_dur = utterance_end.duration_since(utterance_start);
-                let max_dur = utterance_dur + Duration::from_millis(2000);
+                let elapsed_ms = utterance_start.elapsed().as_millis() as u64;
+                // Match source audio's 2s margin: total budget = elapsed + 2s from now.
+                let max_dur = Duration::from_millis(elapsed_ms) + Duration::from_millis(2000);
                 let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
                 if pcm.len() > max_bytes {
-                    eprintln!(
-                        "[RTMP] Truncating TTS audio: {:.0}ms → {:.0}ms for {}",
-                        pcm.len() as f64 / 88.2,
-                        max_bytes as f64 / 88.2,
-                        lang
-                    );
                     crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
                 }
                 let mgr = manager.lock().await;
                 mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
-                let pipeline_ms = tts_start.elapsed().as_millis() as u64;
-                eprintln!(
-                    "[RTMP] Queued audio for {} (pipeline: {}ms, plays at utterance_start)",
-                    lang, pipeline_ms
-                );
-                println!("[METRIC] pipeline_ms={} lang={}", pipeline_ms, lang);
             }
             Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
         }
     }
 
-    // Send synced audio + video to WebSocket guests (full audio, no truncation)
+    // Guest WS path: full untruncated audio.
     if let Some(room) = rooms.get(room_id) {
-        // Audio
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
         room.send_to_lang(lang, Message::Binary(audio_buffer.into()));
         room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
         room.send_to_host(to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
-
-        // Synced video frames (captured during the utterance)
-        if !utterance_frames.is_empty() {
-            room.send_to_lang(lang, to_ws(&ServerMsg::VideoStart {
-                utterance_id,
-                frame_count: utterance_frames.len() as u32,
-            }));
-            for frame in utterance_frames {
-                room.send_to_lang(lang, to_ws(&ServerMsg::VideoFrame {
-                    data: frame.data.clone(),
-                }));
-            }
-            room.send_to_lang(lang, to_ws(&ServerMsg::VideoEnd { utterance_id }));
-            eprintln!(
-                "[TTS] sent {} synced video frames for utterance {} ({})",
-                utterance_frames.len(), utterance_id, lang
-            );
-        }
+        // Host-side latency marker: pipeline done for this utterance.
+        room.send_to_host(to_ws(&ServerMsg::VideoEnd { utterance_id }));
     }
 }
 

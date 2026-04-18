@@ -237,7 +237,6 @@ async fn handle_host(
                                     .and_then(|r| r.rtmp_manager.clone());
 
                                 if let Some(room) = rooms.get(&room_id) {
-                                    room.push_frame(data.to_string());
                                     room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
                                         data: data.to_string(),
                                     }));
