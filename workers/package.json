@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "migrate:local": "wrangler d1 migrations apply brivva --local",
-    "migrate:prod": "wrangler d1 migrations apply brivva --remote"
+    "migrate:prod": "wrangler d1 migrations apply brivva --remote",
+    "ops:migrate-session-rename:local": "wrangler d1 execute brivva --local --file=ops/live-session-id-migration.sql",
+    "ops:migrate-session-rename:prod": "wrangler d1 execute brivva --remote --file=ops/live-session-id-migration.sql"
   },
   "dependencies": {
     "hono": "^4.8.5",

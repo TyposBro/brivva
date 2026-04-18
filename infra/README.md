@@ -46,6 +46,19 @@ cd ..
 ./deploy.sh   # build → push :latest → force new ECS deployment
 ```
 
+### Session Naming Migration
+
+If your deployed Workers D1 database predates the `room_id` → `live_session_id`
+rename, run the one-off migration before deploying code that expects the new
+column name:
+
+```fish
+cd workers
+bun run ops:migrate-session-rename:prod
+```
+
+The SQL lives in [workers/ops/live-session-id-migration.sql](../workers/ops/live-session-id-migration.sql).
+
 `deploy.sh` auto-resolves account from terraform state. Override with `AWS_ACCOUNT=...` if running standalone.
 
 ## Rotate secrets

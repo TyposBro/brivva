@@ -15,3 +15,10 @@ wrangler d1 execute brivva --remote --file=ops/live-session-id-migration.sql
 ```
 
 Use `--local` instead of `--remote` for local development databases.
+
+Convenience scripts:
+
+```sh
+bun run ops:migrate-session-rename:local
+bun run ops:migrate-session-rename:prod
+```
