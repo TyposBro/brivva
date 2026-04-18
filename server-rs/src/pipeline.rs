@@ -89,12 +89,10 @@ fn emit_final(
     let utterance_end = Instant::now();
 
     if let Some(room) = rooms.get(room_id) {
-        let final_msg = to_ws(&ServerMsg::Final {
+        room.send_to_host(to_ws(&ServerMsg::Final {
             transcript: transcript.to_string(),
             utterance_id: uid,
-        });
-        room.send_to_host(final_msg.clone());
-        room.send_to_all_guests(final_msg);
+        }));
 
         let active = room.active_langs();
         println!("[PIPELINE] active langs: {:?}", active);
@@ -326,11 +324,9 @@ pub async fn start_stt(
                 // Emit an Interim (only when there's something to show — drops empty keep-alives).
                 let interim = format!("{}{}", final_text, interim_tail);
                 if !interim.is_empty() {
-                    let im = to_ws(&ServerMsg::Interim {
-                        transcript: interim.clone(),
-                    });
-                    room.send_to_host(im.clone());
-                    room.send_to_all_guests(im);
+                    room.send_to_host(to_ws(&ServerMsg::Interim {
+                        transcript: interim,
+                    }));
                 }
 
                 // Endpoint detected → commit the utterance.
@@ -470,13 +466,12 @@ async fn run_pipeline(
             let translate_ms: u64 = 0;
 
             if let Some(room) = rooms.get(&room_id) {
-                let msg = to_ws(&ServerMsg::Translation {
+                room.send_to_host(to_ws(&ServerMsg::Translation {
                     text: translated_text.clone(),
                     utterance_id,
+                    target_lang: target.to_string(),
                     translate_ms,
-                });
-                room.send_to_lang(&target, msg.clone());
-                room.send_to_host(msg);
+                }));
             }
 
             do_tts_and_broadcast(
@@ -610,13 +605,14 @@ async fn do_tts_and_broadcast(
         }
     }
 
-    // Guest WS path: full untruncated audio.
+    // Host-side latency markers. MP3 bytes are discarded — after the decode
+    // above fed PCM into the RTMP queue, no one else needs the original MP3.
     if let Some(room) = rooms.get(room_id) {
-        room.send_to_lang(lang, to_ws(&ServerMsg::TtsStart { utterance_id }));
-        room.send_to_lang(lang, Message::Binary(audio_buffer.into()));
-        room.send_to_lang(lang, to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
-        room.send_to_host(to_ws(&ServerMsg::TtsEnd { utterance_id, tts_ms }));
-        // Host-side latency marker: pipeline done for this utterance.
+        room.send_to_host(to_ws(&ServerMsg::TtsEnd {
+            utterance_id,
+            target_lang: lang.to_string(),
+            tts_ms,
+        }));
         room.send_to_host(to_ws(&ServerMsg::VideoEnd { utterance_id }));
     }
 }

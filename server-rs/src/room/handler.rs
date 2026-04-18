@@ -16,71 +16,46 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::pipeline;
-use crate::types::{Guest, Lang, Room, RoomQuery, Rooms, ServerMsg};
+use crate::types::{Lang, Room, RoomQuery};
 use crate::workers_api;
 use crate::AppState;
 
-/// Helper to serialize a ServerMsg and wrap in a WS text frame
-fn to_ws(msg: &ServerMsg) -> Message {
-    Message::Text(serde_json::to_string(msg).unwrap().into())
-}
-
-/// Axum handler — reads query params, then upgrades HTTP → WebSocket
+/// WS entry. Accepts only authenticated hosts — no guests, no room codes.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<RoomQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, query))
+    ws.on_upgrade(move |socket| handle_host_socket(socket, state, query))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, query: RoomQuery) {
-    eprintln!("[WS] handle_socket called, role={}", query.role);
+async fn handle_host_socket(socket: WebSocket, state: AppState, query: RoomQuery) {
+    // Auth gate — host must present a valid Workers-signed JWT.
+    let token = match query.token.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!("[WS] host without token, rejecting");
+            return;
+        }
+    };
+    let claims = match auth::verify(token) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[WS] host JWT verify failed: {}", e);
+            return;
+        }
+    };
+
+    let source_lang = query
+        .source_lang
+        .as_deref()
+        .and_then(Lang::from_str)
+        .unwrap_or(Lang::En);
+
     let (sender, receiver) = socket.split();
-
-    match query.role.as_str() {
-        "host" => {
-            // Host must present a valid Workers-issued JWT. Claims give us the
-            // authenticated user id, which we match against the session owner
-            // returned from the Workers /internal API.
-            let token = match query.token.as_deref() {
-                Some(t) if !t.is_empty() => t,
-                _ => {
-                    eprintln!("[WS] host without token, rejecting");
-                    return;
-                }
-            };
-            let claims = match auth::verify(token) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[WS] host JWT verify failed: {}", e);
-                    return;
-                }
-            };
-            let source_lang = query
-                .source_lang
-                .as_deref()
-                .and_then(Lang::from_str)
-                .unwrap_or(Lang::En);
-            handle_host(sender, receiver, state, claims.sub, source_lang, query.session_id).await;
-        }
-        "guest" => {
-            let room_id = match query.room_id {
-                Some(id) => id,
-                None => return,
-            };
-            let lang = query
-                .lang
-                .as_deref()
-                .and_then(Lang::from_str)
-                .unwrap_or(Lang::En);
-            handle_guest(sender, receiver, state.rooms, room_id, lang).await;
-        }
-        _ => return,
-    }
+    handle_host(sender, receiver, state, claims.sub, source_lang, query.session_id).await;
 }
 
-/// Generate a 6-char room code
 fn generate_room_id() -> String {
     Uuid::new_v4().to_string()[..6].to_uppercase()
 }
@@ -105,12 +80,10 @@ async fn handle_host(
 
     let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));
 
-    // If session_id provided, fetch bundle from Workers (streams, voice) and
-    // boot up FFmpeg for each configured RTMP destination.
+    // Session context lives in Workers/D1. Fetch the bundle + start FFmpeg per stream.
     if let Some(ref sid) = session_id {
         match workers_api::fetch_session_bundle(sid).await {
             Ok(bundle) => {
-                // Owner check — JWT user must match session.user_id.
                 if bundle.session.user_id != user_id {
                     eprintln!(
                         "[WS] session {} owner mismatch ({} vs jwt {})",
@@ -135,11 +108,7 @@ async fn handle_host(
                         let full_url = if stream_key.is_empty() {
                             rtmp_url.clone()
                         } else {
-                            format!(
-                                "{}/{}",
-                                rtmp_url.trim_end_matches('/'),
-                                stream_key
-                            )
+                            format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
                         };
                         if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url) {
                             eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
@@ -179,18 +148,12 @@ async fn handle_host(
             }
             Err(e) => {
                 eprintln!("[WS] failed to fetch session {}: {}", sid, e);
-                // Continue without RTMP — host can still stream to guests only.
+                // Continue without RTMP — host still gets STT feedback.
             }
         }
     }
 
     rooms.insert(room_id.clone(), room);
-
-    let _ = sender
-        .send(to_ws(&ServerMsg::RoomCreated {
-            room_id: room_id.clone(),
-        }))
-        .await;
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = host_rx.recv().await {
@@ -230,18 +193,12 @@ async fn handle_host(
 
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
                     match json.get("type").and_then(|v| v.as_str()) {
+                        // Face video: push directly to FFmpeg. No preview, no guest broadcast.
                         Some("face:frame") => {
                             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
                                 let rtmp_mgr = rooms
                                     .get(&room_id)
                                     .and_then(|r| r.rtmp_manager.clone());
-
-                                if let Some(room) = rooms.get(&room_id) {
-                                    room.send_to_all_guests(to_ws(&ServerMsg::FaceFrame {
-                                        data: data.to_string(),
-                                    }));
-                                }
-
                                 if let Some(mgr) = rtmp_mgr {
                                     use base64::Engine;
                                     if let Ok(jpeg_bytes) =
@@ -283,8 +240,6 @@ async fn handle_host(
     ffmpeg_monitor_stop.store(true, Ordering::Release);
 
     if let Some((_, room)) = rooms.remove(&room_id) {
-        room.send_to_all_guests(to_ws(&ServerMsg::RoomClosed));
-
         if let Some(manager) = room.rtmp_manager {
             let mut mgr = manager.lock().await;
             mgr.stop_all().await;
@@ -307,70 +262,4 @@ async fn handle_host(
 
     send_task.abort();
     eprintln!("Room {} closed", room_id);
-}
-
-// ── Guest Flow ────────────────────────────────────────────
-
-async fn handle_guest(
-    mut sender: SplitSink<WebSocket, Message>,
-    mut receiver: SplitStream<WebSocket>,
-    rooms: Rooms,
-    room_id: String,
-    lang: Lang,
-) {
-    if !rooms.contains_key(&room_id) {
-        let _ = sender
-            .send(to_ws(&ServerMsg::Error {
-                message: "Room not found".into(),
-            }))
-            .await;
-        return;
-    }
-
-    let guest_id = Uuid::new_v4().to_string();
-    let (guest_tx, mut guest_rx) = mpsc::unbounded_channel::<Message>();
-
-    {
-        let room = rooms.get(&room_id).unwrap();
-        room.guests.insert(
-            guest_id.clone(),
-            Guest {
-                lang: lang.clone(),
-                tx: guest_tx,
-            },
-        );
-        let counts = room.guest_counts();
-        room.send_to_host(to_ws(&ServerMsg::GuestCount { counts }));
-    }
-
-    let _ = sender
-        .send(to_ws(&ServerMsg::RoomJoined {
-            room_id: room_id.clone(),
-        }))
-        .await;
-
-    eprintln!("Guest {} joined room {} ({})", guest_id, room_id, lang);
-
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = guest_rx.recv().await {
-            if sender.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    while let Some(Ok(msg)) = receiver.next().await {
-        if matches!(msg, Message::Close(_)) {
-            break;
-        }
-    }
-
-    if let Some(room) = rooms.get(&room_id) {
-        room.guests.remove(&guest_id);
-        let counts = room.guest_counts();
-        room.send_to_host(to_ws(&ServerMsg::GuestCount { counts }));
-    }
-
-    send_task.abort();
-    eprintln!("Guest {} left room {}", guest_id, room_id);
 }

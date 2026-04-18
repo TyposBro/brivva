@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// Fargate is host-only. There are no guest WebSockets — all translated
+// audio leaves the server via RTMP to streaming platforms. The WS exists
+// solely to (a) accept host audio/video uplink, (b) feed per-utterance
+// progress + errors back to the host UI.
+
 // ── Language ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,23 +58,12 @@ impl Lang {
 
 #[derive(Debug, Deserialize)]
 pub struct RoomQuery {
-    pub role: String,
     #[serde(rename = "sourceLang")]
     pub source_lang: Option<String>,
-    #[serde(rename = "roomId")]
-    pub room_id: Option<String>,
-    pub lang: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
-    /// JWT from Workers (host role only). Verified in handle_socket.
+    /// JWT issued by Workers. Verified in `ws_handler`.
     pub token: Option<String>,
-}
-
-// ── Guest ─────────────────────────────────────────────────
-
-pub struct Guest {
-    pub lang: Lang,
-    pub tx: mpsc::UnboundedSender<Message>,
 }
 
 // ── Room ──────────────────────────────────────────────────
@@ -78,14 +72,13 @@ pub struct Room {
     pub id: String,
     pub source_lang: Lang,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
-    pub guests: DashMap<String, Guest>,
     /// Cloned voice ID from ElevenLabs (None until clone completes)
     pub voice_clone_id: Option<String>,
     /// Session ID from Workers (links to D1 session + streams)
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
     pub rtmp_manager: Option<crate::ffmpeg::SharedRtmpManager>,
-    /// Languages being streamed via RTMP (so pipeline translates even without WS guests)
+    /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
 }
 
@@ -95,7 +88,6 @@ impl Room {
             id,
             source_lang,
             host_tx: None,
-            guests: DashMap::new(),
             voice_clone_id: None,
             session_id,
             rtmp_manager: None,
@@ -103,48 +95,23 @@ impl Room {
         }
     }
 
-    /// Which languages have at least one guest or RTMP stream?
+    /// Unique languages that require a translated RTMP track.
     pub fn active_langs(&self) -> Vec<Lang> {
-        let mut langs = std::collections::HashSet::new();
-        for entry in self.guests.iter() {
-            langs.insert(entry.value().lang.clone());
-        }
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
         for lang in &self.rtmp_langs {
-            langs.insert(lang.clone());
-        }
-        langs.into_iter().collect()
-    }
-
-    /// Send a message to all guests listening in a specific language
-    pub fn send_to_lang(&self, lang: &Lang, msg: Message) {
-        for entry in self.guests.iter() {
-            if &entry.value().lang == lang {
-                let _ = entry.value().tx.send(msg.clone());
+            if seen.insert(lang.clone()) {
+                out.push(lang.clone());
             }
         }
+        out
     }
 
-    /// Send a message to all guests (all languages)
-    pub fn send_to_all_guests(&self, msg: Message) {
-        for entry in self.guests.iter() {
-            let _ = entry.value().tx.send(msg.clone());
-        }
-    }
-
-    /// Send a message to the host
+    /// Forward a message to the host WS (transcripts, latency markers, errors).
     pub fn send_to_host(&self, msg: Message) {
         if let Some(tx) = &self.host_tx {
             let _ = tx.send(msg);
         }
-    }
-
-    /// Guest count per language (for host dashboard)
-    pub fn guest_counts(&self) -> std::collections::HashMap<String, usize> {
-        let mut counts = std::collections::HashMap::new();
-        for entry in self.guests.iter() {
-            *counts.entry(entry.value().lang.to_string()).or_insert(0) += 1;
-        }
-        counts
     }
 }
 
@@ -157,26 +124,6 @@ pub type Rooms = Arc<DashMap<String, Room>>;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerMsg {
-    #[serde(rename = "room:created")]
-    RoomCreated {
-        #[serde(rename = "roomId")]
-        room_id: String,
-    },
-
-    #[serde(rename = "room:joined")]
-    RoomJoined {
-        #[serde(rename = "roomId")]
-        room_id: String,
-    },
-
-    #[serde(rename = "room:closed")]
-    RoomClosed,
-
-    #[serde(rename = "room:guest_count")]
-    GuestCount {
-        counts: std::collections::HashMap<String, usize>,
-    },
-
     #[serde(rename = "interim")]
     Interim { transcript: String },
 
@@ -192,20 +139,18 @@ pub enum ServerMsg {
         text: String,
         #[serde(rename = "utteranceId")]
         utterance_id: u64,
+        #[serde(rename = "targetLang")]
+        target_lang: String,
         #[serde(rename = "translateMs")]
         translate_ms: u64,
-    },
-
-    #[serde(rename = "tts_start")]
-    TtsStart {
-        #[serde(rename = "utteranceId")]
-        utterance_id: u64,
     },
 
     #[serde(rename = "tts_end")]
     TtsEnd {
         #[serde(rename = "utteranceId")]
         utterance_id: u64,
+        #[serde(rename = "targetLang")]
+        target_lang: String,
         #[serde(rename = "ttsMs")]
         tts_ms: u64,
     },
@@ -216,11 +161,7 @@ pub enum ServerMsg {
         voice_id: String,
     },
 
-    #[serde(rename = "face:frame")]
-    FaceFrame { data: String },
-
-    /// Signals the end of the per-utterance pipeline (host-side latency marker).
-    /// Emitted after TTS completes; FE uses it to finalize its stopwatch.
+    /// Per-utterance pipeline-done marker; host UI uses it to finalize latency.
     #[serde(rename = "video_end")]
     VideoEnd {
         #[serde(rename = "utteranceId")]
