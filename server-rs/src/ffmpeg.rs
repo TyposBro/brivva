@@ -162,7 +162,9 @@ pub struct RtmpManager {
 
 impl RtmpManager {
     pub fn new() -> Self {
-        Self { streams: HashMap::new() }
+        Self {
+            streams: HashMap::new(),
+        }
     }
 
     /// Start an FFmpeg RTMP process with dedicated video + audio drain threads.
@@ -179,7 +181,9 @@ impl RtmpManager {
         is_source: bool,
         host_gain: f32,
     ) -> Result<(), String> {
-        self.spawn_stream_inner(stream_id, lang, rtmp_url, delay_ms, is_source, host_gain, None)?;
+        self.spawn_stream_inner(
+            stream_id, lang, rtmp_url, delay_ms, is_source, host_gain, None,
+        )?;
         eprintln!(
             "[FFMPEG] started stream={} lang={} → {} [delay={}ms, source={}, host_gain={:.2}]",
             stream_id, lang, rtmp_url, delay_ms, is_source, host_gain
@@ -325,14 +329,25 @@ impl RtmpManager {
         prev_count: u32,
         buffers: StreamBuffers,
     ) {
-        match self.spawn_stream_inner(id, lang, rtmp_url, delay_ms, is_source, host_gain, Some(buffers)) {
+        match self.spawn_stream_inner(
+            id,
+            lang,
+            rtmp_url,
+            delay_ms,
+            is_source,
+            host_gain,
+            Some(buffers),
+        ) {
             Ok(()) => {
                 if let Some(stream) = self.streams.get_mut(id) {
                     stream.restart_count = prev_count + 1;
                 }
                 eprintln!(
                     "[FFMPEG] restarted {} ({}) attempt {}/{}",
-                    id, lang, prev_count + 1, MAX_FFMPEG_RESTARTS
+                    id,
+                    lang,
+                    prev_count + 1,
+                    MAX_FFMPEG_RESTARTS
                 );
             }
             Err(e) => eprintln!("[FFMPEG] restart {} ({}) failed: {}", id, lang, e),
@@ -367,14 +382,23 @@ impl RtmpManager {
 
         // Compose FFmpeg args. Only target streams apply the drawtext filter.
         let mut args: Vec<String> = vec![
-            "-y".into(), "-loglevel".into(), "warning".into(),
-            "-f".into(), "image2pipe".into(),
-            "-framerate".into(), "30".into(),
-            "-i".into(), "pipe:0".into(),
-            "-f".into(), "s16le".into(),
-            "-ar".into(), "44100".into(),
-            "-ac".into(), "1".into(),
-            "-i".into(), audio_fifo.clone(),
+            "-y".into(),
+            "-loglevel".into(),
+            "warning".into(),
+            "-f".into(),
+            "image2pipe".into(),
+            "-framerate".into(),
+            "30".into(),
+            "-i".into(),
+            "pipe:0".into(),
+            "-f".into(),
+            "s16le".into(),
+            "-ar".into(),
+            "44100".into(),
+            "-ac".into(),
+            "1".into(),
+            "-i".into(),
+            audio_fifo.clone(),
         ];
         if let Some(cap) = &caption {
             // Escape the textfile path for drawtext — it uses `\` as an escape
@@ -387,20 +411,34 @@ impl RtmpManager {
             args.extend_from_slice(&["-vf".into(), drawtext]);
         }
         args.extend_from_slice(&[
-            "-c:v".into(), "libx264".into(),
-            "-preset".into(), "ultrafast".into(),
-            "-tune".into(), "zerolatency".into(),
-            "-crf".into(), "20".into(),
-            "-maxrate".into(), "35000k".into(),
-            "-bufsize".into(), "70000k".into(),
-            "-pix_fmt".into(), "yuv420p".into(),
-            "-g".into(), "60".into(),
-            "-c:a".into(), "aac".into(),
-            "-ac:a".into(), "2".into(),
-            "-b:a".into(), "128k".into(),
-            "-map".into(), "0:v".into(),
-            "-map".into(), "1:a".into(),
-            "-f".into(), "flv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "ultrafast".into(),
+            "-tune".into(),
+            "zerolatency".into(),
+            "-crf".into(),
+            "20".into(),
+            "-maxrate".into(),
+            "35000k".into(),
+            "-bufsize".into(),
+            "70000k".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-g".into(),
+            "60".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-ac:a".into(),
+            "2".into(),
+            "-b:a".into(),
+            "128k".into(),
+            "-map".into(),
+            "0:v".into(),
+            "-map".into(),
+            "1:a".into(),
+            "-f".into(),
+            "flv".into(),
             rtmp_url.into(),
         ]);
 
@@ -435,7 +473,9 @@ impl RtmpManager {
         let audio_handle = thread::Builder::new()
             .name(format!("audio-drain-{}", stream_id))
             .spawn(move || {
-                audio_drain_loop(a_sid, a_buf, a_tts, a_fifo, delay, is_source, host_gain, a_stop)
+                audio_drain_loop(
+                    a_sid, a_buf, a_tts, a_fifo, delay, is_source, host_gain, a_stop,
+                )
             })
             .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
 
@@ -484,9 +524,16 @@ impl RtmpManager {
                     .await;
                     match result {
                         Ok(Ok(Ok(()))) => {}
-                        Ok(Ok(Err(_))) => eprintln!("[FFMPEG:{}] {} thread panicked", id_clone, label),
-                        Ok(Err(_)) => eprintln!("[FFMPEG:{}] {} thread join cancelled", id_clone, label),
-                        Err(_) => eprintln!("[FFMPEG:{}] {} thread join timed out (3s), abandoning", id_clone, label),
+                        Ok(Ok(Err(_))) => {
+                            eprintln!("[FFMPEG:{}] {} thread panicked", id_clone, label)
+                        }
+                        Ok(Err(_)) => {
+                            eprintln!("[FFMPEG:{}] {} thread join cancelled", id_clone, label)
+                        }
+                        Err(_) => eprintln!(
+                            "[FFMPEG:{}] {} thread join timed out (3s), abandoning",
+                            id_clone, label
+                        ),
                     }
                 }
             }
@@ -520,7 +567,8 @@ pub fn spawn_health_monitor(
                 let mut mgr = manager.lock().await;
                 mgr.detect_crashed()
             };
-            for (id, lang, rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers) in crashed {
+            for (id, lang, rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers) in crashed
+            {
                 tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
                 if stop_flag.load(Ordering::Acquire) {
                     break;
@@ -553,7 +601,8 @@ fn video_drain_loop(
 
     eprintln!(
         "[VIDEO:{}] drain started (30 fps, delay={}ms)",
-        stream_id, delay.as_millis()
+        stream_id,
+        delay.as_millis()
     );
 
     loop {
@@ -604,7 +653,10 @@ fn video_drain_loop(
     }
 
     drop(stdin);
-    eprintln!("[VIDEO:{}] drain exited after {} ticks", stream_id, tick_count);
+    eprintln!(
+        "[VIDEO:{}] drain exited after {} ticks",
+        stream_id, tick_count
+    );
 }
 
 // ── Audio drain + mixer ────────────────────────────────────
@@ -644,7 +696,10 @@ fn audio_drain_loop(
 
     eprintln!(
         "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2})",
-        stream_id, delay.as_millis(), is_source, host_gain
+        stream_id,
+        delay.as_millis(),
+        is_source,
+        host_gain
     );
 
     loop {
@@ -716,7 +771,10 @@ fn audio_drain_loop(
     }
 
     drop(fifo);
-    eprintln!("[AUDIO:{}] drain exited after {} ticks", stream_id, tick_count);
+    eprintln!(
+        "[AUDIO:{}] drain exited after {} ticks",
+        stream_id, tick_count
+    );
 }
 
 /// Apply a uniform gain to a PCM s16le buffer and clip to the i16 range.
@@ -750,6 +808,44 @@ fn mix_pcm_s16le(a: &[u8], a_gain: f32, b: &[u8], b_gain: f32) -> Vec<u8> {
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    fn decode_samples(bytes: &[u8]) -> Vec<i16> {
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn sanitize_caption_strips_control_chars_and_truncates() {
+        let text = format!("hi\x00there\n{}", "a".repeat(250));
+        let out = sanitize_caption(&text);
+
+        assert!(!out.contains('\x00'));
+        assert!(out.contains('\n'));
+        assert_eq!(out.chars().count(), 200);
+    }
+
+    #[test]
+    fn apply_gain_scales_samples_and_ignores_trailing_odd_byte() {
+        let scaled = apply_gain(&[0x10, 0x27, 0xF0, 0xD8, 0xAA], 0.5);
+        assert_eq!(decode_samples(&scaled), vec![5000, -5000]);
+    }
+
+    #[test]
+    fn mix_pcm_s16le_clips_on_overflow() {
+        let mixed = mix_pcm_s16le(&pcm(&[30_000, -30_000]), 1.0, &pcm(&[10_000, -10_000]), 1.0);
+        assert_eq!(decode_samples(&mixed), vec![32_767, -32_768]);
+    }
+}
+
 // ── Startup cleanup ────────────────────────────────────────
 
 pub fn kill_orphan_ffmpeg() {
@@ -759,7 +855,10 @@ pub fn kill_orphan_ffmpeg() {
     {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[STARTUP] pgrep not available, skipping orphan cleanup: {}", e);
+            eprintln!(
+                "[STARTUP] pgrep not available, skipping orphan cleanup: {}",
+                e
+            );
             return;
         }
     };

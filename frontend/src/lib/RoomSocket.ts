@@ -5,6 +5,7 @@ const WS_BASE = (
 export type RoomMessage = { type: string; [k: string]: unknown };
 
 export type RoomSocketCallbacks = {
+  onOpen?: () => void;
   onMessage: (msg: RoomMessage) => void;
   onBinary?: (data: ArrayBuffer) => void;
   onClose: () => void;
@@ -37,10 +38,12 @@ export class RoomSocket {
   }
 
   private wireHandlers({
+    onOpen,
     onMessage,
     onBinary,
     onClose,
   }: RoomSocketCallbacks): void {
+    if (onOpen) this.ws!.onopen = () => onOpen();
     this.ws!.onmessage = (e) => this.routeMessage(e, onMessage, onBinary);
     this.ws!.onclose = onClose;
     this.ws!.onerror = () => this.ws?.close();

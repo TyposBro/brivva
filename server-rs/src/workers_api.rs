@@ -6,12 +6,6 @@
 //! `X-Internal-Secret` header.
 
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
-
-static WORKERS_API_URL: LazyLock<String> =
-    LazyLock::new(|| std::env::var("WORKERS_API_URL").unwrap_or_default());
-static INTERNAL_SECRET: LazyLock<String> =
-    LazyLock::new(|| std::env::var("INTERNAL_SECRET").unwrap_or_default());
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -51,8 +45,12 @@ pub struct StreamRow {
     pub host_gain: f32,
 }
 
-fn default_delay_ms() -> u64 { 2000 }
-fn default_host_gain() -> f32 { 0.2 }
+fn default_delay_ms() -> u64 {
+    2000
+}
+fn default_host_gain() -> f32 {
+    0.2
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceRow {
@@ -78,7 +76,10 @@ fn client() -> reqwest::Client {
 }
 
 fn base() -> Result<String, String> {
-    let url = WORKERS_API_URL.trim_end_matches('/').to_string();
+    let url = std::env::var("WORKERS_API_URL")
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string();
     if url.is_empty() {
         return Err("WORKERS_API_URL not set".into());
     }
@@ -89,7 +90,10 @@ pub async fn fetch_session_bundle(session_id: &str) -> Result<SessionBundle, Str
     let url = format!("{}/internal/sessions/{}", base()?, session_id);
     let resp = client()
         .get(&url)
-        .header("X-Internal-Secret", INTERNAL_SECRET.as_str())
+        .header(
+            "X-Internal-Secret",
+            std::env::var("INTERNAL_SECRET").unwrap_or_default(),
+        )
         .send()
         .await
         .map_err(|e| format!("workers fetch error: {e}"))?;
@@ -119,7 +123,10 @@ pub async fn update_session_status(
     let url = format!("{}/internal/sessions/{}", base()?, session_id);
     let resp = client()
         .patch(&url)
-        .header("X-Internal-Secret", INTERNAL_SECRET.as_str())
+        .header(
+            "X-Internal-Secret",
+            std::env::var("INTERNAL_SECRET").unwrap_or_default(),
+        )
         .json(&StatusUpdate { status, room_id })
         .send()
         .await

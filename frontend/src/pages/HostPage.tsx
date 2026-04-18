@@ -13,15 +13,26 @@ import {
 import { cn } from "../lib/cn";
 import * as api from "../lib/api";
 
+function getUserId(): string {
+  let id = localStorage.getItem("brivva_user_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("brivva_user_id", id);
+  }
+  return id;
+}
+
 export default function HostPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sessionId = searchParams.get("sessionId") ?? undefined;
   const sourceLang = searchParams.get("sourceLang") ?? "en";
+  const userId = getUserId();
   const {
     status,
     liveTranscript,
     utterances,
+    translations,
     analyser,
     error,
     timings,
@@ -32,6 +43,7 @@ export default function HostPage() {
     closeRoom,
     startVoiceRecording,
     skipVoiceSetup,
+    setActiveTargetLangs,
   } = useHostRoom();
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -58,9 +70,18 @@ export default function HostPage() {
   useEffect(() => {
     if (createdRef.current) return;
     createdRef.current = true;
-    createRoom({ sessionId, sourceLang });
+    void createRoom({ sessionId, sourceLang, userId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Feed the latency stopwatch the set of target langs configured for the
+  // session. These arrive asynchronously via loadSession.
+  useEffect(() => {
+    const langs = streams
+      .map((s) => s.lang)
+      .filter((l) => l && l !== sourceLang);
+    setActiveTargetLangs([...new Set(langs)]);
+  }, [streams, sourceLang, setActiveTargetLangs]);
 
   useEffect(() => {
     if (listRef.current) {
@@ -192,6 +213,12 @@ export default function HostPage() {
 
                   {s.error && (
                     <p className="text-error text-xs font-label">{s.error}</p>
+                  )}
+
+                  {translations[s.lang ?? ""] && (
+                    <p className="text-on-surface text-sm font-label leading-snug border-l-2 border-primary/40 pl-2">
+                      {translations[s.lang ?? ""].text}
+                    </p>
                   )}
 
                   {s.rtmp_url && (

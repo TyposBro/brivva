@@ -1,4 +1,5 @@
 import { useReducer, useRef, useCallback } from "react";
+import * as api from "../lib/api";
 import { AudioPipeline } from "../lib/AudioPipeline";
 import { RoomSocket } from "../lib/RoomSocket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
@@ -6,7 +7,7 @@ import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
 import { createMessageHandler } from "../state/host/messageHandler";
 
 export type { UtteranceTiming };
-export type { HostStatus, GuestCounts, HostUtterance } from "../state/host/reducer";
+export type { HostStatus, HostUtterance } from "../state/host/reducer";
 
 const VOICE_SAMPLE_SECONDS = 30;
 const VOICE_SAMPLE_RATE = 44100;
@@ -29,9 +30,17 @@ export function useHostRoom() {
     }
   }, []);
 
+  // Latency stopwatch needs to know which targets are active so it can create
+  // a slot per-lang. We stash the most recent set in a ref; the hook's caller
+  // updates it when a session is started.
+  const activeTargetLangsRef = useRef<string[]>([]);
+  const setActiveTargetLangs = useCallback((langs: string[]) => {
+    activeTargetLangsRef.current = langs;
+  }, []);
+
   const handleMessage = createMessageHandler(
     dispatch,
-    () => state.guestCounts,
+    () => activeTargetLangsRef.current,
     { startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize },
   );
 
@@ -164,21 +173,46 @@ export function useHostRoom() {
     dispatch({ type: "recording_stopped" });
   };
 
-  const createRoom = (opts?: { sessionId?: string; sourceLang?: string }) => {
+  const createRoom = async (opts?: {
+    sessionId?: string;
+    sourceLang?: string;
+    userId: string;
+  }) => {
+    if (!opts?.userId) {
+      dispatch({ type: "error", message: "user_id required to open WS" });
+      return;
+    }
     dispatch({ type: "reset" });
     resetTimings();
     startWebcam();
-    const params: Record<string, string> = { role: "host", sourceLang: opts?.sourceLang ?? "en" };
-    if (opts?.sessionId) params.sessionId = opts.sessionId;
-    socket.current.connect(
-      params,
-      {
-        onMessage: (msg) => {
-          handleMessage(msg);
-        },
-        onClose: () => { stopRecording(); dispatch({ type: "disconnected" }); },
+
+    let token: string;
+    try {
+      const { token: t } = await api.getAuthToken(opts.userId);
+      token = t;
+    } catch (e) {
+      dispatch({
+        type: "error",
+        message: e instanceof Error ? `Auth token fetch failed: ${e.message}` : "Auth failed",
+      });
+      return;
+    }
+
+    const params: Record<string, string> = {
+      sourceLang: opts.sourceLang ?? "en",
+      token,
+    };
+    if (opts.sessionId) params.sessionId = opts.sessionId;
+    socket.current.connect(params, {
+      // Backend no longer sends a RoomCreated event — treat WS open as
+      // "ready for voice setup" and move the UI forward.
+      onOpen: () => dispatch({ type: "connected" }),
+      onMessage: (msg) => handleMessage(msg),
+      onClose: () => {
+        stopRecording();
+        dispatch({ type: "disconnected" });
       },
-    );
+    });
   };
 
   const startRecording = async () => {
@@ -200,5 +234,6 @@ export function useHostRoom() {
     ...state, timings, videoRef,
     createRoom, startRecording, stopRecording, closeRoom,
     startVoiceRecording, stopVoiceRecording, skipVoiceSetup,
+    setActiveTargetLangs,
   };
 }

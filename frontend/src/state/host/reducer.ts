@@ -1,13 +1,19 @@
-export type HostStatus = "idle" | "creating" | "voice_setup" | "cloning" | "ready" | "recording" | "disconnected";
-export type GuestCounts = { en: number; ja: number; zh: number };
+export type HostStatus =
+  | "idle"
+  | "creating"
+  | "voice_setup"
+  | "cloning"
+  | "ready"
+  | "recording"
+  | "disconnected";
+
 export type HostUtterance = { id: number; transcript: string };
 
 export interface HostState {
   status: HostStatus;
-  roomId: string | null;
-  guestCounts: GuestCounts;
   liveTranscript: string;
   utterances: HostUtterance[];
+  translations: Record<string, { id: number; text: string }>; // keyed by target lang
   analyser: AnalyserNode | null;
   error: string | null;
   voiceReady: boolean;
@@ -15,10 +21,10 @@ export interface HostState {
 
 export type HostAction =
   | { type: "reset" }
-  | { type: "room_created"; roomId: string }
-  | { type: "guest_count"; counts: GuestCounts }
+  | { type: "connected" }
   | { type: "interim"; transcript: string }
   | { type: "final"; id: number; transcript: string }
+  | { type: "translation"; id: number; targetLang: string; text: string }
   | { type: "error"; message: string }
   | { type: "recording_started"; analyser: AnalyserNode }
   | { type: "recording_stopped" }
@@ -27,14 +33,11 @@ export type HostAction =
   | { type: "voice_ready" }
   | { type: "skip_voice_setup" };
 
-const EMPTY_COUNTS: GuestCounts = { en: 0, ja: 0, zh: 0 };
-
 export const INITIAL_STATE: HostState = {
   status: "idle",
-  roomId: null,
-  guestCounts: EMPTY_COUNTS,
   liveTranscript: "",
   utterances: [],
+  translations: {},
   analyser: null,
   error: null,
   voiceReady: false,
@@ -45,11 +48,8 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
     case "reset":
       return { ...INITIAL_STATE, status: "creating" };
 
-    case "room_created":
-      return { ...state, status: "voice_setup", roomId: action.roomId };
-
-    case "guest_count":
-      return { ...state, guestCounts: action.counts };
+    case "connected":
+      return { ...state, status: "voice_setup" };
 
     case "interim":
       return { ...state, liveTranscript: action.transcript };
@@ -58,7 +58,19 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
       return {
         ...state,
         liveTranscript: "",
-        utterances: [...state.utterances, { id: action.id, transcript: action.transcript }],
+        utterances: [
+          ...state.utterances,
+          { id: action.id, transcript: action.transcript },
+        ],
+      };
+
+    case "translation":
+      return {
+        ...state,
+        translations: {
+          ...state.translations,
+          [action.targetLang]: { id: action.id, text: action.text },
+        },
       };
 
     case "error":

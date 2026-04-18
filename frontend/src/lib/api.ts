@@ -33,6 +33,19 @@ export function getUser(userId: string): Promise<UserInfo> {
   return request(`/api/user?user_id=${encodeURIComponent(userId)}`);
 }
 
+/**
+ * Fetch a short-lived Workers-signed JWT. Required by Fargate's media WS
+ * (`sub` claim must match the session owner before host:audio is accepted).
+ * Cache the token for its ~15 min validity in the caller — the WS upgrade
+ * is the only consumer.
+ */
+export function getAuthToken(userId: string): Promise<{ token: string }> {
+  return request("/auth/token", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+}
+
 // ── YouTube OAuth ───────────────────────────────────────
 
 export function youtubeAuthUrl(userId: string): string {
@@ -46,6 +59,13 @@ export type PlatformConfig = {
   lang?: string;
   rtmp_url?: string;
   stream_key?: string;
+  /** Fargate holds the delayed host media this long before pushing to RTMP,
+   *  giving STT+translate+TTS a window to overlay. Target-lang streams
+   *  typically 1500–3000 ms depending on expected latency. Omit for 2000. */
+  delay_ms?: number;
+  /** Gain applied to delayed original audio under translated TTS.
+   *  Range 0–1. 1 = full (source stream), 0.2 = quiet underlay (target). */
+  host_gain?: number;
 };
 
 export type Platform = {

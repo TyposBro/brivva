@@ -46,10 +46,10 @@ impl Lang {
     /// All premade voices support 32 languages via eleven_flash_v2_5
     pub fn voice_id(&self) -> &'static str {
         match self {
-            Lang::En => "EXAVITQu4vr4xnSDxMaL",  // Sarah
-            Lang::Ja => "pFZP5JQG7iQjIQuC4Bku",  // Lily
-            Lang::Zh => "Xb7hH8MSUJpSbSDYk0k2",  // Alice
-            Lang::Ko => "cgSgspJ2msm6clMCkdW9",  // Jessica
+            Lang::En => "EXAVITQu4vr4xnSDxMaL", // Sarah
+            Lang::Ja => "pFZP5JQG7iQjIQuC4Bku", // Lily
+            Lang::Zh => "Xb7hH8MSUJpSbSDYk0k2", // Alice
+            Lang::Ko => "cgSgspJ2msm6clMCkdW9", // Jessica
         }
     }
 }
@@ -170,4 +170,27 @@ pub enum ServerMsg {
 
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lang_from_str_accepts_supported_values_only() {
+        assert_eq!(Lang::from_str("en"), Some(Lang::En));
+        assert_eq!(Lang::from_str("ja"), Some(Lang::Ja));
+        assert_eq!(Lang::from_str("zh"), Some(Lang::Zh));
+        assert_eq!(Lang::from_str("ko"), Some(Lang::Ko));
+        assert_eq!(Lang::from_str("EN"), None);
+        assert_eq!(Lang::from_str("fr"), None);
+    }
+
+    #[test]
+    fn active_langs_dedupes_and_preserves_first_seen_order() {
+        let mut room = Room::new("ROOM01".into(), Lang::En, Some("session-1".into()));
+        room.rtmp_langs = vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko];
+
+        assert_eq!(room.active_langs(), vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+    }
 }

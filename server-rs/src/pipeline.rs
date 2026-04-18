@@ -28,12 +28,10 @@ const SONIOX_MODEL: &str = "stt-rt-preview";
 /// Host audio format — matches what the browser sends + what ffmpeg expects.
 const HOST_SAMPLE_RATE: u32 = 44_100;
 
-static SONIOX_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("SONIOX_API_KEY").unwrap_or_default()
-});
-static ELEVENLABS_API_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("ELEVENLABS_API_KEY").unwrap_or_default()
-});
+static SONIOX_API_KEY: LazyLock<String> =
+    LazyLock::new(|| std::env::var("SONIOX_API_KEY").unwrap_or_default());
+static ELEVENLABS_API_KEY: LazyLock<String> =
+    LazyLock::new(|| std::env::var("ELEVENLABS_API_KEY").unwrap_or_default());
 
 // ── Soniox v4 wire format ─────────────────────────────────
 //
@@ -94,14 +92,20 @@ enum SonioxMode {
     /// Pure transcription of the source lang. Emits Interim + Final to host.
     Source { lang: Lang },
     /// Translation source → target. Emits Translation + fires TTS.
-    Translate { source_lang: Lang, target_lang: Lang },
+    Translate {
+        source_lang: Lang,
+        target_lang: Lang,
+    },
 }
 
 impl SonioxMode {
     fn tag(&self) -> String {
         match self {
             SonioxMode::Source { lang } => format!("src:{}", lang),
-            SonioxMode::Translate { source_lang, target_lang } => {
+            SonioxMode::Translate {
+                source_lang,
+                target_lang,
+            } => {
                 format!("{}→{}", source_lang, target_lang)
             }
         }
@@ -110,7 +114,10 @@ impl SonioxMode {
     fn build_config<'a>(&self, api_key: &'a str) -> SonioxConfig<'a> {
         let (hint_lang, translation) = match self {
             SonioxMode::Source { lang } => (lang.to_string(), None),
-            SonioxMode::Translate { source_lang, target_lang } => (
+            SonioxMode::Translate {
+                source_lang,
+                target_lang,
+            } => (
                 source_lang.to_string(),
                 Some(SonioxTranslation {
                     kind: "one_way",
@@ -244,7 +251,11 @@ async fn run_soniox_session(
     let mut reconnect_count: u32 = 0;
 
     loop {
-        let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
+        let max_attempts = if reconnect_count == 0 {
+            10
+        } else {
+            STT_RECONNECT_MAX
+        };
         let mut ws_stream = None;
 
         for attempt in 1..=max_attempts {
@@ -426,9 +437,7 @@ async fn run_soniox_session(
                             println!("[FINAL {} #{}] {}", target_lang, uid, committed);
                             let voice_clone_id =
                                 rooms_ref.get(&rid).and_then(|r| r.voice_clone_id.clone());
-                            let rtmp_mgr = rooms_ref
-                                .get(&rid)
-                                .and_then(|r| r.rtmp_manager.clone());
+                            let rtmp_mgr = rooms_ref.get(&rid).and_then(|r| r.rtmp_manager.clone());
                             if let Some(room) = rooms_ref.get(&rid) {
                                 room.send_to_host(to_ws(&ServerMsg::Translation {
                                     text: committed.clone(),
@@ -521,15 +530,23 @@ async fn do_tts_and_broadcast(
     let voice_id = voice_clone_id
         .map(str::to_string)
         .unwrap_or_else(|| lang.voice_id().to_string());
-    let model_id = if is_cloned { "eleven_multilingual_v2" } else { "eleven_flash_v2_5" };
+    let model_id = if is_cloned {
+        "eleven_multilingual_v2"
+    } else {
+        "eleven_flash_v2_5"
+    };
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
         &voice_id
     );
     println!(
         "[TTS] voice={}{} model={} lang={} deadline={}ms text='{}'",
-        &voice_id, if is_cloned { " (cloned)" } else { "" }, model_id, lang,
-        tts_deadline.as_millis(), text
+        &voice_id,
+        if is_cloned { " (cloned)" } else { "" },
+        model_id,
+        lang,
+        tts_deadline.as_millis(),
+        text
     );
 
     let client = reqwest::Client::new();
@@ -645,7 +662,12 @@ pub async fn clone_voice(pcm: Vec<u8>, rooms: &Rooms, room_id: &str) {
     let wav = pcm_to_wav(&pcm);
     let room_id_short = &room_id[..6.min(room_id.len())];
 
-    println!("[VOICE_CLONE] starting clone for room {} ({} bytes PCM, {} bytes WAV)", room_id_short, pcm.len(), wav.len());
+    println!(
+        "[VOICE_CLONE] starting clone for room {} ({} bytes PCM, {} bytes WAV)",
+        room_id_short,
+        pcm.len(),
+        wav.len()
+    );
 
     let client = reqwest::Client::new();
 
@@ -722,7 +744,11 @@ pub async fn delete_cloned_voice(voice_id: &str) {
         Ok(r) if r.status().is_success() => {
             println!("[VOICE_CLONE] deleted cloned voice {}", voice_id);
         }
-        Ok(r) => eprintln!("[VOICE_CLONE] delete error {}: {:?}", r.status(), r.text().await),
+        Ok(r) => eprintln!(
+            "[VOICE_CLONE] delete error {}: {:?}",
+            r.status(),
+            r.text().await
+        ),
         Err(e) => eprintln!("[VOICE_CLONE] delete request error: {}", e),
     }
 }

@@ -27,7 +27,17 @@ type Destination = {
   lang: string;
   rtmp_url: string;
   stream_key: string;
+  /** Fargate holds the original host media this long (ms) before pushing to
+   *  RTMP. Default 2000 ms covers typical STT + TTS latency. */
+  delay_ms: number;
+  /** 0.0–1.0: how loud the delayed original audio sits under translated TTS.
+   *  1.0 = pure passthrough (source lang), 0.2 = ducked underlay (target). */
+  host_gain: number;
 };
+
+const DEFAULT_DELAY_MS = 2000;
+const DEFAULT_HOST_GAIN_TARGET = 0.2;
+const DEFAULT_HOST_GAIN_SOURCE = 1.0;
 
 function getUserId(): string {
   let id = localStorage.getItem("brivva_user_id");
@@ -150,6 +160,11 @@ export default function DashboardPage() {
         lang,
         rtmp_url: cred?.rtmp_url ?? platform.defaultRtmp ?? "",
         stream_key: cred?.stream_key ?? "",
+        delay_ms: DEFAULT_DELAY_MS,
+        host_gain:
+          lang === sourceLang
+            ? DEFAULT_HOST_GAIN_SOURCE
+            : DEFAULT_HOST_GAIN_TARGET,
       },
     ]);
     setPickerOpen(false);
@@ -171,14 +186,20 @@ export default function DashboardPage() {
     const detected = api.detectPlatform(value);
     if (detected) {
       const autoLang = api.PLATFORM_LANG[detected.platform];
+      const destLang = autoLang ?? "en";
       setDestinations((prev) => [
         ...prev,
         {
           uid: crypto.randomUUID(),
           platform: detected.platform,
-          lang: autoLang ?? "en",
+          lang: destLang,
           rtmp_url: detected.rtmpUrl,
           stream_key: detected.streamKey,
+          delay_ms: DEFAULT_DELAY_MS,
+          host_gain:
+            destLang === sourceLang
+              ? DEFAULT_HOST_GAIN_SOURCE
+              : DEFAULT_HOST_GAIN_TARGET,
         },
       ]);
       setMagicPaste("");
@@ -228,13 +249,18 @@ export default function DashboardPage() {
       const targetLangs = [...new Set(destinations.map((d) => d.lang))];
       const platforms: api.PlatformConfig[] = destinations.map((d) => {
         const p = api.PLATFORMS.find((x) => x.id === d.platform);
-        if (p?.auto) return { platform: d.platform, lang: d.lang };
+        const base = {
+          platform: d.platform,
+          lang: d.lang,
+          delay_ms: d.delay_ms,
+          host_gain: d.host_gain,
+        };
+        if (p?.auto) return base;
         const rtmpUrl = p?.keyOnly
           ? p.defaultRtmp
           : d.rtmp_url || p?.defaultRtmp || "";
         return {
-          platform: d.platform,
-          lang: d.lang,
+          ...base,
           rtmp_url: rtmpUrl,
           stream_key: d.stream_key,
         };
@@ -647,6 +673,53 @@ export default function DashboardPage() {
 
 // ── Destination Card ──────────────────────────────────
 
+function StreamSlider({
+  label,
+  valueLabel,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+  hint,
+}: {
+  label: string;
+  valueLabel: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (v: number) => void;
+  hint?: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3 mb-1">
+        <span className="text-[11px] font-label text-on-surface-variant uppercase tracking-wider">
+          {label}
+        </span>
+        <span className="text-xs font-label font-bold text-on-surface tabular-nums">
+          {valueLabel}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-primary h-1"
+      />
+      {hint && (
+        <p className="text-[10px] text-on-surface-variant/60 leading-snug mt-1">
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function DestinationCard({
   dest,
   sourceLang,
@@ -742,6 +815,36 @@ function DestinationCard({
         >
           <X className="w-3.5 h-3.5" />
         </button>
+      </div>
+
+      {/* Always-on timing + mix controls — apply to every stream */}
+      <div className="px-4 pb-3 pt-1 space-y-2">
+        <StreamSlider
+          label="Output delay"
+          valueLabel={`${dest.delay_ms} ms`}
+          min={0}
+          max={5000}
+          step={100}
+          value={dest.delay_ms}
+          onChange={(v) => onUpdate({ delay_ms: v })}
+          hint="Fargate holds the original media this long before emitting, leaving time for STT + translate + TTS."
+        />
+        <StreamSlider
+          label={
+            dest.lang === sourceLang ? "Original audio volume" : "Under-voice volume"
+          }
+          valueLabel={`${Math.round(dest.host_gain * 100)}%`}
+          min={0}
+          max={100}
+          step={5}
+          value={Math.round(dest.host_gain * 100)}
+          onChange={(v) => onUpdate({ host_gain: v / 100 })}
+          hint={
+            dest.lang === sourceLang
+              ? "100% for source streams — no translation overlay to duck under."
+              : "How loud the original voice sits under the translated speech."
+          }
+        />
       </div>
 
       {/* Expandable config section */}

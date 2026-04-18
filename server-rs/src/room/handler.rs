@@ -1,24 +1,24 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket},
         Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     response::Response,
 };
 use futures_util::{
-    stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::auth;
 use crate::pipeline;
 use crate::types::{Lang, Room, RoomQuery};
 use crate::workers_api;
-use crate::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no room codes.
 pub async fn ws_handler(
@@ -53,7 +53,15 @@ async fn handle_host_socket(socket: WebSocket, state: AppState, query: RoomQuery
         .unwrap_or(Lang::En);
 
     let (sender, receiver) = socket.split();
-    handle_host(sender, receiver, state, claims.sub, source_lang, query.session_id).await;
+    handle_host(
+        sender,
+        receiver,
+        state,
+        claims.sub,
+        source_lang,
+        query.session_id,
+    )
+    .await;
 }
 
 fn generate_room_id() -> String {
@@ -100,8 +108,7 @@ async fn handle_host(
                     let mut manager = crate::ffmpeg::RtmpManager::new();
                     let mut rtmp_langs = Vec::new();
                     for s in &bundle.streams {
-                        let (Some(rtmp_url), Some(stream_key)) =
-                            (&s.rtmp_url, &s.stream_key)
+                        let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key)
                         else {
                             continue;
                         };
@@ -110,8 +117,7 @@ async fn handle_host(
                         } else {
                             format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
                         };
-                        let is_source = Lang::from_str(&s.lang)
-                            .is_some_and(|l| l == source_lang);
+                        let is_source = Lang::from_str(&s.lang).is_some_and(|l| l == source_lang);
                         if let Err(e) = manager.start_stream(
                             &s.id,
                             &s.lang,
@@ -144,12 +150,9 @@ async fn handle_host(
                 let sid_clone = sid.clone();
                 let rid_clone = room_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = workers_api::update_session_status(
-                        &sid_clone,
-                        "live",
-                        Some(&rid_clone),
-                    )
-                    .await
+                    if let Err(e) =
+                        workers_api::update_session_status(&sid_clone, "live", Some(&rid_clone))
+                            .await
                     {
                         eprintln!("[WS] status→live failed: {}", e);
                     }
@@ -225,9 +228,8 @@ async fn handle_host(
                         // Face video: push directly to FFmpeg. No preview, no guest broadcast.
                         Some("face:frame") => {
                             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
-                                let rtmp_mgr = rooms
-                                    .get(&room_id)
-                                    .and_then(|r| r.rtmp_manager.clone());
+                                let rtmp_mgr =
+                                    rooms.get(&room_id).and_then(|r| r.rtmp_manager.clone());
                                 if let Some(mgr) = rtmp_mgr {
                                     use base64::Engine;
                                     if let Ok(jpeg_bytes) =

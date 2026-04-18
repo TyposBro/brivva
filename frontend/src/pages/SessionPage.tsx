@@ -249,7 +249,7 @@ export default function SessionPage() {
 
         {/* Actions */}
         <section className="flex flex-col sm:flex-row gap-3">
-          {isLive && !session.room_id && (
+          {isLive && (
             <button
               className="monolith-gradient text-white px-8 py-3 rounded-xl font-headline font-extrabold hover:scale-[0.98] transition-all shadow-xl flex items-center justify-center gap-2"
               onClick={() =>
@@ -259,27 +259,8 @@ export default function SessionPage() {
               }
             >
               <Radio className="w-5 h-5" />
-              Start Broadcasting
+              {session.room_id ? "Rejoin Broadcast" : "Start Broadcasting"}
             </button>
-          )}
-
-          {isLive && session.room_id && (
-            <div className="flex items-center gap-3 bg-surface-container-low px-5 py-3 rounded-xl">
-              <span className="text-on-surface-variant text-sm font-label">
-                Room Code:
-              </span>
-              <code className="text-primary font-mono font-bold text-lg">
-                {session.room_id}
-              </code>
-              <button
-                className="text-on-surface-variant hover:text-primary transition-colors"
-                onClick={() =>
-                  navigator.clipboard.writeText(session.room_id ?? "")
-                }
-              >
-                <Copy className="w-4 h-4" />
-              </button>
-            </div>
           )}
 
           {isLive && (

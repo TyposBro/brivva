@@ -1,7 +1,6 @@
 import { type Dispatch } from "react";
 import { type RoomMessage } from "../../lib/RoomSocket";
-import { type HostAction, type GuestCounts } from "./reducer";
-import { LANGS } from "../../types";
+import { type HostAction } from "./reducer";
 
 type Stopwatch = {
   startTimer: (uid: string, text: string, langs: string[]) => void;
@@ -12,23 +11,16 @@ type Stopwatch = {
   finalize: (uid: string, lipsyncMs: number) => void;
 };
 
+// Backend → frontend message contract. All guest-facing variants are gone.
+// Target-specific events (translation, tts_end) are tagged with targetLang so
+// the host UI can attribute timings and text per target stream.
 export function createMessageHandler(
   dispatch: Dispatch<HostAction>,
-  getGuestCounts: () => GuestCounts,
+  getActiveTargetLangs: () => string[],
   stopwatch: Stopwatch,
 ) {
   return (msg: RoomMessage) => {
     switch (msg.type) {
-      case "room:created":
-        dispatch({ type: "room_created", roomId: msg.roomId as string });
-        break;
-
-      case "room:guest_count": {
-        const counts = msg.counts as GuestCounts;
-        dispatch({ type: "guest_count", counts });
-        break;
-      }
-
       case "interim":
         dispatch({ type: "interim", transcript: (msg.transcript as string) ?? "" });
         stopwatch.markInterim();
@@ -37,26 +29,35 @@ export function createMessageHandler(
       case "final": {
         const uid = String(msg.utteranceId);
         const text = (msg.transcript as string) ?? "";
-        const activeLangs = LANGS.filter((l) => getGuestCounts()[l] > 0);
         dispatch({ type: "final", id: msg.utteranceId as number, transcript: text });
-        stopwatch.startTimer(uid, text, activeLangs);
-        // STT timing: if server sends sttMs, record it
+        stopwatch.startTimer(uid, text, getActiveTargetLangs());
         if (typeof msg.sttMs === "number") {
           stopwatch.recordStt(uid, msg.sttMs as number);
         }
         break;
       }
 
-      case "translation":
-        stopwatch.recordTranslate(String(msg.utteranceId), msg.translateMs as number);
+      case "translation": {
+        const id = msg.utteranceId as number;
+        const text = (msg.text as string) ?? "";
+        const targetLang = (msg.targetLang as string) ?? "";
+        dispatch({ type: "translation", id, targetLang, text });
+        if (typeof msg.translateMs === "number") {
+          stopwatch.recordTranslate(String(id), msg.translateMs as number);
+        }
         break;
+      }
 
       case "tts_end":
-        stopwatch.recordTts(String(msg.utteranceId), msg.ttsMs as number);
+        if (typeof msg.ttsMs === "number") {
+          stopwatch.recordTts(String(msg.utteranceId), msg.ttsMs as number);
+        }
         break;
 
       case "video_end":
-        stopwatch.finalize(String(msg.utteranceId), msg.lipsyncMs as number);
+        // Backend emits this after the per-utterance TTS decode completes —
+        // FE uses it as the pipeline-done marker for the latency stopwatch.
+        stopwatch.finalize(String(msg.utteranceId), (msg.lipsyncMs as number) ?? 0);
         break;
 
       case "voice:ready":
