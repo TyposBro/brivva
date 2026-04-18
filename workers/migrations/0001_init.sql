@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     source_lang TEXT NOT NULL,
     target_langs TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'setup',
-    live_session_id TEXT,
+    room_id TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
