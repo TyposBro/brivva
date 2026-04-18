@@ -157,22 +157,47 @@ locals {
     }
   }
 
+  # Init container writes cloudflared config + creds to the shared volume.
+  # cloudflared image is distroless (no sh) so we can't render config in it.
+  cloudflared_init_container = {
+    name      = "cloudflared-init"
+    image     = "public.ecr.aws/docker/library/alpine:3"
+    essential = false
+    entryPoint = ["sh", "-c"]
+    command = [
+      "echo \"$TUNNEL_CREDS\" > /shared/creds.json && printf 'tunnel: ${var.tunnel_id}\\ncredentials-file: /shared/creds.json\\ningress:\\n  - hostname: ${var.domain}\\n    service: http://localhost:3000\\n  - service: http_status:404\\n' > /shared/config.yml"
+    ]
+    mountPoints = [
+      { sourceVolume = "cloudflared-config", containerPath = "/shared", readOnly = false }
+    ]
+    secrets = [
+      { name = "TUNNEL_CREDS", valueFrom = "${local.secret_arn}:TUNNEL_CREDS::" }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.app.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "cloudflared-init"
+      }
+    }
+  }
+
   cloudflared_container = {
     name      = "cloudflared"
     image     = "cloudflare/cloudflared:latest"
     essential = true
-    # Override image ENTRYPOINT=["cloudflared", "--no-autoupdate"] so the
-    # sh script below runs instead of being passed as cloudflared args.
-    entryPoint = ["sh", "-c"]
+    # Image ENTRYPOINT = ["cloudflared", "--no-autoupdate"].
+    # We pass only the `tunnel ... run` subcommand as args.
     command = [
-      "echo \"$TUNNEL_CREDS\" > /tmp/creds.json && printf 'tunnel: ${var.tunnel_id}\\ncredentials-file: /tmp/creds.json\\ningress:\\n  - hostname: ${var.domain}\\n    service: http://localhost:3000\\n  - service: http_status:404\\n' > /tmp/config.yml && exec cloudflared tunnel --no-autoupdate --config /tmp/config.yml run"
+      "tunnel", "--config", "/shared/config.yml", "run"
     ]
-    # Wait for server-rs to be listening on localhost:3000 before accepting CF traffic.
+    mountPoints = [
+      { sourceVolume = "cloudflared-config", containerPath = "/shared", readOnly = true }
+    ]
     dependsOn = [
+      { containerName = "cloudflared-init", condition = "SUCCESS" },
       { containerName = "server-rs", condition = "START" }
-    ]
-    secrets = [
-      { name = "TUNNEL_CREDS", valueFrom = "${local.secret_arn}:TUNNEL_CREDS::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -186,6 +211,7 @@ locals {
 
   containers = concat(
     [local.server_container],
+    local.enable_cloudflared ? [local.cloudflared_init_container] : [],
     local.enable_cloudflared ? [local.cloudflared_container] : [],
   )
 }
@@ -202,6 +228,14 @@ resource "aws_ecs_task_definition" "app" {
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
+  }
+
+  # Ephemeral shared volume for cloudflared config + creds handoff from init container.
+  dynamic "volume" {
+    for_each = local.enable_cloudflared ? [1] : []
+    content {
+      name = "cloudflared-config"
+    }
   }
 
   container_definitions = jsonencode(local.containers)
