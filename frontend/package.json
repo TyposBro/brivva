@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
+    "test:all": "vitest run && playwright test",
     "deploy": "VITE_WORKER_URL=https://brivva-server.milliytechnology.org tsc && VITE_WORKER_URL=https://brivva-server.milliytechnology.org vite build && npx wrangler pages deploy dist --project-name=brivva --branch=main --commit-dirty=true"
   },
   "dependencies": {
@@ -30,6 +32,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "@vitest/ui": "^4.1.4",
     "autoprefixer": "^10.4.27",
     "babel-plugin-react-compiler": "^1.0.0",
     "jsdom": "^29.0.2",

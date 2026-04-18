@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Concurrency: a new push to the same branch cancels the in-flight run so
+# CI never queues stale commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-rs:
+    name: server-rs (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: cargo clippy (warnings are not fatal, zero dead code is)
+        run: cargo clippy --all-targets -- -W dead_code -W unused -D warnings
+        continue-on-error: false
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+  workers:
+    name: workers (Cloudflare + D1)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: vitest (unit + integration + e2e against in-memory D1)
+        run: bun run test
+
+  frontend:
+    name: frontend (Vite + React)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: vitest (component + reducer + message-handler tests)
+        run: bun run test
+
+      - name: production build (smoke test vite can emit a bundle)
+        run: bun run build
