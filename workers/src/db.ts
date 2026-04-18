@@ -187,15 +187,16 @@ export async function createStreamManual(
   platform: string,
   rtmpUrl: string,
   streamKey: string,
+  delayMs: number,
 ): Promise<StreamRecord> {
   const id = uuid();
   const createdAt = now();
   await db
     .prepare(
-      `INSERT INTO streams (id, session_id, lang, platform, rtmp_url, stream_key, status, created_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
+      `INSERT INTO streams (id, session_id, lang, platform, rtmp_url, stream_key, status, delay_ms, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
     )
-    .bind(id, sessionId, lang, platform, rtmpUrl, streamKey, "ready", createdAt)
+    .bind(id, sessionId, lang, platform, rtmpUrl, streamKey, "ready", delayMs, createdAt)
     .run();
   return {
     id,
@@ -207,6 +208,7 @@ export async function createStreamManual(
     stream_key: streamKey,
     rtmp_url: rtmpUrl,
     status: "ready",
+    delay_ms: delayMs,
     created_at: createdAt,
   };
 }

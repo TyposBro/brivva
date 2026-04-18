@@ -39,7 +39,14 @@ pub struct StreamRow {
     pub stream_key: Option<String>,
     #[allow(dead_code)]
     pub status: String,
+    /// Per-stream output delay in ms — Fargate holds original host media
+    /// for this long before emitting to RTMP, giving STT+translate+TTS a
+    /// window to produce the translated audio that overlays at emit time.
+    #[serde(default = "default_delay_ms")]
+    pub delay_ms: u64,
 }
+
+fn default_delay_ms() -> u64 { 2000 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceRow {

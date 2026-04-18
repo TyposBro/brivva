@@ -110,7 +110,15 @@ async fn handle_host(
                         } else {
                             format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
                         };
-                        if let Err(e) = manager.start_stream(&s.id, &s.lang, &full_url) {
+                        let is_source = Lang::from_str(&s.lang)
+                            .is_some_and(|l| l == source_lang);
+                        if let Err(e) = manager.start_stream(
+                            &s.id,
+                            &s.lang,
+                            &full_url,
+                            s.delay_ms,
+                            is_source,
+                        ) {
                             eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
                         } else if let Some(lang) = Lang::from_str(&s.lang) {
                             rtmp_langs.push(lang);
@@ -184,6 +192,15 @@ async fn handle_host(
                 }
                 if let Some(ref tx) = audio_tx {
                     let _ = tx.send(data.to_vec());
+                }
+                // Also feed the per-stream RTMP mixer so delayed host audio
+                // is available to underlay the translated TTS.
+                let rtmp_mgr = rooms.get(&room_id).and_then(|r| r.rtmp_manager.clone());
+                if let Some(mgr) = rtmp_mgr {
+                    let bytes = data.to_vec();
+                    tokio::spawn(async move {
+                        mgr.lock().await.push_host_audio(&bytes);
+                    });
                 }
             }
             Message::Text(text) => {

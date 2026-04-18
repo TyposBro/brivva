@@ -74,20 +74,16 @@ struct SonioxToken {
 
 // ── STT Connection ────────────────────────────────────────
 
-/// Emit a final transcript: broadcast to room and trigger translation pipeline.
-/// `host_audio` is the raw 44.1kHz PCM captured during this utterance, used for
-/// source-language passthrough (skip TTS for RTMP streams in the host's language).
+/// Emit a final transcript: echo to the host WS and spawn per-target TTS.
+/// Original audio has already flowed to RTMP continuously via the mixer, so
+/// the pipeline no longer needs host PCM or utterance timestamps here.
 fn emit_final(
     rooms: &Rooms,
     room_id: &str,
     transcript: &str,
     uid: u64,
     source_lang: &Lang,
-    utterance_start: Instant,
-    host_audio: Vec<u8>,
 ) {
-    let utterance_end = Instant::now();
-
     if let Some(room) = rooms.get(room_id) {
         room.send_to_host(to_ws(&ServerMsg::Final {
             transcript: transcript.to_string(),
@@ -102,10 +98,7 @@ fn emit_final(
             let src = source_lang.clone();
             let text = transcript.to_string();
             tokio::spawn(async move {
-                run_pipeline(
-                    &text, uid, &src, &active, &rooms_clone, &rid,
-                    utterance_start, utterance_end, host_audio,
-                ).await;
+                run_pipeline(&text, uid, &src, &active, &rooms_clone, &rid).await;
             });
         }
     }
@@ -135,10 +128,6 @@ pub async fn start_stt(
     let audio_rx = Arc::new(tokio::sync::Mutex::new(audio_rx));
     let mut utterance_counter: u64 = 0;
     let mut reconnect_count: u32 = 0;
-
-    // Host audio accumulator for source-language passthrough (native voice → RTMP).
-    let audio_acc: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     loop {
         let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
@@ -222,15 +211,12 @@ pub async fn start_stt(
             continue;
         }
 
-        // Task 1: Forward host audio → Soniox + mirror into the passthrough accumulator.
-        let acc_tx = audio_acc.clone();
+        // Task 1: Forward host audio → Soniox. Host PCM also flows to the RTMP
+        // mixer via handler.rs::push_host_audio, independent of STT.
         let audio_rx_clone = audio_rx.clone();
         let send_task = tokio::spawn(async move {
             let mut rx = audio_rx_clone.lock().await;
             while let Some(data) = rx.recv().await {
-                if let Ok(mut acc) = acc_tx.lock() {
-                    acc.push(data.clone());
-                }
                 if stt_sink
                     .send(tungstenite::Message::Binary(data.into()))
                     .await
@@ -241,13 +227,11 @@ pub async fn start_stt(
             }
         });
 
-        // Task 2: Read Soniox tokens, emit Interim/Final events to the room.
+        // Task 2: Read Soniox tokens, emit Interim/Final events to the host.
         let rooms_ref = rooms.clone();
         let rid = room_id.clone();
         let source_lang_clone = source_lang.clone();
-        let acc_rx = audio_acc.clone();
         let mut uc = utterance_counter;
-        let mut utterance_start: Option<Instant> = None;
 
         let disconnected_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disc_flag = disconnected_unexpectedly.clone();
@@ -310,14 +294,8 @@ pub async fn start_stt(
                     }
                     if tok.is_final {
                         final_text.push_str(&tok.text);
-                        if utterance_start.is_none() {
-                            utterance_start = Some(Instant::now());
-                        }
                     } else {
                         interim_tail.push_str(&tok.text);
-                        if utterance_start.is_none() {
-                            utterance_start = Some(Instant::now());
-                        }
                     }
                 }
 
@@ -334,29 +312,13 @@ pub async fn start_stt(
                     uc += 1;
                     let uid = uc;
                     let committed = std::mem::take(&mut final_text);
-                    let start = utterance_start.take().unwrap_or_else(Instant::now);
-                    let host_audio: Vec<u8> = {
-                        let mut acc = acc_rx.lock().unwrap();
-                        acc.drain(..).flatten().collect()
-                    };
                     println!("[FINAL #{}] {}", uid, committed);
                     drop(room);
-                    emit_final(
-                        &rooms_ref,
-                        &rid,
-                        &committed,
-                        uid,
-                        &source_lang_clone,
-                        start,
-                        host_audio,
-                    );
-                } else if endpoint_hit {
-                    // Endpoint with no committed text (noise / silence) — just reset.
-                    utterance_start = None;
-                    if let Ok(mut acc) = acc_rx.lock() {
-                        acc.clear();
-                    }
+                    emit_final(&rooms_ref, &rid, &committed, uid, &source_lang_clone);
                 }
+                // Endpoints with no text (silence) are no-ops; the mixer has
+                // already been forwarding the original audio.
+                let _ = endpoint_hit;
             }
             uc
         });
@@ -397,16 +359,12 @@ pub async fn start_stt(
 
 // ── Translation Pipeline ──
 //
-// Translation is performed inside the STT provider (Soniox v4 emits
-// already-translated text per target). Stage below is currently a
-// pass-through stub until the Soniox WS client lands — do NOT ship to prod.
+// Each translated target spawns one task: translate (stub) + TTS. The host's
+// original audio/video flows to RTMP continuously via the per-stream delay
+// buffers in ffmpeg.rs, so there's no source-language passthrough branch and
+// no host_audio / utterance_* timestamps to thread through.
 
-/// Run the per-target pipeline for one utterance.
-///
-/// For the source language, queue the host's native audio directly to RTMP
-/// (passthrough — no TTS round trip). For every other target, broadcast a
-/// translation event (stub: pass-through until Soniox per-target WS lands)
-/// then hand off to ElevenLabs TTS.
+/// Run the per-target TTS pipeline for one utterance.
 async fn run_pipeline(
     transcript: &str,
     utterance_id: u64,
@@ -414,43 +372,14 @@ async fn run_pipeline(
     target_langs: &[Lang],
     rooms: &Rooms,
     room_id: &str,
-    utterance_start: Instant,
-    utterance_end: Instant,
-    host_audio: Vec<u8>,
 ) {
     let mut handles = Vec::new();
-
     let voice_clone_id = rooms.get(room_id).and_then(|r| r.voice_clone_id.clone());
 
     for lang in target_langs {
+        // Source-language RTMP output is handled by the per-stream delay
+        // buffer + mixer (passthrough, no TTS). Skip TTS for source here.
         if lang == source_lang {
-            // Source passthrough: host audio is 44.1 kHz PCM already — queue directly to RTMP.
-            let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
-            if let Some(manager) = rtmp_mgr {
-                if host_audio.is_empty() {
-                    eprintln!("[PASSTHROUGH] no host audio captured for source lang {}", lang);
-                    continue;
-                }
-                let mut pcm = host_audio.clone();
-                let pcm_len = pcm.len();
-                let lang_str = lang.to_string();
-                let mgr = manager.clone();
-                handles.push(tokio::spawn(async move {
-                    let utterance_dur = utterance_end.duration_since(utterance_start);
-                    let max_dur = utterance_dur + Duration::from_millis(2000);
-                    let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
-                    if pcm.len() > max_bytes {
-                        crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-                    }
-                    let locked = mgr.lock().await;
-                    locked.queue_audio(&lang_str, pcm, utterance_start);
-                    eprintln!(
-                        "[PASSTHROUGH] Queued host audio for {} ({}KB, 44.1kHz native)",
-                        lang_str,
-                        pcm_len / 1024
-                    );
-                }));
-            }
             continue;
         }
 
@@ -481,7 +410,6 @@ async fn run_pipeline(
                 &rooms,
                 &room_id,
                 voice_clone_id.as_deref(),
-                utterance_start,
             )
             .await;
         }));
@@ -494,9 +422,9 @@ async fn run_pipeline(
 
 /// Call ElevenLabs TTS and send synced audio + video to guests.
 /// Has a hard timeout at broadcast_delay - 500ms to prevent sync slips.
-/// Call ElevenLabs TTS and stream the resulting audio to guests + RTMP.
-/// Hard timeout = broadcast_delay − 500 ms (capped at 5 s) to keep A/V in sync
-/// — if ElevenLabs is slow, we drop this utterance to silence rather than slip.
+/// Call ElevenLabs TTS and push the resulting PCM into the target stream's
+/// mixer queue. No per-utterance timing — the mixer plays it in order and
+/// the 5 s queue cap keeps slow targets from falling too far behind.
 async fn do_tts_and_broadcast(
     text: &str,
     utterance_id: u64,
@@ -504,18 +432,11 @@ async fn do_tts_and_broadcast(
     rooms: &Rooms,
     room_id: &str,
     voice_clone_id: Option<&str>,
-    utterance_start: Instant,
 ) {
     let tts_start = Instant::now();
-
-    let tts_deadline = {
-        let delay_ms: u64 = std::env::var("BROADCAST_DELAY_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5000);
-        let sync_deadline = Duration::from_millis(delay_ms.saturating_sub(500));
-        sync_deadline.min(Duration::from_secs(5))
-    };
+    // Hard cap of 5s per utterance — ElevenLabs hanging on one line
+    // shouldn't block the whole pipeline.
+    let tts_deadline = Duration::from_secs(5);
 
     let is_cloned = voice_clone_id.is_some();
     let voice_id = voice_clone_id
@@ -586,27 +507,21 @@ async fn do_tts_and_broadcast(
         lang
     );
 
-    // RTMP path: decode MP3 → PCM, truncate to utterance + 2s margin, queue.
+    // RTMP path: decode MP3 → PCM, append to this stream's TTS queue. No
+    // timestamp alignment — the per-stream mixer plays it in arrival order,
+    // overlaid on the delayed host audio at emit time.
     let rtmp_mgr = rooms.get(room_id).and_then(|r| r.rtmp_manager.clone());
     if let Some(manager) = rtmp_mgr {
         match crate::ffmpeg::decode_mp3_to_pcm(&audio_buffer).await {
-            Ok(mut pcm) => {
-                let elapsed_ms = utterance_start.elapsed().as_millis() as u64;
-                // Match source audio's 2s margin: total budget = elapsed + 2s from now.
-                let max_dur = Duration::from_millis(elapsed_ms) + Duration::from_millis(2000);
-                let max_bytes = (max_dur.as_secs_f64() * 88200.0) as usize;
-                if pcm.len() > max_bytes {
-                    crate::ffmpeg::truncate_with_fadeout(&mut pcm, max_bytes);
-                }
+            Ok(pcm) => {
                 let mgr = manager.lock().await;
-                mgr.queue_audio(&lang.to_string(), pcm, utterance_start);
+                mgr.push_tts(&lang.to_string(), pcm);
             }
             Err(e) => eprintln!("[RTMP] MP3→PCM decode failed: {}", e),
         }
     }
 
-    // Host-side latency markers. MP3 bytes are discarded — after the decode
-    // above fed PCM into the RTMP queue, no one else needs the original MP3.
+    // Host-side latency markers.
     if let Some(room) = rooms.get(room_id) {
         room.send_to_host(to_ws(&ServerMsg::TtsEnd {
             utterance_id,

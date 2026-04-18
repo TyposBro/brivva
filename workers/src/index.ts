@@ -127,6 +127,10 @@ app.get("/api/sessions", async (c) => {
   return c.json({ sessions });
 });
 
+// Default RTMP delay (ms) if the frontend omits it. Tuned to cover the
+// typical STT (~500ms) + translate + TTS (~500ms) round-trip.
+const DEFAULT_DELAY_MS = 2000;
+
 app.post("/api/sessions", async (c) => {
   const body = await c.req.json<{
     user_id?: string;
@@ -134,7 +138,13 @@ app.post("/api/sessions", async (c) => {
     source_lang?: string;
     target_langs?: string[];
     voice_id?: string;
-    platforms?: { platform: string; lang?: string; rtmp_url?: string; stream_key?: string }[];
+    platforms?: {
+      platform: string;
+      lang?: string;
+      rtmp_url?: string;
+      stream_key?: string;
+      delay_ms?: number;
+    }[];
   }>();
   if (!body.user_id || !body.title || !body.source_lang || !body.target_langs?.length) {
     return c.json({ error: "user_id, title, source_lang, target_langs required" }, 400);
@@ -149,7 +159,6 @@ app.post("/api/sessions", async (c) => {
     JSON.stringify(body.target_langs),
   );
 
-  // Optional: attach manual RTMP streams for non-auto platforms.
   const streams = [];
   for (const p of body.platforms ?? []) {
     if (!p.rtmp_url || !p.stream_key || !p.lang) continue;
@@ -161,6 +170,7 @@ app.post("/api/sessions", async (c) => {
         p.platform,
         p.rtmp_url,
         p.stream_key,
+        p.delay_ms ?? DEFAULT_DELAY_MS,
       ),
     );
   }
@@ -188,6 +198,7 @@ app.post("/api/sessions/:id/streams", async (c) => {
     platform?: string;
     rtmp_url?: string;
     stream_key?: string;
+    delay_ms?: number;
   }>();
   if (!body.lang || !body.platform || !body.rtmp_url || !body.stream_key) {
     return c.json({ error: "lang, platform, rtmp_url, stream_key required" }, 400);
@@ -199,6 +210,7 @@ app.post("/api/sessions/:id/streams", async (c) => {
     body.platform,
     body.rtmp_url,
     body.stream_key,
+    body.delay_ms ?? DEFAULT_DELAY_MS,
   );
   return c.json(s);
 });
