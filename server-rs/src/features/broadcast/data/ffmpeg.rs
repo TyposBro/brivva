@@ -184,9 +184,14 @@ impl RtmpManager {
         self.spawn_stream_inner(
             stream_id, lang, rtmp_url, delay_ms, is_source, host_gain, None,
         )?;
-        eprintln!(
-            "[FFMPEG] started stream={} lang={} → {} [delay={}ms, source={}, host_gain={:.2}]",
-            stream_id, lang, rtmp_url, delay_ms, is_source, host_gain
+        tracing::info!(
+            stream_id = %stream_id,
+            lang = %lang,
+            rtmp_url = %rtmp_url,
+            delay_ms,
+            is_source,
+            host_gain,
+            "ffmpeg rtmp stream started"
         );
         Ok(())
     }
@@ -265,14 +270,19 @@ impl RtmpManager {
                     if stream.stop_flag.load(Ordering::Acquire) {
                         continue;
                     }
-                    eprintln!(
-                        "[FFMPEG] crashed lang={} exit={}, will restart",
-                        stream.lang, code
+                    tracing::warn!(
+                        stream_id = %id,
+                        lang = %stream.lang,
+                        exit_code = code,
+                        restart_count = stream.restart_count,
+                        "ffmpeg rtmp process crashed, scheduling restart"
                     );
                     if stream.restart_count >= MAX_FFMPEG_RESTARTS {
-                        eprintln!(
-                            "[FFMPEG] giving up on {} after {} attempts",
-                            stream.lang, MAX_FFMPEG_RESTARTS
+                        tracing::error!(
+                            stream_id = %id,
+                            lang = %stream.lang,
+                            attempts = MAX_FFMPEG_RESTARTS,
+                            "ffmpeg rtmp giving up after max restart attempts"
                         );
                         stream.stop_flag.store(true, Ordering::Release);
                         continue;
@@ -280,7 +290,11 @@ impl RtmpManager {
                     to_restart.push(id.clone());
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("[FFMPEG] status check failed for {}: {}", id, e),
+                Err(e) => tracing::error!(
+                    stream_id = %id,
+                    error = %e,
+                    "ffmpeg status check failed"
+                ),
             }
         }
 
@@ -340,15 +354,20 @@ impl RtmpManager {
                 if let Some(stream) = self.streams.get_mut(id) {
                     stream.restart_count = prev_count + 1;
                 }
-                eprintln!(
-                    "[FFMPEG] restarted {} ({}) attempt {}/{}",
-                    id,
-                    lang,
-                    prev_count + 1,
-                    MAX_FFMPEG_RESTARTS
+                tracing::info!(
+                    stream_id = %id,
+                    lang = %lang,
+                    attempt = prev_count + 1,
+                    max_attempts = MAX_FFMPEG_RESTARTS,
+                    "ffmpeg rtmp restarted"
                 );
             }
-            Err(e) => eprintln!("[FFMPEG] restart {} ({}) failed: {}", id, lang, e),
+            Err(e) => tracing::error!(
+                stream_id = %id,
+                lang = %lang,
+                error = %e,
+                "ffmpeg rtmp restart failed"
+            ),
         }
     }
 
@@ -505,9 +524,9 @@ impl RtmpManager {
             match stream.child.kill() {
                 Ok(_) => {
                     let _ = stream.child.wait();
-                    eprintln!("[FFMPEG:{}] killed", id);
+                    tracing::info!(stream_id = %id, "ffmpeg rtmp process killed (stop_all)");
                 }
-                Err(e) => eprintln!("[FFMPEG:{}] kill error: {}", id, e),
+                Err(e) => tracing::error!(stream_id = %id, error = %e, "ffmpeg kill failed"),
             }
             let join_timeout = Duration::from_secs(3);
             for (label, handle) in [
@@ -853,9 +872,9 @@ pub fn kill_orphan_ffmpeg() {
     {
         Ok(o) => o,
         Err(e) => {
-            eprintln!(
-                "[STARTUP] pgrep not available, skipping orphan cleanup: {}",
-                e
+            tracing::warn!(
+                error = %e,
+                "pgrep not available; skipping orphan cleanup"
             );
             return;
         }
@@ -869,7 +888,7 @@ pub fn kill_orphan_ffmpeg() {
             if pid == my_pid {
                 continue;
             }
-            eprintln!("[STARTUP] killing orphan FFmpeg process (PID {})", pid);
+            tracing::info!(pid, "killing orphan ffmpeg process");
             let _ = std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .output();
@@ -877,22 +896,23 @@ pub fn kill_orphan_ffmpeg() {
         }
     }
 
+    let mut stale_files = 0;
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_") {
                     let _ = std::fs::remove_file(entry.path());
-                    eprintln!("[STARTUP] removed stale file: {}", name);
+                    stale_files += 1;
                 }
             }
         }
     }
 
-    if killed > 0 {
-        eprintln!("[STARTUP] killed {} orphan FFmpeg process(es)", killed);
-    } else {
-        eprintln!("[STARTUP] no orphan FFmpeg processes found");
-    }
+    tracing::info!(
+        orphan_pids_killed = killed,
+        stale_files_removed = stale_files,
+        "orphan ffmpeg cleanup complete"
+    );
 }
 
 /// Decode MP3 bytes to raw PCM s16le 44.1 kHz mono via FFmpeg subprocess.

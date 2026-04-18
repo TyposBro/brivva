@@ -32,14 +32,14 @@ async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQu
     let token = match query.token.as_deref() {
         Some(t) if !t.is_empty() => t,
         _ => {
-            eprintln!("[WS] host without token, rejecting");
+            tracing::warn!("ws host upgrade rejected: missing token");
             return;
         }
     };
     let claims = match auth::verify(token) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[WS] host JWT verify failed: {}", e);
+            tracing::warn!(error = %e, "ws host upgrade rejected: jwt verify failed");
             return;
         }
     };
@@ -111,9 +111,11 @@ async fn handle_host(
         match workers_api::fetch_session_bundle(sid).await {
             Ok(bundle) => {
                 if bundle.session.user_id != user_id {
-                    eprintln!(
-                        "[WS] session {} owner mismatch ({} vs jwt {})",
-                        sid, bundle.session.user_id, user_id
+                    tracing::warn!(
+                        session_id = %sid,
+                        owner_user_id = %bundle.session.user_id,
+                        jwt_user_id = %user_id,
+                        "ws host upgrade rejected: session owner mismatch"
                     );
                     return;
                 }
@@ -144,7 +146,12 @@ async fn handle_host(
                             is_source,
                             s.host_gain.clamp(0.0, 1.0),
                         ) {
-                            eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
+                            tracing::error!(
+                                stream_id = %s.id,
+                                lang = %s.lang,
+                                error = %e,
+                                "rtmp stream start failed"
+                            );
                         } else if let Some(lang) = Lang::from_str(&s.lang) {
                             rtmp_langs.push(lang);
                         }
@@ -152,11 +159,11 @@ async fn handle_host(
                     let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
                     live_session.rtmp_manager = Some(shared_mgr.clone());
                     live_session.rtmp_langs = rtmp_langs;
-                    eprintln!(
-                        "[RTMP] Started {} FFmpeg streams for session {}, langs: {:?}",
-                        bundle.streams.len(),
-                        sid,
-                        live_session.rtmp_langs
+                    tracing::info!(
+                        session_id = %sid,
+                        stream_count = bundle.streams.len(),
+                        langs = ?live_session.rtmp_langs,
+                        "ffmpeg rtmp streams started"
                     );
                     let _health_monitor =
                         crate::features::broadcast::data::ffmpeg::spawn_health_monitor(
@@ -176,12 +183,16 @@ async fn handle_host(
                     )
                     .await
                     {
-                        eprintln!("[WS] status→live failed: {}", e);
+                        tracing::warn!(
+                            session_id = %sid_clone,
+                            error = %e,
+                            "workers status=live update failed"
+                        );
                     }
                 });
             }
             Err(e) => {
-                eprintln!("[WS] failed to fetch session {}: {}", sid, e);
+                tracing::error!(session_id = %sid, error = %e, "session bundle fetch failed");
                 return;
             }
         }
@@ -222,9 +233,9 @@ async fn handle_host(
                         )
                         .await;
                     });
-                    eprintln!(
-                        "[HOST] First audio received, STT pipelines started for live session {}",
-                        live_session_id
+                    tracing::info!(
+                        live_session_id = %live_session_id,
+                        "first host audio received, STT pipelines spawned"
                     );
                 }
                 if let Some(ref tx) = audio_tx {
@@ -286,14 +297,18 @@ async fn handle_host(
         if let Some(sid) = live_session.session_id {
             tokio::spawn(async move {
                 if let Err(e) = workers_api::update_session_status(&sid, "ended", None).await {
-                    eprintln!("[WS] status→ended failed: {}", e);
+                    tracing::warn!(
+                        session_id = %sid,
+                        error = %e,
+                        "workers status=ended update failed"
+                    );
                 }
             });
         }
     }
 
     send_task.abort();
-    eprintln!("Live session {} closed", live_session_id);
+    tracing::info!(live_session_id = %live_session_id, "live session closed");
 }
 
 #[cfg(test)]
