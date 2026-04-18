@@ -5,9 +5,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
-use super::soniox::{
-    SONIOX_END_TOKEN, SONIOX_WS_URL, SonioxMode, SonioxResponse, SONIOX_MODEL,
-};
+use super::soniox::{SONIOX_END_TOKEN, SONIOX_WS_URL, SonioxMode, SonioxResponse};
 use super::to_ws;
 use super::tts::broadcast_translated_tts;
 
@@ -49,8 +47,18 @@ pub async fn start_stt_pipelines(
         }
     });
 
-    spawn_source_session(&live_session_id, &live_sessions, source_lang, source_rx);
-    spawn_translate_sessions(&live_session_id, &live_sessions, source_lang, target_receivers);
+    spawn_source_session(
+        &live_session_id,
+        &live_sessions,
+        source_lang.clone(),
+        source_rx,
+    );
+    spawn_translate_sessions(
+        &live_session_id,
+        &live_sessions,
+        source_lang,
+        target_receivers,
+    );
 }
 
 fn dedupe_target_langs(source_lang: Lang, target_langs: Vec<Lang>) -> Vec<Lang> {
@@ -123,8 +131,11 @@ async fn run_soniox_session(
             return;
         };
 
-        let (mut stt_sink, mut stt_stream) = ws_stream.split();
-        if send_soniox_config(&mode, &tag, &mut stt_sink, &mut reconnect_count).await.is_err() {
+        let (mut stt_sink, stt_stream) = ws_stream.split();
+        if send_soniox_config(&mode, &tag, &mut stt_sink, &mut reconnect_count)
+            .await
+            .is_err()
+        {
             if reconnect_count > STT_RECONNECT_MAX {
                 break;
             }
@@ -171,8 +182,14 @@ async fn connect_soniox(
     live_sessions: &LiveSessions,
     tag: &str,
     reconnect_count: u32,
-) -> Option<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
-    let max_attempts = if reconnect_count == 0 { 10 } else { STT_RECONNECT_MAX };
+) -> Option<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    let max_attempts = if reconnect_count == 0 {
+        10
+    } else {
+        STT_RECONNECT_MAX
+    };
 
     for attempt in 1..=max_attempts {
         if !live_sessions.contains_key(live_session_id) {

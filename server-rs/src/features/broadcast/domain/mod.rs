@@ -72,14 +72,9 @@ pub struct LiveSession {
     pub id: String,
     pub source_lang: Lang,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
-    /// Voice ID currently selected for TTS. This can be a durable Workers
-    /// voice or a temporary per-room clone created by Fargate.
+    /// Voice ID currently selected for TTS. Workers owns voice lifecycle and
+    /// provides this durable ElevenLabs voice id through the session bundle.
     pub selected_voice_id: Option<String>,
-    /// Temporary clone created by Fargate from a live voice sample. This is
-    /// the only voice asset Fargate is allowed to delete on room close.
-    pub ephemeral_voice_id: Option<String>,
-    /// Prevent duplicate live voice-clone requests for the same room.
-    pub clone_in_progress: bool,
     /// Session ID from Workers (links to D1 session + streams)
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
@@ -95,8 +90,6 @@ impl LiveSession {
             source_lang,
             host_tx: None,
             selected_voice_id: None,
-            ephemeral_voice_id: None,
-            clone_in_progress: false,
             session_id,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),

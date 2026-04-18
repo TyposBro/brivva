@@ -607,3 +607,104 @@ describe("POST /api/voices (ElevenLabs clone, fetch-mocked)", () => {
     expect(list.voices).toHaveLength(0);
   });
 });
+
+describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () => {
+  it("400 when user_id or audio_base64 missing (sad)", async () => {
+    const sessionRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-session-voice",
+        title: "Live Session",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    const created = (await sessionRes.json()) as {
+      session: { id: string };
+    };
+
+    const res = await call(`/api/sessions/${created.session.id}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "u-session-voice" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("clones through Workers, persists the voice, and links it to the session (happy)", async () => {
+    installFetchStub([
+      {
+        match: /api\.elevenlabs\.io\/v1\/voices\/add/,
+        method: "POST",
+        reply: () =>
+          new Response(JSON.stringify({ voice_id: "el-session-voice-123" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      },
+    ]);
+
+    const sessionRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-session-voice",
+        title: "Session Voice",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    const created = (await sessionRes.json()) as {
+      session: { id: string };
+    };
+
+    const res = await call(`/api/sessions/${created.session.id}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-session-voice",
+        audio_base64: btoa("\0\0\0\0"),
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as {
+      voice: { id: string; elevenlabs_voice_id: string; user_id: string };
+    };
+    expect(body.voice.user_id).toBe("u-session-voice");
+    expect(body.voice.elevenlabs_voice_id).toBe("el-session-voice-123");
+
+    const linkedSessionRes = await call(`/api/sessions/${created.session.id}`);
+    const linkedSession = (await linkedSessionRes.json()) as {
+      session: { voice_id: string | null };
+    };
+    expect(linkedSession.session.voice_id).toBe(body.voice.id);
+  });
+
+  it("403 when the caller does not own the session (sad)", async () => {
+    const sessionRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "owner-1",
+        title: "Session Voice",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    const created = (await sessionRes.json()) as {
+      session: { id: string };
+    };
+
+    const res = await call(`/api/sessions/${created.session.id}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "other-user",
+        audio_base64: btoa("\0\0\0\0"),
+      }),
+    });
+    expect(res.status).toBe(403);
+  });
+});

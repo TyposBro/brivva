@@ -202,6 +202,34 @@ app.get("/api/sessions/:id", async (c) => {
   return c.json({ session, streams });
 });
 
+app.post("/api/sessions/:id/voice", async (c) => {
+  const sessionId = c.req.param("id");
+  const body = await c.req.json<{
+    user_id?: string;
+    name?: string;
+    audio_base64?: string;
+  }>();
+  if (!body.user_id || !body.audio_base64) {
+    return c.json({ error: "user_id and audio_base64 required" }, 400);
+  }
+
+  const session = await db.getSession(c.env.DB, sessionId);
+  if (!session) return c.json({ error: "not found" }, 404);
+  if (session.user_id !== body.user_id) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+
+  const voiceName = body.name?.trim() || `${session.title} Host Voice`;
+  const { voice_id } = await el.cloneVoice(
+    c.env.ELEVENLABS_API_KEY,
+    voiceName,
+    body.audio_base64,
+  );
+  const voice = await db.createVoice(c.env.DB, body.user_id, voice_id, voiceName);
+  await db.updateSessionVoiceId(c.env.DB, sessionId, voice.id);
+  return c.json({ voice });
+});
+
 app.delete("/api/sessions/:id", async (c) => {
   const id = c.req.param("id");
   await db.deleteSessionRow(c.env.DB, id);

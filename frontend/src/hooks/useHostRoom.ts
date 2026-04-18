@@ -21,6 +21,8 @@ export function useHostRoom() {
   const streamRef = useRef<MediaStream | null>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const activeUserIdRef = useRef<string | null>(null);
 
   // Callback ref: connects stream to video element whenever either becomes available
   const videoRef = useCallback((el: HTMLVideoElement | null) => {
@@ -158,7 +160,34 @@ export function useHostRoom() {
     const b64 = btoa(binary);
 
     dispatch({ type: "voice_cloning" });
-    socket.current.sendJson({ type: "voice:sample", data: b64 });
+    const sessionId = activeSessionIdRef.current;
+    const userId = activeUserIdRef.current;
+    if (!sessionId) {
+      dispatch({ type: "error", message: "Session ID required for voice cloning" });
+      dispatch({ type: "skip_voice_setup" });
+      return;
+    }
+    if (!userId) {
+      dispatch({ type: "error", message: "User ID required for voice cloning" });
+      dispatch({ type: "skip_voice_setup" });
+      return;
+    }
+
+    void api
+      .cloneSessionVoice(sessionId, {
+        user_id: userId,
+        audio_base64: b64,
+      })
+      .then(() => {
+        dispatch({ type: "voice_ready" });
+      })
+      .catch((err) => {
+        dispatch({
+          type: "error",
+          message: err instanceof Error ? err.message : "Voice clone failed",
+        });
+        dispatch({ type: "skip_voice_setup" });
+      });
   }, []);
 
   const skipVoiceSetup = useCallback(() => {
@@ -185,6 +214,8 @@ export function useHostRoom() {
     dispatch({ type: "reset" });
     resetTimings();
     startWebcam();
+    activeSessionIdRef.current = opts.sessionId ?? null;
+    activeUserIdRef.current = opts.userId;
 
     let token: string;
     try {

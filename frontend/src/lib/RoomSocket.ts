@@ -31,7 +31,7 @@ export class RoomSocket {
   }
 
   private buildUrl(params: Record<string, string>): string {
-    const url = new URL(`${WS_BASE}/api/room`);
+    const url = new URL(`${WS_BASE}/api/session`);
     for (const [key, value] of Object.entries(params))
       url.searchParams.set(key, value);
     return url.toString();

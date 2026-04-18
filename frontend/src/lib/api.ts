@@ -197,6 +197,16 @@ export function getSession(
   return request(`/api/sessions/${encodeURIComponent(id)}`);
 }
 
+export function cloneSessionVoice(
+  sessionId: string,
+  body: { user_id: string; audio_base64: string; name?: string }
+): Promise<{ voice: Voice }> {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/voice`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export function deleteSession(
   id: string
 ): Promise<{ status: string }> {

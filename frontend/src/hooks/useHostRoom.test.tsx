@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 // Mock api
 vi.mock("../lib/api", () => ({
   getAuthToken: vi.fn(),
+  cloneSessionVoice: vi.fn(),
 }));
 
 type Callbacks = {
@@ -76,6 +77,7 @@ import * as api from "../lib/api";
 import { useHostRoom } from "./useHostRoom";
 
 const mockedGetAuthToken = api.getAuthToken as unknown as ReturnType<typeof vi.fn>;
+const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<typeof vi.fn>;
 
 function installMedia() {
   const track = { stop: vi.fn() };
@@ -84,6 +86,29 @@ function installMedia() {
     configurable: true,
     value: { getUserMedia: vi.fn(async () => stream) },
   });
+
+  class FakeScriptProcessorNode {
+    onaudioprocess: ((event: { inputBuffer: { getChannelData: () => Float32Array } }) => void) | null = null;
+    connect() {}
+    disconnect() {}
+  }
+
+  class FakeMediaStreamSourceNode {
+    connect() {}
+    disconnect() {}
+  }
+
+  class FakeAudioContext {
+    destination = {};
+    createMediaStreamSource() { return new FakeMediaStreamSourceNode(); }
+    createScriptProcessor() { return new FakeScriptProcessorNode(); }
+    close() { return Promise.resolve(); }
+  }
+
+  Object.defineProperty(globalThis, "AudioContext", {
+    configurable: true,
+    value: FakeAudioContext,
+  });
 }
 
 describe("useHostRoom", () => {
@@ -91,6 +116,7 @@ describe("useHostRoom", () => {
     pipelineInstances.length = 0;
     socketInstances.length = 0;
     mockedGetAuthToken.mockReset();
+    mockedCloneSessionVoice.mockReset();
     installMedia();
   });
 
@@ -160,6 +186,35 @@ describe("useHostRoom", () => {
     act(() => socketInstances[0].fireOpen());
     act(() => socketInstances[0].fireMessage({ type: "voice:ready", voiceId: "v1" }));
     expect(result.current.status).toBe("ready");
+    expect(result.current.voiceReady).toBe(true);
+  });
+
+  it("stopVoiceRecording clones through Workers for the active session", async () => {
+    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedCloneSessionVoice.mockResolvedValueOnce({
+      voice: { id: "v1", user_id: "u1", elevenlabs_voice_id: "el1", name: "n", created_at: 1 },
+    });
+    const { result } = renderHook(() => useHostRoom());
+
+    await act(async () => {
+      await result.current.createRoom({ userId: "u1", sessionId: "s1" });
+    });
+    act(() => socketInstances[0].fireOpen());
+
+    await act(async () => {
+      await result.current.startVoiceRecording();
+    });
+    await act(async () => {
+      result.current.stopVoiceRecording();
+    });
+
+    await waitFor(() =>
+      expect(mockedCloneSessionVoice).toHaveBeenCalledWith(
+        "s1",
+        expect.objectContaining({ user_id: "u1" }),
+      ),
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
     expect(result.current.voiceReady).toBe(true);
   });
 

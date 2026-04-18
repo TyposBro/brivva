@@ -248,7 +248,6 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
         live_session.selected_voice_id.as_deref(),
         Some("voice-clone-123")
     );
-    assert_eq!(live_session.ephemeral_voice_id, None);
     drop(live_session);
 
     socket

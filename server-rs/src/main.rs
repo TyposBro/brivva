@@ -1,7 +1,4 @@
-use server_rs::{
-    app_state, build_app,
-    features::broadcast::data::ffmpeg,
-};
+use server_rs::{app_state, build_app, features::broadcast::data::ffmpeg};
 
 #[tokio::main]
 async fn main() {

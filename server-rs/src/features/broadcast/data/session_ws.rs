@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::features::broadcast::data::{auth, pipeline, workers_api};
-use crate::features::broadcast::domain::{Lang, LiveSession, ServerMsg, SessionQuery};
+use crate::features::broadcast::domain::{Lang, LiveSession, SessionQuery};
 use crate::orchestration::state::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no room codes.
@@ -80,25 +80,6 @@ fn next_available_live_session_id(live_sessions: &dashmap::DashMap<String, LiveS
             return candidate;
         }
     }
-}
-
-fn reserve_ephemeral_voice_clone(
-    live_sessions: &dashmap::DashMap<String, LiveSession>,
-    live_session_id: &str,
-) -> Result<(), &'static str> {
-    let Some(mut live_session) = live_sessions.get_mut(live_session_id) else {
-        return Err("live session missing");
-    };
-
-    if live_session.clone_in_progress {
-        return Err("voice clone already in progress");
-    }
-    if live_session.ephemeral_voice_id.is_some() {
-        return Err("voice clone already created for this live session");
-    }
-
-    live_session.clone_in_progress = true;
-    Ok(())
 }
 
 // ── Host Flow ─────────────────────────────────────────────
@@ -285,49 +266,6 @@ async fn handle_host(
                                 }
                             }
                         }
-                        Some("voice:sample") => {
-                            if let Some(pcm_b64) = json.get("data").and_then(|v| v.as_str()) {
-                                use base64::Engine;
-                                if let Ok(pcm) =
-                                    base64::engine::general_purpose::STANDARD.decode(pcm_b64)
-                                {
-                                    match reserve_ephemeral_voice_clone(
-                                        &live_sessions,
-                                        &live_session_id,
-                                    ) {
-                                        Ok(()) => {}
-                                        Err(message) => {
-                                            if let Some(live_session) =
-                                                live_sessions.get(&live_session_id)
-                                            {
-                                                live_session.send_to_host(Message::Text(
-                                                    serde_json::to_string(&ServerMsg::Error {
-                                                        message: message.to_string(),
-                                                    })
-                                                    .unwrap()
-                                                    .into(),
-                                                ));
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                    eprintln!(
-                                        "[VOICE_CLONE] received voice sample: {} bytes PCM",
-                                        pcm.len()
-                                    );
-                                    let live_sessions_clone = live_sessions.clone();
-                                    let target_live_session_id = live_session_id.clone();
-                                    tokio::spawn(async move {
-                                        pipeline::clone_voice(
-                                            pcm,
-                                            &live_sessions_clone,
-                                            &target_live_session_id,
-                                        )
-                                        .await;
-                                    });
-                                }
-                            }
-                        }
                         _ => {}
                     }
                 }
@@ -352,12 +290,6 @@ async fn handle_host(
                 }
             });
         }
-
-        if let Some(voice_id) = live_session.ephemeral_voice_id {
-            tokio::spawn(async move {
-                pipeline::delete_cloned_voice(&voice_id).await;
-            });
-        }
     }
 
     send_task.abort();
@@ -368,36 +300,6 @@ async fn handle_host(
 mod tests {
     use super::*;
     use crate::features::broadcast::domain::Lang;
-
-    #[test]
-    fn reserve_ephemeral_voice_clone_allows_first_request_only() {
-        let live_sessions = dashmap::DashMap::new();
-        let mut live_session = LiveSession::new("ROOM01".into(), Lang::En, None);
-        live_session.selected_voice_id = Some("durable-voice".into());
-        live_sessions.insert("ROOM01".into(), live_session);
-
-        assert_eq!(
-            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
-            Ok(())
-        );
-        assert_eq!(
-            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
-            Err("voice clone already in progress")
-        );
-    }
-
-    #[test]
-    fn reserve_ephemeral_voice_clone_rejects_when_clone_exists() {
-        let live_sessions = dashmap::DashMap::new();
-        let mut live_session = LiveSession::new("ROOM01".into(), Lang::En, None);
-        live_session.ephemeral_voice_id = Some("temp-voice".into());
-        live_sessions.insert("ROOM01".into(), live_session);
-
-        assert_eq!(
-            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
-            Err("voice clone already created for this live session")
-        );
-    }
 
     #[test]
     fn next_available_live_session_id_skips_existing_entries() {

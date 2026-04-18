@@ -48,8 +48,13 @@ pub struct SonioxToken {
 
 #[derive(Clone)]
 pub enum SonioxMode {
-    Source { lang: Lang },
-    Translate { source_lang: Lang, target_lang: Lang },
+    Source {
+        lang: Lang,
+    },
+    Translate {
+        source_lang: Lang,
+        target_lang: Lang,
+    },
 }
 
 impl SonioxMode {

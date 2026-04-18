@@ -165,6 +165,17 @@ export async function updateSessionStatus(
     .run();
 }
 
+export async function updateSessionVoiceId(
+  db: D1Database,
+  id: string,
+  voiceId: string | null,
+): Promise<void> {
+  await db
+    .prepare("UPDATE sessions SET voice_id=? WHERE id=?")
+    .bind(voiceId, id)
+    .run();
+}
+
 export async function deleteSessionRow(db: D1Database, id: string): Promise<void> {
   await db.prepare("DELETE FROM streams WHERE session_id=?").bind(id).run();
   await db.prepare("DELETE FROM sessions WHERE id=?").bind(id).run();
