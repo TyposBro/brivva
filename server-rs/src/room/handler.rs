@@ -118,6 +118,7 @@ async fn handle_host(
                             &full_url,
                             s.delay_ms,
                             is_source,
+                            s.host_gain.clamp(0.0, 1.0),
                         ) {
                             eprintln!("[RTMP] Failed to start stream {}: {}", s.id, e);
                         } else if let Some(lang) = Lang::from_str(&s.lang) {

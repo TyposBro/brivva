@@ -44,9 +44,15 @@ pub struct StreamRow {
     /// window to produce the translated audio that overlays at emit time.
     #[serde(default = "default_delay_ms")]
     pub delay_ms: u64,
+    /// Gain applied to the delayed host audio at mix time. 1.0 = full volume
+    /// (source-language stream), 0.2 = quiet underlay (target streams where
+    /// translated TTS should dominate).
+    #[serde(default = "default_host_gain")]
+    pub host_gain: f32,
 }
 
 fn default_delay_ms() -> u64 { 2000 }
+fn default_host_gain() -> f32 { 0.2 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceRow {

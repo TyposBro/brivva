@@ -130,6 +130,21 @@ app.get("/api/sessions", async (c) => {
 // Default RTMP delay (ms) if the frontend omits it. Tuned to cover the
 // typical STT (~500ms) + translate + TTS (~500ms) round-trip.
 const DEFAULT_DELAY_MS = 2000;
+// Default ducking gain for the delayed host audio under translated TTS.
+// 1.0 = full volume (right for a source-language stream), 0.2 = quiet
+// underlay (right for target-language streams with TTS on top).
+const DEFAULT_HOST_GAIN_TARGET = 0.2;
+const DEFAULT_HOST_GAIN_SOURCE = 1.0;
+
+function resolveHostGain(
+  p: { host_gain?: number; lang?: string },
+  sourceLang: string,
+): number {
+  if (typeof p.host_gain === "number") {
+    return Math.max(0, Math.min(1, p.host_gain));
+  }
+  return p.lang === sourceLang ? DEFAULT_HOST_GAIN_SOURCE : DEFAULT_HOST_GAIN_TARGET;
+}
 
 app.post("/api/sessions", async (c) => {
   const body = await c.req.json<{
@@ -144,6 +159,7 @@ app.post("/api/sessions", async (c) => {
       rtmp_url?: string;
       stream_key?: string;
       delay_ms?: number;
+      host_gain?: number;
     }[];
   }>();
   if (!body.user_id || !body.title || !body.source_lang || !body.target_langs?.length) {
@@ -171,6 +187,7 @@ app.post("/api/sessions", async (c) => {
         p.rtmp_url,
         p.stream_key,
         p.delay_ms ?? DEFAULT_DELAY_MS,
+        resolveHostGain(p, body.source_lang),
       ),
     );
   }
@@ -199,10 +216,18 @@ app.post("/api/sessions/:id/streams", async (c) => {
     rtmp_url?: string;
     stream_key?: string;
     delay_ms?: number;
+    host_gain?: number;
   }>();
   if (!body.lang || !body.platform || !body.rtmp_url || !body.stream_key) {
     return c.json({ error: "lang, platform, rtmp_url, stream_key required" }, 400);
   }
+  // Stand-alone add-stream: we don't know session.source_lang here without a
+  // DB read. FE must send host_gain explicitly when it differs from the
+  // target-stream default.
+  const hostGain =
+    typeof body.host_gain === "number"
+      ? Math.max(0, Math.min(1, body.host_gain))
+      : DEFAULT_HOST_GAIN_TARGET;
   const s = await db.createStreamManual(
     c.env.DB,
     sessionId,
@@ -211,6 +236,7 @@ app.post("/api/sessions/:id/streams", async (c) => {
     body.rtmp_url,
     body.stream_key,
     body.delay_ms ?? DEFAULT_DELAY_MS,
+    hostGain,
   );
   return c.json(s);
 });

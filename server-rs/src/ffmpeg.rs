@@ -39,8 +39,6 @@ const HOST_VIDEO_CAP_FRAMES: usize = 20 * 30;
 /// Cap the TTS queue at 5 s of PCM. Oldest bytes are dropped on overflow so
 /// the translated speech stays fresh rather than falling further behind.
 const TTS_QUEUE_CAP_BYTES: usize = 5 * 88_200;
-/// How loud the delayed original audio sits under a target-language TTS.
-const HOST_DUCK_GAIN: f32 = 0.2;
 /// Max FFmpeg restart attempts per stream.
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
@@ -77,6 +75,7 @@ struct RtmpStream {
     rtmp_url: String,
     delay: Duration,
     is_source: bool,
+    host_gain: f32,
     buffers: StreamBuffers,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
@@ -92,6 +91,10 @@ impl RtmpManager {
     }
 
     /// Start an FFmpeg RTMP process with dedicated video + audio drain threads.
+    ///
+    /// `host_gain` is the multiplier applied to the delayed host audio before
+    /// mixing with translated TTS (1.0 for source streams, typically 0.2 for
+    /// ducked target streams).
     pub fn start_stream(
         &mut self,
         stream_id: &str,
@@ -99,11 +102,12 @@ impl RtmpManager {
         rtmp_url: &str,
         delay_ms: u64,
         is_source: bool,
+        host_gain: f32,
     ) -> Result<(), String> {
-        self.spawn_stream_inner(stream_id, lang, rtmp_url, delay_ms, is_source, None)?;
+        self.spawn_stream_inner(stream_id, lang, rtmp_url, delay_ms, is_source, host_gain, None)?;
         eprintln!(
-            "[FFMPEG] started stream={} lang={} → {} [delay={}ms, source={}]",
-            stream_id, lang, rtmp_url, delay_ms, is_source
+            "[FFMPEG] started stream={} lang={} → {} [delay={}ms, source={}, host_gain={:.2}]",
+            stream_id, lang, rtmp_url, delay_ms, is_source, host_gain
         );
         Ok(())
     }
@@ -160,7 +164,7 @@ impl RtmpManager {
     /// Scan for crashed FFmpeg processes and surface the restart context.
     pub(crate) fn detect_crashed(
         &mut self,
-    ) -> Vec<(String, String, String, u64, bool, u32, StreamBuffers)> {
+    ) -> Vec<(String, String, String, u64, bool, f32, u32, StreamBuffers)> {
         let mut to_restart = Vec::new();
 
         for (id, stream) in &mut self.streams {
@@ -202,6 +206,7 @@ impl RtmpManager {
                     old.rtmp_url,
                     old.delay.as_millis() as u64,
                     old.is_source,
+                    old.host_gain,
                     old.restart_count,
                     old.buffers,
                 ));
@@ -219,10 +224,11 @@ impl RtmpManager {
         rtmp_url: &str,
         delay_ms: u64,
         is_source: bool,
+        host_gain: f32,
         prev_count: u32,
         buffers: StreamBuffers,
     ) {
-        match self.spawn_stream_inner(id, lang, rtmp_url, delay_ms, is_source, Some(buffers)) {
+        match self.spawn_stream_inner(id, lang, rtmp_url, delay_ms, is_source, host_gain, Some(buffers)) {
             Ok(()) => {
                 if let Some(stream) = self.streams.get_mut(id) {
                     stream.restart_count = prev_count + 1;
@@ -243,6 +249,7 @@ impl RtmpManager {
         rtmp_url: &str,
         delay_ms: u64,
         is_source: bool,
+        host_gain: f32,
         existing_buffers: Option<StreamBuffers>,
     ) -> Result<(), String> {
         let audio_fifo = format!("/tmp/brivva_audio_{}", stream_id);
@@ -308,7 +315,9 @@ impl RtmpManager {
         let a_fifo = audio_fifo.clone();
         let audio_handle = thread::Builder::new()
             .name(format!("audio-drain-{}", stream_id))
-            .spawn(move || audio_drain_loop(a_sid, a_buf, a_tts, a_fifo, delay, is_source, a_stop))
+            .spawn(move || {
+                audio_drain_loop(a_sid, a_buf, a_tts, a_fifo, delay, is_source, host_gain, a_stop)
+            })
             .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
 
         self.streams.insert(
@@ -322,6 +331,7 @@ impl RtmpManager {
                 rtmp_url: rtmp_url.to_string(),
                 delay,
                 is_source,
+                host_gain,
                 buffers,
                 stop_flag,
                 restart_count: 0,
@@ -382,13 +392,15 @@ pub fn spawn_health_monitor(
                 let mut mgr = manager.lock().await;
                 mgr.detect_crashed()
             };
-            for (id, lang, rtmp_url, delay_ms, is_source, prev_count, buffers) in crashed {
+            for (id, lang, rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers) in crashed {
                 tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
                 if stop_flag.load(Ordering::Acquire) {
                     break;
                 }
                 let mut mgr = manager.lock().await;
-                mgr.restart_stream(&id, &lang, &rtmp_url, delay_ms, is_source, prev_count, buffers);
+                mgr.restart_stream(
+                    &id, &lang, &rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers,
+                );
             }
         }
     })
@@ -472,7 +484,9 @@ fn video_drain_loop(
 // Emit PCM s16le @ 44.1 kHz mono at 20 ms ticks. Each tick:
 // 1. Ingest any delayed host-audio chunks into `ready_host`.
 // 2. Take up to 1764 bytes host + 1764 bytes TTS (pad with silence).
-// 3. If `is_source`: output = host (100%). Else: clip(host × 0.2 + tts × 1.0).
+// 3. `output = clip(host × host_gain + tts × 1.0)`. Source streams use
+//    host_gain=1.0 and never receive TTS, so the mix collapses to the
+//    host passthrough.
 // 4. Write to the FFmpeg FIFO.
 
 fn audio_drain_loop(
@@ -482,6 +496,7 @@ fn audio_drain_loop(
     fifo_path: String,
     delay: Duration,
     is_source: bool,
+    host_gain: f32,
     stop: Arc<AtomicBool>,
 ) {
     let mut fifo = match std::fs::OpenOptions::new().write(true).open(&fifo_path) {
@@ -500,8 +515,8 @@ fn audio_drain_loop(
     let mut next_tick = Instant::now() + AUDIO_TICK;
 
     eprintln!(
-        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={})",
-        stream_id, delay.as_millis(), is_source
+        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2})",
+        stream_id, delay.as_millis(), is_source, host_gain
     );
 
     loop {
@@ -538,7 +553,14 @@ fn audio_drain_loop(
         }
 
         let output = if is_source {
-            host_chunk
+            // Source streams never queue TTS — skip the mix entirely.
+            // host_gain usually 1.0 here; if a user picked something lower
+            // the stream will simply sound quieter, which is fine.
+            if (host_gain - 1.0).abs() < f32::EPSILON {
+                host_chunk
+            } else {
+                apply_gain(&host_chunk, host_gain)
+            }
         } else {
             let tts_chunk: Vec<u8> = {
                 let mut q = tts_queue.lock().unwrap();
@@ -549,7 +571,7 @@ fn audio_drain_loop(
             if tts_padded.len() < AUDIO_BYTES_PER_TICK {
                 tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
             }
-            mix_pcm_s16le(&host_chunk, HOST_DUCK_GAIN, &tts_padded, 1.0)
+            mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0)
         };
 
         let write_result = if output.is_empty() {
@@ -567,6 +589,20 @@ fn audio_drain_loop(
 
     drop(fifo);
     eprintln!("[AUDIO:{}] drain exited after {} ticks", stream_id, tick_count);
+}
+
+/// Apply a uniform gain to a PCM s16le buffer and clip to the i16 range.
+fn apply_gain(pcm: &[u8], gain: f32) -> Vec<u8> {
+    let n_aligned = pcm.len() - (pcm.len() % 2);
+    let mut out = Vec::with_capacity(n_aligned);
+    let mut i = 0;
+    while i + 1 < n_aligned {
+        let s = i16::from_le_bytes([pcm[i], pcm[i + 1]]) as f32;
+        let scaled = (s * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        out.extend_from_slice(&scaled.to_le_bytes());
+        i += 2;
+    }
+    out
 }
 
 /// Mix two PCM streams (s16le little-endian, same length) with per-source gain

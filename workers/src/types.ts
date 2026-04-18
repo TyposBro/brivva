@@ -42,6 +42,7 @@ export type StreamRecord = {
   rtmp_url: string | null;
   status: string;
   delay_ms: number;
+  host_gain: number;
   created_at: number;
 };
 
