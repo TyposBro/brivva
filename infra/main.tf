@@ -134,7 +134,9 @@ locals {
       { containerPort = 3000, hostPort = 3000, protocol = "tcp" }
     ]
     environment = [
-      { name = "DATABASE_URL", value = "sqlite:/data/brivva.db?mode=rwc" },
+      # Ephemeral storage — SQLite lost on task restart. Add EFS mount when
+      # YouTube tokens + voice clones need to survive redeploys.
+      { name = "DATABASE_URL", value = "sqlite:/tmp/brivva.db?mode=rwc" },
       { name = "BROADCAST_DELAY_MS", value = tostring(var.broadcast_delay_ms) },
       { name = "GOOGLE_REDIRECT_URI", value = "https://${var.domain}/auth/youtube/callback" },
       { name = "FRONTEND_URL", value = var.frontend_url },
@@ -159,9 +161,15 @@ locals {
     name      = "cloudflared"
     image     = "cloudflare/cloudflared:latest"
     essential = true
+    # Override image ENTRYPOINT=["cloudflared", "--no-autoupdate"] so the
+    # sh script below runs instead of being passed as cloudflared args.
+    entryPoint = ["sh", "-c"]
     command = [
-      "sh", "-c",
-      "echo \"$TUNNEL_CREDS\" > /tmp/creds.json && printf 'tunnel: ${var.tunnel_id}\\ncredentials-file: /tmp/creds.json\\ningress:\\n  - hostname: ${var.domain}\\n    service: http://localhost:3000\\n  - service: http_status:404\\n' > /tmp/config.yml && cloudflared tunnel --no-autoupdate --config /tmp/config.yml run"
+      "echo \"$TUNNEL_CREDS\" > /tmp/creds.json && printf 'tunnel: ${var.tunnel_id}\\ncredentials-file: /tmp/creds.json\\ningress:\\n  - hostname: ${var.domain}\\n    service: http://localhost:3000\\n  - service: http_status:404\\n' > /tmp/config.yml && exec cloudflared tunnel --no-autoupdate --config /tmp/config.yml run"
+    ]
+    # Wait for server-rs to be listening on localhost:3000 before accepting CF traffic.
+    dependsOn = [
+      { containerName = "server-rs", condition = "START" }
     ]
     secrets = [
       { name = "TUNNEL_CREDS", valueFrom = "${local.secret_arn}:TUNNEL_CREDS::" }
