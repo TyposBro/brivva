@@ -13,7 +13,7 @@ variable "project" {
 variable "domain" {
   description = "Hostname that cloudflared tunnel routes to server-rs:3000."
   type        = string
-  default     = "brivva-server.milliytechnology.org"
+  default     = "brivva.spiko.uz"
 }
 
 variable "frontend_url" {
