@@ -1,28 +1,43 @@
-// Thin D1 helpers. One query per function, matching the verbs the FE + Fargate
-// already call on the Axum server. Keeps JSON shapes identical to server-rs/db.rs.
+// Drizzle-backed D1 helpers. One function per verb that the FE + Fargate
+// internal clients already call. Handlers accept a raw `D1Database` so
+// the call sites stay a one-liner (`db.listVoices(c.env.DB, userId)`); the
+// tiny `drizzle(...)` wrap is cheap — it's just a typed proxy around the
+// same prepared-statement API underneath.
 
+import { and, desc, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+
+import * as schema from "./schema";
 import type {
   PlatformCredential,
   Session,
   StreamRecord,
   User,
   Voice,
-} from "./types";
+} from "./schema";
 
 const now = () => Math.floor(Date.now() / 1000);
 const uuid = () => crypto.randomUUID();
 
+function wrap(db: D1Database) {
+  return drizzle(db, { schema });
+}
+
 // ── users ─────────────────────────────────────────────────
 
-export async function getOrCreateUser(db: D1Database, id: string): Promise<User> {
-  await db
-    .prepare("INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)")
-    .bind(id, now())
+export async function getOrCreateUser(
+  db: D1Database,
+  id: string,
+): Promise<User> {
+  const d = wrap(db);
+  await d
+    .insert(schema.users)
+    .values({ id, created_at: now() })
+    .onConflictDoNothing()
     .run();
-  const row = await db
-    .prepare("SELECT * FROM users WHERE id = ?")
-    .bind(id)
-    .first<User>();
+  const row = await d.query.users.findFirst({
+    where: eq(schema.users.id, id),
+  });
   if (!row) throw new Error("user upsert failed");
   return row;
 }
@@ -36,13 +51,16 @@ export async function updateYouTubeTokens(
   channelId: string,
   channelName: string,
 ): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE users SET youtube_access_token=?, youtube_refresh_token=?,
-         youtube_token_expires_at=?, youtube_channel_id=?, youtube_channel_name=?
-       WHERE id=?`,
-    )
-    .bind(accessToken, refreshToken, expiresAt, channelId, channelName, userId)
+  await wrap(db)
+    .update(schema.users)
+    .set({
+      youtube_access_token: accessToken,
+      youtube_refresh_token: refreshToken,
+      youtube_token_expires_at: expiresAt,
+      youtube_channel_id: channelId,
+      youtube_channel_name: channelName,
+    })
+    .where(eq(schema.users.id, userId))
     .run();
 }
 
@@ -52,29 +70,35 @@ export async function updateAccessToken(
   accessToken: string,
   expiresAt: number,
 ): Promise<void> {
-  await db
-    .prepare(
-      "UPDATE users SET youtube_access_token=?, youtube_token_expires_at=? WHERE id=?",
-    )
-    .bind(accessToken, expiresAt, userId)
+  await wrap(db)
+    .update(schema.users)
+    .set({
+      youtube_access_token: accessToken,
+      youtube_token_expires_at: expiresAt,
+    })
+    .where(eq(schema.users.id, userId))
     .run();
 }
 
 // ── voices ────────────────────────────────────────────────
 
-export async function listVoices(db: D1Database, userId: string): Promise<Voice[]> {
-  const { results } = await db
-    .prepare("SELECT * FROM voices WHERE user_id=? ORDER BY created_at DESC")
-    .bind(userId)
-    .all<Voice>();
-  return results;
+export async function listVoices(
+  db: D1Database,
+  userId: string,
+): Promise<Voice[]> {
+  return await wrap(db).query.voices.findMany({
+    where: eq(schema.voices.user_id, userId),
+    orderBy: desc(schema.voices.created_at),
+  });
 }
 
-export async function getVoice(db: D1Database, voiceId: string): Promise<Voice | null> {
-  const row = await db
-    .prepare("SELECT * FROM voices WHERE id=?")
-    .bind(voiceId)
-    .first<Voice>();
+export async function getVoice(
+  db: D1Database,
+  voiceId: string,
+): Promise<Voice | null> {
+  const row = await wrap(db).query.voices.findFirst({
+    where: eq(schema.voices.id, voiceId),
+  });
   return row ?? null;
 }
 
@@ -84,25 +108,22 @@ export async function createVoice(
   elevenlabsVoiceId: string,
   name: string,
 ): Promise<Voice> {
-  const id = uuid();
-  const createdAt = now();
-  await db
-    .prepare(
-      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, created_at) VALUES (?,?,?,?,?)",
-    )
-    .bind(id, userId, elevenlabsVoiceId, name, createdAt)
-    .run();
-  return {
-    id,
+  const row: Voice = {
+    id: uuid(),
     user_id: userId,
     elevenlabs_voice_id: elevenlabsVoiceId,
     name,
-    created_at: createdAt,
+    created_at: now(),
   };
+  await wrap(db).insert(schema.voices).values(row).run();
+  return row;
 }
 
-export async function deleteVoiceRow(db: D1Database, voiceId: string): Promise<void> {
-  await db.prepare("DELETE FROM voices WHERE id=?").bind(voiceId).run();
+export async function deleteVoiceRow(
+  db: D1Database,
+  voiceId: string,
+): Promise<void> {
+  await wrap(db).delete(schema.voices).where(eq(schema.voices.id, voiceId)).run();
 }
 
 // ── sessions ──────────────────────────────────────────────
@@ -115,17 +136,8 @@ export async function createSession(
   sourceLang: string,
   targetLangs: string,
 ): Promise<Session> {
-  const id = uuid();
-  const createdAt = now();
-  await db
-    .prepare(
-      `INSERT INTO sessions (id, user_id, voice_id, title, source_lang, target_langs, status, created_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
-    )
-    .bind(id, userId, voiceId, title, sourceLang, targetLangs, "setup", createdAt)
-    .run();
-  return {
-    id,
+  const row: Session = {
+    id: uuid(),
     user_id: userId,
     voice_id: voiceId,
     title,
@@ -133,23 +145,29 @@ export async function createSession(
     target_langs: targetLangs,
     status: "setup",
     live_session_id: null,
-    created_at: createdAt,
+    created_at: now(),
   };
+  await wrap(db).insert(schema.sessions).values(row).run();
+  return row;
 }
 
-export async function listSessions(db: D1Database, userId: string): Promise<Session[]> {
-  const { results } = await db
-    .prepare("SELECT * FROM sessions WHERE user_id=? ORDER BY created_at DESC")
-    .bind(userId)
-    .all<Session>();
-  return results;
+export async function listSessions(
+  db: D1Database,
+  userId: string,
+): Promise<Session[]> {
+  return await wrap(db).query.sessions.findMany({
+    where: eq(schema.sessions.user_id, userId),
+    orderBy: desc(schema.sessions.created_at),
+  });
 }
 
-export async function getSession(db: D1Database, id: string): Promise<Session | null> {
-  const row = await db
-    .prepare("SELECT * FROM sessions WHERE id=?")
-    .bind(id)
-    .first<Session>();
+export async function getSession(
+  db: D1Database,
+  id: string,
+): Promise<Session | null> {
+  const row = await wrap(db).query.sessions.findFirst({
+    where: eq(schema.sessions.id, id),
+  });
   return row ?? null;
 }
 
@@ -159,9 +177,10 @@ export async function updateSessionStatus(
   status: string,
   liveSessionId: string | null,
 ): Promise<void> {
-  await db
-    .prepare("UPDATE sessions SET status=?, live_session_id=? WHERE id=?")
-    .bind(status, liveSessionId, id)
+  await wrap(db)
+    .update(schema.sessions)
+    .set({ status, live_session_id: liveSessionId })
+    .where(eq(schema.sessions.id, id))
     .run();
 }
 
@@ -170,25 +189,32 @@ export async function updateSessionVoiceId(
   id: string,
   voiceId: string | null,
 ): Promise<void> {
-  await db
-    .prepare("UPDATE sessions SET voice_id=? WHERE id=?")
-    .bind(voiceId, id)
+  await wrap(db)
+    .update(schema.sessions)
+    .set({ voice_id: voiceId })
+    .where(eq(schema.sessions.id, id))
     .run();
 }
 
-export async function deleteSessionRow(db: D1Database, id: string): Promise<void> {
-  await db.prepare("DELETE FROM streams WHERE session_id=?").bind(id).run();
-  await db.prepare("DELETE FROM sessions WHERE id=?").bind(id).run();
+export async function deleteSessionRow(
+  db: D1Database,
+  id: string,
+): Promise<void> {
+  const d = wrap(db);
+  await d.delete(schema.streams).where(eq(schema.streams.session_id, id)).run();
+  await d.delete(schema.sessions).where(eq(schema.sessions.id, id)).run();
 }
 
 // ── streams ───────────────────────────────────────────────
 
-export async function listStreams(db: D1Database, sessionId: string): Promise<StreamRecord[]> {
-  const { results } = await db
-    .prepare("SELECT * FROM streams WHERE session_id=? ORDER BY platform, lang")
-    .bind(sessionId)
-    .all<StreamRecord>();
-  return results;
+export async function listStreams(
+  db: D1Database,
+  sessionId: string,
+): Promise<StreamRecord[]> {
+  return await wrap(db).query.streams.findMany({
+    where: eq(schema.streams.session_id, sessionId),
+    orderBy: [schema.streams.platform, schema.streams.lang],
+  });
 }
 
 export async function createStreamManual(
@@ -201,17 +227,8 @@ export async function createStreamManual(
   delayMs: number,
   hostGain: number,
 ): Promise<StreamRecord> {
-  const id = uuid();
-  const createdAt = now();
-  await db
-    .prepare(
-      `INSERT INTO streams (id, session_id, lang, platform, rtmp_url, stream_key, status, delay_ms, host_gain, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    )
-    .bind(id, sessionId, lang, platform, rtmpUrl, streamKey, "ready", delayMs, hostGain, createdAt)
-    .run();
-  return {
-    id,
+  const row: StreamRecord = {
+    id: uuid(),
     session_id: sessionId,
     lang,
     platform,
@@ -222,8 +239,10 @@ export async function createStreamManual(
     status: "ready",
     delay_ms: delayMs,
     host_gain: hostGain,
-    created_at: createdAt,
+    created_at: now(),
   };
+  await wrap(db).insert(schema.streams).values(row).run();
+  return row;
 }
 
 export async function updateStreamPlatform(
@@ -234,17 +253,27 @@ export async function updateStreamPlatform(
   streamKey: string,
   rtmpUrl: string,
 ): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE streams SET platform_broadcast_id=?, platform_stream_id=?, stream_key=?, rtmp_url=?, status='ready'
-       WHERE id=?`,
-    )
-    .bind(broadcastId, platformStreamId, streamKey, rtmpUrl, streamId)
+  await wrap(db)
+    .update(schema.streams)
+    .set({
+      platform_broadcast_id: broadcastId,
+      platform_stream_id: platformStreamId,
+      stream_key: streamKey,
+      rtmp_url: rtmpUrl,
+      status: "ready",
+    })
+    .where(eq(schema.streams.id, streamId))
     .run();
 }
 
-export async function deleteStreamRow(db: D1Database, streamId: string): Promise<void> {
-  await db.prepare("DELETE FROM streams WHERE id=?").bind(streamId).run();
+export async function deleteStreamRow(
+  db: D1Database,
+  streamId: string,
+): Promise<void> {
+  await wrap(db)
+    .delete(schema.streams)
+    .where(eq(schema.streams.id, streamId))
+    .run();
 }
 
 // ── platform credentials ──────────────────────────────────
@@ -253,11 +282,10 @@ export async function listCredentials(
   db: D1Database,
   userId: string,
 ): Promise<PlatformCredential[]> {
-  const { results } = await db
-    .prepare("SELECT * FROM platform_credentials WHERE user_id=? ORDER BY platform")
-    .bind(userId)
-    .all<PlatformCredential>();
-  return results;
+  return await wrap(db).query.platform_credentials.findMany({
+    where: eq(schema.platform_credentials.user_id, userId),
+    orderBy: schema.platform_credentials.platform,
+  });
 }
 
 export async function getCredential(
@@ -265,12 +293,12 @@ export async function getCredential(
   userId: string,
   platform: string,
 ): Promise<PlatformCredential | null> {
-  const row = await db
-    .prepare(
-      "SELECT * FROM platform_credentials WHERE user_id=? AND platform=?",
-    )
-    .bind(userId, platform)
-    .first<PlatformCredential>();
+  const row = await wrap(db).query.platform_credentials.findFirst({
+    where: and(
+      eq(schema.platform_credentials.user_id, userId),
+      eq(schema.platform_credentials.platform, platform),
+    ),
+  });
   return row ?? null;
 }
 
@@ -282,21 +310,37 @@ export async function upsertCredential(
   streamKey: string | null,
   displayName: string | null,
 ): Promise<PlatformCredential> {
+  const d = wrap(db);
   const id = uuid();
   const ts = now();
-  await db
-    .prepare(
-      `INSERT INTO platform_credentials
-         (id, user_id, platform, rtmp_url, stream_key, display_name, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?)
-       ON CONFLICT(user_id, platform) DO UPDATE SET
-         rtmp_url = excluded.rtmp_url,
-         stream_key = excluded.stream_key,
-         display_name = COALESCE(excluded.display_name, platform_credentials.display_name),
-         updated_at = excluded.updated_at`,
-    )
-    .bind(id, userId, platform, rtmpUrl, streamKey, displayName, ts, ts)
+  await d
+    .insert(schema.platform_credentials)
+    .values({
+      id,
+      user_id: userId,
+      platform,
+      rtmp_url: rtmpUrl,
+      stream_key: streamKey,
+      display_name: displayName,
+      created_at: ts,
+      updated_at: ts,
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.platform_credentials.user_id,
+        schema.platform_credentials.platform,
+      ],
+      set: {
+        rtmp_url: rtmpUrl,
+        stream_key: streamKey,
+        // Preserve prior display_name when the new one is null (matches the
+        // COALESCE behavior the hand-written SQL migration shipped with).
+        display_name: sql`COALESCE(${displayName}, ${schema.platform_credentials.display_name})`,
+        updated_at: ts,
+      },
+    })
     .run();
+
   const row = await getCredential(db, userId, platform);
   if (!row) throw new Error("credential upsert failed");
   return row;
@@ -307,8 +351,13 @@ export async function deleteCredentialRow(
   userId: string,
   platform: string,
 ): Promise<void> {
-  await db
-    .prepare("DELETE FROM platform_credentials WHERE user_id=? AND platform=?")
-    .bind(userId, platform)
+  await wrap(db)
+    .delete(schema.platform_credentials)
+    .where(
+      and(
+        eq(schema.platform_credentials.user_id, userId),
+        eq(schema.platform_credentials.platform, platform),
+      ),
+    )
     .run();
 }

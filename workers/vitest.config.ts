@@ -10,7 +10,6 @@ export default defineConfig(async () => {
   return {
     plugins: [
       cloudflareTest({
-        singleWorker: true,
         miniflare: {
           compatibilityDate: "2026-04-01",
           compatibilityFlags: ["nodejs_compat"],

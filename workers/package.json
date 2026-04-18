@@ -9,18 +9,23 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:check": "drizzle-kit check",
+    "db:studio": "drizzle-kit studio",
     "migrate:local": "wrangler d1 migrations apply brivva --local",
     "migrate:prod": "wrangler d1 migrations apply brivva --remote",
     "ops:migrate-session-rename:local": "wrangler d1 execute brivva --local --file=ops/live-session-id-migration.sql",
     "ops:migrate-session-rename:prod": "wrangler d1 execute brivva --remote --file=ops/live-session-id-migration.sql"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.8.5",
     "jose": "^5.9.6"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.14.7",
     "@cloudflare/workers-types": "^4.20251101.0",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.6.3",
     "vitest": "^4.1.4",
     "wrangler": "^4.0.0"
