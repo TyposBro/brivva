@@ -57,38 +57,46 @@ impl Lang {
 // ── Query params from frontend ────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct RoomQuery {
+pub struct SessionQuery {
     #[serde(rename = "sourceLang")]
     pub source_lang: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
-    /// JWT issued by Workers. Verified in `ws_handler`.
+    /// JWT issued by Workers. Verified in `session_ws_handler`.
     pub token: Option<String>,
 }
 
-// ── Room ──────────────────────────────────────────────────
+// ── Live Session Runtime ──────────────────────────────────
 
-pub struct Room {
+pub struct LiveSession {
     pub id: String,
     pub source_lang: Lang,
     pub host_tx: Option<mpsc::UnboundedSender<Message>>,
-    /// Cloned voice ID from ElevenLabs (None until clone completes)
-    pub voice_clone_id: Option<String>,
+    /// Voice ID currently selected for TTS. This can be a durable Workers
+    /// voice or a temporary per-room clone created by Fargate.
+    pub selected_voice_id: Option<String>,
+    /// Temporary clone created by Fargate from a live voice sample. This is
+    /// the only voice asset Fargate is allowed to delete on room close.
+    pub ephemeral_voice_id: Option<String>,
+    /// Prevent duplicate live voice-clone requests for the same room.
+    pub clone_in_progress: bool,
     /// Session ID from Workers (links to D1 session + streams)
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
-    pub rtmp_manager: Option<crate::ffmpeg::SharedRtmpManager>,
+    pub rtmp_manager: Option<crate::features::broadcast::data::ffmpeg::SharedRtmpManager>,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
 }
 
-impl Room {
+impl LiveSession {
     pub fn new(id: String, source_lang: Lang, session_id: Option<String>) -> Self {
         Self {
             id,
             source_lang,
             host_tx: None,
-            voice_clone_id: None,
+            selected_voice_id: None,
+            ephemeral_voice_id: None,
+            clone_in_progress: false,
             session_id,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
@@ -117,7 +125,7 @@ impl Room {
 
 // ── Shared State ──────────────────────────────────────────
 
-pub type Rooms = Arc<DashMap<String, Room>>;
+pub type LiveSessions = Arc<DashMap<String, LiveSession>>;
 
 // ── WebSocket Messages (server → client) ──────────────────
 
@@ -188,9 +196,9 @@ mod tests {
 
     #[test]
     fn active_langs_dedupes_and_preserves_first_seen_order() {
-        let mut room = Room::new("ROOM01".into(), Lang::En, Some("session-1".into()));
-        room.rtmp_langs = vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko];
+        let mut session = LiveSession::new("ROOM01".into(), Lang::En, Some("session-1".into()));
+        session.rtmp_langs = vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko];
 
-        assert_eq!(room.active_langs(), vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+        assert_eq!(session.active_langs(), vec![Lang::Ja, Lang::Ko, Lang::Zh]);
     }
 }

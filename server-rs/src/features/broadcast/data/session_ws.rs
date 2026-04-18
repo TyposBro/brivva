@@ -14,22 +14,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::AppState;
-use crate::auth;
-use crate::pipeline;
-use crate::types::{Lang, Room, RoomQuery};
-use crate::workers_api;
+use crate::features::broadcast::data::{auth, pipeline, workers_api};
+use crate::features::broadcast::domain::{Lang, LiveSession, ServerMsg, SessionQuery};
+use crate::orchestration::state::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no room codes.
-pub async fn ws_handler(
+pub async fn session_ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<RoomQuery>,
+    Query(query): Query<SessionQuery>,
     State(state): State<AppState>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_host_socket(socket, state, query))
 }
 
-async fn handle_host_socket(socket: WebSocket, state: AppState, query: RoomQuery) {
+async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQuery) {
     // Auth gate — host must present a valid Workers-signed JWT.
     let token = match query.token.as_deref() {
         Some(t) if !t.is_empty() => t,
@@ -64,8 +62,43 @@ async fn handle_host_socket(socket: WebSocket, state: AppState, query: RoomQuery
     .await;
 }
 
-fn generate_room_id() -> String {
+fn generate_live_session_id() -> String {
     Uuid::new_v4().to_string()[..6].to_uppercase()
+}
+
+fn next_available_live_session_id(live_sessions: &dashmap::DashMap<String, LiveSession>) -> String {
+    for _ in 0..16 {
+        let candidate = generate_live_session_id();
+        if !live_sessions.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+
+    loop {
+        let candidate = Uuid::new_v4().simple().to_string()[..10].to_uppercase();
+        if !live_sessions.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+fn reserve_ephemeral_voice_clone(
+    live_sessions: &dashmap::DashMap<String, LiveSession>,
+    live_session_id: &str,
+) -> Result<(), &'static str> {
+    let Some(mut live_session) = live_sessions.get_mut(live_session_id) else {
+        return Err("live session missing");
+    };
+
+    if live_session.clone_in_progress {
+        return Err("voice clone already in progress");
+    }
+    if live_session.ephemeral_voice_id.is_some() {
+        return Err("voice clone already created for this live session");
+    }
+
+    live_session.clone_in_progress = true;
+    Ok(())
 }
 
 // ── Host Flow ─────────────────────────────────────────────
@@ -78,13 +111,17 @@ async fn handle_host(
     source_lang: Lang,
     session_id: Option<String>,
 ) {
-    let rooms = state.rooms.clone();
-    let room_id = generate_room_id();
+    let live_sessions = state.live_sessions.clone();
+    let live_session_id = next_available_live_session_id(&live_sessions);
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
 
-    let mut room = Room::new(room_id.clone(), source_lang.clone(), session_id.clone());
-    room.host_tx = Some(host_tx);
+    let mut live_session = LiveSession::new(
+        live_session_id.clone(),
+        source_lang.clone(),
+        session_id.clone(),
+    );
+    live_session.host_tx = Some(host_tx);
 
     let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));
 
@@ -101,11 +138,11 @@ async fn handle_host(
                 }
 
                 if let Some(v) = bundle.voice {
-                    room.voice_clone_id = Some(v.elevenlabs_voice_id);
+                    live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
                 }
 
                 if !bundle.streams.is_empty() {
-                    let mut manager = crate::ffmpeg::RtmpManager::new();
+                    let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
                     let mut rtmp_langs = Vec::new();
                     for s in &bundle.streams {
                         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key)
@@ -132,27 +169,31 @@ async fn handle_host(
                         }
                     }
                     let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
-                    room.rtmp_manager = Some(shared_mgr.clone());
-                    room.rtmp_langs = rtmp_langs;
+                    live_session.rtmp_manager = Some(shared_mgr.clone());
+                    live_session.rtmp_langs = rtmp_langs;
                     eprintln!(
                         "[RTMP] Started {} FFmpeg streams for session {}, langs: {:?}",
                         bundle.streams.len(),
                         sid,
-                        room.rtmp_langs
+                        live_session.rtmp_langs
                     );
-                    let _health_monitor = crate::ffmpeg::spawn_health_monitor(
-                        shared_mgr,
-                        ffmpeg_monitor_stop.clone(),
-                    );
+                    let _health_monitor =
+                        crate::features::broadcast::data::ffmpeg::spawn_health_monitor(
+                            shared_mgr,
+                            ffmpeg_monitor_stop.clone(),
+                        );
                 }
 
                 // Best-effort status update — don't block WS on the write.
                 let sid_clone = sid.clone();
-                let rid_clone = room_id.clone();
+                let live_session_id_clone = live_session_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        workers_api::update_session_status(&sid_clone, "live", Some(&rid_clone))
-                            .await
+                    if let Err(e) = workers_api::update_session_status(
+                        &sid_clone,
+                        "live",
+                        Some(&live_session_id_clone),
+                    )
+                    .await
                     {
                         eprintln!("[WS] status→live failed: {}", e);
                     }
@@ -160,12 +201,12 @@ async fn handle_host(
             }
             Err(e) => {
                 eprintln!("[WS] failed to fetch session {}: {}", sid, e);
-                // Continue without RTMP — host still gets STT feedback.
+                return;
             }
         }
     }
 
-    rooms.insert(room_id.clone(), room);
+    live_sessions.insert(live_session_id.clone(), live_session);
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = host_rx.recv().await {
@@ -175,25 +216,25 @@ async fn handle_host(
         }
     });
 
-    let mut audio_tx: Option<mpsc::UnboundedSender<Vec<u8>>> = None;
+    let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
 
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(data) => {
                 if audio_tx.is_none() {
-                    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
                     audio_tx = Some(tx);
-                    let pipeline_rooms = rooms.clone();
-                    let pipeline_rid = room_id.clone();
+                    let pipeline_live_sessions = live_sessions.clone();
+                    let pipeline_live_session_id = live_session_id.clone();
                     let source_lang = source_lang.clone();
-                    let target_langs = rooms
-                        .get(&room_id)
+                    let target_langs = live_sessions
+                        .get(&live_session_id)
                         .map(|r| r.rtmp_langs.clone())
                         .unwrap_or_default();
                     tokio::spawn(async move {
                         pipeline::start_stt_pipelines(
-                            pipeline_rid,
-                            pipeline_rooms,
+                            pipeline_live_session_id,
+                            pipeline_live_sessions,
                             source_lang,
                             target_langs,
                             rx,
@@ -201,16 +242,18 @@ async fn handle_host(
                         .await;
                     });
                     eprintln!(
-                        "[HOST] First audio received, STT pipelines started for room {}",
-                        room_id
+                        "[HOST] First audio received, STT pipelines started for live session {}",
+                        live_session_id
                     );
                 }
                 if let Some(ref tx) = audio_tx {
-                    let _ = tx.send(data.to_vec());
+                    let _ = tx.try_send(data.to_vec());
                 }
                 // Also feed the per-stream RTMP mixer so delayed host audio
                 // is available to underlay the translated TTS.
-                let rtmp_mgr = rooms.get(&room_id).and_then(|r| r.rtmp_manager.clone());
+                let rtmp_mgr = live_sessions
+                    .get(&live_session_id)
+                    .and_then(|r| r.rtmp_manager.clone());
                 if let Some(mgr) = rtmp_mgr {
                     let bytes = data.to_vec();
                     tokio::spawn(async move {
@@ -228,8 +271,9 @@ async fn handle_host(
                         // Face video: push directly to FFmpeg. No preview, no guest broadcast.
                         Some("face:frame") => {
                             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
-                                let rtmp_mgr =
-                                    rooms.get(&room_id).and_then(|r| r.rtmp_manager.clone());
+                                let rtmp_mgr = live_sessions
+                                    .get(&live_session_id)
+                                    .and_then(|r| r.rtmp_manager.clone());
                                 if let Some(mgr) = rtmp_mgr {
                                     use base64::Engine;
                                     if let Ok(jpeg_bytes) =
@@ -247,14 +291,39 @@ async fn handle_host(
                                 if let Ok(pcm) =
                                     base64::engine::general_purpose::STANDARD.decode(pcm_b64)
                                 {
+                                    match reserve_ephemeral_voice_clone(
+                                        &live_sessions,
+                                        &live_session_id,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(message) => {
+                                            if let Some(live_session) =
+                                                live_sessions.get(&live_session_id)
+                                            {
+                                                live_session.send_to_host(Message::Text(
+                                                    serde_json::to_string(&ServerMsg::Error {
+                                                        message: message.to_string(),
+                                                    })
+                                                    .unwrap()
+                                                    .into(),
+                                                ));
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     eprintln!(
                                         "[VOICE_CLONE] received voice sample: {} bytes PCM",
                                         pcm.len()
                                     );
-                                    let rooms_clone = rooms.clone();
-                                    let rid = room_id.clone();
+                                    let live_sessions_clone = live_sessions.clone();
+                                    let target_live_session_id = live_session_id.clone();
                                     tokio::spawn(async move {
-                                        pipeline::clone_voice(pcm, &rooms_clone, &rid).await;
+                                        pipeline::clone_voice(
+                                            pcm,
+                                            &live_sessions_clone,
+                                            &target_live_session_id,
+                                        )
+                                        .await;
                                     });
                                 }
                             }
@@ -270,13 +339,13 @@ async fn handle_host(
 
     ffmpeg_monitor_stop.store(true, Ordering::Release);
 
-    if let Some((_, room)) = rooms.remove(&room_id) {
-        if let Some(manager) = room.rtmp_manager {
+    if let Some((_, live_session)) = live_sessions.remove(&live_session_id) {
+        if let Some(manager) = live_session.rtmp_manager {
             let mut mgr = manager.lock().await;
             mgr.stop_all().await;
         }
 
-        if let Some(sid) = room.session_id {
+        if let Some(sid) = live_session.session_id {
             tokio::spawn(async move {
                 if let Err(e) = workers_api::update_session_status(&sid, "ended", None).await {
                     eprintln!("[WS] status→ended failed: {}", e);
@@ -284,7 +353,7 @@ async fn handle_host(
             });
         }
 
-        if let Some(voice_id) = room.voice_clone_id {
+        if let Some(voice_id) = live_session.ephemeral_voice_id {
             tokio::spawn(async move {
                 pipeline::delete_cloned_voice(&voice_id).await;
             });
@@ -292,5 +361,56 @@ async fn handle_host(
     }
 
     send_task.abort();
-    eprintln!("Room {} closed", room_id);
+    eprintln!("Live session {} closed", live_session_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::broadcast::domain::Lang;
+
+    #[test]
+    fn reserve_ephemeral_voice_clone_allows_first_request_only() {
+        let live_sessions = dashmap::DashMap::new();
+        let mut live_session = LiveSession::new("ROOM01".into(), Lang::En, None);
+        live_session.selected_voice_id = Some("durable-voice".into());
+        live_sessions.insert("ROOM01".into(), live_session);
+
+        assert_eq!(
+            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
+            Ok(())
+        );
+        assert_eq!(
+            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
+            Err("voice clone already in progress")
+        );
+    }
+
+    #[test]
+    fn reserve_ephemeral_voice_clone_rejects_when_clone_exists() {
+        let live_sessions = dashmap::DashMap::new();
+        let mut live_session = LiveSession::new("ROOM01".into(), Lang::En, None);
+        live_session.ephemeral_voice_id = Some("temp-voice".into());
+        live_sessions.insert("ROOM01".into(), live_session);
+
+        assert_eq!(
+            reserve_ephemeral_voice_clone(&live_sessions, "ROOM01"),
+            Err("voice clone already created for this live session")
+        );
+    }
+
+    #[test]
+    fn next_available_live_session_id_skips_existing_entries() {
+        let live_sessions = dashmap::DashMap::new();
+        live_sessions.insert(
+            "ABC123".into(),
+            LiveSession::new("ABC123".into(), Lang::En, None),
+        );
+
+        for _ in 0..32 {
+            let id = next_available_live_session_id(&live_sessions);
+            assert_ne!(id, "ABC123");
+            assert!(!id.is_empty());
+        }
+    }
 }

@@ -182,7 +182,7 @@ async fn spawn_app() -> (String, server_rs::AppState, JoinHandle<()>) {
 async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if state.rooms.len() == expected {
+            if state.live_sessions.len() == expected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -231,17 +231,25 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
 
     let token = make_token("e2e-secret", "host-1");
     let ws_url = format!(
-        "{}/api/room?token={}&sessionId=session-1&sourceLang=en",
+        "{}/api/session?token={}&sessionId=session-1&sourceLang=en",
         app_url.replacen("http", "ws", 1),
         token
     );
     let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
     wait_for_room_count(&app_state, 1).await;
-    let room = app_state.rooms.iter().next().expect("room exists");
-    let room_id = room.key().clone();
-    assert_eq!(room.voice_clone_id.as_deref(), Some("voice-clone-123"));
-    drop(room);
+    let live_session = app_state
+        .live_sessions
+        .iter()
+        .next()
+        .expect("live session exists");
+    let runtime_id = live_session.key().clone();
+    assert_eq!(
+        live_session.selected_voice_id.as_deref(),
+        Some("voice-clone-123")
+    );
+    assert_eq!(live_session.ephemeral_voice_id, None);
+    drop(live_session);
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -276,7 +284,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
             .as_ref()
             .and_then(|b| b.get("room_id"))
             .and_then(Value::as_str),
-        Some(room_id.as_str())
+        Some(runtime_id.as_str())
     );
 
     assert_eq!(requests[2].method, "PATCH");
@@ -292,9 +300,9 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_room() {
         requests[2].body.as_ref().and_then(|b| b.get("room_id")),
         Some(&Value::Null)
     );
-    assert_eq!(room_id.len(), 6);
+    assert_eq!(runtime_id.len(), 6);
     assert!(
-        room_id
+        runtime_id
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     );
@@ -328,14 +336,14 @@ async fn sad_path_owner_mismatch_rejects_connection_before_room_creation() {
 
     let token = make_token("e2e-secret", "host-1");
     let ws_url = format!(
-        "{}/api/room?token={}&sessionId=session-1",
+        "{}/api/session?token={}&sessionId=session-1",
         app_url.replacen("http", "ws", 1),
         token
     );
     let (_socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(app_state.rooms.len(), 0);
+    assert_eq!(app_state.live_sessions.len(), 0);
 
     let requests = wait_for_requests(&workers_state, 1).await;
     assert_eq!(requests.len(), 1);
@@ -346,7 +354,7 @@ async fn sad_path_owner_mismatch_rejects_connection_before_room_creation() {
 }
 
 #[tokio::test]
-async fn edge_case_workers_fetch_failure_still_allows_basic_host_session() {
+async fn edge_case_workers_fetch_failure_rejects_before_room_creation() {
     let (_guard, workers_state, workers_server, app_url, app_state, app_server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (workers_url, workers_state, workers_server) = spawn_workers_mock("host-1", true).await;
@@ -368,37 +376,18 @@ async fn edge_case_workers_fetch_failure_still_allows_basic_host_session() {
 
     let token = make_token("e2e-secret", "host-1");
     let ws_url = format!(
-        "{}/api/room?token={}&sessionId=session-1",
+        "{}/api/session?token={}&sessionId=session-1",
         app_url.replacen("http", "ws", 1),
         token
     );
-    let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
+    let (_socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
-    wait_for_room_count(&app_state, 1).await;
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            "host:end".into(),
-        ))
-        .await
-        .expect("send host:end");
-    wait_for_room_count(&app_state, 0).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(app_state.live_sessions.len(), 0);
 
-    let requests = wait_for_requests(&workers_state, 2).await;
+    let requests = wait_for_requests(&workers_state, 1).await;
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[1].method, "PATCH");
-    assert_eq!(
-        requests[1]
-            .body
-            .as_ref()
-            .and_then(|b| b.get("status"))
-            .and_then(Value::as_str),
-        Some("ended")
-    );
-    assert_eq!(
-        requests.len(),
-        2,
-        "fetch failure should avoid live status update"
-    );
 
     app_server.abort();
     workers_server.abort();

@@ -50,7 +50,7 @@ async fn spawn_app() -> (String, server_rs::AppState, JoinHandle<()>) {
 async fn wait_for_room_count(state: &server_rs::AppState, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if state.rooms.len() == expected {
+            if state.live_sessions.len() == expected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -87,13 +87,13 @@ async fn websocket_without_token_is_rejected_and_never_creates_room() {
     };
 
     let ws_url = format!(
-        "{}/api/room?sourceLang=en",
+        "{}/api/session?sourceLang=en",
         base_url.replacen("http", "ws", 1)
     );
     let (_socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(state.rooms.len(), 0);
+    assert_eq!(state.live_sessions.len(), 0);
 
     server.abort();
 }
@@ -111,16 +111,23 @@ async fn websocket_with_valid_token_uses_default_en_for_invalid_source_lang() {
 
     let token = make_token("integration-secret", "host-1");
     let ws_url = format!(
-        "{}/api/room?token={}&sourceLang=fr",
+        "{}/api/session?token={}&sourceLang=fr",
         base_url.replacen("http", "ws", 1),
         token
     );
     let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
 
     wait_for_room_count(&state, 1).await;
-    let room = state.rooms.iter().next().expect("room exists");
-    assert_eq!(room.source_lang, server_rs::types::Lang::En);
-    drop(room);
+    let live_session = state
+        .live_sessions
+        .iter()
+        .next()
+        .expect("live session exists");
+    assert_eq!(
+        live_session.source_lang,
+        server_rs::features::broadcast::domain::Lang::En
+    );
+    drop(live_session);
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(

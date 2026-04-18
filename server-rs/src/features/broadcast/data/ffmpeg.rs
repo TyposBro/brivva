@@ -235,7 +235,6 @@ impl RtmpManager {
                 while q.len() > TTS_QUEUE_CAP_BYTES {
                     q.pop_front();
                 }
-                return;
             }
         }
     }
@@ -249,7 +248,6 @@ impl RtmpManager {
                 if let Some(cap) = &stream.caption {
                     cap.push(&text);
                 }
-                return;
             }
         }
     }
