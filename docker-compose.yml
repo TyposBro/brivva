@@ -1,0 +1,52 @@
+name: brivva
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server-rs/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - STT_HOST=stt-wrapper
+      - STT_PORT=8766
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - GOOGLE_TRANSLATE_API_KEY=${GOOGLE_TRANSLATE_API_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-https://brivva-server.milliytechnology.org/auth/youtube/callback}
+      - FRONTEND_URL=${FRONTEND_URL:-https://brivva.pages.dev}
+      - DATABASE_URL=sqlite:/data/brivva.db?mode=rwc
+    volumes:
+      - db-data:/data
+    depends_on:
+      - stt-wrapper
+    restart: unless-stopped
+
+  stt-wrapper:
+    build: ./stt-wrapper
+    ports:
+      - "8766:8766"
+    environment:
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+    restart: unless-stopped
+
+  # Local RTMP server for testing (no YouTube needed)
+  # View streams: ffplay rtmp://localhost:1935/live/{lang}
+  rtmp:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "1935:1935"   # RTMP
+      - "8554:8554"   # RTSP
+      - "8888:8888"   # HLS
+      - "8889:8889"   # WebRTC HTTP
+      - "8189:8189/udp"  # WebRTC ICE/UDP
+    environment:
+      # Advertise host IP so browser WebRTC can connect
+      - MTX_WEBRTCADDITIONALHOSTS=127.0.0.1
+    restart: unless-stopped
+    profiles:
+      - local-test
+
+volumes:
+  db-data:

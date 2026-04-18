@@ -1,0 +1,7 @@
+# GPU override — use with: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+services:
+  nllb:
+    build:
+      context: ./nllb
+      dockerfile: Dockerfile.gpu
+    runtime: nvidia
