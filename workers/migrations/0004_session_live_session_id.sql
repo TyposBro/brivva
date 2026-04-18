@@ -1,5 +1,3 @@
-ALTER TABLE sessions ADD COLUMN live_session_id TEXT;
-
-UPDATE sessions
-SET live_session_id = room_id
-WHERE room_id IS NOT NULL;
+-- Historical placeholder kept to preserve migration ordering after the
+-- live-session naming rewrite was folded into the base schema.
+SELECT 1;

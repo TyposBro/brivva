@@ -85,17 +85,17 @@ export default function HomePage() {
                   Audience
                 </span>
                 <h3 className="font-headline font-bold text-xl text-on-surface">
-                  Join Room
+                  Resume Session
                 </h3>
               </div>
               <div className="space-y-3">
                 <input
                   className="w-full bg-surface-container-highest border-none rounded-lg px-4 py-3 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label outline-none"
-                  placeholder="Enter Room Code"
+                  placeholder="Enter Session ID"
                   type="text"
                 />
                 <button className="w-full bg-on-surface text-surface py-3 rounded-lg font-headline font-extrabold hover:opacity-90 transition-opacity uppercase tracking-tighter flex items-center justify-center gap-2">
-                  Join <ArrowRight className="w-4 h-4" />
+                  Resume <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
