@@ -24,7 +24,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
 
 /// Audio waiting to be played at the right point in the delayed timeline
-struct QueuedAudio {
+pub(crate) struct QueuedAudio {
     /// Source timestamp when this utterance started (host speaking)
     play_at: Instant,
     /// Raw PCM s16le 44100Hz mono

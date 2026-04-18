@@ -1,7 +1,6 @@
 mod db;
 mod ffmpeg;
 mod pipeline;
-mod platform;
 mod room;
 mod routes;
 mod types;

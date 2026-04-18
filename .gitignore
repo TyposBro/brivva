@@ -10,7 +10,8 @@ coverage/
 # Rust
 target/
 
-# Python ML services
-.venv/
-__pycache__/
-*.pyc
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
