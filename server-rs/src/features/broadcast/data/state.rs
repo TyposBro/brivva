@@ -20,6 +20,10 @@ pub struct BroadcastState {
     pub soniox_ws_url: String,
     pub elevenlabs_api_key: String,
     pub elevenlabs_base_url: String,
+    /// Kill-switch: force default voice library, skip cloning. See runbook.
+    pub force_default_voice: bool,
+    /// Kill-switch: downgrade rtmps:// to rtmp:// at FFmpeg spawn. See runbook.
+    pub force_rtmp_not_rtmps: bool,
 }
 
 impl BroadcastState {
@@ -33,6 +37,8 @@ impl BroadcastState {
             soniox_ws_url: String::new(),
             elevenlabs_api_key: String::new(),
             elevenlabs_base_url: String::new(),
+            force_default_voice: false,
+            force_rtmp_not_rtmps: false,
         }
     }
 }

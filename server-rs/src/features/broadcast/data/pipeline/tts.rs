@@ -18,20 +18,28 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
     let tts_deadline = Duration::from_secs(5);
 
-    let Some((api_key, base_url)) = req.handle.sessions.get(&req.handle.id).map(|s| {
-        (
-            s.pipeline_config.elevenlabs_api_key.clone(),
-            s.pipeline_config.elevenlabs_base_url.clone(),
-        )
-    }) else {
+    let Some((api_key, base_url, force_default_voice)) =
+        req.handle.sessions.get(&req.handle.id).map(|s| {
+            (
+                s.pipeline_config.elevenlabs_api_key.clone(),
+                s.pipeline_config.elevenlabs_base_url.clone(),
+                s.pipeline_config.force_default_voice,
+            )
+        })
+    else {
         return;
     };
 
-    let is_cloned = req.selected_voice_id.is_some();
-    let voice_id = req
-        .selected_voice_id
-        .clone()
-        .unwrap_or_else(|| req.target_lang.voice_id().to_string());
+    // Kill-switch: BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1 skips the cloned voice
+    // regardless of whether the session bundle supplied one. See runbook.
+    let is_cloned = req.selected_voice_id.is_some() && !force_default_voice;
+    let voice_id = if is_cloned {
+        req.selected_voice_id
+            .clone()
+            .unwrap_or_else(|| req.target_lang.voice_id().to_string())
+    } else {
+        req.target_lang.voice_id().to_string()
+    };
     let model_id = if is_cloned {
         "eleven_multilingual_v2"
     } else {

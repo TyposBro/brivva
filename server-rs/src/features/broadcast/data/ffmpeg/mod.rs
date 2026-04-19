@@ -14,16 +14,16 @@
 //!   Fargate reads via the session bundle.
 
 mod caption;
+mod drain;
 mod mixer;
 mod orphan;
 
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
 use caption::CaptionState;
-use mixer::{apply_gain, mix_pcm_s16le};
+use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -32,12 +32,6 @@ use std::time::{Duration, Instant};
 
 // ── Timing + format constants ─────────────────────────────
 
-/// Video: 33.33 ms per frame at 30 fps.
-const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
-/// Audio: 20 ms per tick.
-const AUDIO_TICK: Duration = Duration::from_millis(20);
-/// Audio bytes per 20 ms at 44.1 kHz mono s16le: 1764.
-const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// Cap the host audio delay buffer per stream at ~20 s of samples.
 /// (Prevents unbounded growth if the drain thread falls behind.)
 const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
@@ -118,17 +112,6 @@ struct StreamSpawnArgs {
     is_source: bool,
     host_gain: f32,
     existing_buffers: Option<StreamBuffers>,
-}
-
-struct AudioDrainCtx {
-    stream_id: String,
-    host_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    tts_queue: Arc<StdMutex<VecDeque<u8>>>,
-    fifo_path: String,
-    delay: Duration,
-    is_source: bool,
-    host_gain: f32,
-    stop: Arc<AtomicBool>,
 }
 
 impl Default for RtmpManager {
@@ -242,9 +225,7 @@ impl RtmpManager {
     }
 
     /// Scan for crashed FFmpeg processes and surface the restart context.
-    pub(crate) fn detect_crashed(
-        &mut self,
-    ) -> Vec<CrashedStreamSnapshot> {
+    pub(crate) fn detect_crashed(&mut self) -> Vec<CrashedStreamSnapshot> {
         let mut to_restart = Vec::new();
 
         for (id, stream) in &mut self.streams {
@@ -572,246 +553,3 @@ pub fn spawn_health_monitor(
         }
     })
 }
-
-// ── Video drain ────────────────────────────────────────────
-//
-// Emit at exactly 30 fps. Each tick: drain every video chunk that has aged
-// past `delay`, keep the latest one, then write it (or repeat the previous
-// frame if nothing is ready yet).
-
-struct VideoDrainCtx {
-    stream_id: String,
-    video_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    stdin: std::process::ChildStdin,
-    delay: Duration,
-    stop: Arc<AtomicBool>,
-}
-
-fn video_drain_loop(ctx: VideoDrainCtx) {
-    let VideoDrainCtx {
-        stream_id,
-        video_buf,
-        mut stdin,
-        delay,
-        stop,
-    } = ctx;
-    let mut last_frame: Option<Vec<u8>> = None;
-    let mut tick_count: u64 = 0;
-    let mut next_tick = Instant::now() + FRAME_INTERVAL;
-
-    eprintln!(
-        "[VIDEO:{}] drain started (30 fps, delay={}ms)",
-        stream_id,
-        delay.as_millis()
-    );
-
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-
-        let now = Instant::now();
-        if next_tick > now {
-            thread::sleep(next_tick - now);
-        }
-        let actual = Instant::now();
-        next_tick += FRAME_INTERVAL;
-        tick_count += 1;
-
-        // Drain any chunk whose delay has elapsed; keep the newest one.
-        let ready = {
-            let mut buf = video_buf.lock().unwrap();
-            let mut latest: Option<Vec<u8>> = None;
-            while let Some((ts, _)) = buf.front() {
-                if *ts + delay <= actual {
-                    let (_, f) = buf.pop_front().unwrap();
-                    latest = Some(f);
-                } else {
-                    break;
-                }
-            }
-            latest
-        };
-
-        let to_write = match ready {
-            Some(f) => {
-                last_frame = Some(f.clone());
-                Some(f)
-            }
-            None => last_frame.clone(),
-        };
-
-        if let Some(f) = to_write && stdin.write_all(&f).is_err() {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[VIDEO:{}] write error, exiting", stream_id);
-            }
-            break;
-        }
-        // else: startup, no frames yet — skip writing this tick.
-    }
-
-    drop(stdin);
-    eprintln!(
-        "[VIDEO:{}] drain exited after {} ticks",
-        stream_id, tick_count
-    );
-}
-
-// ── Audio drain + mixer ────────────────────────────────────
-//
-// Emit PCM s16le @ 44.1 kHz mono at 20 ms ticks. Each tick:
-// 1. Ingest any delayed host-audio chunks into `ready_host`.
-// 2. Take up to 1764 bytes host + 1764 bytes TTS (pad with silence).
-// 3. `output = clip(host × host_gain + tts × 1.0)`. Source streams use
-//    host_gain=1.0 and never receive TTS, so the mix collapses to the
-//    host passthrough.
-// 4. Write to the FFmpeg FIFO.
-
-fn audio_drain_loop(ctx: AudioDrainCtx) {
-    let AudioDrainCtx {
-        stream_id,
-        host_buf,
-        tts_queue,
-        fifo_path,
-        delay,
-        is_source,
-        host_gain,
-        stop,
-    } = ctx;
-
-    let mut fifo = match open_audio_fifo(&fifo_path, &stream_id, &stop) {
-        Some(f) => f,
-        None => return,
-    };
-
-    let silence_chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
-    let mut ready_host: Vec<u8> = Vec::with_capacity(AUDIO_BYTES_PER_TICK * 4);
-    let mut tick_count: u64 = 0;
-    let mut next_tick = Instant::now() + AUDIO_TICK;
-
-    eprintln!(
-        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2})",
-        stream_id,
-        delay.as_millis(),
-        is_source,
-        host_gain
-    );
-
-    while !stop.load(Ordering::Acquire) {
-        let actual = wait_for_tick(&mut next_tick);
-        tick_count += 1;
-
-        drain_aged_host_audio(DrainHostArgs {
-            host_buf: &host_buf,
-            ready_host: &mut ready_host,
-            now: actual,
-            delay,
-        });
-        let host_chunk = take_tick_sample(&mut ready_host);
-        let output = build_tick_output(TickOutputArgs {
-            host_chunk,
-            is_source,
-            host_gain,
-            tts_queue: &tts_queue,
-        });
-
-        let bytes = if output.is_empty() { &silence_chunk } else { &output };
-        if fifo.write_all(bytes).is_err() {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] write error, exiting", stream_id);
-            }
-            break;
-        }
-    }
-
-    drop(fifo);
-    eprintln!(
-        "[AUDIO:{}] drain exited after {} ticks",
-        stream_id, tick_count
-    );
-}
-
-fn open_audio_fifo(path: &str, stream_id: &str, stop: &AtomicBool) -> Option<std::fs::File> {
-    match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
-            }
-            None
-        }
-    }
-}
-
-fn wait_for_tick(next_tick: &mut Instant) -> Instant {
-    let now = Instant::now();
-    if *next_tick > now {
-        thread::sleep(*next_tick - now);
-    }
-    let actual = Instant::now();
-    *next_tick += AUDIO_TICK;
-    actual
-}
-
-struct DrainHostArgs<'a> {
-    host_buf: &'a StdMutex<VecDeque<TimedChunk>>,
-    ready_host: &'a mut Vec<u8>,
-    now: Instant,
-    delay: Duration,
-}
-
-fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
-    let mut buf = args.host_buf.lock().unwrap();
-    while let Some((ts, _)) = buf.front() {
-        if *ts + args.delay <= args.now {
-            let (_, pcm) = buf.pop_front().unwrap();
-            args.ready_host.extend_from_slice(&pcm);
-        } else {
-            break;
-        }
-    }
-}
-
-fn take_tick_sample(ready_host: &mut Vec<u8>) -> Vec<u8> {
-    let take = AUDIO_BYTES_PER_TICK.min(ready_host.len());
-    let mut chunk: Vec<u8> = ready_host.drain(..take).collect();
-    if chunk.len() < AUDIO_BYTES_PER_TICK {
-        chunk.resize(AUDIO_BYTES_PER_TICK, 0);
-    }
-    chunk
-}
-
-struct TickOutputArgs<'a> {
-    host_chunk: Vec<u8>,
-    is_source: bool,
-    host_gain: f32,
-    tts_queue: &'a StdMutex<VecDeque<u8>>,
-}
-
-fn build_tick_output(args: TickOutputArgs<'_>) -> Vec<u8> {
-    let TickOutputArgs {
-        host_chunk,
-        is_source,
-        host_gain,
-        tts_queue,
-    } = args;
-    if is_source {
-        // Source streams never queue TTS — skip the mix entirely.
-        if (host_gain - 1.0).abs() < f32::EPSILON {
-            host_chunk
-        } else {
-            apply_gain(&host_chunk, host_gain)
-        }
-    } else {
-        let mut tts_padded: Vec<u8> = {
-            let mut q = tts_queue.lock().unwrap();
-            let n = AUDIO_BYTES_PER_TICK.min(q.len());
-            q.drain(..n).collect()
-        };
-        if tts_padded.len() < AUDIO_BYTES_PER_TICK {
-            tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
-        }
-        mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0)
-    }
-}
-

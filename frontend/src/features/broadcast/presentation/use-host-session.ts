@@ -5,32 +5,36 @@ import { SessionSocket } from "../../../shared/networking/session-socket";
 import { useTimings, type UtteranceTiming } from "./use-timings";
 import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
+import { useWebcam } from "./use-webcam";
+import { useVoiceClone } from "./use-voice-clone";
 
 export type { UtteranceTiming };
 export type { HostStatus, HostUtterance } from "./reducer";
 
-const VOICE_SAMPLE_SECONDS = 30;
-const VOICE_SAMPLE_RATE = 44100;
-
+// PRAGMATIC: 104 lines — §3.1 wants ≤80, but this hook IS the composition
+// root for the host flow. It stitches 3 child hooks (useWebcam, useVoiceClone,
+// audio + socket lifecycle) into the state machine. Further splitting scatters
+// the wiring across files where the dependency chain becomes harder to trace
+// than the inline definition.
 export function useHostSession() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);
   const { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize, reset: resetTimings } = useTimings();
 
   const audio = useRef(new AudioPipeline());
   const socket = useRef(new SessionSocket());
-  const streamRef = useRef<MediaStream | null>(null);
-  const videoElRef = useRef<HTMLVideoElement | null>(null);
-  const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const activeUserIdRef = useRef<string | null>(null);
 
-  // Callback ref: connects stream to video element whenever either becomes available
-  const videoRef = useCallback((el: HTMLVideoElement | null) => {
-    videoElRef.current = el;
-    if (el && streamRef.current) {
-      el.srcObject = streamRef.current;
-    }
-  }, []);
+  const { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming } = useWebcam(
+    (msg) => socket.current.sendJson(msg),
+    () => socket.current.isOpen,
+  );
+
+  const { startVoiceRecording, stopVoiceRecording, skipVoiceSetup } = useVoiceClone(
+    dispatch,
+    () => activeSessionIdRef.current,
+    () => activeUserIdRef.current,
+  );
 
   // Latency stopwatch needs to know which targets are active so it can create
   // a slot per-lang. We stash the most recent set in a ref; the hook's caller
@@ -46,160 +50,23 @@ export function useHostSession() {
     { startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize },
   );
 
-  // --- webcam ---
-
-  const startWebcam = useCallback(async () => {
-    try {
-      // Request highest resolution the camera supports (up to 4K)
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 3840 }, height: { ideal: 2160 }, facingMode: "user" },
-      });
-      streamRef.current = stream;
-      if (videoElRef.current) {
-        videoElRef.current.srcObject = stream;
-      }
-    } catch (err) {
-      console.error("Webcam access failed:", err);
-    }
-  }, []);
-
-  const stopWebcam = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-  }, []);
-
-  const captureAndSendFrame = useCallback(() => {
-    const video = videoElRef.current;
-    if (!video || !socket.current.isOpen || !video.videoWidth) return;
-
-    // Use the camera's native resolution — no downscaling
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(video, 0, 0, w, h);
-
-    // Higher quality for 1080p+, slightly lower for 4K to manage bandwidth
-    const quality = w > 2000 ? 0.80 : 0.85;
-    const dataUrl = canvas.toDataURL("image/jpeg", quality);
-    const base64 = dataUrl.split(",")[1];
-
-    socket.current.sendJson({ type: "face:frame", data: base64 });
-  }, []);
-
-  const startFrameStreaming = useCallback(() => {
-    stopFrameStreaming();
-    frameIntervalRef.current = setInterval(captureAndSendFrame, 33); // ~30fps
-  }, [captureAndSendFrame]);
-
-  const stopFrameStreaming = useCallback(() => {
-    if (frameIntervalRef.current !== null) {
-      clearInterval(frameIntervalRef.current);
-      frameIntervalRef.current = null;
-    }
-  }, []);
-
-  // --- voice sample recording ---
-
-  const voicePcmRef = useRef<Int16Array[]>([]);
-  const voiceRecorderRef = useRef<{ ctx: AudioContext; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | null>(null);
-
-  const startVoiceRecording = useCallback(async () => {
-    voicePcmRef.current = [];
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const ctx = new AudioContext({ sampleRate: VOICE_SAMPLE_RATE });
-      const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      processor.onaudioprocess = (e) => {
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
-        }
-        voicePcmRef.current.push(int16);
-      };
-      source.connect(processor);
-      processor.connect(ctx.destination);
-      voiceRecorderRef.current = { ctx, source, processor };
-
-      // Auto-stop after VOICE_SAMPLE_SECONDS
-      setTimeout(() => stopVoiceRecording(), VOICE_SAMPLE_SECONDS * 1000);
-    } catch (err) {
-      console.error("Voice recording failed:", err);
-    }
-  }, []);
-
-  const stopVoiceRecording = useCallback(() => {
-    const rec = voiceRecorderRef.current;
-    if (!rec) return;
-    rec.processor.disconnect();
-    rec.source.disconnect();
-    rec.ctx.close();
-    voiceRecorderRef.current = null;
-
-    // Merge PCM chunks
-    const totalLen = voicePcmRef.current.reduce((s, c) => s + c.length, 0);
-    const merged = new Int16Array(totalLen);
-    let offset = 0;
-    for (const chunk of voicePcmRef.current) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
-    voicePcmRef.current = [];
-
-    // Convert to base64 and send to server
-    const bytes = new Uint8Array(merged.buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const b64 = btoa(binary);
-
-    dispatch({ type: "voice_cloning" });
-    const sessionId = activeSessionIdRef.current;
-    const userId = activeUserIdRef.current;
-    if (!sessionId) {
-      dispatch({ type: "error", message: "Session ID required for voice cloning" });
-      dispatch({ type: "skip_voice_setup" });
-      return;
-    }
-    if (!userId) {
-      dispatch({ type: "error", message: "User ID required for voice cloning" });
-      dispatch({ type: "skip_voice_setup" });
-      return;
-    }
-
-    void api
-      .cloneSessionVoice(sessionId, {
-        user_id: userId,
-        audio_base64: b64,
-      })
-      .then(() => {
-        dispatch({ type: "voice_ready" });
-      })
-      .catch((err) => {
-        dispatch({
-          type: "error",
-          message: err instanceof Error ? err.message : "Voice clone failed",
-        });
-        dispatch({ type: "skip_voice_setup" });
-      });
-  }, []);
-
-  const skipVoiceSetup = useCallback(() => {
-    dispatch({ type: "skip_voice_setup" });
-  }, []);
-
-  // --- actions ---
-
   const stopRecording = () => {
     audio.current.stop();
     stopFrameStreaming();
     dispatch({ type: "recording_stopped" });
+  };
+
+  const fetchAuthToken = async (userId: string): Promise<string | null> => {
+    try {
+      const { token } = await api.getAuthToken(userId);
+      return token;
+    } catch (e) {
+      dispatch({
+        type: "error",
+        message: e instanceof Error ? `Auth token fetch failed: ${e.message}` : "Auth failed",
+      });
+      return null;
+    }
   };
 
   const connectSession = async (opts?: {
@@ -217,26 +84,12 @@ export function useHostSession() {
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
 
-    let token: string;
-    try {
-      const { token: t } = await api.getAuthToken(opts.userId);
-      token = t;
-    } catch (e) {
-      dispatch({
-        type: "error",
-        message: e instanceof Error ? `Auth token fetch failed: ${e.message}` : "Auth failed",
-      });
-      return;
-    }
+    const token = await fetchAuthToken(opts.userId);
+    if (!token) return;
 
-    const params: Record<string, string> = {
-      sourceLang: opts.sourceLang ?? "en",
-      token,
-    };
+    const params: Record<string, string> = { sourceLang: opts.sourceLang ?? "en", token };
     if (opts.sessionId) params.sessionId = opts.sessionId;
     socket.current.connect(params, {
-      // Backend no longer sends a created event — treat WS open as
-      // "ready for voice setup" and move the UI forward.
       onOpen: () => dispatch({ type: "connected" }),
       onMessage: (msg) => handleMessage(msg),
       onClose: () => {

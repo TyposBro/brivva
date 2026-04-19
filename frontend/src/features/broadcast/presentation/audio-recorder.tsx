@@ -91,18 +91,20 @@ function startDrawLoop(
   const draw = () => {
     animRef.current = requestAnimationFrame(draw);
     analyser.getByteFrequencyData(dataArray);
-    drawBars(ctx, canvas, dataArray, bufferLength);
+    drawBars({ ctx, canvas, data: dataArray, length: bufferLength });
   };
 
   draw();
 }
 
-function drawBars(
-  ctx: CanvasRenderingContext2D,
-  canvas: HTMLCanvasElement,
-  data: Uint8Array,
-  length: number
-) {
+interface DrawBarsArgs {
+  ctx: CanvasRenderingContext2D;
+  canvas: HTMLCanvasElement;
+  data: Uint8Array;
+  length: number;
+}
+
+function drawBars({ ctx, canvas, data, length }: DrawBarsArgs) {
   ctx.fillStyle = "#131313";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 

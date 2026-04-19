@@ -87,8 +87,7 @@ fn internal_session_status_patch_schema_matches_server_rs_payload() {
     assert!(update["properties"]["live_session_id"].is_object());
 
     let patch = &spec["paths"]["/internal/sessions/{id}"]["patch"];
-    let request_schema =
-        &patch["requestBody"]["content"]["application/json"]["schema"]["$ref"];
+    let request_schema = &patch["requestBody"]["content"]["application/json"]["schema"]["$ref"];
     assert_eq!(
         request_schema.as_str(),
         Some("#/components/schemas/InternalSessionStatusUpdate")

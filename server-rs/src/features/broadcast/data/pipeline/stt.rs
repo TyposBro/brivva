@@ -21,10 +21,7 @@ pub struct PipelineSession {
     pub config: Arc<PipelineConfig>,
 }
 
-pub async fn start_stt_pipelines(
-    session: PipelineSession,
-    audio_rx: mpsc::Receiver<Vec<u8>>,
-) {
+pub async fn start_stt_pipelines(session: PipelineSession, audio_rx: mpsc::Receiver<Vec<u8>>) {
     if session.config.soniox_api_key.is_empty() {
         eprintln!("[STT] SONIOX_API_KEY not set — STT pipeline disabled");
         return;
@@ -181,8 +178,10 @@ mod tests {
 
     #[test]
     fn dedupe_collapses_duplicates_preserving_first_seen_order() {
-        let targets =
-            dedupe_target_langs(Lang::En, vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko]);
+        let targets = dedupe_target_langs(
+            Lang::En,
+            vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko],
+        );
         assert_eq!(targets, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
     }
 

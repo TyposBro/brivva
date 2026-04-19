@@ -66,16 +66,22 @@ mod tests {
 
     #[test]
     fn verify_accepts_valid_token() {
-        let claims = verify(&make_token("test-secret", JWT_ISSUER, JWT_AUDIENCE), "test-secret")
-            .expect("valid jwt should verify");
+        let claims = verify(
+            &make_token("test-secret", JWT_ISSUER, JWT_AUDIENCE),
+            "test-secret",
+        )
+        .expect("valid jwt should verify");
 
         assert_eq!(claims.sub, "user-123");
     }
 
     #[test]
     fn verify_rejects_wrong_audience() {
-        let err = verify(&make_token("test-secret", JWT_ISSUER, "wrong-audience"), "test-secret")
-            .expect_err("verify should fail for wrong aud");
+        let err = verify(
+            &make_token("test-secret", JWT_ISSUER, "wrong-audience"),
+            "test-secret",
+        )
+        .expect_err("verify should fail for wrong aud");
 
         assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
     }

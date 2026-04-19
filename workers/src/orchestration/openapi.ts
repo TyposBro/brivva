@@ -381,6 +381,227 @@ function getOperation(summary: string, responses: Record<string, unknown>, extra
   };
 }
 
+function userPaths() {
+  return {
+    "/api/user": {
+      get: getOperation("Get or create user profile", {
+        200: jsonResponse(ref("UserInfo"), "User profile"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+    },
+  };
+}
+
+function voicePaths() {
+  return {
+    "/api/voices": {
+      get: getOperation("List saved voices", {
+        200: jsonResponse(ref("ListVoicesResponse"), "Voice list"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+      post: getOperation("Create voice clone", {
+        200: jsonResponse(ref("Voice"), "Created voice"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("CreateVoiceRequest")),
+      }),
+    },
+    "/api/voices/{id}": {
+      delete: getOperation("Delete voice clone", {
+        200: jsonResponse(ref("StatusResponse"), "Delete status"),
+        404: jsonResponse(ref("ErrorResponse"), "Voice not found"),
+      }, {
+        parameters: [pathParam("id", "Voice id")],
+      }),
+    },
+  };
+}
+
+function credentialPaths() {
+  return {
+    "/api/credentials": {
+      get: getOperation("List saved platform credentials", {
+        200: jsonResponse(ref("ListCredentialsResponse"), "Credential list"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+      post: getOperation("Save platform credential", {
+        200: jsonResponse(ref("PlatformCredential"), "Saved credential"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("SaveCredentialRequest")),
+      }),
+      delete: getOperation("Delete platform credential", {
+        200: jsonResponse(ref("StatusResponse"), "Delete status"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id"), queryParam("platform")],
+      }),
+    },
+  };
+}
+
+function sessionPaths() {
+  return {
+    "/api/sessions": {
+      get: getOperation("List sessions for user", {
+        200: jsonResponse(ref("ListSessionsResponse"), "Session list"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+      post: getOperation("Create broadcast session", {
+        200: jsonResponse(ref("CreateSessionResponse"), "Created session and streams"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("CreateSessionRequest")),
+      }),
+    },
+    "/api/sessions/{id}": {
+      get: getOperation("Get session with streams", {
+        200: jsonResponse(ref("GetSessionResponse"), "Session detail"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+      }),
+      delete: getOperation("Delete session", {
+        200: jsonResponse(ref("StatusResponse"), "Delete status"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+      }),
+    },
+    "/api/sessions/{id}/voice": {
+      post: getOperation("Clone voice for session host", {
+        200: jsonResponse(ref("CloneSessionVoiceResponse"), "Cloned voice"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+        403: jsonResponse(ref("ErrorResponse"), "Forbidden"),
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+        requestBody: jsonBody(ref("CloneSessionVoiceRequest")),
+      }),
+    },
+    "/api/sessions/{id}/streams": {
+      post: getOperation("Add RTMP stream to session", {
+        200: jsonResponse(ref("Stream"), "Created stream"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+        requestBody: jsonBody(ref("AddStreamRequest")),
+      }),
+    },
+    "/api/sessions/{session_id}/streams/{stream_id}": {
+      delete: getOperation("Remove RTMP stream from session", {
+        200: jsonResponse(ref("StatusResponse"), "Delete status"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [
+          pathParam("session_id", "Session id"),
+          pathParam("stream_id", "Stream id"),
+        ],
+      }),
+    },
+  };
+}
+
+function authPaths() {
+  return {
+    "/auth/youtube": {
+      get: getOperation("Redirect to YouTube OAuth", {
+        302: redirectResponse("Redirect to Google OAuth"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+    },
+    "/auth/youtube/callback": {
+      get: getOperation("Handle YouTube OAuth callback", {
+        302: redirectResponse("Redirect back to frontend"),
+        400: jsonResponse(ref("ErrorResponse"), "Missing code or state"),
+        500: jsonResponse(ref("ErrorResponse"), "OAuth exchange failed"),
+      }, {
+        parameters: [
+          queryParam("code", false),
+          queryParam("state", false),
+          queryParam("error", false),
+        ],
+      }),
+    },
+    "/auth/token": {
+      post: getOperation("Issue short-lived JWT for media websocket", {
+        200: jsonResponse(ref("AuthTokenResponse"), "Signed JWT"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("AuthTokenRequest")),
+      }),
+    },
+  };
+}
+
+function internalPaths() {
+  return {
+    "/internal/users/{id}": {
+      get: getOperation("Fetch raw user row for internal services", {
+        200: jsonResponse(ref("InternalUser"), "Raw user row"),
+        401: { description: "Unauthorized" },
+      }, {
+        security: [{ InternalSecret: [] }],
+        parameters: [pathParam("id", "User id")],
+      }),
+    },
+    "/internal/voices/{id}": {
+      get: getOperation("Fetch voice row for internal services", {
+        200: jsonResponse({ allOf: [ref("Voice")], nullable: true }, "Voice row or null"),
+        401: { description: "Unauthorized" },
+      }, {
+        security: [{ InternalSecret: [] }],
+        parameters: [pathParam("id", "Voice id")],
+      }),
+    },
+    "/internal/sessions/{id}": {
+      get: getOperation("Fetch session bootstrap bundle for live session startup", {
+        200: jsonResponse(ref("InternalSessionBundle"), "Session bundle"),
+        401: { description: "Unauthorized" },
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        security: [{ InternalSecret: [] }],
+        parameters: [pathParam("id", "Session id")],
+      }),
+      patch: getOperation("Update session status from media backend", {
+        200: jsonResponse(ref("InternalSessionStatusResponse"), "Status updated"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+        401: { description: "Unauthorized" },
+      }, {
+        security: [{ InternalSecret: [] }],
+        parameters: [pathParam("id", "Session id")],
+        requestBody: jsonBody(ref("InternalSessionStatusUpdate")),
+      }),
+    },
+  };
+}
+
+function buildPaths() {
+  return {
+    "/health": {
+      get: getOperation("Health check", {
+        200: jsonResponse(ref("HealthResponse"), "Worker healthy"),
+      }),
+    },
+    ...userPaths(),
+    ...voicePaths(),
+    ...credentialPaths(),
+    ...sessionPaths(),
+    ...authPaths(),
+    ...internalPaths(),
+  };
+}
+
 export function buildOpenApiDocument() {
   return {
     openapi: OPENAPI_VERSION,
@@ -401,187 +622,6 @@ export function buildOpenApiDocument() {
       },
       schemas,
     },
-    paths: {
-      "/health": {
-        get: getOperation("Health check", {
-          200: jsonResponse(ref("HealthResponse"), "Worker healthy"),
-        }),
-      },
-      "/api/user": {
-        get: getOperation("Get or create user profile", {
-          200: jsonResponse(ref("UserInfo"), "User profile"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id")],
-        }),
-      },
-      "/api/voices": {
-        get: getOperation("List saved voices", {
-          200: jsonResponse(ref("ListVoicesResponse"), "Voice list"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id")],
-        }),
-        post: getOperation("Create voice clone", {
-          200: jsonResponse(ref("Voice"), "Created voice"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          requestBody: jsonBody(ref("CreateVoiceRequest")),
-        }),
-      },
-      "/api/voices/{id}": {
-        delete: getOperation("Delete voice clone", {
-          200: jsonResponse(ref("StatusResponse"), "Delete status"),
-          404: jsonResponse(ref("ErrorResponse"), "Voice not found"),
-        }, {
-          parameters: [pathParam("id", "Voice id")],
-        }),
-      },
-      "/api/credentials": {
-        get: getOperation("List saved platform credentials", {
-          200: jsonResponse(ref("ListCredentialsResponse"), "Credential list"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id")],
-        }),
-        post: getOperation("Save platform credential", {
-          200: jsonResponse(ref("PlatformCredential"), "Saved credential"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          requestBody: jsonBody(ref("SaveCredentialRequest")),
-        }),
-        delete: getOperation("Delete platform credential", {
-          200: jsonResponse(ref("StatusResponse"), "Delete status"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id"), queryParam("platform")],
-        }),
-      },
-      "/api/sessions": {
-        get: getOperation("List sessions for user", {
-          200: jsonResponse(ref("ListSessionsResponse"), "Session list"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id")],
-        }),
-        post: getOperation("Create broadcast session", {
-          200: jsonResponse(ref("CreateSessionResponse"), "Created session and streams"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          requestBody: jsonBody(ref("CreateSessionRequest")),
-        }),
-      },
-      "/api/sessions/{id}": {
-        get: getOperation("Get session with streams", {
-          200: jsonResponse(ref("GetSessionResponse"), "Session detail"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [pathParam("id", "Session id")],
-        }),
-        delete: getOperation("Delete session", {
-          200: jsonResponse(ref("StatusResponse"), "Delete status"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [pathParam("id", "Session id")],
-        }),
-      },
-      "/api/sessions/{id}/voice": {
-        post: getOperation("Clone voice for session host", {
-          200: jsonResponse(ref("CloneSessionVoiceResponse"), "Cloned voice"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-          403: jsonResponse(ref("ErrorResponse"), "Forbidden"),
-          404: jsonResponse(ref("ErrorResponse"), "Session not found"),
-        }, {
-          parameters: [pathParam("id", "Session id")],
-          requestBody: jsonBody(ref("CloneSessionVoiceRequest")),
-        }),
-      },
-      "/api/sessions/{id}/streams": {
-        post: getOperation("Add RTMP stream to session", {
-          200: jsonResponse(ref("Stream"), "Created stream"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [pathParam("id", "Session id")],
-          requestBody: jsonBody(ref("AddStreamRequest")),
-        }),
-      },
-      "/api/sessions/{session_id}/streams/{stream_id}": {
-        delete: getOperation("Remove RTMP stream from session", {
-          200: jsonResponse(ref("StatusResponse"), "Delete status"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [
-            pathParam("session_id", "Session id"),
-            pathParam("stream_id", "Stream id"),
-          ],
-        }),
-      },
-      "/auth/youtube": {
-        get: getOperation("Redirect to YouTube OAuth", {
-          302: redirectResponse("Redirect to Google OAuth"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          parameters: [queryParam("user_id")],
-        }),
-      },
-      "/auth/youtube/callback": {
-        get: getOperation("Handle YouTube OAuth callback", {
-          302: redirectResponse("Redirect back to frontend"),
-          400: jsonResponse(ref("ErrorResponse"), "Missing code or state"),
-          500: jsonResponse(ref("ErrorResponse"), "OAuth exchange failed"),
-        }, {
-          parameters: [
-            queryParam("code", false),
-            queryParam("state", false),
-            queryParam("error", false),
-          ],
-        }),
-      },
-      "/auth/token": {
-        post: getOperation("Issue short-lived JWT for media websocket", {
-          200: jsonResponse(ref("AuthTokenResponse"), "Signed JWT"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-        }, {
-          requestBody: jsonBody(ref("AuthTokenRequest")),
-        }),
-      },
-      "/internal/users/{id}": {
-        get: getOperation("Fetch raw user row for internal services", {
-          200: jsonResponse(ref("InternalUser"), "Raw user row"),
-          401: { description: "Unauthorized" },
-        }, {
-          security: [{ InternalSecret: [] }],
-          parameters: [pathParam("id", "User id")],
-        }),
-      },
-      "/internal/voices/{id}": {
-        get: getOperation("Fetch voice row for internal services", {
-          200: jsonResponse({ allOf: [ref("Voice")], nullable: true }, "Voice row or null"),
-          401: { description: "Unauthorized" },
-        }, {
-          security: [{ InternalSecret: [] }],
-          parameters: [pathParam("id", "Voice id")],
-        }),
-      },
-      "/internal/sessions/{id}": {
-        get: getOperation("Fetch session bootstrap bundle for live session startup", {
-          200: jsonResponse(ref("InternalSessionBundle"), "Session bundle"),
-          401: { description: "Unauthorized" },
-          404: jsonResponse(ref("ErrorResponse"), "Session not found"),
-        }, {
-          security: [{ InternalSecret: [] }],
-          parameters: [pathParam("id", "Session id")],
-        }),
-        patch: getOperation("Update session status from media backend", {
-          200: jsonResponse(ref("InternalSessionStatusResponse"), "Status updated"),
-          400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-          401: { description: "Unauthorized" },
-        }, {
-          security: [{ InternalSecret: [] }],
-          parameters: [pathParam("id", "Session id")],
-          requestBody: jsonBody(ref("InternalSessionStatusUpdate")),
-        }),
-      },
-    },
+    paths: buildPaths(),
   };
 }

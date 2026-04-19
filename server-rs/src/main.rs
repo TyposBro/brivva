@@ -26,8 +26,7 @@ async fn main() {
 /// human-readable output during local development. RUST_LOG controls the
 /// level filter (default info).
 fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let pretty = std::env::var("RUST_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("pretty"))

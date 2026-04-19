@@ -81,6 +81,13 @@ pub struct PipelineConfig {
     pub soniox_ws_url: String,
     pub elevenlabs_api_key: String,
     pub elevenlabs_base_url: String,
+    /// Kill-switch: force default voice library, skip cloning. Forwarded
+    /// from BroadcastState so TTS dispatch can consult without reaching
+    /// up into orchestration. See `docs/runbook.md`.
+    pub force_default_voice: bool,
+    /// Kill-switch: downgrade `rtmps://` to `rtmp://` at FFmpeg spawn
+    /// when a platform's TLS is flaking. See `docs/runbook.md`.
+    pub force_rtmp_not_rtmps: bool,
 }
 
 /// Handle to a single live session — the pair every pipeline function needs
@@ -222,12 +229,7 @@ mod tests {
     }
 
     fn test_pipeline_config() -> Arc<PipelineConfig> {
-        Arc::new(PipelineConfig {
-            soniox_api_key: String::new(),
-            soniox_ws_url: String::new(),
-            elevenlabs_api_key: String::new(),
-            elevenlabs_base_url: String::new(),
-        })
+        Arc::new(PipelineConfig::default())
     }
 
     #[test]

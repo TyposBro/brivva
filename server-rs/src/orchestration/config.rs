@@ -19,6 +19,14 @@ pub struct AppConfig {
     pub soniox_ws_url: String,
     pub elevenlabs_api_key: String,
     pub elevenlabs_base_url: String,
+    /// Kill-switch: force default voice library, skip voice cloning. Used
+    /// when voice clone produces garbage (e.g. the April 2026 Indian-accent
+    /// regression). See `docs/runbook.md`.
+    pub force_default_voice: bool,
+    /// Kill-switch: downgrade `rtmps://` destinations to `rtmp://` when a
+    /// platform's TLS stack is flaking. Only usable on platforms that accept
+    /// unsecured RTMP. See `docs/runbook.md`.
+    pub force_rtmp_not_rtmps: bool,
 }
 
 impl AppConfig {
@@ -35,12 +43,26 @@ impl AppConfig {
             elevenlabs_base_url: env_or_default("ELEVENLABS_BASE_URL", ELEVENLABS_BASE_URL_DEFAULT)
                 .trim_end_matches('/')
                 .to_string(),
+            force_default_voice: env_flag("BRIVVA_FALLBACK_TO_DEFAULT_VOICE"),
+            force_rtmp_not_rtmps: env_flag("BRIVVA_FORCE_RTMP_NOT_RTMPS"),
         })
     }
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Truthy values: "1", "true", "yes" (case-insensitive). Anything else is
+/// treated as disabled, including empty/unset.
+fn env_flag(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

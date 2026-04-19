@@ -18,7 +18,9 @@ use crate::core::contracts::workers::SessionBundle;
 use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::data::{auth, pipeline};
-use crate::features::broadcast::domain::{Lang, LiveSession, LiveSessions, PipelineConfig, SessionQuery};
+use crate::features::broadcast::domain::{
+    Lang, LiveSession, LiveSessions, PipelineConfig, SessionQuery,
+};
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
@@ -184,6 +186,8 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         soniox_ws_url: state.soniox_ws_url.clone(),
         elevenlabs_api_key: state.elevenlabs_api_key.clone(),
         elevenlabs_base_url: state.elevenlabs_base_url.clone(),
+        force_default_voice: state.force_default_voice,
+        force_rtmp_not_rtmps: state.force_rtmp_not_rtmps,
     })
 }
 
@@ -242,7 +246,11 @@ async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
         sid,
         ffmpeg_monitor_stop,
     });
-    spawn_live_status_update(workers_api.clone(), sid.to_string(), live_session_id.to_string());
+    spawn_live_status_update(
+        workers_api.clone(),
+        sid.to_string(),
+        live_session_id.to_string(),
+    );
     BootstrapOutcome::Continue
 }
 
@@ -267,15 +275,25 @@ fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     }
     let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
     let mut rtmp_langs = Vec::new();
+    let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
             continue;
         };
-        let full_url = if stream_key.is_empty() {
+        let mut full_url = if stream_key.is_empty() {
             rtmp_url.clone()
         } else {
             format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
         };
+        // Kill-switch: BRIVVA_FORCE_RTMP_NOT_RTMPS=1 downgrades rtmps:// to
+        // rtmp:// when a platform's TLS is flaking. See runbook.
+        if force_rtmp && full_url.starts_with("rtmps://") {
+            full_url = format!("rtmp://{}", &full_url["rtmps://".len()..]);
+            tracing::warn!(
+                stream_id = %s.id,
+                "kill-switch FORCE_RTMP_NOT_RTMPS: downgraded rtmps:// to rtmp://"
+            );
+        }
         let is_source = Lang::from_str(&s.lang).is_some_and(|l| &l == source_lang);
         if let Err(e) = manager.start_stream(
             &s.id,
@@ -310,11 +328,7 @@ fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     );
 }
 
-fn spawn_live_status_update(
-    workers_api: Arc<WorkersApi>,
-    sid: String,
-    live_session_id: String,
-) {
+fn spawn_live_status_update(workers_api: Arc<WorkersApi>, sid: String, live_session_id: String) {
     tokio::spawn(async move {
         if let Err(e) = workers_api
             .update_session_status(&sid, "live", Some(&live_session_id))
@@ -346,7 +360,11 @@ fn handle_binary(args: BinaryArgs<'_>) {
         audio_tx,
     } = args;
     if audio_tx.is_none() {
-        *audio_tx = Some(spawn_stt_pipeline(live_sessions, live_session_id, source_lang));
+        *audio_tx = Some(spawn_stt_pipeline(
+            live_sessions,
+            live_session_id,
+            source_lang,
+        ));
     }
     if let Some(tx) = audio_tx.as_ref() {
         let _ = tx.try_send(data.clone());
@@ -440,7 +458,10 @@ async fn teardown_session(args: TeardownArgs<'_>) {
     if let Some(sid) = live_session.session_id {
         let workers_for_end = workers_api.clone();
         tokio::spawn(async move {
-            if let Err(e) = workers_for_end.update_session_status(&sid, "ended", None).await {
+            if let Err(e) = workers_for_end
+                .update_session_status(&sid, "ended", None)
+                .await
+            {
                 tracing::warn!(
                     session_id = %sid,
                     error = %e,

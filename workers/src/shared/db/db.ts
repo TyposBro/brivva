@@ -42,41 +42,49 @@ export async function getOrCreateUser(
   return row;
 }
 
+export type UpdateYouTubeTokens = {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  channelId: string;
+  channelName: string;
+};
+
 export async function updateYouTubeTokens(
   db: D1Database,
-  userId: string,
-  accessToken: string,
-  refreshToken: string,
-  expiresAt: number,
-  channelId: string,
-  channelName: string,
+  args: UpdateYouTubeTokens,
 ): Promise<void> {
   await wrap(db)
     .update(schema.users)
     .set({
-      youtube_access_token: accessToken,
-      youtube_refresh_token: refreshToken,
-      youtube_token_expires_at: expiresAt,
-      youtube_channel_id: channelId,
-      youtube_channel_name: channelName,
+      youtube_access_token: args.accessToken,
+      youtube_refresh_token: args.refreshToken,
+      youtube_token_expires_at: args.expiresAt,
+      youtube_channel_id: args.channelId,
+      youtube_channel_name: args.channelName,
     })
-    .where(eq(schema.users.id, userId))
+    .where(eq(schema.users.id, args.userId))
     .run();
 }
 
+export type UpdateAccessToken = {
+  userId: string;
+  accessToken: string;
+  expiresAt: number;
+};
+
 export async function updateAccessToken(
   db: D1Database,
-  userId: string,
-  accessToken: string,
-  expiresAt: number,
+  args: UpdateAccessToken,
 ): Promise<void> {
   await wrap(db)
     .update(schema.users)
     .set({
-      youtube_access_token: accessToken,
-      youtube_token_expires_at: expiresAt,
+      youtube_access_token: args.accessToken,
+      youtube_token_expires_at: args.expiresAt,
     })
-    .where(eq(schema.users.id, userId))
+    .where(eq(schema.users.id, args.userId))
     .run();
 }
 
@@ -102,17 +110,18 @@ export async function getVoice(
   return row ?? null;
 }
 
-export async function createVoice(
-  db: D1Database,
-  userId: string,
-  elevenlabsVoiceId: string,
-  name: string,
-): Promise<Voice> {
+export type CreateVoice = {
+  userId: string;
+  elevenlabsVoiceId: string;
+  name: string;
+};
+
+export async function createVoice(db: D1Database, args: CreateVoice): Promise<Voice> {
   const row: Voice = {
     id: uuid(),
-    user_id: userId,
-    elevenlabs_voice_id: elevenlabsVoiceId,
-    name,
+    user_id: args.userId,
+    elevenlabs_voice_id: args.elevenlabsVoiceId,
+    name: args.name,
     created_at: now(),
   };
   await wrap(db).insert(schema.voices).values(row).run();
@@ -128,21 +137,22 @@ export async function deleteVoiceRow(
 
 // ── sessions ──────────────────────────────────────────────
 
-export async function createSession(
-  db: D1Database,
-  userId: string,
-  voiceId: string | null,
-  title: string,
-  sourceLang: string,
-  targetLangs: string,
-): Promise<Session> {
+export type CreateSession = {
+  userId: string;
+  voiceId: string | null;
+  title: string;
+  sourceLang: string;
+  targetLangs: string;
+};
+
+export async function createSession(db: D1Database, args: CreateSession): Promise<Session> {
   const row: Session = {
     id: uuid(),
-    user_id: userId,
-    voice_id: voiceId,
-    title,
-    source_lang: sourceLang,
-    target_langs: targetLangs,
+    user_id: args.userId,
+    voice_id: args.voiceId,
+    title: args.title,
+    source_lang: args.sourceLang,
+    target_langs: args.targetLangs,
     status: "setup",
     live_session_id: null,
     created_at: now(),
@@ -171,16 +181,20 @@ export async function getSession(
   return row ?? null;
 }
 
+export type UpdateSessionStatus = {
+  id: string;
+  status: string;
+  liveSessionId: string | null;
+};
+
 export async function updateSessionStatus(
   db: D1Database,
-  id: string,
-  status: string,
-  liveSessionId: string | null,
+  args: UpdateSessionStatus,
 ): Promise<void> {
   await wrap(db)
     .update(schema.sessions)
-    .set({ status, live_session_id: liveSessionId })
-    .where(eq(schema.sessions.id, id))
+    .set({ status: args.status, live_session_id: args.liveSessionId })
+    .where(eq(schema.sessions.id, args.id))
     .run();
 }
 
@@ -217,52 +231,60 @@ export async function listStreams(
   });
 }
 
+export type CreateStreamManual = {
+  sessionId: string;
+  lang: string;
+  platform: string;
+  rtmpUrl: string;
+  streamKey: string;
+  delayMs: number;
+  hostGain: number;
+};
+
 export async function createStreamManual(
   db: D1Database,
-  sessionId: string,
-  lang: string,
-  platform: string,
-  rtmpUrl: string,
-  streamKey: string,
-  delayMs: number,
-  hostGain: number,
+  args: CreateStreamManual,
 ): Promise<StreamRecord> {
   const row: StreamRecord = {
     id: uuid(),
-    session_id: sessionId,
-    lang,
-    platform,
+    session_id: args.sessionId,
+    lang: args.lang,
+    platform: args.platform,
     platform_broadcast_id: null,
     platform_stream_id: null,
-    stream_key: streamKey,
-    rtmp_url: rtmpUrl,
+    stream_key: args.streamKey,
+    rtmp_url: args.rtmpUrl,
     status: "ready",
-    delay_ms: delayMs,
-    host_gain: hostGain,
+    delay_ms: args.delayMs,
+    host_gain: args.hostGain,
     created_at: now(),
   };
   await wrap(db).insert(schema.streams).values(row).run();
   return row;
 }
 
+export type UpdateStreamPlatform = {
+  streamId: string;
+  broadcastId: string;
+  platformStreamId: string;
+  streamKey: string;
+  rtmpUrl: string;
+};
+
 export async function updateStreamPlatform(
   db: D1Database,
-  streamId: string,
-  broadcastId: string,
-  platformStreamId: string,
-  streamKey: string,
-  rtmpUrl: string,
+  args: UpdateStreamPlatform,
 ): Promise<void> {
   await wrap(db)
     .update(schema.streams)
     .set({
-      platform_broadcast_id: broadcastId,
-      platform_stream_id: platformStreamId,
-      stream_key: streamKey,
-      rtmp_url: rtmpUrl,
+      platform_broadcast_id: args.broadcastId,
+      platform_stream_id: args.platformStreamId,
+      stream_key: args.streamKey,
+      rtmp_url: args.rtmpUrl,
       status: "ready",
     })
-    .where(eq(schema.streams.id, streamId))
+    .where(eq(schema.streams.id, args.streamId))
     .run();
 }
 
@@ -302,13 +324,17 @@ export async function getCredential(
   return row ?? null;
 }
 
+export type UpsertCredential = {
+  userId: string;
+  platform: string;
+  rtmpUrl: string | null;
+  streamKey: string | null;
+  displayName: string | null;
+};
+
 export async function upsertCredential(
   db: D1Database,
-  userId: string,
-  platform: string,
-  rtmpUrl: string | null,
-  streamKey: string | null,
-  displayName: string | null,
+  args: UpsertCredential,
 ): Promise<PlatformCredential> {
   const d = wrap(db);
   const id = uuid();
@@ -317,11 +343,11 @@ export async function upsertCredential(
     .insert(schema.platform_credentials)
     .values({
       id,
-      user_id: userId,
-      platform,
-      rtmp_url: rtmpUrl,
-      stream_key: streamKey,
-      display_name: displayName,
+      user_id: args.userId,
+      platform: args.platform,
+      rtmp_url: args.rtmpUrl,
+      stream_key: args.streamKey,
+      display_name: args.displayName,
       created_at: ts,
       updated_at: ts,
     })
@@ -331,17 +357,17 @@ export async function upsertCredential(
         schema.platform_credentials.platform,
       ],
       set: {
-        rtmp_url: rtmpUrl,
-        stream_key: streamKey,
+        rtmp_url: args.rtmpUrl,
+        stream_key: args.streamKey,
         // Preserve prior display_name when the new one is null (matches the
         // COALESCE behavior the hand-written SQL migration shipped with).
-        display_name: sql`COALESCE(${displayName}, ${schema.platform_credentials.display_name})`,
+        display_name: sql`COALESCE(${args.displayName}, ${schema.platform_credentials.display_name})`,
         updated_at: ts,
       },
     })
     .run();
 
-  const row = await getCredential(db, userId, platform);
+  const row = await getCredential(db, args.userId, args.platform);
   if (!row) throw new Error("credential upsert failed");
   return row;
 }

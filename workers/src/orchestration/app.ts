@@ -106,7 +106,11 @@ app.post("/api/voices", async (c) => {
     body.name,
     body.audio_base64,
   );
-  const voice = await db.createVoice(c.env.DB, body.user_id, voice_id, body.name);
+  const voice = await db.createVoice(c.env.DB, {
+    userId: body.user_id,
+    elevenlabsVoiceId: voice_id,
+    name: body.name,
+  });
   return c.json(voice);
 });
 
@@ -133,14 +137,13 @@ app.get("/api/credentials", async (c) => {
 app.post("/api/credentials", async (c) => {
   const body = parseWithSchema(c, SaveCredentialRequestSchema, await c.req.json());
   if (body instanceof Response) return body;
-  const row = await db.upsertCredential(
-    c.env.DB,
-    body.user_id,
-    body.platform,
-    body.rtmp_url ?? null,
-    body.stream_key ?? null,
-    body.display_name ?? null,
-  );
+  const row = await db.upsertCredential(c.env.DB, {
+    userId: body.user_id,
+    platform: body.platform,
+    rtmpUrl: body.rtmp_url ?? null,
+    streamKey: body.stream_key ?? null,
+    displayName: body.display_name ?? null,
+  });
   return c.json(row);
 });
 
@@ -188,29 +191,27 @@ app.post("/api/sessions", async (c) => {
   const body = parseWithSchema(c, CreateSessionRequestSchema, await c.req.json());
   if (body instanceof Response) return body;
   await db.getOrCreateUser(c.env.DB, body.user_id);
-  const session = await db.createSession(
-    c.env.DB,
-    body.user_id,
-    body.voice_id ?? null,
-    body.title,
-    body.source_lang,
-    JSON.stringify(body.target_langs),
-  );
+  const session = await db.createSession(c.env.DB, {
+    userId: body.user_id,
+    voiceId: body.voice_id ?? null,
+    title: body.title,
+    sourceLang: body.source_lang,
+    targetLangs: JSON.stringify(body.target_langs),
+  });
 
   const streams = [];
   for (const p of body.platforms ?? []) {
     if (!p.rtmp_url || !p.stream_key || !p.lang) continue;
     streams.push(
-      await db.createStreamManual(
-        c.env.DB,
-        session.id,
-        p.lang,
-        p.platform,
-        p.rtmp_url,
-        p.stream_key,
-        p.delay_ms ?? DEFAULT_DELAY_MS,
-        resolveHostGain(p, body.source_lang),
-      ),
+      await db.createStreamManual(c.env.DB, {
+        sessionId: session.id,
+        lang: p.lang,
+        platform: p.platform,
+        rtmpUrl: p.rtmp_url,
+        streamKey: p.stream_key,
+        delayMs: p.delay_ms ?? DEFAULT_DELAY_MS,
+        hostGain: resolveHostGain(p, body.source_lang),
+      }),
     );
   }
 
@@ -247,7 +248,11 @@ app.post("/api/sessions/:id/voice", async (c) => {
     voiceName,
     body.audio_base64,
   );
-  const voice = await db.createVoice(c.env.DB, body.user_id, voice_id, voiceName);
+  const voice = await db.createVoice(c.env.DB, {
+    userId: body.user_id,
+    elevenlabsVoiceId: voice_id,
+    name: voiceName,
+  });
   await db.updateSessionVoiceId(c.env.DB, params.id, voice.id);
   return c.json({ voice });
 });
@@ -275,16 +280,15 @@ app.post("/api/sessions/:id/streams", async (c) => {
     typeof body.host_gain === "number"
       ? Math.max(0, Math.min(1, body.host_gain))
       : DEFAULT_HOST_GAIN_TARGET;
-  const s = await db.createStreamManual(
-    c.env.DB,
-    params.id,
-    body.lang,
-    body.platform,
-    body.rtmp_url,
-    body.stream_key,
-    body.delay_ms ?? DEFAULT_DELAY_MS,
+  const s = await db.createStreamManual(c.env.DB, {
+    sessionId: params.id,
+    lang: body.lang,
+    platform: body.platform,
+    rtmpUrl: body.rtmp_url,
+    streamKey: body.stream_key,
+    delayMs: body.delay_ms ?? DEFAULT_DELAY_MS,
     hostGain,
-  );
+  });
   return c.json(s);
 });
 
@@ -328,15 +332,14 @@ app.get("/auth/youtube/callback", async (c) => {
     const channel = await yt.getChannelInfo(tokens.access_token);
     await db.getOrCreateUser(c.env.DB, state);
     const expiresAt = Math.floor(Date.now() / 1000) + tokens.expires_in;
-    await db.updateYouTubeTokens(
-      c.env.DB,
-      state,
-      tokens.access_token,
-      tokens.refresh_token ?? "",
+    await db.updateYouTubeTokens(c.env.DB, {
+      userId: state,
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token ?? "",
       expiresAt,
-      channel.id,
-      channel.title,
-    );
+      channelId: channel.id,
+      channelName: channel.title,
+    });
     const jwt = await signJwt(c.env.JWT_SECRET, { sub: state });
     // Pass JWT via URL fragment (not readable by servers/logs).
     return c.redirect(`${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(state)}#token=${jwt}`);
@@ -396,7 +399,11 @@ app.patch("/internal/sessions/:id", async (c) => {
   if (params instanceof Response) return params;
   const body = parseWithSchema(c, InternalSessionStatusUpdateSchema, await c.req.json());
   if (body instanceof Response) return body;
-  await db.updateSessionStatus(c.env.DB, params.id, body.status, body.live_session_id ?? null);
+  await db.updateSessionStatus(c.env.DB, {
+    id: params.id,
+    status: body.status,
+    liveSessionId: body.live_session_id ?? null,
+  });
   return c.json({ status: "ok" });
 });
 

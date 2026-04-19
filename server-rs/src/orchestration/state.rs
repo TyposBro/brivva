@@ -21,5 +21,7 @@ pub fn broadcast_state() -> BroadcastState {
         soniox_ws_url: cfg.soniox_ws_url.clone(),
         elevenlabs_api_key: cfg.elevenlabs_api_key.clone(),
         elevenlabs_base_url: cfg.elevenlabs_base_url.clone(),
+        force_default_voice: cfg.force_default_voice,
+        force_rtmp_not_rtmps: cfg.force_rtmp_not_rtmps,
     }
 }
