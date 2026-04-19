@@ -1,0 +1,62 @@
+name: brivva-smoke
+
+services:
+  rtmp:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "1935:1935"
+    environment:
+      - MTX_LOGLEVEL=warn
+    restart: "no"
+
+  workers-stub:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.stub
+    command: ["bun", "stubs/workers.ts"]
+    environment:
+      - PORT=8787
+      - MEDIAMTX_RTMP=rtmp://rtmp:1935/live
+    depends_on:
+      - rtmp
+
+  soniox-stub:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.stub
+    command: ["bun", "stubs/soniox.ts"]
+    environment:
+      - PORT=9001
+      - SONIOX_UTTERANCE_MS=5000
+
+  elevenlabs-stub:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.stub
+    command: ["bun", "stubs/elevenlabs.ts"]
+    environment:
+      - PORT=9002
+      - TTS_DURATION_S=2
+
+  server:
+    build:
+      context: ../..
+      dockerfile: server-rs/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - RUST_LOG=info
+      - RUST_LOG_FORMAT=pretty
+      - WORKERS_API_URL=http://workers-stub:8787
+      - INTERNAL_SECRET=smoke-internal-secret
+      - JWT_SECRET=smoke-jwt-secret
+      - SONIOX_WS_URL=ws://soniox-stub:9001
+      - SONIOX_API_KEY=smoke-soniox-key
+      - ELEVENLABS_BASE_URL=http://elevenlabs-stub:9002
+      - ELEVENLABS_API_KEY=smoke-eleven-key
+    depends_on:
+      - rtmp
+      - workers-stub
+      - soniox-stub
+      - elevenlabs-stub
+    restart: "no"

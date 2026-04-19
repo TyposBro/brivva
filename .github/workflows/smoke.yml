@@ -1,0 +1,58 @@
+name: e2e-smoke
+
+on:
+  schedule:
+    # 09:00 UTC daily. Post-deploy nightly signal for the full media pipeline.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "server-rs/**"
+      - "tests/e2e/**"
+      - ".github/workflows/smoke.yml"
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: media pipeline smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.1"
+
+      - name: build + start stack
+        working-directory: tests/e2e
+        run: |
+          docker compose -f compose.e2e.yml up --build -d
+          docker compose -f compose.e2e.yml ps
+
+      - name: run smoke driver
+        working-directory: tests/e2e
+        env:
+          SERVER_URL: http://localhost:3000
+          WS_URL: ws://localhost:3000/api/session
+          RTMP_URL: rtmp://localhost:1935/live/smoke
+          JWT_SECRET: smoke-jwt-secret
+          SESSION_ID: SMOKE001
+          USER_ID: smoke-user
+        run: bun run smoke
+
+      - name: dump server logs on failure
+        if: failure()
+        working-directory: tests/e2e
+        run: docker compose -f compose.e2e.yml logs --tail=300
+
+      - name: tear down
+        if: always()
+        working-directory: tests/e2e
+        run: docker compose -f compose.e2e.yml down -v

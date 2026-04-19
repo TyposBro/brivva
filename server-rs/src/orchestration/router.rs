@@ -14,6 +14,7 @@ pub fn build_app(state: AppState) -> Router {
             "/",
             get(|| async { "Brivva Translation Server (media-only)" }),
         )
+        .route("/health", get(|| async { "ok" }))
         .route("/api/session", get(session_ws_handler))
         .route("/api/room", get(session_ws_handler))
         .layer(cors)

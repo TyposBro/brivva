@@ -1,0 +1,11 @@
+# Shared image for all three stubs. Picks command via compose entrypoint.
+FROM oven/bun:1.1-debian
+
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY tests/e2e/package.json ./package.json
+COPY tests/e2e/stubs ./stubs
+
+# No dependencies to install — stubs use Bun built-ins only.

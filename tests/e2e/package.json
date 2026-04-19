@@ -1,0 +1,12 @@
+{
+  "name": "@brivva/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "bun driver.ts",
+    "stubs:workers": "bun stubs/workers.ts",
+    "stubs:soniox": "bun stubs/soniox.ts",
+    "stubs:elevenlabs": "bun stubs/elevenlabs.ts"
+  }
+}

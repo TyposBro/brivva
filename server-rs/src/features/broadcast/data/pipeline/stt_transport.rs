@@ -36,7 +36,7 @@ pub(super) async fn connect_soniox(
             return None;
         }
 
-        match tokio_tungstenite::connect_async(SONIOX_WS_URL).await {
+        match tokio_tungstenite::connect_async(&**SONIOX_WS_URL).await {
             Ok((stream, _)) => return Some(stream),
             Err(error) => {
                 eprintln!(

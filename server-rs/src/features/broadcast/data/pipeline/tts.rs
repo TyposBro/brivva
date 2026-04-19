@@ -8,6 +8,15 @@ use super::to_ws;
 static ELEVENLABS_API_KEY: LazyLock<String> =
     LazyLock::new(|| std::env::var("ELEVENLABS_API_KEY").unwrap_or_default());
 
+const ELEVENLABS_BASE_URL_DEFAULT: &str = "https://api.elevenlabs.io";
+
+static ELEVENLABS_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("ELEVENLABS_BASE_URL")
+        .unwrap_or_else(|_| ELEVENLABS_BASE_URL_DEFAULT.to_string())
+        .trim_end_matches('/')
+        .to_string()
+});
+
 pub async fn broadcast_translated_tts(
     text: &str,
     utterance_id: u64,
@@ -29,8 +38,8 @@ pub async fn broadcast_translated_tts(
         "eleven_flash_v2_5"
     };
     let url = format!(
-        "https://api.elevenlabs.io/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
-        &voice_id
+        "{}/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
+        &*ELEVENLABS_BASE_URL, &voice_id
     );
 
     let client = reqwest::Client::new();
