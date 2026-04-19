@@ -22,6 +22,15 @@ import {
   type UserInfo,
   type Voice,
 } from "@brivva/contracts/http";
+import {
+  DetectedPlatformSchema,
+  PLATFORM_CATALOG,
+  PLATFORM_DEFAULT_LANG,
+  type DetectedPlatform,
+  type PlatformCatalogEntry,
+} from "@brivva/contracts/platforms";
+import { client } from "./generated/client";
+
 export type {
   AuthTokenResponse,
   CloneSessionVoiceRequest,
@@ -33,15 +42,6 @@ export type {
   Voice,
 } from "@brivva/contracts/http";
 
-// VITE_API_URL points at the Workers CRUD API (D1-backed, global edge).
-// VITE_WORKER_URL is reserved for the Fargate media WS (long-lived audio).
-// Fallback to VITE_WORKER_URL for local dev when running against a single-process
-// legacy backend.
-const API_BASE =
-  import.meta.env.VITE_API_URL ??
-  import.meta.env.VITE_WORKER_URL ??
-  "http://localhost:3000";
-
 type StreamInfo = StreamRecord & {
   broadcast_id?: string;
   stream_id?: string;
@@ -50,123 +50,53 @@ type StreamInfo = StreamRecord & {
 
 export type { StreamInfo };
 
+export type Platform = PlatformCatalogEntry;
+
 const StreamInfoSchema = StreamSchema.transform((stream): StreamInfo => ({
   ...stream,
   broadcast_id: stream.platform_broadcast_id ?? undefined,
   stream_id: stream.platform_stream_id ?? undefined,
 }));
 
-async function request<T>(
-  path: string,
+async function parseResult<T>(
+  promise: Promise<{ data?: unknown; error?: unknown; response: Response }>,
   schema: { parse(input: unknown): T },
-  opts?: RequestInit,
 ): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => "");
-    const json = raw
-      ? (() => {
-          try {
-            return JSON.parse(raw);
-          } catch {
-            return null;
-          }
-        })()
-      : null;
-    const parsed = ErrorResponseSchema.safeParse(json);
+  const { data, error, response } = await promise;
+  if (!response.ok || data === undefined) {
+    const parsed = ErrorResponseSchema.safeParse(error);
     if (parsed.success) {
-      throw new Error(`API ${resp.status}: ${parsed.data.error}`);
+      throw new Error(`API ${response.status}: ${parsed.data.error}`);
     }
-    throw new Error(`API ${resp.status}: ${raw}`);
+    throw new Error(`API ${response.status}: request failed`);
   }
-  const json = await resp.json();
-  return schema.parse(json);
+  return schema.parse(data);
 }
-
-// ── User ────────────────────────────────────────────────
 
 export function getUser(userId: string): Promise<UserInfo> {
-  return request(`/api/user?user_id=${encodeURIComponent(userId)}`, UserInfoSchema);
+  return parseResult(
+    client.GET("/api/user", { params: { query: { user_id: userId } } }),
+    UserInfoSchema,
+  );
 }
 
-/**
- * Fetch a short-lived Workers-signed JWT. Required by Fargate's media WS
- * (`sub` claim must match the session owner before host:audio is accepted).
- * Cache the token for its ~15 min validity in the caller — the WS upgrade
- * is the only consumer.
- */
 export function getAuthToken(userId: string): Promise<AuthTokenResponse> {
-  return request("/auth/token", AuthTokenResponseSchema, {
-    method: "POST",
-    body: JSON.stringify({ user_id: userId }),
-  });
+  return parseResult(
+    client.POST("/auth/token", { body: { user_id: userId } }),
+    AuthTokenResponseSchema,
+  );
 }
-
-// ── YouTube OAuth ───────────────────────────────────────
 
 export function youtubeAuthUrl(userId: string): string {
-  return `${API_BASE}/auth/youtube?user_id=${encodeURIComponent(userId)}`;
+  const base =
+    import.meta.env.VITE_API_URL ??
+    import.meta.env.VITE_WORKER_URL ??
+    "http://localhost:3000";
+  return `${base}/auth/youtube?user_id=${encodeURIComponent(userId)}`;
 }
 
-// ── Platforms ───────────────────────────────────────────
-
-export type Platform = {
-  id: string;
-  label: string;
-  region: string;
-  auto: boolean;
-  defaultRtmp: string;
-  help: string;
-  settingsUrl: string;
-  keyOnly: boolean;
-};
-
-export const PLATFORMS: Platform[] = [
-  // Global
-  { id: "youtube", label: "YouTube", region: "Global", auto: true, defaultRtmp: "", help: "Auto-creates broadcasts via API. Connect your account above.", settingsUrl: "", keyOnly: false },
-  { id: "instagram", label: "Instagram", region: "Global", auto: false, defaultRtmp: "rtmps://live-upload.instagram.com:443/rtmp/", help: "Open Instagram app → tap + → Live → tap ⚙️ → 'Stream with external device' → copy Stream Key.", settingsUrl: "", keyOnly: true },
-  { id: "tiktok", label: "TikTok", region: "Global", auto: false, defaultRtmp: "", help: "Download TikTok LIVE Studio desktop app → Go Live → copy Server URL & Stream Key. Requires 1,000+ followers.", settingsUrl: "", keyOnly: false },
-  { id: "twitch", label: "Twitch", region: "Global", auto: false, defaultRtmp: "rtmp://live.twitch.tv/app/", help: "Twitch.tv → Creator Dashboard → Settings → Stream → copy Primary Stream Key.", settingsUrl: "https://dashboard.twitch.tv/settings/stream", keyOnly: true },
-  // Korea
-  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "쿠팡 Wing → Live & Shorts → Self live → 라이브 만들기 → OBS 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "", keyOnly: false },
-  { id: "naver", label: "Naver Shopping Live", region: "Korea", auto: false, defaultRtmp: "", help: "네이버 스마트스토어센터 → 쇼핑라이브 → 라이브 예약/시작 → 외부 송출 설정 → copy RTMP URL & 스트림 키.", settingsUrl: "https://sell.smartstore.naver.com/", keyOnly: false },
-  // Japan
-  { id: "rakuten", label: "Rakuten Live", region: "Japan", auto: false, defaultRtmp: "", help: "Rakuten RMS → ライブコマース → 配信設定 → copy RTMP URL & ストリームキー.", settingsUrl: "https://rms.rakuten.co.jp/", keyOnly: false },
-  // China
-  { id: "douyin", label: "Douyin (抖音)", region: "China", auto: false, defaultRtmp: "", help: "Download 抖音直播伴侣 desktop app → login → 开始直播 → 推流地址 will appear. Copy 服务器地址 & 推流码.", settingsUrl: "", keyOnly: false },
-  { id: "taobao", label: "Taobao Live (淘宝直播)", region: "China", auto: false, defaultRtmp: "", help: "淘宝直播中控台 → 创建直播 → OBS推流 → copy RTMP URL & 推流码.", settingsUrl: "https://liveplatform.taobao.com/live/liveList.htm", keyOnly: false },
-  { id: "kuaishou", label: "Kuaishou (快手)", region: "China", auto: false, defaultRtmp: "rtmp://live.kuaishou.com/live/", help: "快手直播伴侣 desktop app → login → 开播设置 → copy 推流码 (Stream Key).", settingsUrl: "", keyOnly: true },
-  { id: "xiaohongshu", label: "Xiaohongshu (小红书)", region: "China", auto: false, defaultRtmp: "", help: "小红书 App → + → 直播 → 设置 → 电脑模式 → copy 授权码 → 小红书直播助手 desktop app → paste auth code → copy 推流地址 & 推流码.", settingsUrl: "", keyOnly: false },
-  { id: "bilibili", label: "Bilibili (哔哩哔哩)", region: "China", auto: false, defaultRtmp: "rtmp://live-push.bilivideo.com/live-bvc/", help: "Bilibili → 直播中心 → 我的直播间 → 开始直播 → copy 推流码 (Stream Key).", settingsUrl: "https://link.bilibili.com/p/center/index#/my-room/start-live", keyOnly: true },
-  // Custom / Testing
-  { id: "custom", label: "Custom RTMP", region: "Other", auto: false, defaultRtmp: "", help: "Enter any RTMP/RTMPS endpoint URL and stream key.", settingsUrl: "", keyOnly: false },
-  { id: "local-test", label: "Local Test (MediaMTX)", region: "Other", auto: true, defaultRtmp: "rtmp://rtmp:1935/live/", help: "Auto-creates one stream per language on local MediaMTX. View with: ffplay rtmp://localhost:1935/live/{lang}", settingsUrl: "", keyOnly: false },
-];
-
-/**
- * Platform → default language mapping.
- * null = user picks (YouTube, Custom, Local Test).
- * Regional platforms auto-assign their audience's language.
- */
-export const PLATFORM_LANG: Record<string, string | null> = {
-  youtube: null,
-  instagram: "en",
-  tiktok: "en",
-  twitch: "en",
-  coupang: "ko",
-  naver: "ko",
-  rakuten: "ja",
-  douyin: "zh",
-  taobao: "zh",
-  kuaishou: "zh",
-  xiaohongshu: "zh",
-  bilibili: "zh",
-  custom: null,
-  "local-test": null,
-};
+export const PLATFORMS: readonly Platform[] = PLATFORM_CATALOG;
+export const PLATFORM_LANG = PLATFORM_DEFAULT_LANG;
 
 export const LANGS = [
   { code: "ko", label: "Korean", flag: "\uD83C\uDDF0\uD83C\uDDF7" },
@@ -192,29 +122,25 @@ export function createSession(body: {
   platforms?: PlatformConfig[];
   privacy_status?: string;
 }): Promise<CreateSessionResponse> {
-  return request("/api/sessions", CreateSessionResponseSchema.transform((response) => ({
-    ...response,
-    streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
-  })), {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return parseResult(
+    client.POST("/api/sessions", { body }),
+    CreateSessionResponseSchema.transform((response) => ({
+      ...response,
+      streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
+    })),
+  );
 }
 
-export function listSessions(
-  userId: string
-): Promise<{ sessions: Session[] }> {
-  return request(
-    `/api/sessions?user_id=${encodeURIComponent(userId)}`,
+export function listSessions(userId: string): Promise<{ sessions: Session[] }> {
+  return parseResult(
+    client.GET("/api/sessions", { params: { query: { user_id: userId } } }),
     ListSessionsResponseSchema,
   );
 }
 
-export function getSession(
-  id: string
-): Promise<{ session: Session | null; streams: StreamInfo[] }> {
-  return request(
-    `/api/sessions/${encodeURIComponent(id)}`,
+export function getSession(id: string): Promise<{ session: Session | null; streams: StreamInfo[] }> {
+  return parseResult(
+    client.GET("/api/sessions/{id}", { params: { path: { id } } }),
     GetSessionResponseSchema.transform((response) => ({
       ...response,
       streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
@@ -224,56 +150,49 @@ export function getSession(
 
 export function cloneSessionVoice(
   sessionId: string,
-  body: CloneSessionVoiceRequest
+  body: CloneSessionVoiceRequest,
 ): Promise<{ voice: Voice }> {
-  return request(
-    `/api/sessions/${encodeURIComponent(sessionId)}/voice`,
+  return parseResult(
+    client.POST("/api/sessions/{id}/voice", {
+      params: { path: { id: sessionId } },
+      body,
+    }),
     CloneSessionVoiceResponseSchema,
-    {
-    method: "POST",
-    body: JSON.stringify(body),
-    },
   );
 }
 
-export function deleteSession(
-  id: string
-): Promise<{ status: string }> {
-  return request(`/api/sessions/${encodeURIComponent(id)}`, StatusResponseSchema, {
-    method: "DELETE",
-  });
+export function deleteSession(id: string): Promise<{ status: string }> {
+  return parseResult(
+    client.DELETE("/api/sessions/{id}", { params: { path: { id } } }),
+    StatusResponseSchema,
+  );
 }
-
-// ── Stream management ───────────────────────────────────
 
 export function addStream(
   sessionId: string,
-  body: { lang: string; platform: string; rtmp_url: string; stream_key: string }
+  body: { lang: string; platform: string; rtmp_url: string; stream_key: string; delay_ms?: number; host_gain?: number },
 ): Promise<StreamInfo> {
-  return request(`/api/sessions/${encodeURIComponent(sessionId)}/streams`, StreamInfoSchema, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-export function removeStream(
-  sessionId: string,
-  streamId: string
-): Promise<{ status: string }> {
-  return request(
-    `/api/sessions/${encodeURIComponent(sessionId)}/streams/${encodeURIComponent(streamId)}`,
-    StatusResponseSchema,
-    { method: "DELETE" },
+  return parseResult(
+    client.POST("/api/sessions/{id}/streams", {
+      params: { path: { id: sessionId } },
+      body,
+    }),
+    StreamInfoSchema,
   );
 }
 
-// ── Voices ──────────────────────────────────────────────
+export function removeStream(sessionId: string, streamId: string): Promise<{ status: string }> {
+  return parseResult(
+    client.DELETE("/api/sessions/{session_id}/streams/{stream_id}", {
+      params: { path: { session_id: sessionId, stream_id: streamId } },
+    }),
+    StatusResponseSchema,
+  );
+}
 
-export function listVoices(
-  userId: string
-): Promise<{ voices: Voice[] }> {
-  return request(
-    `/api/voices?user_id=${encodeURIComponent(userId)}`,
+export function listVoices(userId: string): Promise<{ voices: Voice[] }> {
+  return parseResult(
+    client.GET("/api/voices", { params: { query: { user_id: userId } } }),
     ListVoicesResponseSchema,
   );
 }
@@ -283,23 +202,19 @@ export function createVoice(body: {
   name: string;
   audio_base64: string;
 }): Promise<Voice> {
-  return request("/api/voices", VoiceSchema, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return parseResult(client.POST("/api/voices", { body }), VoiceSchema);
 }
 
 export function deleteVoice(id: string): Promise<{ status: string }> {
-  return request(`/api/voices/${encodeURIComponent(id)}`, StatusResponseSchema, {
-    method: "DELETE",
-  });
+  return parseResult(
+    client.DELETE("/api/voices/{id}", { params: { path: { id } } }),
+    StatusResponseSchema,
+  );
 }
 
-// ── Platform Credentials (Vault) ────────────────────────
-
 export function listCredentials(userId: string): Promise<{ credentials: PlatformCredential[] }> {
-  return request(
-    `/api/credentials?user_id=${encodeURIComponent(userId)}`,
+  return parseResult(
+    client.GET("/api/credentials", { params: { query: { user_id: userId } } }),
     ListCredentialsResponseSchema,
   );
 }
@@ -311,26 +226,19 @@ export function saveCredential(body: {
   stream_key?: string;
   display_name?: string;
 }): Promise<PlatformCredential> {
-  return request("/api/credentials", PlatformCredentialSchema, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return parseResult(client.POST("/api/credentials", { body }), PlatformCredentialSchema);
 }
 
 export function deleteCredential(userId: string, platform: string): Promise<{ status: string }> {
-  return request(
-    `/api/credentials?user_id=${encodeURIComponent(userId)}&platform=${encodeURIComponent(platform)}`,
+  return parseResult(
+    client.DELETE("/api/credentials", {
+      params: { query: { user_id: userId, platform } },
+    }),
     StatusResponseSchema,
-    {
-      method: "DELETE",
-    },
   );
 }
 
-// ── Magic Paste Detection ───────────────────────────────
-
-/** Auto-detect platform from a pasted RTMP URL string */
-export function detectPlatform(input: string): { platform: string; rtmpUrl: string; streamKey: string } | null {
+export function detectPlatform(input: string): DetectedPlatform | null {
   const trimmed = input.trim();
 
   const patterns: [string, string, string][] = [
@@ -347,17 +255,17 @@ export function detectPlatform(input: string): { platform: string; rtmpUrl: stri
       const key = trimmed.startsWith(baseUrl)
         ? trimmed.slice(baseUrl.length)
         : trimmed.split("/").pop() ?? "";
-      return { platform, rtmpUrl: baseUrl, streamKey: key };
+      return DetectedPlatformSchema.parse({ platform, rtmpUrl: baseUrl, streamKey: key });
     }
   }
 
   if (trimmed.startsWith("rtmp://") || trimmed.startsWith("rtmps://")) {
     const lastSlash = trimmed.lastIndexOf("/");
-    return {
+    return DetectedPlatformSchema.parse({
       platform: "custom",
       rtmpUrl: trimmed.slice(0, lastSlash + 1),
       streamKey: trimmed.slice(lastSlash + 1),
-    };
+    });
   }
 
   return null;

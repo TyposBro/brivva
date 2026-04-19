@@ -14,6 +14,7 @@ import {
   SessionStreamParamsSchema,
   UserQuerySchema,
 } from "@brivva/contracts/http";
+import { YoutubeCallbackQuerySchema } from "@brivva/contracts/oauth";
 
 import { signJwt } from "./auth";
 import * as db from "./db";
@@ -308,9 +309,15 @@ app.get("/auth/youtube", (c) => {
 });
 
 app.get("/auth/youtube/callback", async (c) => {
-  const code = c.req.query("code");
-  const state = c.req.query("state"); // user_id
-  const err = c.req.query("error");
+  const query = parseWithSchema(c, YoutubeCallbackQuerySchema, {
+    code: c.req.query("code"),
+    state: c.req.query("state"),
+    error: c.req.query("error"),
+  });
+  if (query instanceof Response) return query;
+  const code = query.code;
+  const state = query.state; // user_id
+  const err = query.error;
   if (err) {
     return c.redirect(`${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(err)}`);
   }

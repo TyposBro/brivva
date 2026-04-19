@@ -7,7 +7,11 @@
     "workers"
   ],
   "packageManager": "bun@1.3.3",
+  "devDependencies": {
+    "openapi-typescript": "^7.10.1"
+  },
   "scripts": {
+    "contracts:generate": "bun run --cwd workers openapi:export && bun run --cwd frontend openapi:generate",
     "install:all": "bun install",
     "test:frontend": "bun run --cwd frontend test",
     "test:workers": "bun run --cwd workers test",

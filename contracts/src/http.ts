@@ -2,11 +2,25 @@ import { z } from "zod";
 
 export const LangCodeSchema = z.enum(["ko", "en", "ja", "zh"]);
 
+export const HealthResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
 export const UserInfoSchema = z.object({
   id: z.string().min(1),
   youtube_connected: z.boolean(),
   youtube_channel_name: z.string().nullable(),
   youtube_channel_id: z.string().nullable(),
+  created_at: z.number().int(),
+});
+
+export const InternalUserSchema = z.object({
+  id: z.string().min(1),
+  youtube_channel_id: z.string().nullable(),
+  youtube_channel_name: z.string().nullable(),
+  youtube_access_token: z.string().nullable(),
+  youtube_refresh_token: z.string().nullable(),
+  youtube_token_expires_at: z.number().int().nullable(),
   created_at: z.number().int(),
 });
 
@@ -179,16 +193,24 @@ export const InternalSessionBundleSchema = z.object({
   voice: VoiceSchema.nullable(),
 });
 
+export const InternalVoiceResponseSchema = VoiceSchema.nullable();
+
 export const InternalSessionStatusUpdateSchema = z.object({
   status: z.string().min(1),
   live_session_id: z.string().nullable().optional(),
 });
 
+export const InternalSessionStatusResponseSchema = z.object({
+  status: z.literal("ok"),
+});
+
 export type UserInfo = z.infer<typeof UserInfoSchema>;
+export type InternalUser = z.infer<typeof InternalUserSchema>;
 export type Voice = z.infer<typeof VoiceSchema>;
 export type Session = z.infer<typeof SessionSchema>;
 export type StreamRecord = z.infer<typeof StreamSchema>;
 export type PlatformCredential = z.infer<typeof PlatformCredentialSchema>;
+export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type AuthTokenRequest = z.infer<typeof AuthTokenRequestSchema>;
 export type AuthTokenResponse = z.infer<typeof AuthTokenResponseSchema>;
 export type PlatformConfig = z.infer<typeof PlatformConfigSchema>;
@@ -201,3 +223,5 @@ export type CloneSessionVoiceResponse = z.infer<typeof CloneSessionVoiceResponse
 export type AddStreamRequest = z.infer<typeof AddStreamRequestSchema>;
 export type CreateVoiceRequest = z.infer<typeof CreateVoiceRequestSchema>;
 export type SaveCredentialRequest = z.infer<typeof SaveCredentialRequestSchema>;
+export type InternalSessionBundle = z.infer<typeof InternalSessionBundleSchema>;
+export type InternalSessionStatusUpdate = z.infer<typeof InternalSessionStatusUpdateSchema>;

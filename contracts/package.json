@@ -6,6 +6,9 @@
   "sideEffects": false,
   "exports": {
     "./http": "./src/http.ts",
+    "./meta": "./src/meta.ts",
+    "./oauth": "./src/oauth.ts",
+    "./platforms": "./src/platforms.ts",
     "./ws": "./src/ws.ts"
   },
   "dependencies": {

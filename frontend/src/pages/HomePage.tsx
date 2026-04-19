@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Radio, Users, ArrowRight } from "lucide-react";
+import {
+  FrontendOAuthLandingQuerySchema,
+  FrontendOAuthTokenFragmentSchema,
+} from "@brivva/contracts/oauth";
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -9,15 +13,19 @@ export default function HomePage() {
   // fragment (fragments never hit the server → safe to carry a bearer token),
   // persist user_id + token, and forward the visitor to /dashboard.
   useEffect(() => {
-    const hash = window.location.hash;
-    const query = new URLSearchParams(window.location.search);
-    const userId = query.get("user_id");
-    const tokenMatch = hash.match(/(?:^|&|#)token=([^&]+)/);
+    const query = FrontendOAuthLandingQuerySchema.parse(
+      Object.fromEntries(new URLSearchParams(window.location.search).entries()),
+    );
+    const fragment = FrontendOAuthTokenFragmentSchema.parse(
+      Object.fromEntries(new URLSearchParams(window.location.hash.replace(/^#/, "")).entries()),
+    );
+    const userId = query.user_id;
+    const token = fragment.token;
     if (userId) {
       localStorage.setItem("brivva_user_id", userId);
     }
-    if (tokenMatch) {
-      localStorage.setItem("brivva_jwt", tokenMatch[1]);
+    if (token) {
+      localStorage.setItem("brivva_jwt", token);
       window.history.replaceState(null, "", "/");
       navigate("/dashboard", { replace: true });
     }

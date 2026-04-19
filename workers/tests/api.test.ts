@@ -69,11 +69,14 @@ describe("OpenAPI docs", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       openapi: string;
+      info: { version: string };
       paths: Record<string, unknown>;
     };
     expect(body.openapi).toBe("3.0.0");
     expect(body.paths["/auth/token"]).toBeTruthy();
     expect(body.paths["/api/sessions"]).toBeTruthy();
+    expect(body.paths["/internal/sessions/{id}"]).toBeTruthy();
+    expect(body.info.version).toBe("0.2.0");
   });
 
   it("GET /docs returns swagger html", async () => {

@@ -1,0 +1,73 @@
+import { z } from "zod";
+
+export const PlatformIdSchema = z.enum([
+  "youtube",
+  "instagram",
+  "tiktok",
+  "twitch",
+  "coupang",
+  "naver",
+  "rakuten",
+  "douyin",
+  "taobao",
+  "kuaishou",
+  "xiaohongshu",
+  "bilibili",
+  "custom",
+  "local-test",
+]);
+
+export const PlatformCatalogEntrySchema = z.object({
+  id: PlatformIdSchema,
+  label: z.string().min(1),
+  region: z.string().min(1),
+  auto: z.boolean(),
+  defaultRtmp: z.string(),
+  help: z.string(),
+  settingsUrl: z.string(),
+  keyOnly: z.boolean(),
+});
+
+export const DetectedPlatformSchema = z.object({
+  platform: PlatformIdSchema.or(z.literal("custom")),
+  rtmpUrl: z.string().min(1),
+  streamKey: z.string(),
+});
+
+export const PLATFORM_CATALOG = [
+  { id: "youtube", label: "YouTube", region: "Global", auto: true, defaultRtmp: "", help: "Auto-creates broadcasts via API. Connect your account above.", settingsUrl: "", keyOnly: false },
+  { id: "instagram", label: "Instagram", region: "Global", auto: false, defaultRtmp: "rtmps://live-upload.instagram.com:443/rtmp/", help: "Open Instagram app -> Live -> external device -> copy stream key.", settingsUrl: "", keyOnly: true },
+  { id: "tiktok", label: "TikTok", region: "Global", auto: false, defaultRtmp: "", help: "Open TikTok LIVE Studio -> Go Live -> copy server URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "twitch", label: "Twitch", region: "Global", auto: false, defaultRtmp: "rtmp://live.twitch.tv/app/", help: "Twitch Creator Dashboard -> Settings -> Stream -> copy stream key.", settingsUrl: "https://dashboard.twitch.tv/settings/stream", keyOnly: true },
+  { id: "coupang", label: "Coupang Live", region: "Korea", auto: false, defaultRtmp: "", help: "Coupang Wing live settings -> copy RTMP URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "naver", label: "Naver Shopping Live", region: "Korea", auto: false, defaultRtmp: "", help: "Naver Smart Store Center live settings -> copy RTMP URL and stream key.", settingsUrl: "https://sell.smartstore.naver.com/", keyOnly: false },
+  { id: "rakuten", label: "Rakuten Live", region: "Japan", auto: false, defaultRtmp: "", help: "Rakuten RMS live settings -> copy RTMP URL and stream key.", settingsUrl: "https://rms.rakuten.co.jp/", keyOnly: false },
+  { id: "douyin", label: "Douyin", region: "China", auto: false, defaultRtmp: "", help: "Douyin live companion -> copy server URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "taobao", label: "Taobao Live", region: "China", auto: false, defaultRtmp: "", help: "Taobao Live control center -> OBS push -> copy RTMP URL and stream key.", settingsUrl: "https://liveplatform.taobao.com/live/liveList.htm", keyOnly: false },
+  { id: "kuaishou", label: "Kuaishou", region: "China", auto: false, defaultRtmp: "rtmp://live.kuaishou.com/live/", help: "Kuaishou live companion -> copy stream key.", settingsUrl: "", keyOnly: true },
+  { id: "xiaohongshu", label: "Xiaohongshu", region: "China", auto: false, defaultRtmp: "", help: "Xiaohongshu desktop assistant -> copy push URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "bilibili", label: "Bilibili", region: "China", auto: false, defaultRtmp: "rtmp://live-push.bilivideo.com/live-bvc/", help: "Bilibili live center -> start live -> copy stream key.", settingsUrl: "https://link.bilibili.com/p/center/index#/my-room/start-live", keyOnly: true },
+  { id: "custom", label: "Custom RTMP", region: "Other", auto: false, defaultRtmp: "", help: "Enter any RTMP or RTMPS endpoint URL and stream key.", settingsUrl: "", keyOnly: false },
+  { id: "local-test", label: "Local Test (MediaMTX)", region: "Other", auto: true, defaultRtmp: "rtmp://rtmp:1935/live/", help: "Auto-creates one stream per language on local MediaMTX.", settingsUrl: "", keyOnly: false },
+] as const satisfies readonly z.infer<typeof PlatformCatalogEntrySchema>[];
+
+export const PLATFORM_DEFAULT_LANG: Record<string, string | null> = {
+  youtube: null,
+  instagram: "en",
+  tiktok: "en",
+  twitch: "en",
+  coupang: "ko",
+  naver: "ko",
+  rakuten: "ja",
+  douyin: "zh",
+  taobao: "zh",
+  kuaishou: "zh",
+  xiaohongshu: "zh",
+  bilibili: "zh",
+  custom: null,
+  "local-test": null,
+};
+
+export type PlatformId = z.infer<typeof PlatformIdSchema>;
+export type PlatformCatalogEntry = z.infer<typeof PlatformCatalogEntrySchema>;
+export type DetectedPlatform = z.infer<typeof DetectedPlatformSchema>;
