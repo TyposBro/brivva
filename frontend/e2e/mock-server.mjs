@@ -6,6 +6,8 @@ import { WebSocketServer } from "ws";
 import { URL } from "node:url";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8787);
+// The SPA port the auth callbacks bounce back to. Matches playwright.config.ts.
+const APP_PORT = Number(process.env.PLAYWRIGHT_APP_PORT ?? 5174);
 
 /** @type {import("ws").WebSocket | null} */
 let activeSocket = null;
@@ -49,6 +51,9 @@ function patchUser(id, patch) {
 }
 
 const voices = new Map();
+// Per-user platform credentials (grip/tiktok paste-creds flow).
+// Keyed by user_id → { [platform]: credential row }.
+const credentials = new Map();
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -126,6 +131,24 @@ const server = createServer(async (req, res) => {
     const u = patchUser(body.user_id ?? "e2e-user", body);
     return json(res, 200, u);
   }
+  // Test-only endpoints ↓↓↓
+  // Seed an existing voice clone row so mismatch-banner tests don't have to
+  // drive the full recorder stub to produce a voice with source_lang set.
+  if (url.pathname === "/test/seed-voice" && req.method === "POST") {
+    const body = await readBody(req);
+    const userId = body.user_id ?? "e2e-user";
+    const voice = {
+      id: body.id ?? "v-seed",
+      user_id: userId,
+      elevenlabs_voice_id: body.elevenlabs_voice_id ?? "el-seed",
+      name: body.name ?? "Seeded",
+      source_lang: body.source_lang ?? null,
+      created_at: Math.floor(Date.now() / 1000),
+    };
+    voices.set(userId, voice);
+    patchUser(userId, { active_voice_id: voice.id });
+    return json(res, 200, voice);
+  }
   if (url.pathname === "/test/reset" && req.method === "POST") {
     activeSocket?.close();
     activeSocket = null;
@@ -137,6 +160,7 @@ const server = createServer(async (req, res) => {
     killSwitchActive = false;
     users.clear();
     voices.clear();
+    credentials.clear();
     return json(res, 200, { ok: true });
   }
 
@@ -151,7 +175,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/auth/google" && req.method === "GET") {
     // Skip Google round-trip — bounce straight back to the SPA with a fake
     // user_id + JWT in the OAuth-style fragment.
-    const cb = `http://localhost:5174/?user_id=e2e-user#token=eyJhbGciOiJIUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 900 })).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_")}.sig`;
+    const cb = `http://localhost:${APP_PORT}/?user_id=e2e-user#token=eyJhbGciOiJIUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 900 })).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_")}.sig`;
     res.writeHead(302, { Location: cb });
     res.end();
     return;
@@ -159,7 +183,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/auth/youtube" && req.method === "GET") {
     const userId = url.searchParams.get("user_id") ?? "e2e-user";
     patchUser(userId, { youtube_connected: true, youtube_channel_name: "E2E Channel" });
-    res.writeHead(302, { Location: "http://localhost:5174/dashboard?youtube=connected" });
+    res.writeHead(302, { Location: `http://localhost:${APP_PORT}/dashboard?youtube=connected` });
     res.end();
     return;
   }
@@ -198,7 +222,32 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { voices: v ? [v] : [] });
   }
   if (url.pathname === "/api/credentials" && req.method === "GET") {
-    return json(res, 200, { credentials: [] });
+    const userId = url.searchParams.get("user_id") ?? "e2e-user";
+    const bag = credentials.get(userId);
+    const list = bag ? Object.values(bag) : [];
+    return json(res, 200, { credentials: list });
+  }
+  // Grip + TikTok paste-creds flow. Store the pasted RTMP/key tuple so the
+  // next /api/credentials GET pre-fills the destination card on reload.
+  if ((url.pathname === "/auth/grip" || url.pathname === "/auth/tiktok") && req.method === "POST") {
+    const body = await readBody(req);
+    const platform = url.pathname === "/auth/grip" ? "grip" : "tiktok";
+    const userId = body.user_id ?? "e2e-user";
+    const now = Math.floor(Date.now() / 1000);
+    const cred = {
+      id: `c-${platform}-${userId}`,
+      user_id: userId,
+      platform,
+      rtmp_url: body.rtmp_url ?? null,
+      stream_key: body.stream_key ?? null,
+      display_name: body.display_name ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    const bag = credentials.get(userId) ?? {};
+    bag[platform] = cred;
+    credentials.set(userId, bag);
+    return json(res, 200, cred);
   }
   if (url.pathname === "/api/sessions" && req.method === "GET") {
     return json(res, 200, { sessions: [] });

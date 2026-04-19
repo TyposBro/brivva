@@ -1,6 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
-
-const MOCK = "http://localhost:8787";
+import { MOCK } from "./config";
 
 async function resetMock(req: APIRequestContext) {
   await req.post(`${MOCK}/test/reset`);
@@ -18,8 +17,11 @@ async function seedExistingUser(req: APIRequestContext) {
       active_voice_id: "v-default",
     },
   });
+  // source_lang must match the dashboard's default session source (ko),
+  // otherwise the strict voice/source mismatch guard (commit b83f986)
+  // blocks Go Live with a banner.
   await req.post(`${MOCK}/api/voices`, {
-    data: { user_id: "e2e-user", name: "Aziz", audio_base64: "x" },
+    data: { user_id: "e2e-user", name: "Aziz", audio_base64: "x", source_lang: "ko" },
   });
 }
 

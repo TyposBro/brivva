@@ -1,7 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const MOCK_PORT = 8787;
-const APP_PORT = 5174;
+// Ports are env-overridable so a local dev can run the e2e suite against
+// alternate ports when their Cloudflare wrangler dev is holding 8787 (the
+// default). CI keeps the canonical pair via the defaults below.
+const MOCK_PORT = Number(process.env.PLAYWRIGHT_MOCK_PORT ?? 8787);
+const APP_PORT = Number(process.env.PLAYWRIGHT_APP_PORT ?? 5174);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -29,7 +32,7 @@ export default defineConfig({
       command: `node e2e/mock-server.mjs`,
       port: MOCK_PORT,
       reuseExistingServer: !process.env.CI,
-      env: { MOCK_PORT: String(MOCK_PORT) },
+      env: { MOCK_PORT: String(MOCK_PORT), PLAYWRIGHT_APP_PORT: String(APP_PORT) },
     },
     {
       command: `vite --port ${APP_PORT} --strictPort`,

@@ -1,6 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
-
-const MOCK = "http://localhost:8787";
+import { MOCK } from "./config";
 
 async function resetMock(req: APIRequestContext) {
   await req.post(`${MOCK}/test/reset`);
