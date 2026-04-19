@@ -8,7 +8,7 @@ import {
   Square,
   Loader2,
 } from "lucide-react";
-import { cn } from "../lib/cn";
+import { cn } from "../core/cn";
 import * as api from "../lib/api";
 
 export default function SessionPage() {

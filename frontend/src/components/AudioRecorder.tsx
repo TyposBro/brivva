@@ -1,6 +1,6 @@
 import { useRef, useEffect } from "react";
 import { Mic, Square } from "lucide-react";
-import { cn } from "../lib/cn";
+import { cn } from "../core/cn";
 
 interface AudioRecorderProps {
   isRecording: boolean;

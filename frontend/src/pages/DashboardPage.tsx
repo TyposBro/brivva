@@ -16,7 +16,7 @@ import {
   Settings2,
   Clipboard,
 } from "lucide-react";
-import { cn } from "../lib/cn";
+import { cn } from "../core/cn";
 import * as api from "../lib/api";
 
 // ── Types ──────────────────────────────────────────────

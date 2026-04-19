@@ -10,7 +10,7 @@ import {
   SkipForward,
   ExternalLink,
 } from "lucide-react";
-import { cn } from "../lib/cn";
+import { cn } from "../core/cn";
 import * as api from "../lib/api";
 
 function getUserId(): string {
