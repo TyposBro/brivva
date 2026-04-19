@@ -72,6 +72,13 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
+      ECR_REPO: brivva/server-rs
+      ECS_CLUSTER: brivva
+      ECS_SERVICE: brivva
+      ECS_CONTAINER: server-rs
+      TASK_FAMILY: brivva
     steps:
       - uses: actions/checkout@v4
 
@@ -82,39 +89,69 @@ jobs:
           aws-region: us-east-1
 
       - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region us-east-1 \
-            | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
-
-      # Graviton ARM64 image. Buildx uses QEMU on GH's amd64 runner which is
-      # slow but correct — swap to a self-hosted arm64 runner later for speed.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
+      # Cross-compile on amd64 runner via cargo-zigbuild (see Dockerfile).
+      # Registry cache keeps warm builds fast: cargo-chef's deps layer is
+      # reused unless Cargo.lock changes.
       - name: Build and push server-rs
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            -t ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com/brivva/server-rs:latest \
-            -f server-rs/Dockerfile \
-            --push .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server-rs/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache,mode=max
 
-      - name: Force new ECS deployment
+      # Register an immutable task-def revision pinning image:<sha>.
+      # Enables rollback to a prior revision via ./scripts/rollback.sh.
+      - name: Register new task definition
+        id: taskdef
+        run: |
+          set -euo pipefail
+          IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${GITHUB_SHA}"
+          aws ecs describe-task-definition \
+            --region us-east-1 \
+            --task-definition "${TASK_FAMILY}" \
+            --query 'taskDefinition' \
+            --output json \
+          | jq --arg IMG "$IMAGE" --arg C "$ECS_CONTAINER" '
+              .containerDefinitions |= map(
+                if .name == $C then .image = $IMG else . end
+              )
+              | {family, networkMode, taskRoleArn, executionRoleArn,
+                 containerDefinitions, volumes, placementConstraints,
+                 requiresCompatibilities, cpu, memory, runtimePlatform, ephemeralStorage}
+              | with_entries(select(.value != null))
+            ' > taskdef.json
+          REV=$(aws ecs register-task-definition \
+            --region us-east-1 \
+            --cli-input-json file://taskdef.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+          echo "registered $REV"
+
+      - name: Update ECS service → new revision
         run: |
           aws ecs update-service \
             --region us-east-1 \
-            --cluster brivva \
-            --service brivva \
-            --force-new-deployment \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${{ steps.taskdef.outputs.revision }}" \
             --query 'service.taskDefinition' --output text
 
+      # Circuit breaker (configured on the service) auto-rolls back to the
+      # previous revision if new tasks fail to reach steady state.
       - name: Wait for ECS to stabilize
-        run: aws ecs wait services-stable --region us-east-1 --cluster brivva --services brivva
+        run: aws ecs wait services-stable --region us-east-1 --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"
 
       - name: Smoke-test the tunnel
         run: |
