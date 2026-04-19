@@ -2,11 +2,11 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [prod]
   workflow_dispatch: # manual re-deploy from the Actions tab
 
 concurrency:
-  group: deploy-main
+  group: deploy-prod
   cancel-in-progress: false # serialize deploys — don't cancel a mid-flight one
 
 jobs:

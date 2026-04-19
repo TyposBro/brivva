@@ -2,20 +2,26 @@
 
 ## Workflows
 
-### `ci.yml` — runs on every push + PR
+### `ci.yml` — runs on every push + PR to `main` or `prod`
 - **server-rs**: `cargo check` + `cargo clippy -W dead_code -D warnings` + `cargo test`
 - **workers**: `bun run typecheck` + `bun run test` (vitest with in-memory D1)
 - **frontend**: `bun run typecheck` + `bun run test` + `bun run build` (smoke)
 
-Fail-fast per job; all three must be green.
+Fail-fast per job; all three must be green. Also callable as a reusable
+workflow from `deploy.yml`.
 
-### `deploy.yml` — runs on push to `main`
+### `deploy.yml` — runs on push to `prod`
+`main` is the dev trunk. To ship: merge `main → prod` and push `prod`.
 Re-runs `ci.yml` as a gate, then three parallel deploys:
 1. **Workers → brivva-api** via `wrangler deploy` + `migrate:prod`
-2. **Pages → brivva.pages.dev** via `wrangler pages deploy dist`
+2. **Pages → brivva.pages.dev** via `wrangler pages deploy dist --branch=main` (Pages production alias)
 3. **Fargate → us-east-1** via `docker buildx` (arm64) + `ecs update-service --force-new-deployment` + `services-stable` wait + tunnel smoke test
 
 Manual re-deploy available via the Actions tab (`workflow_dispatch`).
+
+### `smoke.yml` — nightly + PR gate
+End-to-end media pipeline smoke. Runs nightly (09:00 UTC) and on PRs that
+touch `server-rs/**` or `tests/e2e/**`. See `tests/e2e/README.md`.
 
 ## Required secrets
 

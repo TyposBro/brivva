@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, prod]
   pull_request:
-    branches: [main]
+    branches: [main, prod]
+  workflow_call: {}
 
 # Concurrency: a new push to the same branch cancels the in-flight run so
 # CI never queues stale commits.
