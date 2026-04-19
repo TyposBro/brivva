@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# post-merge — informational, runs after `git pull` / `git merge`.
+#
+# Does NOT fail or block anything. Just tells you what drifted so you
+# can catch up without surprises.
+#
+# Checks:
+#   1. Lockfile changes → remind to run `bun install`
+#   2. D1 migration changes → remind to apply locally
+#   3. Terraform changes → remind to `terraform plan`
+#   4. Contracts changes → remind to regenerate Rust bindings
+#   5. Dockerfile / compose changes → remind to rebuild
+#
+# Everything is a reminder, never a blocker. You just merged, the
+# commit is already yours — a block would be too late anyway.
+
+set -eu
+
+BLUE=$'\033[0;34m'
+YELLOW=$'\033[0;33m'
+NC=$'\033[0m'
+
+say() {
+  echo "${BLUE}post-merge:${NC} $1"
+}
+
+warn() {
+  echo "${YELLOW}post-merge reminder:${NC} $1"
+}
+
+# Range of commits we just pulled in.
+# ORIG_HEAD is where we were before the merge.
+CHANGED=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null || true)
+
+if [ -z "$CHANGED" ]; then
+  exit 0
+fi
+
+# ── 1. Lockfiles ─────────────────────────────────────────────
+if echo "$CHANGED" | grep -qE '(^|/)(bun\.lock|Cargo\.lock|package-lock\.json|yarn\.lock)$'; then
+  warn "lockfile changed — run \`bun install\` (or \`cargo build\` for Rust deps)"
+fi
+
+# ── 2. D1 migrations ─────────────────────────────────────────
+if echo "$CHANGED" | grep -q '^workers/migrations/'; then
+  warn "D1 migrations changed — run \`bun run --cwd workers migrate:local\` for dev"
+fi
+
+# ── 3. Terraform ─────────────────────────────────────────────
+if echo "$CHANGED" | grep -qE '^infra/.*\.tf$'; then
+  warn "infra/*.tf changed — run \`cd infra && terraform plan\` to preview before next apply"
+fi
+
+# ── 4. Contracts ─────────────────────────────────────────────
+if echo "$CHANGED" | grep -qE '^contracts/'; then
+  warn "contracts changed — regenerate bindings: \`bun run contracts:generate\`"
+fi
+
+# ── 5. Docker ────────────────────────────────────────────────
+if echo "$CHANGED" | grep -qE '(Dockerfile|docker-compose\.yml|compose\..*\.yml)$'; then
+  warn "Docker / compose config changed — rebuild affected stacks"
+fi
+
+# ── 6. Hooks themselves ──────────────────────────────────────
+if echo "$CHANGED" | grep -q '^scripts/git-hooks/'; then
+  warn "git hooks changed — run \`./scripts/install-hooks.sh\` to refresh (no-op if already installed)"
+fi
+
+# ── 7. Architecture / claude.md rules ────────────────────────
+if echo "$CHANGED" | grep -qE '^(ARCHITECTURE\.md|claude\.md|agents\.md)$'; then
+  say "architecture or rules doc updated — worth re-reading"
+fi
+
+exit 0
