@@ -13,6 +13,15 @@
 //!   expected STT+translate+TTS latency) — frontend decides, D1 persists,
 //!   Fargate reads via the session bundle.
 
+mod caption;
+mod mixer;
+mod orphan;
+
+pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
+
+use caption::CaptionState;
+use mixer::{apply_gain, mix_pcm_s16le};
+
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::process::Stdio;
@@ -20,8 +29,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command as TokioCommand;
 
 // ── Timing + format constants ─────────────────────────────
 
@@ -43,10 +50,6 @@ const TTS_QUEUE_CAP_BYTES: usize = 5 * 88_200;
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
 const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
-/// Minimum time a burn-in caption stays on screen before we overwrite it.
-/// Prevents rapid-fire translations from flashing through unreadably.
-const MIN_CAPTION_DWELL_MS: u64 = 1_500;
-
 // ── Per-stream shared state ───────────────────────────────
 
 /// Timestamped chunk of host media. The tuple is (received_at, bytes). A chunk
@@ -90,72 +93,6 @@ struct RtmpStream {
 /// that drawtext reads with `reload=1`; writes are rate-limited via a tokio
 /// task so a fresh translation always gets at least MIN_CAPTION_DWELL_MS on
 /// screen before being replaced.
-struct CaptionState {
-    path: String,
-    sender: tokio::sync::mpsc::UnboundedSender<String>,
-    writer: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl CaptionState {
-    fn spawn(stream_id: &str) -> Self {
-        let path = format!("/tmp/brivva_caption_{}.txt", stream_id);
-        // Empty initial file so drawtext reads cleanly from the first frame.
-        let _ = std::fs::write(&path, "");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let path_clone = path.clone();
-        let writer = tokio::spawn(async move {
-            let min_dwell = Duration::from_millis(MIN_CAPTION_DWELL_MS);
-            let mut last_written = Instant::now()
-                .checked_sub(min_dwell)
-                .unwrap_or_else(Instant::now);
-            while let Some(mut text) = rx.recv().await {
-                // Wait out any remaining minimum-dwell budget for the previous caption.
-                let elapsed = last_written.elapsed();
-                if elapsed < min_dwell {
-                    tokio::time::sleep(min_dwell - elapsed).await;
-                }
-                // Coalesce any updates that piled up during the sleep — only the
-                // latest translation is worth showing.
-                while let Ok(newer) = rx.try_recv() {
-                    text = newer;
-                }
-                let sanitized = sanitize_caption(&text);
-                write_caption_atomic(&path_clone, &sanitized);
-                last_written = Instant::now();
-            }
-        });
-        Self {
-            path,
-            sender: tx,
-            writer: Some(writer),
-        }
-    }
-
-    fn push(&self, text: &str) {
-        let _ = self.sender.send(text.to_string());
-    }
-}
-
-/// Remove control chars and cap caption length so drawtext stays legible.
-fn sanitize_caption(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .take(200)
-        .collect()
-}
-
-/// Write the caption atomically so FFmpeg's `reload=1` never sees a torn file.
-fn write_caption_atomic(path: &str, text: &str) {
-    let tmp = format!("{}.tmp", path);
-    if let Err(e) = std::fs::write(&tmp, text) {
-        eprintln!("[CAPTION] write tmp failed ({}): {}", path, e);
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        eprintln!("[CAPTION] rename failed ({}): {}", path, e);
-    }
-}
-
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
 }
@@ -355,10 +292,7 @@ impl RtmpManager {
                 // Captions get reborn by spawn_stream_inner — tear down the old one.
                 if let Some(mut cap) = old.caption.take() {
                     let _ = std::fs::remove_file(&cap.path);
-                    drop(cap.sender);
-                    if let Some(handle) = cap.writer.take() {
-                        handle.abort();
-                    }
+                    cap.shutdown();
                 }
                 result.push((
                     id,
@@ -586,11 +520,7 @@ impl RtmpManager {
             let _ = std::fs::remove_file(&stream.audio_fifo);
             if let Some(mut cap) = stream.caption.take() {
                 let _ = std::fs::remove_file(&cap.path);
-                // Dropping the sender closes the channel so the writer task exits.
-                drop(cap.sender);
-                if let Some(handle) = cap.writer.take() {
-                    handle.abort();
-                }
+                cap.shutdown();
             }
         }
     }
@@ -830,152 +760,3 @@ fn audio_drain_loop(ctx: AudioDrainCtx) {
     );
 }
 
-/// Apply a uniform gain to a PCM s16le buffer and clip to the i16 range.
-fn apply_gain(pcm: &[u8], gain: f32) -> Vec<u8> {
-    let n_aligned = pcm.len() - (pcm.len() % 2);
-    let mut out = Vec::with_capacity(n_aligned);
-    let mut i = 0;
-    while i + 1 < n_aligned {
-        let s = i16::from_le_bytes([pcm[i], pcm[i + 1]]) as f32;
-        let scaled = (s * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        out.extend_from_slice(&scaled.to_le_bytes());
-        i += 2;
-    }
-    out
-}
-
-/// Mix two PCM streams (s16le little-endian, same length) with per-source gain
-/// and clip to the i16 range. Output length = min(a.len(), b.len()).
-fn mix_pcm_s16le(a: &[u8], a_gain: f32, b: &[u8], b_gain: f32) -> Vec<u8> {
-    let n = a.len().min(b.len());
-    let n_aligned = n - (n % 2);
-    let mut out = Vec::with_capacity(n_aligned);
-    let mut i = 0;
-    while i + 1 < n_aligned {
-        let sa = i16::from_le_bytes([a[i], a[i + 1]]) as f32;
-        let sb = i16::from_le_bytes([b[i], b[i + 1]]) as f32;
-        let mixed = (sa * a_gain + sb * b_gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        out.extend_from_slice(&mixed.to_le_bytes());
-        i += 2;
-    }
-    out
-}
-
-// ── Startup cleanup ────────────────────────────────────────
-
-pub fn kill_orphan_ffmpeg() {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-f", "brivva_audio"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "pgrep not available; skipping orphan cleanup"
-            );
-            return;
-        }
-    };
-
-    let pids = String::from_utf8_lossy(&output.stdout);
-    let mut killed = 0;
-    for line in pids.lines() {
-        if let Ok(pid) = line.trim().parse::<i32>() {
-            let my_pid = std::process::id() as i32;
-            if pid == my_pid {
-                continue;
-            }
-            tracing::info!(pid, "killing orphan ffmpeg process");
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
-            killed += 1;
-        }
-    }
-
-    let mut stale_files = 0;
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && (name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_"))
-            {
-                let _ = std::fs::remove_file(entry.path());
-                stale_files += 1;
-            }
-        }
-    }
-
-    tracing::info!(
-        orphan_pids_killed = killed,
-        stale_files_removed = stale_files,
-        "orphan ffmpeg cleanup complete"
-    );
-}
-
-/// Decode MP3 bytes to raw PCM s16le 44.1 kHz mono via FFmpeg subprocess.
-pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = TokioCommand::new("ffmpeg")
-        .args([
-            "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("FFmpeg decode spawn failed: {}", e))?;
-
-    let mut stdin = child.stdin.take().ok_or("No stdin")?;
-    stdin
-        .write_all(mp3)
-        .await
-        .map_err(|e| format!("FFmpeg stdin write failed: {}", e))?;
-    drop(stdin);
-
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("FFmpeg wait failed: {}", e))?;
-    if output.stdout.is_empty() {
-        return Err("Empty PCM output".to_string());
-    }
-    Ok(output.stdout)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pcm(samples: &[i16]) -> Vec<u8> {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    }
-
-    fn decode_samples(bytes: &[u8]) -> Vec<i16> {
-        bytes
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect()
-    }
-
-    #[test]
-    fn sanitize_caption_strips_control_chars_and_truncates() {
-        let text = format!("hi\x00there\n{}", "a".repeat(250));
-        let out = sanitize_caption(&text);
-
-        assert!(!out.contains('\x00'));
-        assert!(out.contains('\n'));
-        assert_eq!(out.chars().count(), 200);
-    }
-
-    #[test]
-    fn apply_gain_scales_samples_and_ignores_trailing_odd_byte() {
-        let scaled = apply_gain(&[0x10, 0x27, 0xF0, 0xD8, 0xAA], 0.5);
-        assert_eq!(decode_samples(&scaled), vec![5000, -5000]);
-    }
-
-    #[test]
-    fn mix_pcm_s16le_clips_on_overflow() {
-        let mixed = mix_pcm_s16le(&pcm(&[30_000, -30_000]), 1.0, &pcm(&[10_000, -10_000]), 1.0);
-        assert_eq!(decode_samples(&mixed), vec![32_767, -32_768]);
-    }
-}
