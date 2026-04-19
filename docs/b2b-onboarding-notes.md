@@ -83,7 +83,30 @@ destination card. Walk new B2B hosts through this the day of broadcast.
 - Live keys issue **1 hour before scheduled start time**. Cannot fetch earlier.
 - Rehearsal keys issue **5 hours before scheduled start time**.
 - Keys are **one-shot per broadcast** — a new broadcast → new keys. Don't reuse across sessions.
+- After saving the broadcast, Grip requires you to **start pushing RTMP within 1 hour** or the stream is invalidated.
+- The `송출 종류` (transmission type) **cannot be changed after save** — pick Live or Recording (rehearsal) correctly the first time.
+- Connect-to-reservation window: **15 minutes before scheduled start time through end time**. Push outside that window and Grip won't bind the stream to the reserved broadcast slot.
 - Grip terminates the broadcast after **15 minutes of network interruption** — if Fargate reconnects after that window it won't resume.
+
+### Grip encoder constraints (Brivva ffmpeg must respect)
+
+Per the PC 송출 form:
+
+- Codec: **H.264**
+- Keyframe interval: **1 second**
+- Resolution: **720×1280** (portrait, 9:16)
+- Bitrate: **≤ 3 Mbps** — exceeding this causes Grip to drop the connection mid-stream
+
+Brivva's server-rs ffmpeg per-language output must match these. If the
+existing pipeline emits 16:9 landscape or >3 Mbps, add a Grip-specific
+ffmpeg profile before the first real b2b show. Check before May 10.
+
+### Name / password fields on the form
+
+The PC 송출 form shows `name` + `password` next to `stream key` + `server`.
+Per Grip's PDF guide, **authentication is optional** ("인증 기능은 사용하지
+않아도 무관"). Brivva only needs server URL + stream key — leave name /
+password blank in Grip and on our side.
 
 ### When Grip answers the Seller API request
 
