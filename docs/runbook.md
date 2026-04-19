@@ -13,21 +13,22 @@ Response section in `ARCHITECTURE.md`.
 ### 1. Translated TTS silent — host audio fine, translated stream has no voice
 
 Symptom: host speaks, subtitles appear, but translated output is silence
-or garbled. Usually ElevenLabs WS stall, voice clone id mismatch, or
-Qwen3 auth issue.
+or garbled. Usually ElevenLabs WS stall or voice clone id mismatch (the
+April 2026 Indian-accent regression is the canonical example).
 
 Triage (30 seconds):
 1. Open Fargate logs: `aws logs tail /ecs/brivva --follow --since 5m`.
 2. Grep for `[TTS]` — is the session even reaching TTS, or stuck at STT?
-3. If `TTS speak request failed` or `DashScope error` → see fix.
+3. If the cloned voice is producing the wrong language/accent → kill-switch fix.
+4. If ElevenLabs HTTP errors are the pattern → platform outage, skip to Plan B.
 
 Fix:
-- `BRIVVA_DISABLE_QWEN3=1` → force ElevenLabs for all languages. Update
-  secret in Secrets Manager, restart task. **Kills DashScope path, keeps
-  stream alive.**
-- If ElevenLabs itself is down: `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1`
-  forces the built-in voice library (no clone). Lower quality, always
-  works.
+- `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` → force the target language's
+  default voice from the ElevenLabs library, bypass cloning entirely.
+  Update Secrets Manager, force-restart the ECS service. Lower voice
+  fidelity but always works.
+- If ElevenLabs itself is down: no kill-switch helps — ride out the
+  outage, or switch to Plan B (desktop app fallback below).
 
 Recovery validation:
 - Listen to RTMP output: `ffplay rtmps://...:443/live/<STREAM_KEY>`.
@@ -81,20 +82,27 @@ Recovery validation:
 
 ## Kill Switches (env vars, no redeploy)
 
-Update Secrets Manager `brivva/env` → force task restart:
+Update Secrets Manager `brivva/env` → force task restart. Both switches
+are wired in `server-rs` and read once at session start per `AppConfig`.
 
-| Var | When to use |
-|---|---|
-| `BRIVVA_DISABLE_TIER4=1` | Dubbing (ElevenLabs Dubbing API) broken, skip post-processing |
-| `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` | Voice clone producing garbage (Indian accent), force default voices |
-| `BRIVVA_DISABLE_QWEN3=1` | DashScope down, force ElevenLabs only |
-| `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` | TLS handshake fails with a platform, drop to unsecured |
+| Var | When to use | Wired at |
+|---|---|---|
+| `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` | Voice clone producing garbage (accent bugs), force default voices | `features/broadcast/data/pipeline/tts.rs` |
+| `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` | TLS handshake fails with a platform, drop to unsecured RTMP | `features/broadcast/data/session_ws.rs` |
 
 Apply:
 ```bash
 aws secretsmanager update-secret --secret-id brivva/env --secret-string '{...}'
 aws ecs update-service --cluster brivva --service brivva --force-new-deployment
 ```
+
+Truthy values: `1`, `true`, `yes`, `on` (case-insensitive). Anything
+else — including unset — disables the switch.
+
+Note: previous revisions of this runbook referenced `BRIVVA_DISABLE_TIER4`
+and `BRIVVA_DISABLE_QWEN3`. Tier 4 dubbing and Qwen3 DashScope are not
+present in the current server-rs tree, so those switches are intentionally
+omitted. Re-add if/when those providers ship.
 
 ---
 
