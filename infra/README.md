@@ -177,6 +177,51 @@ Pipeline writes the translated text per utterance to `/tmp/subs-<lang>.txt`. `re
 - **Long lines.** Translated text sometimes balloons. Wrap at ~40 chars in the pipeline before writing to the textfile, or use drawtext's `line_spacing` + manual newlines.
 - **Timing.** drawtext reloads asynchronously. Expect 200-500ms lag between text update and frame showing new subtitle. For tight sync, write the file slightly ahead of TTS playout.
 
+## Monitoring
+
+`monitoring.tf` provisions a CloudWatch dashboard, log-based metric filters,
+and alarms wired to an SNS topic. After `tofu apply`, the dashboard URL is in
+the `dashboard_url` output.
+
+### Alarms
+
+| Name | Trigger | What it means |
+|---|---|---|
+| `brivva-ecs-running-tasks-low` | `RunningTaskCount < 1` for 2m | Task crashed or deploy rolling. Tunnel users see 530/1033. |
+| `brivva-ecs-cpu-high` | CPU avg > 80% for 15m | Saturated — bump `task_cpu` or scale out. |
+| `brivva-ecs-memory-high` | Mem avg > 85% for 15m | OOM-kill imminent — bump `task_memory`. |
+| `brivva-ffmpeg-crash-rate` | > 3 ffmpeg crashes in 5m | Destination RTMP unhealthy or CPU throttling. |
+| `brivva-ffmpeg-gave-up` | Any "restart limit exceeded" in 1m | A stream is fully DOWN until the session restarts. **Page.** |
+
+The crash + give-up alarms rely on metric filters that match the tracing JSON
+`fields.message` field. If you rename a log line in `server-rs/**`, update the
+filter pattern in `monitoring.tf` — the alarms silently report zero otherwise.
+
+### Wiring alerts
+
+```hcl
+# infra/terraform.tfvars
+alarm_email = "oncall@example.com"
+```
+
+AWS sends a confirmation email on first `tofu apply`. Click the link before
+alarms will actually deliver.
+
+For Slack/PagerDuty, subscribe extra endpoints to the `alarm_topic_arn`
+output (a Lambda → Slack webhook is the classic pattern).
+
+Disable the whole block with `alarm_enabled = false` for dev stacks that
+share an AWS account.
+
+### Dashboard layout
+
+- Row 1: ECS CPU/memory % (left) + running/desired task count (right)
+- Row 2: ffmpeg crash/give-up counts (left) + session starts + WS auth
+  rejections + workers status failures (right)
+- Row 3: log widget showing recent WARN/ERROR lines via Logs Insights
+
+Extend by editing the `widgets` list in `monitoring.tf`.
+
 ## State
 
 Local backend for now (`terraform.tfstate` in this dir, gitignored). Migrate to S3 + DynamoDB lock before team use.

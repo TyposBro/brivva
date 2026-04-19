@@ -103,3 +103,17 @@ variable "workers_api_url" {
   type        = string
   default     = "https://brivva-api.milliytechnology.workers.dev"
 }
+
+# ── Monitoring ──────────────────────────────────────────────
+
+variable "alarm_enabled" {
+  description = "Provision CloudWatch alarms + SNS topic. Disable for bare-bones dev stacks."
+  type        = bool
+  default     = true
+}
+
+variable "alarm_email" {
+  description = "Email subscribed to the SNS alarm topic. Empty = alarms fire but nobody is paged. AWS sends a confirmation email on first apply."
+  type        = string
+  default     = ""
+}

@@ -29,3 +29,13 @@ output "service_name" {
 output "cloudflared_enabled" {
   value = local.enable_cloudflared
 }
+
+output "dashboard_url" {
+  description = "Deep link to the CloudWatch ops dashboard."
+  value       = "https://${var.region}.console.aws.amazon.com/cloudwatch/home?region=${var.region}#dashboards:name=${aws_cloudwatch_dashboard.app.dashboard_name}"
+}
+
+output "alarm_topic_arn" {
+  description = "SNS topic ARN for all Brivva alarms. Subscribe extra endpoints (Slack webhook, PagerDuty) against this."
+  value       = var.alarm_enabled ? aws_sns_topic.alarms[0].arn : null
+}
