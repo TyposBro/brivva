@@ -78,12 +78,23 @@ if [ -n "$TFSTATE_HITS" ]; then
   fail "staged terraform state file(s):\n$TFSTATE_HITS\nState belongs in S3 backend. See docs/terraform-state-migration-plan.md."
 fi
 
-# ── 4. Rust formatting ───────────────────────────────────────
-if echo "$STAGED" | grep -qE '\.rs$'; then
-  if ! (cd server-rs && cargo fmt --check --quiet 2>/dev/null); then
-    fail "rustfmt violations. Run \`cargo fmt\` in server-rs/ and restage."
+# ── 4. Rust formatting (staged files only) ──────────────────
+# Check only files actually in the commit to avoid blocking on an
+# unrelated collaborator's WIP elsewhere in the crate.
+STAGED_RS=$(echo "$STAGED" | grep -E '\.rs$' || true)
+if [ -n "$STAGED_RS" ]; then
+  FMT_VIOLATIONS=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if ! rustfmt --check --edition 2024 "$f" >/dev/null 2>&1; then
+      FMT_VIOLATIONS="$FMT_VIOLATIONS\n  - $f"
+    fi
+  done <<< "$STAGED_RS"
+
+  if [ -n "$FMT_VIOLATIONS" ]; then
+    fail "rustfmt violations in staged files:$FMT_VIOLATIONS\nRun \`rustfmt --edition 2024 <file>\` (or \`cargo fmt\`) and restage."
   fi
-  ok "rustfmt clean"
+  ok "rustfmt clean (staged files)"
 fi
 
 # ── 5. Layer checks per subproject ───────────────────────────
