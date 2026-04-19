@@ -76,7 +76,30 @@ destination card. Walk new B2B hosts through this the day of broadcast.
 5. Set `송출 종류` (broadcast type) to **`라이브`** (Live). Use **`녹화`** (Recording) only for private rehearsal
 6. Click `저장` (Save) — the server URL + stream key appear in the third section of the form
 7. Copy both → paste into the Brivva destination card (Server URL + Stream Key)
-8. Click "Save credentials" in Brivva so next session pre-fills
+8. Go Live. Brivva does NOT offer a "Save credentials" button for Grip — see below.
+
+### Brivva does NOT save Grip creds (intentional)
+
+Stream keys are **one-shot per broadcast**. Grip runs on AWS IVS and IVS
+rejects a duplicate publisher when the same key is reused — the second
+session silently connects for a few seconds, then gets dropped (observed
+as `송출 대기중` hanging on the Grip side while ffmpeg encodes idle-ly for
+25+ seconds before our watchdog SIGKILLs it).
+
+To keep the failure mode un-reproducible:
+
+- The destination card renders paste inputs but shows **no "Save
+  credentials" button for Grip** (TikTok still saves — its keys are
+  reusable until the host regenerates them).
+- `POST /auth/grip` on Workers returns **410 Gone**
+  (`grip_creds_not_savable`) so a stale client can't quietly persist a
+  key either.
+- The FE filters `grip` rows out of `/api/credentials` responses — even
+  if legacy DB rows exist from before this change, nothing pre-fills.
+- The host must paste a fresh key **every session**. There is no
+  shortcut; it is a Grip/IVS constraint, not a Brivva limitation.
+
+If a host complains about the missing Save button, point them here.
 
 ### Timing (critical — plan the call slot around this)
 

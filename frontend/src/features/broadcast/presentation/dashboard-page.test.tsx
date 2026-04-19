@@ -242,6 +242,89 @@ describe("DashboardPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("filters Grip rows out of /api/credentials — legacy rows never pre-fill (sad)", async () => {
+    // Grip stream keys are one-shot per broadcast (AWS IVS rejects a
+    // duplicate publisher — the second session silently dies after ~25s).
+    // The save path has been removed, but legacy rows may still exist in
+    // platform_credentials from before this change. The dashboard must
+    // drop `grip` rows on load so nothing pre-fills the destination card.
+    getUser.mockResolvedValue(fullUser());
+    listVoices.mockResolvedValue({ voices: [] });
+    listSessions.mockResolvedValue({ sessions: [] });
+    listCredentials.mockResolvedValue({
+      credentials: [
+        {
+          id: "pc-grip-legacy",
+          user_id: "u1",
+          platform: "grip",
+          rtmp_url: "rtmps://stale.example/app",
+          stream_key: "stale-one-shot-key",
+          display_name: "grip:legacy",
+          created_at: 1,
+          updated_at: 1,
+        },
+        {
+          id: "pc-tiktok",
+          user_id: "u1",
+          platform: "tiktok",
+          rtmp_url: "rtmps://push.tiktokcdn.com/game/",
+          stream_key: "tiktok-reusable",
+          display_name: "tiktok:main",
+          created_at: 1,
+          updated_at: 1,
+        },
+      ],
+    });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: 1 });
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <DashboardPage />
+      </MemoryRouter>,
+    );
+    // Wait for data load.
+    await screen.findByText("BRIVVA");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const u = userEvent.setup();
+
+    // Add a Grip destination. If the legacy row leaked into savedCreds it
+    // would pre-fill the rtmp_url + stream_key inputs — assert they're
+    // empty (= filter worked).
+    await u.click(await screen.findByRole("button", { name: /Add destination/i }));
+    await u.click(screen.getByRole("button", { name: /^Grip$/i }));
+    const serverUrl = screen.getByPlaceholderText(/Server URL/i) as HTMLInputElement;
+    const streamKey = screen.getByPlaceholderText(/Stream Key/i) as HTMLInputElement;
+    expect(serverUrl.value).toBe("");
+    expect(streamKey.value).toBe("");
+
+    // And the ephemeral-key warning renders so the host knows why.
+    expect(screen.getByTestId("grip-ephemeral-warning")).toBeInTheDocument();
+
+    // Regression guard: TikTok flowed through to savedCreds (only Grip is
+    // filtered). The TikTok card mounts collapsed when savedCreds[tiktok]
+    // is present, so assert the Pre-filled badge (which only renders when
+    // hasSavedCreds is true) shows up once expanded. Remove the Grip card
+    // first so role queries on the new TikTok card aren't ambiguous.
+    const removeBtns = document.querySelectorAll("button.hover\\:text-error");
+    await u.click(removeBtns[0]!);
+    await u.click(screen.getByRole("button", { name: /Add destination/i }));
+    await u.click(screen.getByRole("button", { name: /^TikTok$/i }));
+    // Expand the collapsed TikTok card. The config-toggle chevron is the
+    // lucide-chevron-right button next to the X remove button.
+    const chevron = document.querySelector(
+      "button > svg.lucide-chevron-right",
+    )?.parentElement as HTMLButtonElement | null;
+    expect(chevron).not.toBeNull();
+    await u.click(chevron!);
+    expect(
+      screen.getByText(/Pre-filled from saved credentials/i),
+    ).toBeInTheDocument();
+    const ttStreamKey = screen.getByPlaceholderText(
+      /Stream Key/i,
+    ) as HTMLInputElement;
+    expect(ttStreamKey.value).toBe("tiktok-reusable");
+  });
+
   it("recent sessions render in the list (happy)", async () => {
     getUser.mockResolvedValue(fullUser());
     listVoices.mockResolvedValue({ voices: [] });

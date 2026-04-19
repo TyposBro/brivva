@@ -1618,7 +1618,11 @@ describe("GET /auth/google/callback (fetch-stubbed, happy)", () => {
 });
 
 describe("POST /auth/grip + /auth/tiktok", () => {
-  it("upserts a Grip credential row with platform=grip (happy)", async () => {
+  it("410 Gone on POST /auth/grip — keys are one-shot, save path removed", async () => {
+    // Grip stream keys are one-shot per broadcast (AWS IVS rejects duplicate
+    // publishers). Saving them guaranteed the failure where the second
+    // session died silently after ~25s. The endpoint now refuses to persist
+    // so a legacy client can't reintroduce the bug.
     const res = await call("/auth/grip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1630,15 +1634,10 @@ describe("POST /auth/grip + /auth/tiktok", () => {
         display_name: "Grip main",
       }),
     });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      platform: string;
-      stream_key: string;
-      display_name: string;
-    };
-    expect(body.platform).toBe("grip");
-    expect(body.stream_key).toBe("grip-stream-key");
-    expect(body.display_name).toBe("Grip main");
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("grip_creds_not_savable");
+    expect(body.message).toMatch(/one-shot/i);
   });
 
   it("400 when required fields missing on /auth/tiktok (sad)", async () => {
@@ -1675,12 +1674,16 @@ describe("POST /auth/grip + /auth/tiktok", () => {
 // describe blocks so regressions in one platform can't silently pass by
 // inheriting the other's assertions.
 
-describe("POST /auth/grip — paste-creds round-trip", () => {
-  it("persists the row and exposes it via GET /api/credentials (happy)", async () => {
-    // Task A-1 + A-2: write → list round-trip lands the stream_key + rtmp_url
-    // the host pasted from their Grip dashboard. The orchestration layer
-    // reads this row later when a session carries platform=grip without a
-    // product_id (manual paste-creds path).
+describe("POST /auth/grip — save path removed (ephemeral one-shot keys)", () => {
+  // These four tests were originally a write → list round-trip (commit
+  // 3f24189). The save path has been deleted because Grip stream keys are
+  // one-shot per broadcast (AWS IVS under the hood: a fresh key issues ~1h
+  // before each show, and IVS rejects a duplicate publisher — the second
+  // session connects briefly then dies silently after ~25s). Every request
+  // shape that previously worked must now be rejected with 410, and nothing
+  // should ever hit platform_credentials.
+
+  it("410 on a fully-valid Grip save request (what used to be the happy path)", async () => {
     const res = await call("/auth/grip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1691,51 +1694,32 @@ describe("POST /auth/grip — paste-creds round-trip", () => {
         rtmp_url: "rtmps://live.grip.fans:443/live/",
       }),
     });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      platform: string;
-      stream_key: string;
-      rtmp_url: string | null;
-      display_name: string | null;
-    };
-    expect(body.platform).toBe("grip");
-    expect(body.stream_key).toBe("grip-sk-aaa");
-    expect(body.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("grip_creds_not_savable");
 
-    // D1 row must actually exist (guard against a handler that returns the
-    // constructed row without persisting — a failure mode we shipped once
-    // before and want a regression pin for).
+    // Critical: no D1 row may exist. If the handler accidentally persisted
+    // before returning the error, the FE's defensive filter would hide it
+    // — but a future migration could re-surface it. Pin the contract here.
     const dbRow = (await env.DB.prepare(
-      "SELECT stream_key, rtmp_url FROM platform_credentials WHERE user_id = ? AND platform = ?",
+      "SELECT stream_key FROM platform_credentials WHERE user_id = ? AND platform = ?",
     )
       .bind("u-grip-rt", "grip")
-      .first()) as { stream_key: string; rtmp_url: string } | null;
-    expect(dbRow).not.toBeNull();
-    expect(dbRow!.stream_key).toBe("grip-sk-aaa");
-    expect(dbRow!.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+      .first()) as { stream_key: string } | null;
+    expect(dbRow).toBeNull();
 
-    // Round-trip through the public list endpoint — the FE polls this when
-    // rendering the destination picker.
+    // And GET /api/credentials for that user returns nothing Grip-shaped.
     const listRes = await call("/api/credentials?user_id=u-grip-rt");
     expect(listRes.status).toBe(200);
     const list = (await listRes.json()) as {
-      credentials: Array<{
-        platform: string;
-        stream_key: string;
-        rtmp_url: string | null;
-      }>;
+      credentials: Array<{ platform: string }>;
     };
-    const gripRow = list.credentials.find((c) => c.platform === "grip");
-    expect(gripRow).toBeDefined();
-    expect(gripRow!.stream_key).toBe("grip-sk-aaa");
-    expect(gripRow!.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+    expect(list.credentials.find((c) => c.platform === "grip")).toBeUndefined();
   });
 
-  it("400 when stream_key is empty (sad)", async () => {
-    // Task A-3: Zod min(1) on stream_key rejects empty strings. Without this
-    // guard the FE could accidentally save a credential that would later
-    // cause FFmpeg to spawn with an empty stream-key segment and blow up
-    // mid-broadcast.
+  it("410 even on a malformed body — no validation branch matters anymore", async () => {
+    // Previously this shape returned 400 (stream_key empty). The new handler
+    // short-circuits before any schema check, so every body is 410.
     const res = await call("/auth/grip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1745,13 +1729,12 @@ describe("POST /auth/grip — paste-creds round-trip", () => {
         stream_key: "",
       }),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("grip_creds_not_savable");
   });
 
-  it("400 when user_id is missing (sad)", async () => {
-    // Task A-4: user_id is required by GripAuthRequestSchema. Missing it is
-    // a client bug (anonymous POST to /auth/grip would silently orphan a
-    // credential row if the handler fell through to getOrCreateUser).
+  it("410 when user_id is missing — previously 400, now uniformly rejected", async () => {
     const res = await call("/auth/grip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1760,13 +1743,13 @@ describe("POST /auth/grip — paste-creds round-trip", () => {
         stream_key: "k",
       }),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(410);
   });
 
-  it("repeated saves UPSERT — same user_id+platform yields one row (happy)", async () => {
-    // Task A-5: the handler must not insert duplicates when a host re-pastes
-    // (common when the Grip dashboard expires the old stream key). Schema
-    // has UNIQUE(user_id, platform); db.upsertCredential uses onConflict.
+  it("repeated calls never produce a row — replaces the old UPSERT test", async () => {
+    // The old test asserted two saves collapse into one row via UPSERT. The
+    // new contract is stronger: zero rows, no matter how many times the FE
+    // (or a stale client) retries.
     await call("/auth/grip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1787,17 +1770,14 @@ describe("POST /auth/grip — paste-creds round-trip", () => {
         rtmp_url: "rtmps://b.example/live/",
       }),
     });
-    expect(res2.status).toBe(200);
+    expect(res2.status).toBe(410);
 
     const rows = await env.DB.prepare(
-      "SELECT stream_key, rtmp_url FROM platform_credentials WHERE user_id = ? AND platform = ?",
+      "SELECT stream_key FROM platform_credentials WHERE user_id = ? AND platform = ?",
     )
       .bind("u-grip-upsert", "grip")
       .all();
-    expect(rows.results).toHaveLength(1);
-    const row = rows.results[0] as { stream_key: string; rtmp_url: string };
-    expect(row.stream_key).toBe("second-key");
-    expect(row.rtmp_url).toBe("rtmps://b.example/live/");
+    expect(rows.results).toHaveLength(0);
   });
 });
 

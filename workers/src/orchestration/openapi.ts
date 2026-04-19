@@ -780,12 +780,18 @@ function authPaths() {
       }),
     },
     "/auth/grip": {
-      post: getOperation("Save Grip RTMP credentials (no real OAuth)", {
-        200: jsonResponse(ref("PlatformCredential"), "Saved credential"),
-        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
-      }, {
-        requestBody: jsonBody(ref("GripAuthRequest")),
-      }),
+      post: getOperation(
+        "Removed — Grip stream keys are one-shot per broadcast",
+        {
+          410: jsonResponse(
+            ref("ErrorResponse"),
+            "grip_creds_not_savable — paste fresh each session",
+          ),
+        },
+        {
+          requestBody: jsonBody(ref("GripAuthRequest")),
+        },
+      ),
     },
     "/auth/tiktok": {
       post: getOperation("Save TikTok RTMP credentials (no real OAuth)", {

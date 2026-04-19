@@ -2,9 +2,12 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 import { MOCK } from "./config";
 
 // Shape-realistic Grip (AWS-IVS) values the host would paste from the Grip
-// Business Center. The mock server echoes them back via /api/credentials,
-// which lets us assert the "Pre-filled from saved credentials" badge on
-// reload without touching a real Grip endpoint.
+// Business Center. The old scenario saved these via POST /auth/grip and
+// asserted they pre-filled on reload. That path is gone: Grip stream keys
+// are one-shot per broadcast (IVS rejects a duplicate publisher — the
+// second session silently dies after ~25s). The FE now renders an
+// ephemeral-key warning, hides Save, and filters Grip rows out of
+// /api/credentials so nothing pre-fills.
 const GRIP_RTMP = "rtmps://abc123def456.global-contribute.live-video.net:443/app";
 const GRIP_KEY = "sk_ap-northeast-2_abcdef1234567890_examplekey";
 
@@ -34,13 +37,13 @@ async function signIn(page: Page) {
   });
 }
 
-test.describe("Scenario 4 — Grip paste-creds persistence", () => {
+test.describe("Scenario 4 — Grip creds are ephemeral (no save, no pre-fill)", () => {
   test.beforeEach(async ({ request }) => {
     await resetMock(request);
     await seedOnboarded(request);
   });
 
-  test("save Grip creds → badge flips to 'Saved' → reload pre-fills from storage", async ({ page, request }) => {
+  test("Grip shows warning + no Save button, and reload never pre-fills inputs", async ({ page }) => {
     await signIn(page);
     await page.goto("/dashboard");
 
@@ -49,61 +52,44 @@ test.describe("Scenario 4 — Grip paste-creds persistence", () => {
     await page.getByRole("button", { name: /^Grip$/i }).click();
 
     // Config panel auto-expands for paste-creds platforms without saved creds.
-    // Fill Server URL + Stream Key with AWS-IVS-shaped values.
+    // Paste inputs render, but the behaviour around them is different from
+    // every other paste-creds platform.
     const serverUrlInput = page.getByPlaceholder("Server URL");
     const streamKeyInput = page.getByPlaceholder("Stream Key");
     await expect(serverUrlInput).toBeVisible();
     await expect(streamKeyInput).toBeVisible();
 
+    // Amber one-shot-key warning is rendered in place of the Save button.
+    await expect(page.getByTestId("grip-ephemeral-warning")).toBeVisible();
+    await expect(page.getByTestId("grip-ephemeral-warning")).toContainText(/one-shot/i);
+
+    // Save button must NOT exist for Grip.
+    await expect(page.getByRole("button", { name: /Save credentials/i })).toHaveCount(0);
+
+    // Fill the pasted values so the host can still go live this session.
     await serverUrlInput.fill(GRIP_RTMP);
     await streamKeyInput.fill(GRIP_KEY);
 
-    // Fire the save. POST /auth/grip persists into mock-server's in-memory
-    // credentials map and the UI flips to the just-saved indicator.
-    const savePromise = page.waitForResponse(
-      (r) => r.url().includes("/auth/grip") && r.request().method() === "POST",
-    );
-    await page.getByRole("button", { name: /Save credentials/i }).click();
-    const saveRes = await savePromise;
-    expect(saveRes.status()).toBe(200);
-
-    await expect(
-      page.getByText(/Saved — will pre-fill next session/i),
-    ).toBeVisible();
-
-    // Sanity: mock stored the creds under the user_id.
-    const credRes = await request.get(`${MOCK}/api/credentials?user_id=e2e-user`);
-    const credBody = (await credRes.json()) as {
-      credentials: Array<{ platform: string; rtmp_url: string; stream_key: string }>;
-    };
-    expect(credBody.credentials).toHaveLength(1);
-    expect(credBody.credentials[0].platform).toBe("grip");
-    expect(credBody.credentials[0].rtmp_url).toBe(GRIP_RTMP);
-    expect(credBody.credentials[0].stream_key).toBe(GRIP_KEY);
-
-    // Reload → dashboard fetches /api/credentials → adding Grip again should
-    // pre-fill the inputs from savedCreds. With saved creds present the card
-    // mounts collapsed; the config panel only renders when expanded, so the
-    // "Pre-filled from saved credentials" badge is gated on clicking the
-    // chevron. Assert the stored values flow through.
+    // Reload → dashboard refetches /api/credentials. Because the FE filters
+    // Grip rows out (and the workers endpoint returns 410 for save anyway),
+    // nothing ever got stored server-side; re-adding Grip must start empty.
     await page.reload();
     await page.getByRole("button", { name: /Add destination/i }).click();
     await page.getByRole("button", { name: /^Grip$/i }).click();
 
-    // Expand the Grip card's config panel. The chevron toggle uses the
-    // lucide ChevronRight icon when collapsed, which lucide-react renders
-    // with class `lucide-chevron-right`. The X remove button sits next to
-    // it; we scope to the first matching button within the Grip card.
-    const gripCard = page
-      .locator("text=/^Grip$/")
-      .first()
-      .locator("xpath=ancestor::div[contains(@class,'bg-surface-container-low')][1]");
-    await gripCard.locator("button:has(svg.lucide-chevron-right)").first().click();
+    const freshServerUrl = page.getByPlaceholder("Server URL");
+    const freshStreamKey = page.getByPlaceholder("Stream Key");
+    await expect(freshServerUrl).toBeVisible();
+    await expect(freshStreamKey).toBeVisible();
+    await expect(freshServerUrl).toHaveValue("");
+    await expect(freshStreamKey).toHaveValue("");
 
+    // The "Pre-filled from saved credentials" badge must never appear for
+    // Grip, even transiently.
     await expect(
       page.getByText(/Pre-filled from saved credentials/i),
-    ).toBeVisible();
-    await expect(page.getByPlaceholder("Server URL")).toHaveValue(GRIP_RTMP);
-    await expect(page.getByPlaceholder("Stream Key")).toHaveValue(GRIP_KEY);
+    ).toHaveCount(0);
+    // Warning is back on the fresh card too.
+    await expect(page.getByTestId("grip-ephemeral-warning")).toBeVisible();
   });
 });

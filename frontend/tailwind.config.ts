@@ -33,6 +33,10 @@ export default {
         "on-error": "#690005",
         "on-error-container": "#ffdad6",
         success: "#34d399",
+        // Amber-ish warning — distinct from error (red) and success (green).
+        // Used for advisory notes that should catch the eye without signalling
+        // a broken state (e.g. the Grip one-shot-key reminder).
+        warning: "#f59e0b",
       },
       fontFamily: {
         headline: ["Space Grotesk", "sans-serif"],

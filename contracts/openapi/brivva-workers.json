@@ -1987,20 +1987,10 @@
     },
     "/auth/grip": {
       "post": {
-        "summary": "Save Grip RTMP credentials (no real OAuth)",
+        "summary": "Removed — Grip stream keys are one-shot per broadcast",
         "responses": {
-          "200": {
-            "description": "Saved credential",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PlatformCredential"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
+          "410": {
+            "description": "grip_creds_not_savable — paste fresh each session",
             "content": {
               "application/json": {
                 "schema": {

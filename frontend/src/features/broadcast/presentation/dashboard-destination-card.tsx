@@ -29,10 +29,16 @@ export type Destination = {
 };
 
 // Platforms whose only "auth" is pasting an RTMP URL + stream key from the
-// host dashboard. We surface a Save button in the config panel so the values
-// get persisted into platform_credentials and pre-filled on the next session
-// without pushing the user through a separate "Connected platforms" page.
+// host dashboard. Both get inline paste inputs on the card.
 const PASTE_CREDS_PLATFORMS = new Set(["grip", "tiktok"]);
+
+// Subset of paste-creds platforms whose stream keys are one-shot — a fresh
+// key issues per broadcast and reusing it breaks the stream. Grip runs on
+// AWS IVS which rejects duplicate publishers; the second session silently
+// dies after ~25s. We render inputs but never save them, and we never
+// pre-fill from stored rows. TikTok stream keys are reusable until the
+// host regenerates them, so TikTok keeps Save.
+const EPHEMERAL_KEY_PLATFORMS = new Set(["grip"]);
 
 export function PlatformIcon({ id, className }: { id: string; className?: string }) {
   switch (id) {
@@ -215,7 +221,12 @@ function ConfigPanel(props: {
   onCredentialSaved?: (cred: api.PlatformCredential) => void;
 }) {
   const { dest, platform, hasSavedCreds, userId, onUpdate, onCredentialSaved } = props;
-  const supportsSave = PASTE_CREDS_PLATFORMS.has(dest.platform);
+  const isEphemeral = EPHEMERAL_KEY_PLATFORMS.has(dest.platform);
+  // Grip is paste-creds but ephemeral — inputs render, Save must not. The
+  // "Pre-filled" badge is also suppressed so stale keys can't mislead the
+  // host into thinking reuse is safe.
+  const supportsSave =
+    PASTE_CREDS_PLATFORMS.has(dest.platform) && !isEphemeral;
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedJustNow, setSavedJustNow] = useState(false);
@@ -240,10 +251,9 @@ function ConfigPanel(props: {
         rtmp_url: dest.rtmp_url || undefined,
         display_name: `${platform.label} (pasted)`,
       };
-      const cred =
-        dest.platform === "grip"
-          ? await api.saveGripAuth(body)
-          : await api.saveTikTokAuth(body);
+      // Only TikTok reaches this path — Grip is carved out via
+      // EPHEMERAL_KEY_PLATFORMS (one-shot keys must never be persisted).
+      const cred = await api.saveTikTokAuth(body);
       setSavedJustNow(true);
       onCredentialSaved?.(cred);
     } catch (e) {
@@ -255,7 +265,18 @@ function ConfigPanel(props: {
 
   return (
     <div className="px-4 pb-4 space-y-2">
-      {hasSavedCreds && !savedJustNow && (
+      {isEphemeral && (
+        <div
+          role="note"
+          data-testid="grip-ephemeral-warning"
+          className="bg-warning/10 text-warning rounded-lg px-3 py-2 text-[11px] font-label leading-snug"
+        >
+          Grip stream keys are one-shot. Paste them fresh from the Grip admin
+          for each session — Brivva won't save them, and reusing a key causes
+          the broadcast to silently fail after a few seconds.
+        </div>
+      )}
+      {hasSavedCreds && !savedJustNow && !isEphemeral && (
         <span className="text-[10px] font-label text-success uppercase tracking-widest">
           Pre-filled from saved credentials
         </span>

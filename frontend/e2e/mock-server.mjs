@@ -227,17 +227,28 @@ const server = createServer(async (req, res) => {
     const list = bag ? Object.values(bag) : [];
     return json(res, 200, { credentials: list });
   }
-  // Grip + TikTok paste-creds flow. Store the pasted RTMP/key tuple so the
-  // next /api/credentials GET pre-fills the destination card on reload.
-  if ((url.pathname === "/auth/grip" || url.pathname === "/auth/tiktok") && req.method === "POST") {
+  // Grip save path has been removed — keys are one-shot per broadcast and
+  // reusing one silently breaks the next session (AWS IVS rejects duplicate
+  // publishers). The real Workers endpoint returns 410; mirror that here so
+  // an accidental FE regression surfaces in e2e instead of a green suite.
+  if (url.pathname === "/auth/grip" && req.method === "POST") {
+    return json(res, 410, {
+      error: "grip_creds_not_savable",
+      message:
+        "Grip stream keys are one-shot per broadcast. Paste them fresh on each session.",
+    });
+  }
+  // TikTok paste-creds flow. Store the pasted RTMP/key tuple so the next
+  // /api/credentials GET pre-fills the destination card on reload — TikTok
+  // stream keys are reusable until the host regenerates them.
+  if (url.pathname === "/auth/tiktok" && req.method === "POST") {
     const body = await readBody(req);
-    const platform = url.pathname === "/auth/grip" ? "grip" : "tiktok";
     const userId = body.user_id ?? "e2e-user";
     const now = Math.floor(Date.now() / 1000);
     const cred = {
-      id: `c-${platform}-${userId}`,
+      id: `c-tiktok-${userId}`,
       user_id: userId,
-      platform,
+      platform: "tiktok",
       rtmp_url: body.rtmp_url ?? null,
       stream_key: body.stream_key ?? null,
       display_name: body.display_name ?? null,
@@ -245,7 +256,7 @@ const server = createServer(async (req, res) => {
       updated_at: now,
     };
     const bag = credentials.get(userId) ?? {};
-    bag[platform] = cred;
+    bag["tiktok"] = cred;
     credentials.set(userId, bag);
     return json(res, 200, cred);
   }

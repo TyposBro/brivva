@@ -1133,7 +1133,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Save Grip RTMP credentials (no real OAuth) */
+        /** Removed — Grip stream keys are one-shot per broadcast */
         post: {
             parameters: {
                 query?: never;
@@ -1147,17 +1147,8 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Saved credential */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["PlatformCredential"];
-                    };
-                };
-                /** @description Invalid request */
-                400: {
+                /** @description grip_creds_not_savable — paste fresh each session */
+                410: {
                     headers: {
                         [name: string]: unknown;
                     };

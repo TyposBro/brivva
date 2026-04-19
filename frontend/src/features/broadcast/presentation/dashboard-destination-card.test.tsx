@@ -178,4 +178,140 @@ describe("DestinationCard", () => {
     );
     expect(container.firstChild).toBeNull();
   });
+
+  // ── Ephemeral key platforms (Grip) ──
+  // Grip stream keys are one-shot per broadcast (AWS IVS rejects a duplicate
+  // publisher, causing silent mid-stream failure). The destination card must
+  // render paste inputs + an amber warning, but NEVER a Save button and
+  // NEVER a "Pre-filled" badge — reusing a stale saved key is exactly the
+  // broken state we're preventing.
+
+  it("Grip renders the one-shot-key warning block + paste inputs (happy)", () => {
+    const dest = makeDest({
+      platform: "grip",
+      lang: "zh",
+      rtmp_url: "",
+      stream_key: "",
+      delay_ms: 2500,
+      host_gain: 0.2,
+    });
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{}}
+        user={null}
+        userId="u-test"
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    // Warning block visible + worded around one-shot keys.
+    const warning = screen.getByTestId("grip-ephemeral-warning");
+    expect(warning).toBeInTheDocument();
+    expect(warning.textContent).toMatch(/one-shot/i);
+    expect(warning.textContent).toMatch(/fresh/i);
+    // Paste inputs still render so the host can enter the key.
+    expect(screen.getByPlaceholderText(/Server URL/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Stream Key/i)).toBeInTheDocument();
+  });
+
+  it("Grip does NOT render a Save credentials button (sad)", () => {
+    const dest = makeDest({
+      platform: "grip",
+      lang: "zh",
+      rtmp_url: "rtmps://live-a.example/app",
+      stream_key: "grip-key-one-shot",
+    });
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{}}
+        user={null}
+        userId="u-test"
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Save credentials/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Grip does NOT render the 'Pre-filled' badge even when savedCreds has a grip row (sad)", () => {
+    // Defence-in-depth: the dashboard-page filter strips Grip rows out of
+    // savedCreds before they reach the card, but if a future refactor
+    // regresses that guard, the card itself must still refuse to show the
+    // Pre-filled badge — otherwise a host would reuse a stale one-shot key
+    // and silently fail the second session.
+    const dest = makeDest({
+      platform: "grip",
+      lang: "zh",
+      rtmp_url: "rtmps://live-a.example/app",
+      stream_key: "grip-key-one-shot",
+    });
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{
+          grip: {
+            id: "pc-grip",
+            user_id: "u-test",
+            platform: "grip",
+            rtmp_url: "rtmps://stale.example/app",
+            stream_key: "stale-key",
+            display_name: null,
+            created_at: 1,
+            updated_at: 1,
+          },
+        }}
+        user={null}
+        userId="u-test"
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByText(/Pre-filled from saved credentials/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("TikTok still renders Save credentials — regression guard (happy)", () => {
+    // TikTok stream keys are reusable until the host regenerates them; the
+    // save path was NOT removed. This test pins that the Grip change didn't
+    // accidentally strip Save from every paste-creds platform.
+    const dest = makeDest({
+      platform: "tiktok",
+      lang: "en",
+      rtmp_url: "rtmps://push.tiktokcdn.com/game/",
+      stream_key: "tiktok-reusable-key",
+    });
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{}}
+        user={null}
+        userId="u-test"
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Save credentials/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("grip-ephemeral-warning"),
+    ).not.toBeInTheDocument();
+  });
 });

@@ -133,7 +133,15 @@ function DashboardInner() {
       setSessions(s.sessions);
       if (u.active_voice_id) setSelectedVoice(u.active_voice_id);
       const credMap: Record<string, api.PlatformCredential> = {};
-      for (const cred of c.credentials) credMap[cred.platform] = cred;
+      for (const cred of c.credentials) {
+        // Grip stream keys are one-shot per broadcast (AWS IVS rejects a
+        // duplicate publisher, causing silent mid-stream failure). Legacy
+        // rows may still exist in platform_credentials from before the
+        // save path was removed — ignore them so the destination card
+        // never pre-fills a stale Grip key.
+        if (cred.platform === "grip") continue;
+        credMap[cred.platform] = cred;
+      }
       setSavedCreds(credMap);
     } catch (e) {
       console.error("Failed to load data:", e);

@@ -9,7 +9,6 @@ import {
   CompleteOnboardingRequestSchema,
   CreateSessionRequestSchema,
   CreateVoiceRequestSchema,
-  GripAuthRequestSchema,
   InternalSessionMetricsUpdateSchema,
   InternalSessionStatusUpdateSchema,
   PlatformQuerySchema,
@@ -345,8 +344,10 @@ app.post("/api/sessions", async (c) => {
     }
     // Grip destinations: when Seller API keys are present AND the caller
     // supplied a product_id, auto-provision fresh RTMP creds. Otherwise
-    // fall through to the manual paste-creds path (which reads from the
-    // `platform_credentials` row upserted via POST /auth/grip).
+    // fall through to the manual paste-creds path — the FE ships the pasted
+    // rtmp_url + stream_key inline with the session. We no longer persist
+    // Grip creds (see POST /auth/grip → 410): keys are one-shot per
+    // broadcast and reusing a saved key silently breaks the next session.
     if (
       p.platform === "grip" &&
       p.product_id &&
@@ -880,24 +881,29 @@ app.post("/auth/token", async (c) => {
   return c.json({ token: jwt });
 });
 
-// ── Platform credential paste flows (Grip, TikTok) ───────
-// These platforms don't expose real OAuth for live streaming — the creator
-// pastes a session token + stream key from their host dashboard. The
-// session token is stored as display_name metadata; the stream key + RTMP
-// URL are what Fargate actually pushes to.
+// ── Platform credential paste flows (TikTok) ────────────
+// TikTok doesn't expose real OAuth for live streaming — the creator pastes
+// a session token + stream key from their host dashboard. The session
+// token is stored as display_name metadata; the stream key + RTMP URL are
+// what Fargate actually pushes to. TikTok stream keys are reusable until
+// the host regenerates them, so persisting them is safe. Grip also paste-
+// creds, but its keys are one-shot so /auth/grip returns 410 — see below.
 
-app.post("/auth/grip", async (c) => {
-  const body = parseWithSchema(c, GripAuthRequestSchema, await c.req.json());
-  if (body instanceof Response) return body;
-  await db.getOrCreateUser(c.env.DB, body.user_id);
-  const row = await db.upsertCredential(c.env.DB, {
-    userId: body.user_id,
-    platform: "grip",
-    rtmpUrl: body.rtmp_url ?? null,
-    streamKey: body.stream_key,
-    displayName: body.display_name ?? `grip:${body.session_token.slice(0, 6)}…`,
-  });
-  return c.json(row);
+// Grip stream keys are one-shot per broadcast (AWS IVS under the hood — a
+// fresh key issues ~1 hour before each scheduled show, and IVS rejects a
+// second publisher with the same key). Saving + pre-filling guaranteed the
+// failure mode where the second session silently died after ~25s. The FE
+// now pastes fresh each session; the server refuses to persist creds so a
+// legacy client can't reintroduce the bug.
+app.post("/auth/grip", (c) => {
+  return c.json(
+    {
+      error: "grip_creds_not_savable",
+      message:
+        "Grip stream keys are one-shot per broadcast. Paste them fresh on each session.",
+    },
+    410,
+  );
 });
 
 app.post("/auth/tiktok", async (c) => {
