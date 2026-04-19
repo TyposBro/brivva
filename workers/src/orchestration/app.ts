@@ -260,6 +260,33 @@ app.post("/api/sessions", async (c) => {
   // explicitly — avoids ghost "Voice Setup" screens on /session/:id/setup when
   // onboarding already enrolled a clone.
   const voiceId = body.voice_id ?? user.active_voice_id ?? null;
+
+  // Strict enrollment-vs-session source_lang guard. The cloned voice can only
+  // be cross-lingually steered by ElevenLabs' `language_code` on the TARGET
+  // side — the enrollment language must still match what the host actually
+  // speaks, otherwise the clone synthesizes with the wrong accent (Apr 2026
+  // "Indian accent" regression). We enforce mismatch BEFORE any platform
+  // provisioning or D1 writes so no side effects occur on reject.
+  //
+  // Edge cases:
+  //   voice == null                   → allow (host skipped the clone; default
+  //                                     voice has no enrollment lang)
+  //   voice.source_lang == null       → reject (legacy pre-migration 0006 row,
+  //                                     force re-record with a known lang)
+  if (voiceId) {
+    const voice = await db.getVoice(c.env.DB, voiceId);
+    if (voice && voice.source_lang !== body.source_lang) {
+      return c.json(
+        {
+          error: "voice_language_mismatch",
+          voice_source_lang: voice.source_lang,
+          session_source_lang: body.source_lang,
+        },
+        400,
+      );
+    }
+  }
+
   const session = await db.createSession(c.env.DB, {
     userId: body.user_id,
     voiceId,

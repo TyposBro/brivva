@@ -341,10 +341,13 @@ describe("contract-roundtrip GET /api/sessions/:id/quote", () => {
     await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
       .bind("rt-quote-voiced", ts)
       .run();
+    // source_lang="ko" aligns with the session body below so the strict
+    // enrollment-vs-session guard in POST /api/sessions doesn't reject the
+    // quote-setup call.
     await env.DB.prepare(
-      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-rt-q", "rt-quote-voiced", "el-rt-q", "Voiced", ts)
+      .bind("v-rt-q", "rt-quote-voiced", "el-rt-q", "Voiced", "ko", ts)
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-rt-q", "rt-quote-voiced")

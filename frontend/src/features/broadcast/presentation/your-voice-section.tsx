@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Mic, RefreshCw } from "lucide-react";
 import * as api from "../data/api-client";
 import { useVoiceRecorder } from "../../../shared/audio/voice-recorder";
@@ -18,6 +18,16 @@ interface Props {
   voice: api.Voice | null;
   defaultName: string;
   onChange: (voice: api.Voice) => void;
+  /** When set, overrides `voice.source_lang` as the picker's initial value.
+   *  Used when the dashboard opens the re-record flow from the mismatch
+   *  banner and wants to seed the picker with the session's current
+   *  source_lang (so re-recording resolves the mismatch in one step). */
+  initialSourceLang?: SourceLang;
+  /** Incrementing counter the parent bumps to imperatively enter the
+   *  re-record UI (mismatch banner "Re-record voice" CTA). When the value
+   *  changes to a non-zero number, the component opens the recording card
+   *  and re-seeds `sourceLang` from `initialSourceLang` (if provided). */
+  recordRequestKey?: number;
 }
 
 /** Narrows the persisted voice's `source_lang` (backend stores an arbitrary
@@ -34,17 +44,42 @@ function normalizeSourceLang(raw: string | null | undefined): SourceLang | null 
 // One clone per user. Workers upserts on POST /api/voices, so this card just
 // records → uploads → swaps the displayed voice. There's no delete: the only
 // way to remove the clone is to record over it.
-export function YourVoiceSection({ userId, voice, defaultName, onChange }: Props) {
+export function YourVoiceSection({
+  userId,
+  voice,
+  defaultName,
+  onChange,
+  initialSourceLang,
+  recordRequestKey,
+}: Props) {
   const [recording, setRecording] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
-  // Seed from the persisted voice when available so re-recording defaults to
-  // the language the host originally cloned in; otherwise fall back to the
-  // browser locale. Either way the host can override before uploading.
+  // Seed order: explicit parent override → persisted voice → browser locale.
+  // Parent override wins so the dashboard mismatch-banner "Re-record" CTA can
+  // pre-fill the session's current source_lang and fix the mismatch in one
+  // re-record instead of two clicks.
   const [sourceLang, setSourceLang] = useState<SourceLang>(
-    () => normalizeSourceLang(voice?.source_lang) ?? detectBrowserSourceLang(),
+    () =>
+      initialSourceLang ??
+      normalizeSourceLang(voice?.source_lang) ??
+      detectBrowserSourceLang(),
   );
   const sourceLangFromVoice = normalizeSourceLang(voice?.source_lang) !== null;
+
+  // Imperative entry from the dashboard mismatch banner. When the parent
+  // bumps `recordRequestKey`, open the recording UI and re-seed the picker
+  // from `initialSourceLang` (so the host records in the session's source
+  // language and the guard passes on the next create). Ignore the initial
+  // mount — only react to changes.
+  const firstKey = useRef(recordRequestKey);
+  useEffect(() => {
+    if (recordRequestKey === undefined) return;
+    if (firstKey.current === recordRequestKey) return;
+    firstKey.current = recordRequestKey;
+    if (initialSourceLang) setSourceLang(initialSourceLang);
+    setRecording(true);
+  }, [recordRequestKey, initialSourceLang]);
 
   const upload = useCallback(
     async (b64: string) => {

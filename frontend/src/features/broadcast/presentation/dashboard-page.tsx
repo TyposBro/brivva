@@ -22,6 +22,7 @@ import {
   type Destination,
 } from "./dashboard-destination-card";
 import { YourVoiceSection } from "./your-voice-section";
+import { SOURCE_LANGS, type SourceLang } from "./source-lang-picker";
 import { QuoteModal } from "./quote-modal";
 
 // ── Component ──────────────────────────────────────────
@@ -103,11 +104,21 @@ function DashboardInner() {
   const [privacyStatus, setPrivacyStatus] = useState("unlisted");
   const [magicPaste, setMagicPaste] = useState("");
   const [quoteSessionId, setQuoteSessionId] = useState<string | null>(null);
+  // Surfaced when POST /api/sessions returns 400 voice_language_mismatch
+  // even though the FE's reactive state didn't catch it (stale voice cache
+  // after a race). Forces the banner on so the host has a path forward.
+  const [postMismatch, setPostMismatch] = useState(false);
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const voiceSectionRef = useRef<HTMLDivElement>(null);
+
+  // Incrementing counter → forwarded to <YourVoiceSection> as
+  // `recordRequestKey`. Bumping it imperatively opens the re-record UI from
+  // the mismatch banner CTA.
+  const [recordRequestKey, setRecordRequestKey] = useState(0);
 
   const loadData = useCallback(async () => {
     try {
@@ -329,7 +340,15 @@ function DashboardInner() {
       // created session in place so they can resume from /dashboard later.
       setQuoteSessionId(result.session.id);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to create session");
+      const msg = e instanceof Error ? e.message : "Failed to create session";
+      // If Workers rejects with the strict enrollment guard, surface the
+      // banner rather than a raw "API 400: voice_language_mismatch" toast.
+      if (msg.includes("voice_language_mismatch")) {
+        setPostMismatch(true);
+        setError("");
+      } else {
+        setError(msg);
+      }
     } finally {
       setCreating(false);
     }
@@ -352,6 +371,42 @@ function DashboardInner() {
   const hasInvalidDestination = destinations.some(
     (d) => destinationError(d, sourceLang, user) !== null,
   );
+
+  // Voice/source language mismatch. The voice clone can only synthesize
+  // cleanly in the enrollment language (ElevenLabs cross-lingual steering
+  // works on the TARGET side via `language_code`, not the source side). If
+  // the host cloned in English but starts a Korean session, the clone
+  // re-synthesizes with the wrong accent (Apr 2026 regression). We gate Go
+  // Live here so the backend's strict guard never has to reject after a
+  // round-trip. A null `voice.source_lang` (legacy row) is also a mismatch —
+  // we can't prove it matches, so force a re-record.
+  const voice = voices[0] ?? null;
+  const voiceLang = voice?.source_lang ?? null;
+  const reactiveVoiceLangMismatch = voice !== null && voiceLang !== sourceLang;
+  const voiceLangMismatch = reactiveVoiceLangMismatch || postMismatch;
+  const voiceLangKnown =
+    voiceLang !== null && (SOURCE_LANGS as readonly string[]).includes(voiceLang);
+  const voiceLangLabel = voiceLangKnown ? api.langLabel(voiceLang!) : "an unknown language";
+  const sourceLangLabel = api.langLabel(sourceLang);
+
+  const handleRerecordFromBanner = () => {
+    // Open the settings drawer (YourVoiceSection lives inside it), then
+    // bump `recordRequestKey` so the section imperatively enters recording
+    // mode + seeds its picker from `initialSourceLang` (= sourceLang).
+    setShowSettings(true);
+    setRecordRequestKey((k) => k + 1);
+    // Defer the scroll so the drawer's DOM has mounted.
+    setTimeout(() => {
+      voiceSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+  };
+
+  const handleSwapSessionSourceToVoiceLang = () => {
+    if (voiceLangKnown) {
+      setSourceLang(voiceLang!);
+      setPostMismatch(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -422,15 +477,22 @@ function DashboardInner() {
             </div>
 
             {/* Voice — one clone per user, Workers upserts on POST /api/voices. */}
-            <YourVoiceSection
-              userId={userId}
-              voice={voices[0] ?? null}
-              defaultName={user?.youtube_channel_name ?? "My voice"}
-              onChange={(next) => {
-                setVoices([next]);
-                setSelectedVoice(next.id);
-              }}
-            />
+            <div ref={voiceSectionRef}>
+              <YourVoiceSection
+                userId={userId}
+                voice={voices[0] ?? null}
+                defaultName={user?.youtube_channel_name ?? "My voice"}
+                onChange={(next) => {
+                  setVoices([next]);
+                  setSelectedVoice(next.id);
+                  // Voice row just changed — clear any sticky server-side
+                  // rejection so the banner drops if the new row matches.
+                  setPostMismatch(false);
+                }}
+                initialSourceLang={sourceLang as SourceLang}
+                recordRequestKey={recordRequestKey}
+              />
+            </div>
           </div>
         )}
 
@@ -446,7 +508,10 @@ function DashboardInner() {
             <select
               className="appearance-none bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label focus:ring-2 focus:ring-primary/50 transition-all outline-none pr-9 cursor-pointer"
               value={sourceLang}
-              onChange={(e) => setSourceLang(e.target.value)}
+              onChange={(e) => {
+                setSourceLang(e.target.value);
+                setPostMismatch(false);
+              }}
             >
               {api.LANGS.filter((l) => !api.isPassthroughLang(l.code)).map((l) => (
                 <option key={l.code} value={l.code}>
@@ -457,6 +522,39 @@ function DashboardInner() {
             <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant pointer-events-none" />
           </div>
         </div>
+
+        {/* ── Voice / source-lang mismatch banner ──── */}
+        {voiceLangMismatch && (
+          <div
+            role="alert"
+            data-testid="voice-lang-mismatch-banner"
+            className="bg-error-container/20 text-on-error-container rounded-xl px-4 py-3 space-y-2"
+          >
+            <p className="text-sm font-label text-on-surface">
+              Your voice clone was recorded in {voiceLangLabel}, but this
+              session's source is {sourceLangLabel}. Re-record the clone or
+              change the session source language.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="bg-surface-container-high hover:bg-surface-bright text-on-surface px-3 py-1.5 rounded-lg font-label text-xs transition-colors"
+                onClick={handleRerecordFromBanner}
+              >
+                Re-record voice
+              </button>
+              {voiceLangKnown && (
+                <button
+                  type="button"
+                  className="bg-surface-container-high hover:bg-surface-bright text-on-surface px-3 py-1.5 rounded-lg font-label text-xs transition-colors"
+                  onClick={handleSwapSessionSourceToVoiceLang}
+                >
+                  Change session source to {voiceLangLabel}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ── Destinations ─────────────────────────── */}
         <div className="space-y-3">
@@ -577,12 +675,17 @@ function DashboardInner() {
         <button
           className={cn(
             "w-full py-4 rounded-xl font-headline font-extrabold text-lg uppercase tracking-tight transition-all",
-            destinations.length > 0 && !hasInvalidDestination
+            destinations.length > 0 && !hasInvalidDestination && !voiceLangMismatch
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
           )}
           onClick={handleCreateSession}
-          disabled={creating || destinations.length === 0 || hasInvalidDestination}
+          disabled={
+            creating ||
+            destinations.length === 0 ||
+            hasInvalidDestination ||
+            voiceLangMismatch
+          }
         >
           <span className="flex items-center justify-center gap-2">
             <Radio className="w-5 h-5" />
@@ -592,7 +695,9 @@ function DashboardInner() {
                 ? "Add a destination to go live"
                 : hasInvalidDestination
                   ? "Fix destination errors to go live"
-                  : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+                  : voiceLangMismatch
+                    ? "Fix voice language to go live"
+                    : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
           </span>
         </button>
 

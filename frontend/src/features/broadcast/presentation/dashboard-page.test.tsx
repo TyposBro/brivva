@@ -198,6 +198,50 @@ describe("DashboardPage", () => {
     expect((selects[1] as HTMLSelectElement).value).toBe("ja");
   });
 
+  it("renders voice/source-lang mismatch banner when voice.source_lang !== sourceLang (sad)", async () => {
+    // Dashboard's `sourceLang` state defaults to "ko" (see state init). A
+    // voice enrolled in English means the clone would synthesize Korean
+    // with an English accent — Workers rejects with 400, the FE catches it
+    // upfront here.
+    getUser.mockResolvedValue(
+      fullUser({ active_voice_id: "v-en" }),
+    );
+    listVoices.mockResolvedValue({
+      voices: [
+        {
+          id: "v-en",
+          user_id: "u1",
+          elevenlabs_voice_id: "el-en",
+          name: "Aziz English",
+          source_lang: "en",
+          created_at: 1,
+        },
+      ],
+    });
+    listSessions.mockResolvedValue({ sessions: [] });
+    listCredentials.mockResolvedValue({ credentials: [] });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: 1 });
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <DashboardPage />
+      </MemoryRouter>,
+    );
+
+    const banner = await screen.findByTestId("voice-lang-mismatch-banner");
+    expect(banner).toBeInTheDocument();
+    // Mentions both languages so the host knows which way to reconcile.
+    expect(banner.textContent).toMatch(/English/);
+    expect(banner.textContent).toMatch(/Korean/);
+    // Both CTAs render.
+    expect(
+      screen.getByRole("button", { name: /Re-record voice/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Change session source to English/i }),
+    ).toBeInTheDocument();
+  });
+
   it("recent sessions render in the list (happy)", async () => {
     getUser.mockResolvedValue(fullUser());
     listVoices.mockResolvedValue({ voices: [] });

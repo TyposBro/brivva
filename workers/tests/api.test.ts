@@ -175,6 +175,126 @@ describe("POST /api/sessions validation", () => {
   });
 });
 
+describe("POST /api/sessions — voice source_lang guard", () => {
+  // Cross-lingual TTS is handled by ElevenLabs `language_code` on the TARGET
+  // side. The enrollment language must match what the host actually speaks,
+  // otherwise the clone re-synthesizes with the wrong accent (the Apr 2026
+  // "Indian accent" regression that prompted this strict guard). Targets stay
+  // flexible — only source_lang is pinned.
+
+  it("allows session create when user has no voice clone (happy)", async () => {
+    // No voice → nothing to mismatch. Default voice has no enrollment lang,
+    // so the session proceeds normally.
+    await seedUser("u-voiceless");
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-voiceless",
+        title: "No clone",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("allows session create when voice.source_lang matches session.source_lang (happy)", async () => {
+    await seedUser("u-match");
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind("v-match", "u-match", "el-match", "Aziz", "ko", Math.floor(Date.now() / 1000))
+      .run();
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-match", "u-match")
+      .run();
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-match",
+        title: "Match",
+        source_lang: "ko",
+        target_langs: ["ja", "en"],
+      }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects session create when voice.source_lang differs from session.source_lang (sad)", async () => {
+    await seedUser("u-mismatch");
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind("v-mismatch", "u-mismatch", "el-mismatch", "Aziz", "en", Math.floor(Date.now() / 1000))
+      .run();
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-mismatch", "u-mismatch")
+      .run();
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-mismatch",
+        title: "Mismatch",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: string;
+      voice_source_lang: string;
+      session_source_lang: string;
+    };
+    expect(body.error).toBe("voice_language_mismatch");
+    expect(body.voice_source_lang).toBe("en");
+    expect(body.session_source_lang).toBe("ko");
+
+    // Reject must NOT create a session row (no side effects before the guard).
+    const sessionsRes = await call("/api/sessions?user_id=u-mismatch");
+    const sessionsBody = (await sessionsRes.json()) as {
+      sessions: Array<{ id: string }>;
+    };
+    expect(sessionsBody.sessions).toHaveLength(0);
+  });
+
+  it("treats a legacy voice with null source_lang as mismatch (sad)", async () => {
+    // Pre-migration 0006 rows have source_lang=NULL. Without a known
+    // enrollment lang we can't prove a match, so force re-record.
+    await seedUser("u-legacy");
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind("v-legacy", "u-legacy", "el-legacy", "Aziz", null, Math.floor(Date.now() / 1000))
+      .run();
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-legacy", "u-legacy")
+      .run();
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-legacy",
+        title: "Legacy",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: string;
+      voice_source_lang: string | null;
+    };
+    expect(body.error).toBe("voice_language_mismatch");
+    expect(body.voice_source_lang).toBeNull();
+  });
+});
+
 describe("POST /api/sessions — passthrough destinations", () => {
   it("accepts lang=pass sentinel in target_langs + platforms (happy)", async () => {
     // Passthrough destinations bypass STT/translate/TTS on Fargate. Workers
@@ -2021,11 +2141,12 @@ describe("GET /api/sessions/:id/quote", () => {
     await env.DB.prepare(
       "INSERT INTO users (id, created_at) VALUES (?, ?)",
     ).bind("u-voiced", Math.floor(Date.now() / 1000)).run();
-    // Seed a real voice row + attach it so the FK holds.
+    // Seed a real voice row + attach it so the FK holds. source_lang matches
+    // the session's source_lang below so the mismatch guard stays silent.
     await env.DB.prepare(
-      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-voiced-1", "u-voiced", "el-voiced-1", "Aziz", Math.floor(Date.now() / 1000))
+      .bind("v-voiced-1", "u-voiced", "el-voiced-1", "Aziz", "ko", Math.floor(Date.now() / 1000))
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-voiced-1", "u-voiced")
