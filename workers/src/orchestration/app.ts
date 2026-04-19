@@ -244,10 +244,14 @@ function resolveHostGain(
 app.post("/api/sessions", async (c) => {
   const body = parseWithSchema(c, CreateSessionRequestSchema, await c.req.json());
   if (body instanceof Response) return body;
-  await db.getOrCreateUser(c.env.DB, body.user_id);
+  const user = await db.getOrCreateUser(c.env.DB, body.user_id);
+  // Fall back to the user's active voice clone when the caller doesn't pin one
+  // explicitly — avoids ghost "Voice Setup" screens on /session/:id/setup when
+  // onboarding already enrolled a clone.
+  const voiceId = body.voice_id ?? user.active_voice_id ?? null;
   const session = await db.createSession(c.env.DB, {
     userId: body.user_id,
-    voiceId: body.voice_id ?? null,
+    voiceId,
     title: body.title,
     sourceLang: body.source_lang,
     targetLangs: JSON.stringify(body.target_langs),

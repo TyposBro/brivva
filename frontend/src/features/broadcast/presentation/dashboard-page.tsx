@@ -84,6 +84,7 @@ function DashboardInner() {
       setUser(u);
       setVoices(v.voices);
       setSessions(s.sessions);
+      if (u.active_voice_id) setSelectedVoice(u.active_voice_id);
       const credMap: Record<string, api.PlatformCredential> = {};
       for (const cred of c.credentials) credMap[cred.platform] = cred;
       setSavedCreds(credMap);
