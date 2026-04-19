@@ -1,8 +1,12 @@
+pub mod metrics;
+
 use axum::extract::ws::Message;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+pub use metrics::SessionMetrics;
 
 // Fargate is host-only. There are no guest WebSockets — all translated
 // audio leaves the server via RTMP to streaming platforms. The WS exists
@@ -114,6 +118,13 @@ pub struct LiveSession {
     /// Voice ID currently selected for TTS. Workers owns voice lifecycle and
     /// provides this durable ElevenLabs voice id through the session bundle.
     pub selected_voice_id: Option<String>,
+    /// Enrollment language of the cloned voice, when the session bundle
+    /// carries it. Used by the TTS dispatcher to detect cross-lingual
+    /// mismatch and fall back to the default voice rather than let v2 drift
+    /// (the April 2026 Indian-accent regression). None today because the
+    /// Workers `Voice` schema does not carry an `enrollment_lang` field yet;
+    /// the plumbing is wired so switching to populated is a one-line change.
+    pub selected_voice_enrollment_lang: Option<Lang>,
     /// Session ID from Workers (links to D1 session + streams)
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
@@ -122,6 +133,10 @@ pub struct LiveSession {
     pub rtmp_langs: Vec<Lang>,
     /// Upstream-service config injected from orchestration at session start.
     pub pipeline_config: Arc<PipelineConfig>,
+    /// Billing counters shared with the RTMP drains and the metrics reporter
+    /// task. `None` for sessions that don't have a Workers session_id (no
+    /// one to report to).
+    pub metrics: Option<Arc<SessionMetrics>>,
 }
 
 impl LiveSession {
@@ -136,10 +151,12 @@ impl LiveSession {
             source_lang,
             host_tx: None,
             selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
             session_id,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
             pipeline_config,
+            metrics: None,
         }
     }
 

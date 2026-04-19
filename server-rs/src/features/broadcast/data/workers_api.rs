@@ -55,6 +55,38 @@ impl WorkersApi {
             .map_err(|e| format!("workers session decode: {e}"))
     }
 
+    /// POST billing metrics to Workers. The endpoint is not in the current
+    /// OpenAPI export, so we call it optimistically and rely on the generic
+    /// Serialize-bound to keep this module decoupled from the payload type.
+    /// On non-2xx (including 404 while the endpoint doesn't yet exist) we
+    /// return Err, and the caller logs rather than escalating.
+    pub async fn report_session_metrics<T: serde::Serialize + ?Sized>(
+        &self,
+        session_id: &str,
+        payload: &T,
+    ) -> Result<(), String> {
+        if self.base_url.is_empty() {
+            return Err("WORKERS_API_URL not set".into());
+        }
+        let url = format!("{}/internal/sessions/{}/metrics", self.base_url, session_id);
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-Internal-Secret", &self.internal_secret)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| format!("workers metrics error: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "workers metrics {} → {}",
+                session_id,
+                resp.status()
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn update_session_status(
         &self,
         session_id: &str,

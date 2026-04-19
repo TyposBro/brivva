@@ -23,12 +23,14 @@ pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 use caption::CaptionState;
 use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
+use crate::features::broadcast::domain::SessionMetrics;
+
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ── Timing + format constants ─────────────────────────────
 
@@ -44,6 +46,19 @@ const TTS_QUEUE_CAP_BYTES: usize = 5 * 88_200;
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
 const FFMPEG_RESTART_DELAY: Duration = Duration::from_secs(2);
+/// Force an FFmpeg restart if no bytes have been written to the child for
+/// this long. Grip regional endpoints drop silently after ~30 min; the
+/// stream appears fine (FFmpeg hasn't exited) but audio/video stops flowing.
+/// Pre-emptively killing the child surfaces it to `detect_crashed`, which
+/// then restarts the stream with the existing delay buffers preserved.
+const IDLE_RESTART_THRESHOLD: Duration = Duration::from_secs(25);
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 // ── Per-stream shared state ───────────────────────────────
 
 /// Timestamped chunk of host media. The tuple is (received_at, bytes). A chunk
@@ -80,6 +95,10 @@ struct RtmpStream {
     caption: Option<CaptionState>,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
+    /// Unix-ms wall clock of the most recent successful FFmpeg-stdin write
+    /// from either drain thread. The health monitor uses it to detect silent
+    /// output stalls that don't crash FFmpeg (see `IDLE_RESTART_THRESHOLD`).
+    last_write_ms: Arc<AtomicI64>,
 }
 
 /// Per-stream burn-in caption state. Source streams don't have one (nothing
@@ -89,6 +108,11 @@ struct RtmpStream {
 /// screen before being replaced.
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
+    /// Optional billing counters. `None` in unit tests / paths that don't
+    /// care about metrics; `Some` when the session wires one via
+    /// `set_metrics`. Cloned into each drain thread so increments stay
+    /// lock-free.
+    metrics: Option<Arc<SessionMetrics>>,
 }
 
 type CrashedStreamSnapshot = (String, String, String, u64, bool, f32, u32, StreamBuffers);
@@ -124,7 +148,14 @@ impl RtmpManager {
     pub fn new() -> Self {
         Self {
             streams: HashMap::new(),
+            metrics: None,
         }
+    }
+
+    /// Attach a billing-metrics sink. Must be called before `start_stream`
+    /// so per-stream drain threads receive the counter refs at spawn time.
+    pub fn set_metrics(&mut self, metrics: Arc<SessionMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// Start an FFmpeg RTMP process with dedicated video + audio drain threads.
@@ -199,6 +230,9 @@ impl RtmpManager {
     /// No timestamps — the mixer plays it in arrival order and the queue is
     /// capped so a slow target can't fall arbitrarily behind.
     pub fn push_tts(&self, lang: &str, pcm: Vec<u8>) {
+        if let Some(m) = &self.metrics {
+            m.record_tts_pcm(lang, pcm.len() as u64);
+        }
         for stream in self.streams.values() {
             if stream.lang == lang && !stream.is_source {
                 let mut q = stream.buffers.tts.lock().unwrap();
@@ -220,6 +254,48 @@ impl RtmpManager {
                 && let Some(cap) = &stream.caption
             {
                 cap.push(&text);
+            }
+        }
+    }
+
+    /// Kill FFmpeg children that have gone silent (no drain writes in
+    /// `IDLE_RESTART_THRESHOLD`). We only send the kill here; `detect_crashed`
+    /// on the next monitor tick sees the exit and runs the normal restart
+    /// path with buffers reused. Deliberately does not set `stop_flag` so
+    /// the stream is treated as a crash, not an intentional shutdown.
+    pub(crate) fn kill_idle_streams(&mut self) {
+        let now = now_unix_ms();
+        let threshold_ms = IDLE_RESTART_THRESHOLD.as_millis() as i64;
+        for (id, stream) in &mut self.streams {
+            if stream.stop_flag.load(Ordering::Acquire) {
+                continue;
+            }
+            let last = stream.last_write_ms.load(Ordering::Acquire);
+            if last == 0 {
+                continue;
+            }
+            let idle_ms = now.saturating_sub(last);
+            if idle_ms < threshold_ms {
+                continue;
+            }
+            tracing::warn!(
+                stream_id = %id,
+                lang = %stream.lang,
+                idle_ms,
+                threshold_ms,
+                "ffmpeg idle beyond threshold, killing to trigger restart"
+            );
+            match stream.child.kill() {
+                Ok(()) => {
+                    // Reset the timestamp so we don't try to kill a second
+                    // time before `detect_crashed` picks up the exit.
+                    stream.last_write_ms.store(now, Ordering::Release);
+                }
+                Err(e) => tracing::error!(
+                    stream_id = %id,
+                    error = %e,
+                    "ffmpeg idle-kill failed"
+                ),
             }
         }
     }
@@ -347,6 +423,12 @@ impl RtmpManager {
             "warning".into(),
             "-f".into(),
             "image2pipe".into(),
+            // Force mjpeg on stdin so ffmpeg does not block on codec
+            // auto-detection before the host has sent a first JPEG. The
+            // driver sends JPEGs every 2s, and image2pipe would otherwise
+            // fail probe with "Could not find codec parameters" and exit.
+            "-vcodec".into(),
+            "mjpeg".into(),
             "-framerate".into(),
             "30".into(),
             "-i".into(),
@@ -414,11 +496,17 @@ impl RtmpManager {
         let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let delay = Duration::from_millis(args.delay_ms);
+        // Seed last_write to now so a freshly-spawned stream isn't instantly
+        // classified as idle before the drain threads have had a chance to
+        // write their first tick.
+        let last_write_ms = Arc::new(AtomicI64::new(now_unix_ms()));
 
         // Video drain
         let v_buf = buffers.video.clone();
         let v_stop = stop_flag.clone();
         let v_sid = args.stream_id.clone();
+        let v_last = last_write_ms.clone();
+        let v_metrics = self.metrics.clone();
         let video_handle = thread::Builder::new()
             .name(format!("video-drain-{}", args.stream_id))
             .spawn(move || {
@@ -428,6 +516,8 @@ impl RtmpManager {
                     stdin,
                     delay,
                     stop: v_stop,
+                    last_write_ms: v_last,
+                    metrics: v_metrics,
                 })
             })
             .map_err(|e| format!("Video thread spawn failed: {}", e))?;
@@ -442,6 +532,8 @@ impl RtmpManager {
             is_source: args.is_source,
             host_gain: args.host_gain,
             stop: stop_flag.clone(),
+            last_write_ms: last_write_ms.clone(),
+            metrics: self.metrics.clone(),
         };
         let audio_handle = thread::Builder::new()
             .name(format!("audio-drain-{}", args.stream_id))
@@ -464,6 +556,7 @@ impl RtmpManager {
                 caption,
                 stop_flag,
                 restart_count: 0,
+                last_write_ms,
             },
         );
 
@@ -530,6 +623,7 @@ pub fn spawn_health_monitor(
             }
             let crashed = {
                 let mut mgr = manager.lock().await;
+                mgr.kill_idle_streams();
                 mgr.detect_crashed()
             };
             for (id, lang, rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers) in crashed

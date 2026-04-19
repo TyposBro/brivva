@@ -6,9 +6,12 @@
 //   2. mint HS256 JWT for smoke-user
 //   3. open WS to /api/session?session_id=SMOKE001
 //   4. for ~40s: push 20ms PCM sine frames + a JPEG every 2s
-//   5. close WS
-//   6. assert WS emitted translation + tts_end at least once
-//   7. ffprobe translated RTMP output → assert audio+video tracks
+//   5. partway through streaming, ffprobe the translated RTMP output while
+//      the publisher is still alive (mediamtx unpublishes the path the
+//      moment the publisher disconnects, so post-close probing is racy)
+//   6. close WS
+//   7. assert WS emitted translation + tts_end at least once
+//   8. assert ffprobe saw audio+video tracks
 //
 // Fails hard on any missing track. Intended for nightly CI + post-deploy.
 
@@ -22,7 +25,10 @@ const JWT_SECRET = process.env.JWT_SECRET ?? "smoke-jwt-secret";
 const SESSION_ID = process.env.SESSION_ID ?? "SMOKE001";
 const USER_ID = process.env.USER_ID ?? "smoke-user";
 const STREAM_DURATION_MS = Number(process.env.STREAM_DURATION_MS ?? 40_000);
-const SETTLE_MS = Number(process.env.SETTLE_MS ?? 5_000);
+/// Fire ffprobe this far into the stream so the publisher is still alive
+/// when we interrogate mediamtx. The host video delay is 2s, so wait at
+/// least that long before probing.
+const PROBE_AT_MS = Number(process.env.PROBE_AT_MS ?? 20_000);
 
 const SAMPLE_RATE = 44_100;
 const FRAME_MS = 20;
@@ -108,7 +114,14 @@ async function waitForHealth(url: string, timeoutMs = 60_000): Promise<void> {
 }
 
 // ── WS stream ────────────────────────────────────────────
-async function streamAudioVideo(wsUrl: string): Promise<{ sawTranslation: boolean; sawTtsEnd: boolean }> {
+type WsSignals = {
+  sawTranslation: boolean;
+  sawTtsEnd: boolean;
+  probedStreams: ProbeStream[];
+  probeError: string | null;
+};
+
+async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSignals> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
@@ -116,14 +129,18 @@ async function streamAudioVideo(wsUrl: string): Promise<{ sawTranslation: boolea
     let phase = 0;
     let sawTranslation = false;
     let sawTtsEnd = false;
+    let probedStreams: ProbeStream[] = [];
+    let probeError: string | null = null;
     let audioTimer: ReturnType<typeof setInterval> | null = null;
     let jpegTimer: ReturnType<typeof setInterval> | null = null;
     let stopTimer: ReturnType<typeof setTimeout> | null = null;
+    let probeTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanup = () => {
       if (audioTimer) clearInterval(audioTimer);
       if (jpegTimer) clearInterval(jpegTimer);
       if (stopTimer) clearTimeout(stopTimer);
+      if (probeTimer) clearTimeout(probeTimer);
     };
 
     ws.addEventListener("open", () => {
@@ -144,6 +161,15 @@ async function streamAudioVideo(wsUrl: string): Promise<{ sawTranslation: boolea
           data: jpeg.toString("base64"),
         }));
       }, JPEG_EVERY_MS);
+
+      probeTimer = setTimeout(() => {
+        console.log(`[driver] probing RTMP mid-stream: ${rtmpUrl}`);
+        try {
+          probedStreams = probeRtmp(rtmpUrl);
+        } catch (err) {
+          probeError = err instanceof Error ? err.message : String(err);
+        }
+      }, PROBE_AT_MS);
 
       stopTimer = setTimeout(() => {
         console.log("[driver] stream window elapsed, sending host:end");
@@ -167,7 +193,7 @@ async function streamAudioVideo(wsUrl: string): Promise<{ sawTranslation: boolea
 
     ws.addEventListener("close", () => {
       cleanup();
-      resolve({ sawTranslation, sawTtsEnd });
+      resolve({ sawTranslation, sawTtsEnd, probedStreams, probeError });
     });
 
     ws.addEventListener("error", (err) => {
@@ -205,10 +231,10 @@ async function main() {
   await waitForHealth(SERVER_URL);
 
   const token = await mintJwt(USER_ID, JWT_SECRET);
-  const wsUrl = `${WS_URL}?token=${encodeURIComponent(token)}&source_lang=en&session_id=${SESSION_ID}`;
+  const wsUrl = `${WS_URL}?token=${encodeURIComponent(token)}&sourceLang=en&sessionId=${SESSION_ID}`;
 
   console.log("[driver] connecting", wsUrl.slice(0, wsUrl.indexOf("?") + 1) + "…");
-  const wsSignals = await streamAudioVideo(wsUrl);
+  const wsSignals = await streamAudioVideo(wsUrl, RTMP_URL);
   if (!wsSignals.sawTranslation) {
     throw new Error("smoke FAIL — no translation event observed for ja");
   }
@@ -216,11 +242,11 @@ async function main() {
     throw new Error("smoke FAIL — no tts_end event observed for ja");
   }
 
-  console.log(`[driver] WS closed. Waiting ${SETTLE_MS}ms for RTMP to settle …`);
-  await new Promise((r) => setTimeout(r, SETTLE_MS));
+  if (wsSignals.probeError !== null) {
+    throw new Error(`smoke FAIL — RTMP ffprobe error: ${wsSignals.probeError}`);
+  }
 
-  console.log("[driver] probing RTMP:", RTMP_URL);
-  const streams = probeRtmp(RTMP_URL);
+  const streams = wsSignals.probedStreams;
   const audio = streams.find((s) => s.codec_type === "audio");
   const video = streams.find((s) => s.codec_type === "video");
 

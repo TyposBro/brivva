@@ -215,10 +215,16 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         target_lang,
         handle,
     } = args;
-    let selected_voice_id = handle
+    let (selected_voice_id, selected_voice_enrollment_lang) = handle
         .sessions
         .get(&handle.id)
-        .and_then(|session| session.selected_voice_id.clone());
+        .map(|session| {
+            (
+                session.selected_voice_id.clone(),
+                session.selected_voice_enrollment_lang.clone(),
+            )
+        })
+        .unwrap_or((None, None));
     let rtmp_manager = handle
         .sessions
         .get(&handle.id)
@@ -247,6 +253,7 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         target_lang: target_lang.clone(),
         handle: handle.clone(),
         selected_voice_id,
+        selected_voice_enrollment_lang,
     })
     .await;
 }

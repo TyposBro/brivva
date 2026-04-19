@@ -4,6 +4,60 @@ use std::time::{Duration, Instant};
 
 use super::to_ws;
 
+/// Inputs to the voice-selection decision. Pulled out so the kill-switch
+/// integration tests can exercise branch selection without spawning TTS.
+pub struct ResolveVoiceArgs<'a> {
+    pub selected_voice_id: Option<&'a str>,
+    pub enrollment_lang: Option<&'a Lang>,
+    pub target_lang: &'a Lang,
+    pub force_default_voice: bool,
+}
+
+/// Result of `resolve_voice`: which ElevenLabs voice id to request and
+/// whether it's a cloned voice (dictates model choice + voice_settings).
+pub struct ResolvedVoice {
+    pub voice_id: String,
+    pub is_cloned: bool,
+    /// Set when the caller supplied a cloned voice id but the enrollment
+    /// language disagreed with the target — the caller logs a warning.
+    pub is_cloned_fallback_due_to_enrollment: bool,
+}
+
+/// Pure voice-selection decision. Exposed for kill-switch tests.
+///
+/// Order of precedence:
+/// 1. `force_default_voice` kill-switch wins over everything else.
+/// 2. Clone with mismatched `enrollment_lang` falls back to the default
+///    voice to avoid the April 2026 Indian-accent regression.
+/// 3. Supplied `selected_voice_id` is used as a cloned voice.
+/// 4. Otherwise the target language's default library voice.
+pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
+    if args.force_default_voice || args.selected_voice_id.is_none() {
+        return ResolvedVoice {
+            voice_id: args.target_lang.voice_id().to_string(),
+            is_cloned: false,
+            is_cloned_fallback_due_to_enrollment: false,
+        };
+    }
+    if let Some(enroll) = args.enrollment_lang
+        && enroll != args.target_lang
+    {
+        return ResolvedVoice {
+            voice_id: args.target_lang.voice_id().to_string(),
+            is_cloned: false,
+            is_cloned_fallback_due_to_enrollment: true,
+        };
+    }
+    ResolvedVoice {
+        voice_id: args
+            .selected_voice_id
+            .map(str::to_string)
+            .unwrap_or_else(|| args.target_lang.voice_id().to_string()),
+        is_cloned: true,
+        is_cloned_fallback_due_to_enrollment: false,
+    }
+}
+
 /// All inputs to the TTS broadcast path bundled so the public entry point
 /// stays within the §3.3 arg budget.
 pub struct TtsRequest {
@@ -12,6 +66,12 @@ pub struct TtsRequest {
     pub target_lang: Lang,
     pub handle: LiveSessionHandle,
     pub selected_voice_id: Option<String>,
+    /// Enrollment language of the cloned voice, when Workers sends it. None
+    /// when the voice row is pre-schema or the voice is a default library
+    /// voice. When `Some(enroll) != target_lang`, we log a warning and bias
+    /// back to the default voice to avoid the April 2026 Indian-accent
+    /// regression (cross-lingual inference on a cloned v2 voice).
+    pub selected_voice_enrollment_lang: Option<Lang>,
 }
 
 pub async fn broadcast_translated_tts(req: TtsRequest) {
@@ -30,16 +90,24 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         return;
     };
 
-    // Kill-switch: BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1 skips the cloned voice
-    // regardless of whether the session bundle supplied one. See runbook.
-    let is_cloned = req.selected_voice_id.is_some() && !force_default_voice;
-    let voice_id = if is_cloned {
-        req.selected_voice_id
-            .clone()
-            .unwrap_or_else(|| req.target_lang.voice_id().to_string())
-    } else {
-        req.target_lang.voice_id().to_string()
-    };
+    let resolved = resolve_voice(ResolveVoiceArgs {
+        selected_voice_id: req.selected_voice_id.as_deref(),
+        enrollment_lang: req.selected_voice_enrollment_lang.as_ref(),
+        target_lang: &req.target_lang,
+        force_default_voice,
+    });
+    if let Some(enroll) = req.selected_voice_enrollment_lang.as_ref()
+        && resolved.is_cloned_fallback_due_to_enrollment
+    {
+        tracing::warn!(
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            enrollment_lang = %enroll,
+            "cloned voice enrollment language differs from target; falling back to default voice"
+        );
+    }
+    let voice_id = resolved.voice_id;
+    let is_cloned = resolved.is_cloned;
     let model_id = if is_cloned {
         "eleven_multilingual_v2"
     } else {
@@ -55,6 +123,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         api_key: &api_key,
         text: &req.text,
         model_id,
+        is_cloned,
         lang: &req.target_lang,
         deadline: tts_deadline,
     })
@@ -85,6 +154,7 @@ struct FetchTtsArgs<'a> {
     api_key: &'a str,
     text: &'a str,
     model_id: &'a str,
+    is_cloned: bool,
     lang: &'a Lang,
     deadline: Duration,
 }
@@ -95,11 +165,32 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
         api_key,
         text,
         model_id,
+        is_cloned,
         lang,
         deadline,
     } = args;
     let client = reqwest::Client::new();
-    let body = serde_json::json!({ "text": text, "model_id": model_id });
+    // Voice-settings tuning biases TTS toward the original enrollment accent.
+    // Higher stability + non-zero similarity_boost + style=0 keeps the voice
+    // close to the clone instead of drifting to an "average" multilingual
+    // timbre (the April 2026 Indian-accent regression). Default voices don't
+    // need aggressive boost — they are library voices engineered for 32
+    // target languages — but the request shape is the same either way so we
+    // send the settings unconditionally.
+    let body = if is_cloned {
+        serde_json::json!({
+            "text": text,
+            "model_id": model_id,
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "style": 0.0,
+                "use_speaker_boost": true
+            }
+        })
+    } else {
+        serde_json::json!({ "text": text, "model_id": model_id })
+    };
     let tts_result = tokio::time::timeout(deadline, async {
         let mut audio_buffer = Vec::new();
         let response = client

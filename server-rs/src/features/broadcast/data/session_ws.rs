@@ -15,12 +15,24 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::core::contracts::workers::SessionBundle;
+use crate::features::broadcast::data::metrics::spawn_metrics_reporter;
 use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::data::{auth, pipeline};
+use crate::features::broadcast::domain::SessionMetrics;
 use crate::features::broadcast::domain::{
     Lang, LiveSession, LiveSessions, PipelineConfig, SessionQuery,
 };
+
+/// Pure URL transform for the FORCE_RTMP_NOT_RTMPS kill-switch. Exposed so
+/// the kill-switch integration tests can exercise branch selection without
+/// spawning FFmpeg.
+pub fn maybe_downgrade_rtmps(url: &str, force_rtmp: bool) -> String {
+    if force_rtmp && let Some(rest) = url.strip_prefix("rtmps://") {
+        return format!("rtmp://{}", rest);
+    }
+    url.to_string()
+}
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
@@ -237,19 +249,34 @@ async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
 
     if let Some(v) = bundle.voice.clone() {
         live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
+        // `enrollment_lang` isn't in the Workers Voice schema yet. When it
+        // ships (as the optional `enrollment_lang` field on the Voice row),
+        // populate `live_session.selected_voice_enrollment_lang` here with
+        // `Lang::from_str(&v.enrollment_lang.unwrap_or_default())`.
     }
+
+    let metrics = SessionMetrics::new();
+    live_session.metrics = Some(metrics.clone());
 
     start_rtmp_streams(RtmpStartArgs {
         bundle: &bundle,
         source_lang,
         live_session,
         sid,
-        ffmpeg_monitor_stop,
+        ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
+        metrics: metrics.clone(),
     });
     spawn_live_status_update(
         workers_api.clone(),
         sid.to_string(),
         live_session_id.to_string(),
+    );
+    let _metrics_reporter = spawn_metrics_reporter(
+        metrics,
+        workers_api.clone(),
+        Some(sid.to_string()),
+        live_session_id.to_string(),
+        ffmpeg_monitor_stop,
     );
     BootstrapOutcome::Continue
 }
@@ -260,6 +287,7 @@ struct RtmpStartArgs<'a> {
     live_session: &'a mut LiveSession,
     sid: &'a str,
     ffmpeg_monitor_stop: Arc<AtomicBool>,
+    metrics: Arc<SessionMetrics>,
 }
 
 fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
@@ -269,26 +297,26 @@ fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         live_session,
         sid,
         ffmpeg_monitor_stop,
+        metrics,
     } = args;
     if bundle.streams.is_empty() {
         return;
     }
     let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
+    manager.set_metrics(metrics);
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
             continue;
         };
-        let mut full_url = if stream_key.is_empty() {
+        let full_url_with_key = if stream_key.is_empty() {
             rtmp_url.clone()
         } else {
             format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
         };
-        // Kill-switch: BRIVVA_FORCE_RTMP_NOT_RTMPS=1 downgrades rtmps:// to
-        // rtmp:// when a platform's TLS is flaking. See runbook.
-        if force_rtmp && full_url.starts_with("rtmps://") {
-            full_url = format!("rtmp://{}", &full_url["rtmps://".len()..]);
+        let full_url = maybe_downgrade_rtmps(&full_url_with_key, force_rtmp);
+        if force_rtmp && full_url != full_url_with_key {
             tracing::warn!(
                 stream_id = %s.id,
                 "kill-switch FORCE_RTMP_NOT_RTMPS: downgraded rtmps:// to rtmp://"

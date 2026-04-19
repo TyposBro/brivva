@@ -2,7 +2,7 @@ mod soniox;
 mod stt;
 mod stt_response;
 mod stt_transport;
-mod tts;
+pub mod tts;
 
 use crate::features::broadcast::domain::ServerMsg;
 use axum::extract::ws::Message;

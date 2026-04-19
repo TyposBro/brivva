@@ -1,7 +1,8 @@
 pub mod auth;
 pub mod ffmpeg;
+pub mod metrics;
 pub mod pipeline;
-mod session_ws;
+pub mod session_ws;
 pub mod state;
 pub mod workers_api;
 

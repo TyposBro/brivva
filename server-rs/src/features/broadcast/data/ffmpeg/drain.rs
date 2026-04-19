@@ -7,12 +7,20 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 use super::mixer::{apply_gain, mix_pcm_s16le};
+use crate::features::broadcast::domain::SessionMetrics;
 
 /// Video: 33.33 ms per frame at 30 fps.
 const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
@@ -31,6 +39,10 @@ pub(super) struct VideoDrainCtx {
     pub stdin: std::process::ChildStdin,
     pub delay: Duration,
     pub stop: Arc<AtomicBool>,
+    /// Unix-ms wall clock updated after each successful write. Health monitor
+    /// reads this to detect silent FFmpeg stalls on long live shows.
+    pub last_write_ms: Arc<AtomicI64>,
+    pub metrics: Option<Arc<SessionMetrics>>,
 }
 
 pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
@@ -40,6 +52,8 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
         mut stdin,
         delay,
         stop,
+        last_write_ms,
+        metrics,
     } = ctx;
     let mut last_frame: Option<Vec<u8>> = None;
     let mut tick_count: u64 = 0;
@@ -64,13 +78,18 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
             None => last_frame.clone(),
         };
 
-        if let Some(f) = to_write
-            && stdin.write_all(&f).is_err()
-        {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+        if let Some(f) = to_write {
+            let n = f.len() as u64;
+            if stdin.write_all(&f).is_err() {
+                if !stop.load(Ordering::Acquire) {
+                    eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+                }
+                break;
             }
-            break;
+            last_write_ms.store(now_unix_ms(), Ordering::Release);
+            if let Some(m) = &metrics {
+                m.record_bytes_out(n);
+            }
         }
     }
 
@@ -120,6 +139,9 @@ pub(super) struct AudioDrainCtx {
     pub is_source: bool,
     pub host_gain: f32,
     pub stop: Arc<AtomicBool>,
+    /// Unix-ms wall clock updated after each successful FIFO write.
+    pub last_write_ms: Arc<AtomicI64>,
+    pub metrics: Option<Arc<SessionMetrics>>,
 }
 
 pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
@@ -132,6 +154,8 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
         is_source,
         host_gain,
         stop,
+        last_write_ms,
+        metrics,
     } = ctx;
 
     let mut fifo = match open_audio_fifo(&fifo_path, &stream_id, &stop) {
@@ -175,11 +199,16 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
         } else {
             &output
         };
+        let n = bytes.len() as u64;
         if fifo.write_all(bytes).is_err() {
             if !stop.load(Ordering::Acquire) {
                 eprintln!("[AUDIO:{}] write error, exiting", stream_id);
             }
             break;
+        }
+        last_write_ms.store(now_unix_ms(), Ordering::Release);
+        if let Some(m) = &metrics {
+            m.record_bytes_out(n);
         }
     }
 
