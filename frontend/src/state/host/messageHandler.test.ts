@@ -26,9 +26,9 @@ describe("createMessageHandler", () => {
     expect(h.stopwatch.markInterim).toHaveBeenCalledOnce();
   });
 
-  it("interim missing transcript → defaults empty string", () => {
+  it("interim missing transcript → ignored as invalid", () => {
     h.handler({ type: "interim" });
-    expect(h.dispatch).toHaveBeenCalledWith({ type: "interim", transcript: "" });
+    expect(h.dispatch).not.toHaveBeenCalled();
   });
 
   it("final → dispatch + startTimer w/ active langs", () => {
@@ -63,7 +63,7 @@ describe("createMessageHandler", () => {
   });
 
   it("tts_end → recordTts", () => {
-    h.handler({ type: "tts_end", utteranceId: 1, ttsMs: 300 });
+    h.handler({ type: "tts_end", utteranceId: 1, targetLang: "ja", ttsMs: 300 });
     expect(h.stopwatch.recordTts).toHaveBeenCalledWith("1", 300);
   });
 
@@ -87,9 +87,9 @@ describe("createMessageHandler", () => {
     expect(h.dispatch).toHaveBeenCalledWith({ type: "error", message: "boom" });
   });
 
-  it("error w/o message → 'Unknown error' fallback", () => {
+  it("error w/o message → ignored as invalid", () => {
     h.handler({ type: "error" });
-    expect(h.dispatch).toHaveBeenCalledWith({ type: "error", message: "Unknown error" });
+    expect(h.dispatch).not.toHaveBeenCalled();
   });
 
   it("unknown msg.type → no dispatch, no stopwatch calls (sad)", () => {

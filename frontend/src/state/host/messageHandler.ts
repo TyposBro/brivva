@@ -1,5 +1,5 @@
 import { type Dispatch } from "react";
-import { type SessionMessage } from "../../lib/SessionSocket";
+import { HostServerMessageSchema } from "@brivva/contracts/ws";
 import { type HostAction } from "./reducer";
 
 type Stopwatch = {
@@ -19,49 +19,55 @@ export function createMessageHandler(
   getActiveTargetLangs: () => string[],
   stopwatch: Stopwatch,
 ) {
-  return (msg: SessionMessage) => {
-    switch (msg.type) {
+  return (msg: unknown) => {
+    const parsed = HostServerMessageSchema.safeParse(msg);
+    if (!parsed.success) {
+      return;
+    }
+
+    const message = parsed.data;
+    switch (message.type) {
       case "interim":
-        dispatch({ type: "interim", transcript: (msg.transcript as string) ?? "" });
+        dispatch({ type: "interim", transcript: message.transcript });
         stopwatch.markInterim();
         break;
 
       case "final": {
-        const uid = String(msg.utteranceId);
-        const text = (msg.transcript as string) ?? "";
-        dispatch({ type: "final", id: msg.utteranceId as number, transcript: text });
+        const uid = String(message.utteranceId);
+        const text = message.transcript;
+        dispatch({ type: "final", id: message.utteranceId, transcript: text });
         stopwatch.startTimer(uid, text, getActiveTargetLangs());
-        if (typeof msg.sttMs === "number") {
-          stopwatch.recordStt(uid, msg.sttMs as number);
+        if (typeof message.sttMs === "number") {
+          stopwatch.recordStt(uid, message.sttMs);
         }
         break;
       }
 
       case "translation": {
-        const id = msg.utteranceId as number;
-        const text = (msg.text as string) ?? "";
-        const targetLang = (msg.targetLang as string) ?? "";
+        const id = message.utteranceId;
+        const text = message.text;
+        const targetLang = message.targetLang;
         dispatch({ type: "translation", id, targetLang, text });
-        if (typeof msg.translateMs === "number") {
-          stopwatch.recordTranslate(String(id), msg.translateMs as number);
+        if (typeof message.translateMs === "number") {
+          stopwatch.recordTranslate(String(id), message.translateMs);
         }
         break;
       }
 
       case "tts_end":
-        if (typeof msg.ttsMs === "number") {
-          stopwatch.recordTts(String(msg.utteranceId), msg.ttsMs as number);
+        if (typeof message.ttsMs === "number") {
+          stopwatch.recordTts(String(message.utteranceId), message.ttsMs);
         }
         break;
 
       case "video_end":
         // Backend emits this after the per-utterance TTS decode completes —
         // FE uses it as the pipeline-done marker for the latency stopwatch.
-        stopwatch.finalize(String(msg.utteranceId), (msg.lipsyncMs as number) ?? 0);
+        stopwatch.finalize(String(message.utteranceId), message.lipsyncMs ?? 0);
         break;
 
       case "error":
-        dispatch({ type: "error", message: (msg.message as string) ?? "Unknown error" });
+        dispatch({ type: "error", message: message.message });
         break;
     }
   };

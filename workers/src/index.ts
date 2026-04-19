@@ -1,5 +1,18 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import {
+  AddStreamRequestSchema,
+  AuthTokenRequestSchema,
+  CloneSessionVoiceRequestSchema,
+  CreateSessionRequestSchema,
+  CreateVoiceRequestSchema,
+  InternalSessionStatusUpdateSchema,
+  PlatformQuerySchema,
+  SaveCredentialRequestSchema,
+  SessionIdParamsSchema,
+  SessionStreamParamsSchema,
+  UserQuerySchema,
+} from "@brivva/contracts/http";
 
 import { signJwt } from "./auth";
 import * as db from "./db";
@@ -8,6 +21,31 @@ import { toUserInfo, type Env } from "./types";
 import * as yt from "./youtube";
 
 const app = new Hono<{ Bindings: Env }>();
+
+function invalid(c: Context<{ Bindings: Env }>, error: unknown) {
+  if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+    return c.json(
+      {
+        error: "invalid request",
+        issues: error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      },
+      400,
+    );
+  }
+  return c.json({ error: "invalid request" }, 400);
+}
+
+function parseWithSchema<T>(
+  c: Context<{ Bindings: Env }>,
+  schema: { safeParse(input: unknown): { success: true; data: T } | { success: false; error: unknown } },
+  input: unknown,
+): T | Response {
+  const parsed = schema.safeParse(input);
+  return parsed.success ? parsed.data : invalid(c, parsed.error);
+}
 
 app.use(
   "*",
@@ -35,30 +73,28 @@ function requireInternal(c: Context<{ Bindings: Env }>): Response | null {
 // ── users ────────────────────────────────────────────────
 
 app.get("/api/user", async (c) => {
-  const userId = c.req.query("user_id");
-  if (!userId) return c.json({ error: "user_id required" }, 400);
-  const user = await db.getOrCreateUser(c.env.DB, userId);
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+  const user = await db.getOrCreateUser(c.env.DB, query.user_id);
   return c.json(toUserInfo(user));
 });
 
 // ── voices ───────────────────────────────────────────────
 
 app.get("/api/voices", async (c) => {
-  const userId = c.req.query("user_id");
-  if (!userId) return c.json({ error: "user_id required" }, 400);
-  const voices = await db.listVoices(c.env.DB, userId);
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+  const voices = await db.listVoices(c.env.DB, query.user_id);
   return c.json({ voices });
 });
 
 app.post("/api/voices", async (c) => {
-  const body = await c.req.json<{
-    user_id?: string;
-    name?: string;
-    audio_base64?: string;
-  }>();
-  if (!body.user_id || !body.name || !body.audio_base64) {
-    return c.json({ error: "user_id, name, audio_base64 required" }, 400);
-  }
+  const body = parseWithSchema(c, CreateVoiceRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
   await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
   const { voice_id } = await el.cloneVoice(
     c.env.ELEVENLABS_API_KEY,
@@ -81,23 +117,17 @@ app.delete("/api/voices/:id", async (c) => {
 // ── platform credentials ─────────────────────────────────
 
 app.get("/api/credentials", async (c) => {
-  const userId = c.req.query("user_id");
-  if (!userId) return c.json({ error: "user_id required" }, 400);
-  const credentials = await db.listCredentials(c.env.DB, userId);
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+  const credentials = await db.listCredentials(c.env.DB, query.user_id);
   return c.json({ credentials });
 });
 
 app.post("/api/credentials", async (c) => {
-  const body = await c.req.json<{
-    user_id?: string;
-    platform?: string;
-    rtmp_url?: string;
-    stream_key?: string;
-    display_name?: string;
-  }>();
-  if (!body.user_id || !body.platform) {
-    return c.json({ error: "user_id, platform required" }, 400);
-  }
+  const body = parseWithSchema(c, SaveCredentialRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
   const row = await db.upsertCredential(
     c.env.DB,
     body.user_id,
@@ -110,20 +140,23 @@ app.post("/api/credentials", async (c) => {
 });
 
 app.delete("/api/credentials", async (c) => {
-  const userId = c.req.query("user_id");
-  const platform = c.req.query("platform");
-  if (!userId || !platform)
-    return c.json({ error: "user_id + platform required" }, 400);
-  await db.deleteCredentialRow(c.env.DB, userId, platform);
+  const query = parseWithSchema(c, PlatformQuerySchema, {
+    user_id: c.req.query("user_id"),
+    platform: c.req.query("platform"),
+  });
+  if (query instanceof Response) return query;
+  await db.deleteCredentialRow(c.env.DB, query.user_id, query.platform);
   return c.json({ status: "deleted" });
 });
 
 // ── sessions ─────────────────────────────────────────────
 
 app.get("/api/sessions", async (c) => {
-  const userId = c.req.query("user_id");
-  if (!userId) return c.json({ error: "user_id required" }, 400);
-  const sessions = await db.listSessions(c.env.DB, userId);
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+  const sessions = await db.listSessions(c.env.DB, query.user_id);
   return c.json({ sessions });
 });
 
@@ -147,24 +180,8 @@ function resolveHostGain(
 }
 
 app.post("/api/sessions", async (c) => {
-  const body = await c.req.json<{
-    user_id?: string;
-    title?: string;
-    source_lang?: string;
-    target_langs?: string[];
-    voice_id?: string;
-    platforms?: {
-      platform: string;
-      lang?: string;
-      rtmp_url?: string;
-      stream_key?: string;
-      delay_ms?: number;
-      host_gain?: number;
-    }[];
-  }>();
-  if (!body.user_id || !body.title || !body.source_lang || !body.target_langs?.length) {
-    return c.json({ error: "user_id, title, source_lang, target_langs required" }, 400);
-  }
+  const body = parseWithSchema(c, CreateSessionRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
   await db.getOrCreateUser(c.env.DB, body.user_id);
   const session = await db.createSession(
     c.env.DB,
@@ -196,24 +213,24 @@ app.post("/api/sessions", async (c) => {
 });
 
 app.get("/api/sessions/:id", async (c) => {
-  const id = c.req.param("id");
-  const session = await db.getSession(c.env.DB, id);
-  const streams = await db.listStreams(c.env.DB, id);
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const session = await db.getSession(c.env.DB, params.id);
+  const streams = await db.listStreams(c.env.DB, params.id);
   return c.json({ session, streams });
 });
 
 app.post("/api/sessions/:id/voice", async (c) => {
-  const sessionId = c.req.param("id");
-  const body = await c.req.json<{
-    user_id?: string;
-    name?: string;
-    audio_base64?: string;
-  }>();
-  if (!body.user_id || !body.audio_base64) {
-    return c.json({ error: "user_id and audio_base64 required" }, 400);
-  }
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const body = parseWithSchema(c, CloneSessionVoiceRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
 
-  const session = await db.getSession(c.env.DB, sessionId);
+  const session = await db.getSession(c.env.DB, params.id);
   if (!session) return c.json({ error: "not found" }, 404);
   if (session.user_id !== body.user_id) {
     return c.json({ error: "forbidden" }, 403);
@@ -226,29 +243,26 @@ app.post("/api/sessions/:id/voice", async (c) => {
     body.audio_base64,
   );
   const voice = await db.createVoice(c.env.DB, body.user_id, voice_id, voiceName);
-  await db.updateSessionVoiceId(c.env.DB, sessionId, voice.id);
+  await db.updateSessionVoiceId(c.env.DB, params.id, voice.id);
   return c.json({ voice });
 });
 
 app.delete("/api/sessions/:id", async (c) => {
-  const id = c.req.param("id");
-  await db.deleteSessionRow(c.env.DB, id);
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  await db.deleteSessionRow(c.env.DB, params.id);
   return c.json({ status: "deleted" });
 });
 
 app.post("/api/sessions/:id/streams", async (c) => {
-  const sessionId = c.req.param("id");
-  const body = await c.req.json<{
-    lang?: string;
-    platform?: string;
-    rtmp_url?: string;
-    stream_key?: string;
-    delay_ms?: number;
-    host_gain?: number;
-  }>();
-  if (!body.lang || !body.platform || !body.rtmp_url || !body.stream_key) {
-    return c.json({ error: "lang, platform, rtmp_url, stream_key required" }, 400);
-  }
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const body = parseWithSchema(c, AddStreamRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
   // Stand-alone add-stream: we don't know session.source_lang here without a
   // DB read. FE must send host_gain explicitly when it differs from the
   // target-stream default.
@@ -258,7 +272,7 @@ app.post("/api/sessions/:id/streams", async (c) => {
       : DEFAULT_HOST_GAIN_TARGET;
   const s = await db.createStreamManual(
     c.env.DB,
-    sessionId,
+    params.id,
     body.lang,
     body.platform,
     body.rtmp_url,
@@ -270,16 +284,23 @@ app.post("/api/sessions/:id/streams", async (c) => {
 });
 
 app.delete("/api/sessions/:session_id/streams/:stream_id", async (c) => {
-  await db.deleteStreamRow(c.env.DB, c.req.param("stream_id"));
+  const params = parseWithSchema(c, SessionStreamParamsSchema, {
+    session_id: c.req.param("session_id"),
+    stream_id: c.req.param("stream_id"),
+  });
+  if (params instanceof Response) return params;
+  await db.deleteStreamRow(c.env.DB, params.stream_id);
   return c.json({ status: "deleted" });
 });
 
 // ── OAuth (YouTube) ──────────────────────────────────────
 
 app.get("/auth/youtube", (c) => {
-  const userId = c.req.query("user_id");
-  if (!userId) return c.json({ error: "user_id required" }, 400);
-  return c.redirect(yt.authorizeUrl(c.env, userId));
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+  return c.redirect(yt.authorizeUrl(c.env, query.user_id));
 });
 
 app.get("/auth/youtube/callback", async (c) => {
@@ -316,8 +337,8 @@ app.get("/auth/youtube/callback", async (c) => {
 // Short-lived JWT issuance for already-authenticated users (called by FE on
 // page load if it has a user_id but no fresh JWT).
 app.post("/auth/token", async (c) => {
-  const body = await c.req.json<{ user_id?: string }>();
-  if (!body.user_id) return c.json({ error: "user_id required" }, 400);
+  const body = parseWithSchema(c, AuthTokenRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
   const user = await db.getOrCreateUser(c.env.DB, body.user_id);
   const jwt = await signJwt(c.env.JWT_SECRET, { sub: user.id });
   return c.json({ token: jwt });
@@ -358,10 +379,13 @@ app.get("/internal/sessions/:id", async (c) => {
 app.patch("/internal/sessions/:id", async (c) => {
   const err = requireInternal(c);
   if (err) return err;
-  const id = c.req.param("id");
-  const body = await c.req.json<{ status?: string; live_session_id?: string | null }>();
-  if (!body.status) return c.json({ error: "status required" }, 400);
-  await db.updateSessionStatus(c.env.DB, id, body.status, body.live_session_id ?? null);
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const body = parseWithSchema(c, InternalSessionStatusUpdateSchema, await c.req.json());
+  if (body instanceof Response) return body;
+  await db.updateSessionStatus(c.env.DB, params.id, body.status, body.live_session_id ?? null);
   return c.json({ status: "ok" });
 });
 

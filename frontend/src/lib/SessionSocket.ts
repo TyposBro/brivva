@@ -2,11 +2,9 @@ const WS_BASE = (
   import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787"
 ).replace(/^http/, "ws");
 
-export type SessionMessage = { type: string; [k: string]: unknown };
-
 export type SessionSocketCallbacks = {
   onOpen?: () => void;
-  onMessage: (msg: SessionMessage) => void;
+  onMessage: (msg: unknown) => void;
   onBinary?: (data: ArrayBuffer) => void;
   onClose: () => void;
 };

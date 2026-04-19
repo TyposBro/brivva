@@ -12,9 +12,11 @@
     "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test",
+    "typecheck": "tsc --noEmit",
     "deploy": "VITE_WORKER_URL=https://brivva-server.milliytechnology.org tsc && VITE_WORKER_URL=https://brivva-server.milliytechnology.org vite build && npx wrangler pages deploy dist --project-name=brivva --branch=main --commit-dirty=true"
   },
   "dependencies": {
+    "@brivva/contracts": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
     "react": "^19.2.4",
@@ -37,6 +39,7 @@
     "babel-plugin-react-compiler": "^1.0.0",
     "jsdom": "^29.0.2",
     "postcss": "^8.5.8",
+    "zod": "^4.1.13",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",

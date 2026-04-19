@@ -52,7 +52,7 @@ export function useTimings() {
 
   const recordStt = useCallback((uid: string, sttMs: number) => {
     const entry = pending.current.get(uid);
-    if (entry && !entry.sttMs) entry.sttMs = sttMs;
+    if (entry) entry.sttMs = sttMs;
   }, []);
 
   const recordTranslate = useCallback((uid: string, translateMs: number) => {

@@ -1,0 +1,17 @@
+{
+  "name": "brivva-monorepo",
+  "private": true,
+  "workspaces": [
+    "contracts",
+    "frontend",
+    "workers"
+  ],
+  "packageManager": "bun@1.3.3",
+  "scripts": {
+    "install:all": "bun install",
+    "test:frontend": "bun run --cwd frontend test",
+    "test:workers": "bun run --cwd workers test",
+    "typecheck:frontend": "bun run --cwd frontend typecheck",
+    "typecheck:workers": "bun run --cwd workers typecheck"
+  }
+}

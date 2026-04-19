@@ -1,3 +1,38 @@
+import {
+  AuthTokenResponseSchema,
+  CloneSessionVoiceResponseSchema,
+  CreateSessionResponseSchema,
+  ErrorResponseSchema,
+  GetSessionResponseSchema,
+  ListCredentialsResponseSchema,
+  ListSessionsResponseSchema,
+  ListVoicesResponseSchema,
+  PlatformCredentialSchema,
+  StatusResponseSchema,
+  StreamSchema,
+  UserInfoSchema,
+  VoiceSchema,
+  type AuthTokenResponse,
+  type CloneSessionVoiceRequest,
+  type CreateSessionResponse,
+  type PlatformConfig,
+  type PlatformCredential,
+  type Session,
+  type StreamRecord,
+  type UserInfo,
+  type Voice,
+} from "@brivva/contracts/http";
+export type {
+  AuthTokenResponse,
+  CloneSessionVoiceRequest,
+  CreateSessionResponse,
+  PlatformConfig,
+  PlatformCredential,
+  Session,
+  UserInfo,
+  Voice,
+} from "@brivva/contracts/http";
+
 // VITE_API_URL points at the Workers CRUD API (D1-backed, global edge).
 // VITE_WORKER_URL is reserved for the Fargate media WS (long-lived audio).
 // Fallback to VITE_WORKER_URL for local dev when running against a single-process
@@ -7,30 +42,54 @@ const API_BASE =
   import.meta.env.VITE_WORKER_URL ??
   "http://localhost:3000";
 
-async function request<T>(path: string, opts?: RequestInit): Promise<T> {
+type StreamInfo = StreamRecord & {
+  broadcast_id?: string;
+  stream_id?: string;
+  error?: string;
+};
+
+export type { StreamInfo };
+
+const StreamInfoSchema = StreamSchema.transform((stream): StreamInfo => ({
+  ...stream,
+  broadcast_id: stream.platform_broadcast_id ?? undefined,
+  stream_id: stream.platform_stream_id ?? undefined,
+}));
+
+async function request<T>(
+  path: string,
+  schema: { parse(input: unknown): T },
+  opts?: RequestInit,
+): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
   if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`API ${resp.status}: ${body}`);
+    const raw = await resp.text().catch(() => "");
+    const json = raw
+      ? (() => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+    const parsed = ErrorResponseSchema.safeParse(json);
+    if (parsed.success) {
+      throw new Error(`API ${resp.status}: ${parsed.data.error}`);
+    }
+    throw new Error(`API ${resp.status}: ${raw}`);
   }
-  return resp.json();
+  const json = await resp.json();
+  return schema.parse(json);
 }
 
 // ── User ────────────────────────────────────────────────
 
-export type UserInfo = {
-  id: string;
-  youtube_connected: boolean;
-  youtube_channel_name: string | null;
-  youtube_channel_id: string | null;
-  created_at: number;
-};
-
 export function getUser(userId: string): Promise<UserInfo> {
-  return request(`/api/user?user_id=${encodeURIComponent(userId)}`);
+  return request(`/api/user?user_id=${encodeURIComponent(userId)}`, UserInfoSchema);
 }
 
 /**
@@ -39,8 +98,8 @@ export function getUser(userId: string): Promise<UserInfo> {
  * Cache the token for its ~15 min validity in the caller — the WS upgrade
  * is the only consumer.
  */
-export function getAuthToken(userId: string): Promise<{ token: string }> {
-  return request("/auth/token", {
+export function getAuthToken(userId: string): Promise<AuthTokenResponse> {
+  return request("/auth/token", AuthTokenResponseSchema, {
     method: "POST",
     body: JSON.stringify({ user_id: userId }),
   });
@@ -53,20 +112,6 @@ export function youtubeAuthUrl(userId: string): string {
 }
 
 // ── Platforms ───────────────────────────────────────────
-
-export type PlatformConfig = {
-  platform: string;
-  lang?: string;
-  rtmp_url?: string;
-  stream_key?: string;
-  /** Fargate holds the delayed host media this long before pushing to RTMP,
-   *  giving STT+translate+TTS a window to overlay. Target-lang streams
-   *  typically 1500–3000 ms depending on expected latency. Omit for 2000. */
-  delay_ms?: number;
-  /** Gain applied to delayed original audio under translated TTS.
-   *  Range 0–1. 1 = full (source stream), 0.2 = quiet underlay (target). */
-  host_gain?: number;
-};
 
 export type Platform = {
   id: string;
@@ -138,38 +183,6 @@ export function langFlag(code: string): string {
   return LANGS.find((l) => l.code === code)?.flag ?? "";
 }
 
-// ── Sessions ────────────────────────────────────────────
-
-export type Session = {
-  id: string;
-  user_id: string;
-  voice_id: string | null;
-  title: string;
-  source_lang: string;
-  target_langs: string;
-  status: string;
-  live_session_id: string | null;
-  created_at: number;
-};
-
-export type StreamInfo = {
-  id: string;
-  lang: string;
-  platform?: string;
-  broadcast_id?: string;
-  stream_id?: string;
-  rtmp_url?: string;
-  stream_key?: string;
-  status?: string;
-  error?: string;
-};
-
-export type CreateSessionResponse = {
-  session: Session;
-  streams: StreamInfo[];
-  errors?: string[];
-};
-
 export function createSession(body: {
   user_id: string;
   title: string;
@@ -179,7 +192,10 @@ export function createSession(body: {
   platforms?: PlatformConfig[];
   privacy_status?: string;
 }): Promise<CreateSessionResponse> {
-  return request("/api/sessions", {
+  return request("/api/sessions", CreateSessionResponseSchema.transform((response) => ({
+    ...response,
+    streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
+  })), {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -188,29 +204,42 @@ export function createSession(body: {
 export function listSessions(
   userId: string
 ): Promise<{ sessions: Session[] }> {
-  return request(`/api/sessions?user_id=${encodeURIComponent(userId)}`);
+  return request(
+    `/api/sessions?user_id=${encodeURIComponent(userId)}`,
+    ListSessionsResponseSchema,
+  );
 }
 
 export function getSession(
   id: string
 ): Promise<{ session: Session | null; streams: StreamInfo[] }> {
-  return request(`/api/sessions/${encodeURIComponent(id)}`);
+  return request(
+    `/api/sessions/${encodeURIComponent(id)}`,
+    GetSessionResponseSchema.transform((response) => ({
+      ...response,
+      streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
+    })),
+  );
 }
 
 export function cloneSessionVoice(
   sessionId: string,
-  body: { user_id: string; audio_base64: string; name?: string }
+  body: CloneSessionVoiceRequest
 ): Promise<{ voice: Voice }> {
-  return request(`/api/sessions/${encodeURIComponent(sessionId)}/voice`, {
+  return request(
+    `/api/sessions/${encodeURIComponent(sessionId)}/voice`,
+    CloneSessionVoiceResponseSchema,
+    {
     method: "POST",
     body: JSON.stringify(body),
-  });
+    },
+  );
 }
 
 export function deleteSession(
   id: string
 ): Promise<{ status: string }> {
-  return request(`/api/sessions/${encodeURIComponent(id)}`, {
+  return request(`/api/sessions/${encodeURIComponent(id)}`, StatusResponseSchema, {
     method: "DELETE",
   });
 }
@@ -221,7 +250,7 @@ export function addStream(
   sessionId: string,
   body: { lang: string; platform: string; rtmp_url: string; stream_key: string }
 ): Promise<StreamInfo> {
-  return request(`/api/sessions/${encodeURIComponent(sessionId)}/streams`, {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/streams`, StreamInfoSchema, {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -233,24 +262,20 @@ export function removeStream(
 ): Promise<{ status: string }> {
   return request(
     `/api/sessions/${encodeURIComponent(sessionId)}/streams/${encodeURIComponent(streamId)}`,
-    { method: "DELETE" }
+    StatusResponseSchema,
+    { method: "DELETE" },
   );
 }
 
 // ── Voices ──────────────────────────────────────────────
 
-export type Voice = {
-  id: string;
-  user_id: string;
-  elevenlabs_voice_id: string;
-  name: string;
-  created_at: number;
-};
-
 export function listVoices(
   userId: string
 ): Promise<{ voices: Voice[] }> {
-  return request(`/api/voices?user_id=${encodeURIComponent(userId)}`);
+  return request(
+    `/api/voices?user_id=${encodeURIComponent(userId)}`,
+    ListVoicesResponseSchema,
+  );
 }
 
 export function createVoice(body: {
@@ -258,33 +283,25 @@ export function createVoice(body: {
   name: string;
   audio_base64: string;
 }): Promise<Voice> {
-  return request("/api/voices", {
+  return request("/api/voices", VoiceSchema, {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
 export function deleteVoice(id: string): Promise<{ status: string }> {
-  return request(`/api/voices/${encodeURIComponent(id)}`, {
+  return request(`/api/voices/${encodeURIComponent(id)}`, StatusResponseSchema, {
     method: "DELETE",
   });
 }
 
 // ── Platform Credentials (Vault) ────────────────────────
 
-export type PlatformCredential = {
-  id: string;
-  user_id: string;
-  platform: string;
-  rtmp_url: string | null;
-  stream_key: string | null;
-  display_name: string | null;
-  created_at: number;
-  updated_at: number;
-};
-
 export function listCredentials(userId: string): Promise<{ credentials: PlatformCredential[] }> {
-  return request(`/api/credentials?user_id=${encodeURIComponent(userId)}`);
+  return request(
+    `/api/credentials?user_id=${encodeURIComponent(userId)}`,
+    ListCredentialsResponseSchema,
+  );
 }
 
 export function saveCredential(body: {
@@ -294,16 +311,20 @@ export function saveCredential(body: {
   stream_key?: string;
   display_name?: string;
 }): Promise<PlatformCredential> {
-  return request("/api/credentials", {
+  return request("/api/credentials", PlatformCredentialSchema, {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
 export function deleteCredential(userId: string, platform: string): Promise<{ status: string }> {
-  return request(`/api/credentials?user_id=${encodeURIComponent(userId)}&platform=${encodeURIComponent(platform)}`, {
-    method: "DELETE",
-  });
+  return request(
+    `/api/credentials?user_id=${encodeURIComponent(userId)}&platform=${encodeURIComponent(platform)}`,
+    StatusResponseSchema,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 // ── Magic Paste Detection ───────────────────────────────

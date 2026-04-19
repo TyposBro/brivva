@@ -65,14 +65,14 @@ describe("useTimings", () => {
     expect(result.current.timings[0].text).toHaveLength(40);
   });
 
-  it("recordStt guarded: only sets when entry has no sttMs yet", () => {
+  it("recordStt prefers explicit backend timing over local estimate", () => {
     const { result } = renderHook(() => useTimings());
     act(() => result.current.markInterim());
     vi.advanceTimersByTime(100);
     act(() => result.current.startTimer("u1", "x", []));
     act(() => result.current.recordStt("u1", 999));
     act(() => result.current.recordTts("u1", 1));
-    expect(result.current.timings[0].sttMs).toBe(100);
+    expect(result.current.timings[0].sttMs).toBe(999);
   });
 
   it("recordTranslate guarded against double-record", () => {

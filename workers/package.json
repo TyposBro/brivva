@@ -18,6 +18,7 @@
     "ops:migrate-session-rename:prod": "wrangler d1 execute brivva --remote --file=ops/live-session-id-migration.sql"
   },
   "dependencies": {
+    "@brivva/contracts": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.8.5",
     "jose": "^5.9.6"
