@@ -1,19 +1,30 @@
 // Grip Cloud — Seller API wrapper.
 //
-// Grip's official Seller API was discovered 2026-04-19 and supersedes the
-// reverse-engineered paste-the-stream-key flow documented in
-// `docs/grip-integration-notes.md`. Sellers authenticate with an
-// `AccessKey` + `SecretKey` pair issued from the Grip Seller Center
-// (https://seller.grip.show/), not an OAuth2 flow.
+// Grip issues `AccessKey` + `SecretKey` from the Seller Center
+// (https://seller.grip.show/) but publishes ZERO developer-facing REST
+// documentation — docs.gripcloud.show, gripcloud.show, and the FAQ are
+// all operator/admin-panel guides only. Reviewed 2026-04-19.
 //
-// Docs: https://docs.gripcloud.show/ (pinned 2026-04-19)
+// !!! STATUS: BLOCKED on Grip support. The real REST endpoint + auth
+// scheme (suspected HMAC-SHA256 over a canonical request) is private.
+// Email request sent to cloud.bd@gripcorp.co / cloud_csm@gripcorp.co;
+// rewire the internals of `provisionBroadcast` once the spec lands.
 //
-// !!! STATUS: scaffolded, exact endpoint path NOT YET VERIFIED against
-// the live Grip Seller API. See the TODO inside `provisionBroadcast`.
+// Until then the production path is paste-creds: the user copies
+// stream key + URL from Grip admin (issued 1h before scheduled start)
+// and saves via POST /auth/grip. Orchestration never calls this file
+// unless `product_id` is supplied, which the FE does not send today.
+//
+// When Grip replies:
+//   1. Replace the GRIP_API_BASE + endpoint path below.
+//   2. Replace the plain `X-Access-Key` / `X-Secret-Key` headers with
+//      the documented signed `Authorization` header (SubtleCrypto
+//      HMAC-SHA256, available on Workers without extra deps).
+//   3. Adjust response parsing to the real payload shape.
+//
 // The wrapper keeps the same surface as the YouTube wrapper so the
-// orchestration layer treats Grip as "just another auto-fill platform";
-// when the endpoint/response shape is pinned down we only change the
-// internals of this file.
+// orchestration layer treats Grip as "just another auto-fill platform"
+// the moment the internals are real.
 //
 // Caller contract:
 //   provisionBroadcast({ accessKey, secretKey, productId }) ->
@@ -68,17 +79,14 @@ export class GripSellerApiError extends Error {
 /**
  * Provision a Grip live broadcast and return fresh RTMP credentials.
  *
- * TODO(grip-api, 2026-04-19):
- *   Confirm the exact endpoint path + request/response shape against
- *   https://docs.gripcloud.show/. The best-guess endpoint is a POST to
- *   something like `/v1/broadcasts` returning
- *   `{ id, ingest: { url, stream_key } }` — adjust the `fetch` call +
- *   response parsing below once the live docs are open.
- *
- *   Also replace the plain `X-Access-Key` / `X-Secret-Key` headers with
- *   the documented `AccessKey` + signed `Signature` header once the
- *   canonical-request format is confirmed. Use SubtleCrypto.HMAC-SHA256
- *   — available out of the box on Cloudflare Workers, no extra deps.
+ * TODO(grip-api, blocked-on-grip-support):
+ *   Grip has no public REST docs — the Seller API spec is gated behind
+ *   cloud.bd@gripcorp.co / cloud_csm@gripcorp.co. Awaiting their reply
+ *   with endpoint paths, auth (likely HMAC-SHA256 signed Authorization
+ *   header), and response shape. Until then this function is a stub:
+ *   the guessed `POST /v1/broadcasts` + plain-header auth below will
+ *   404 or 401 in prod. Orchestration therefore falls back to the
+ *   paste-creds path, which is the current production flow.
  */
 export async function provisionBroadcast(
   _env: Env,
