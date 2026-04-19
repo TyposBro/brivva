@@ -320,10 +320,16 @@ async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
 
     if let Some(v) = bundle.voice.clone() {
         live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
-        // `enrollment_lang` isn't in the Workers Voice schema yet. When it
-        // ships (as the optional `enrollment_lang` field on the Voice row),
-        // populate `live_session.selected_voice_enrollment_lang` here with
-        // `Lang::from_str(&v.enrollment_lang.unwrap_or_default())`.
+        // Populate enrollment_lang from the Voice row so the TTS dispatcher
+        // can (a) detect cross-lingual mismatch and fall back to the default
+        // voice, and (b) emit an explicit `language_code` in the
+        // ElevenLabs body so `eleven_multilingual_v2` infers in the
+        // enrollment language instead of silently defaulting to English —
+        // the cause of the April 2026 Indian-accent regression. Unknown /
+        // legacy codes that Lang::from_str rejects quietly stay None;
+        // tts.rs already treats None as "let ElevenLabs decide".
+        live_session.selected_voice_enrollment_lang =
+            v.source_lang.as_deref().and_then(Lang::from_str);
     }
     live_session.voice_preset =
         crate::features::broadcast::domain::VoicePreset::from_wire(&bundle.session.voice_preset);

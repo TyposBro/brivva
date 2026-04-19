@@ -76,6 +76,21 @@ impl Lang {
     pub fn voice_id(&self) -> &'static str {
         self.voice_id_female()
     }
+
+    /// ISO-639-1 lowercase two-letter code expected by the ElevenLabs TTS
+    /// request body's `language_code` field. For `eleven_multilingual_v2`
+    /// (cloned voices) passing this is required to keep the inference path
+    /// anchored to the enrollment language — omitting it defaults the model
+    /// to the English path, which produced the April 2026 Indian-accent
+    /// regression when a Korean host synthesised English with a KO clone.
+    pub fn to_elevenlabs_code(&self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ja => "ja",
+            Lang::Zh => "zh",
+            Lang::Ko => "ko",
+        }
+    }
 }
 
 /// Which library default to use when the session hasn't picked a cloned voice.

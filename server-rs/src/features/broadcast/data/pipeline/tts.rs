@@ -145,6 +145,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         model_id,
         is_cloned,
         lang: &req.target_lang,
+        enrollment_lang: req.selected_voice_enrollment_lang.as_ref(),
         deadline: tts_deadline,
     })
     .await
@@ -176,14 +177,32 @@ struct FetchTtsArgs<'a> {
     model_id: &'a str,
     is_cloned: bool,
     lang: &'a Lang,
+    /// Enrollment language of the cloned voice when known. When set on a
+    /// cloned path, the body carries an explicit `language_code` so
+    /// `eleven_multilingual_v2` stays anchored to the recording's native
+    /// phonology instead of defaulting to English inference (the April
+    /// 2026 Indian-accent regression). Ignored for default voices.
+    enrollment_lang: Option<&'a Lang>,
     deadline: Duration,
 }
 
 /// Build the JSON payload sent to ElevenLabs. Pulled out so tests can
 /// exercise voice_settings branch selection without any network I/O.
-pub fn build_tts_request_body(text: &str, model_id: &str, is_cloned: bool) -> serde_json::Value {
+///
+/// `enrollment_lang` is only consumed on the cloned path. When `Some`, the
+/// request body carries a `language_code` (ISO-639-1, e.g. `"ko"`) so
+/// `eleven_multilingual_v2` infers in the enrollment language instead of
+/// silently defaulting to English. `labels` on the voice clone are
+/// clone-time metadata only and do NOT steer inference — the per-synthesis
+/// `language_code` is the knob that actually matters.
+pub fn build_tts_request_body(
+    text: &str,
+    model_id: &str,
+    is_cloned: bool,
+    enrollment_lang: Option<&Lang>,
+) -> serde_json::Value {
     if is_cloned {
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "text": text,
             "model_id": model_id,
             "voice_settings": {
@@ -192,7 +211,11 @@ pub fn build_tts_request_body(text: &str, model_id: &str, is_cloned: bool) -> se
                 "style": 0.0,
                 "use_speaker_boost": true
             }
-        })
+        });
+        if let Some(lang) = enrollment_lang {
+            body["language_code"] = serde_json::Value::String(lang.to_elevenlabs_code().into());
+        }
+        body
     } else {
         serde_json::json!({ "text": text, "model_id": model_id })
     }
@@ -206,6 +229,7 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
         model_id,
         is_cloned,
         lang,
+        enrollment_lang,
         deadline,
     } = args;
     let client = reqwest::Client::new();
@@ -216,7 +240,7 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
     // need aggressive boost — they are library voices engineered for 32
     // target languages — but the request shape is the same either way so we
     // send the settings unconditionally.
-    let body = build_tts_request_body(text, model_id, is_cloned);
+    let body = build_tts_request_body(text, model_id, is_cloned, enrollment_lang);
     let tts_result = tokio::time::timeout(deadline, async {
         let mut audio_buffer = Vec::new();
         let response = client
@@ -396,7 +420,7 @@ mod tests {
 
     #[test]
     fn build_tts_request_body_includes_voice_settings_only_for_cloned_voices() {
-        let cloned = build_tts_request_body("hi", "eleven_multilingual_v2", true);
+        let cloned = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
         assert!(cloned.get("voice_settings").is_some());
         assert_eq!(cloned["voice_settings"]["stability"].as_f64().unwrap(), 0.5);
         assert!(
@@ -405,10 +429,43 @@ mod tests {
                 .unwrap()
         );
 
-        let default = build_tts_request_body("hi", "eleven_flash_v2_5", false);
+        let default = build_tts_request_body("hi", "eleven_flash_v2_5", false, None);
         assert!(default.get("voice_settings").is_none());
         assert_eq!(default["model_id"].as_str().unwrap(), "eleven_flash_v2_5");
         assert_eq!(default["text"].as_str().unwrap(), "hi");
+    }
+
+    #[test]
+    fn build_tts_request_body_emits_language_code_only_when_cloned_and_enrollment_known() {
+        // Cloned + enrollment known → language_code anchored to the
+        // enrollment lang so eleven_multilingual_v2 stops silently defaulting
+        // to the English inference path (April 2026 Indian-accent bug).
+        let cloned_with_enroll =
+            build_tts_request_body("hi", "eleven_multilingual_v2", true, Some(&Lang::Ko));
+        assert_eq!(
+            cloned_with_enroll["language_code"].as_str().unwrap(),
+            "ko",
+            "cloned + enrollment_lang → language_code must be emitted"
+        );
+
+        // Cloned without enrollment → omit the field. Some legacy voice rows
+        // have no enrollment metadata; we let ElevenLabs pick rather than
+        // pretend we know.
+        let cloned_no_enroll = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
+        assert!(
+            cloned_no_enroll.get("language_code").is_none(),
+            "cloned + no enrollment_lang → language_code must be absent"
+        );
+
+        // Default path never carries language_code — eleven_flash_v2_5 is a
+        // different model and the target lang is already encoded by the
+        // library voice id itself.
+        let default_with_enroll =
+            build_tts_request_body("hi", "eleven_flash_v2_5", false, Some(&Lang::Ko));
+        assert!(
+            default_with_enroll.get("language_code").is_none(),
+            "default voice path must not emit language_code even if enrollment_lang supplied"
+        );
     }
 
     #[tokio::test]
@@ -614,12 +671,12 @@ mod tests {
         // Implicit: the dispatcher picks eleven_multilingual_v2 when
         // is_cloned=true and eleven_flash_v2_5 otherwise. Validate the
         // branch through body shape.
-        let cloned_body = build_tts_request_body("hi", "eleven_multilingual_v2", true);
+        let cloned_body = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
         assert_eq!(
             cloned_body["model_id"].as_str().unwrap(),
             "eleven_multilingual_v2"
         );
-        let default_body = build_tts_request_body("hi", "eleven_flash_v2_5", false);
+        let default_body = build_tts_request_body("hi", "eleven_flash_v2_5", false, None);
         assert_eq!(
             default_body["model_id"].as_str().unwrap(),
             "eleven_flash_v2_5"
