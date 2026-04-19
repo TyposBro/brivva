@@ -14,9 +14,13 @@ vi.mock("../../../shared/audio/voice-recorder", () => ({
 }));
 
 const createVoice = vi.fn();
-vi.mock("../data/api-client", () => ({
-  createVoice: (...args: unknown[]) => createVoice(...args),
-}));
+vi.mock("../data/api-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../data/api-client")>();
+  return {
+    ...actual,
+    createVoice: (...args: unknown[]) => createVoice(...args),
+  };
+});
 
 import { YourVoiceSection } from "./your-voice-section";
 
@@ -92,7 +96,60 @@ describe("YourVoiceSection", () => {
     await waitFor(() => expect(createVoice).toHaveBeenCalledWith(
       expect.objectContaining({ user_id: "u1", audio_base64: "BASE64", name: "fresh" }),
     ));
+    // source_lang must ride the payload — onboarding used to be the only
+    // place that set it; dashboard now sends it too.
+    expect(createVoice).toHaveBeenCalledWith(
+      expect.objectContaining({ source_lang: expect.any(String) }),
+    );
     await waitFor(() => expect(onChange).toHaveBeenCalled());
+  });
+
+  it("re-record: defaults source-lang from voice.source_lang, user can override", async () => {
+    recorder.stop.mockReturnValue("BASE64");
+    recorder.elapsedSec = 45;
+    recorder.isRecording = true;
+    createVoice.mockResolvedValue({
+      id: "v3",
+      user_id: "u1",
+      elevenlabs_voice_id: "el3",
+      name: "Aziz",
+      source_lang: "ja",
+      created_at: 10,
+    });
+    render(
+      <YourVoiceSection
+        userId="u1"
+        voice={{
+          id: "v1",
+          user_id: "u1",
+          elevenlabs_voice_id: "el1",
+          name: "Aziz",
+          source_lang: "ko",
+          created_at: 1,
+        }}
+        defaultName="Aziz"
+        onChange={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Re-record/i }));
+
+    // Seeded from voice.source_lang = "ko".
+    expect(screen.getByRole("radio", { name: /Korean/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    // Host switches to Japanese before stopping.
+    await userEvent.click(screen.getByRole("radio", { name: /Japanese/i }));
+
+    const stopBtn = screen.getByRole("button", { name: /Stop & Clone/i });
+    await userEvent.click(stopBtn);
+
+    await waitFor(() =>
+      expect(createVoice).toHaveBeenCalledWith(
+        expect.objectContaining({ source_lang: "ja" }),
+      ),
+    );
   });
 
   it("upload sad: surfaces error message when API rejects", async () => {

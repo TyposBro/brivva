@@ -6,6 +6,11 @@ import { SignInGate } from "../../../shared/auth/sign-in-gate";
 import { useAuth } from "../../../shared/auth/use-auth";
 import { useVoiceRecorder } from "../../../shared/audio/voice-recorder";
 import { VoiceSetupCard } from "./voice-setup-card";
+import {
+  SourceLangPicker,
+  detectBrowserSourceLang,
+  type SourceLang,
+} from "./source-lang-picker";
 import * as broadcastApi from "../data/api-client";
 import {
   completeOnboarding,
@@ -18,17 +23,6 @@ type Step = (typeof STEPS)[number];
 
 const VOICE_MIN_SEC = 30;
 const VOICE_MAX_SEC = 180;
-
-type SourceLang = "ko" | "en" | "ja" | "zh";
-const SOURCE_LANGS: readonly SourceLang[] = ["ko", "en", "ja", "zh"];
-
-function detectBrowserSourceLang(): SourceLang {
-  const tag = (typeof navigator !== "undefined" && navigator.language) || "";
-  const prefix = tag.toLowerCase().split("-")[0];
-  return (SOURCE_LANGS as readonly string[]).includes(prefix)
-    ? (prefix as SourceLang)
-    : "ko";
-}
 
 export default function OnboardingPage() {
   return (
@@ -307,40 +301,12 @@ function VoiceStep({
         </p>
       </div>
 
-      <div>
-        <label
-          htmlFor="source-lang"
-          className="block font-label text-sm text-on-surface mb-2"
-        >
-          What language will you speak on stream?
-        </label>
-        <div id="source-lang" role="radiogroup" className="grid grid-cols-2 gap-2">
-          {SOURCE_LANGS.map((code) => {
-            const meta = broadcastApi.LANGS.find((l) => l.code === code)!;
-            const selected = sourceLang === code;
-            return (
-              <button
-                key={code}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                disabled={voice !== null || uploading}
-                className={cn(
-                  "flex items-center gap-2 px-4 py-2.5 rounded-lg font-label text-sm transition-colors text-left disabled:opacity-50",
-                  selected
-                    ? "bg-primary-container text-on-primary-container"
-                    : "bg-surface-container-low hover:bg-surface-container-high text-on-surface",
-                )}
-                onClick={() => onSourceLangChange(code)}
-              >
-                <span className="text-lg">{meta.flag}</span>
-                <span className="flex-1">{meta.label}</span>
-                {selected && <Check className="w-4 h-4" />}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <SourceLangPicker
+        value={sourceLang}
+        onChange={onSourceLangChange}
+        disabled={voice !== null || uploading}
+        showBrowserDefaultHint
+      />
 
       {error && (
         <div className="bg-error-container/20 text-error px-4 py-2.5 rounded-lg font-label text-sm">
