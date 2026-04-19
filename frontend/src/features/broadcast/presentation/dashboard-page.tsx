@@ -4,36 +4,23 @@ import {
   Mic,
   Trash2,
   Plus,
-  X,
   Radio,
-  ExternalLink,
+  X,
+  Youtube,
   ChevronDown,
   ChevronRight,
-  Youtube,
-  Tv,
-  Globe,
-  Monitor,
   Settings2,
   Clipboard,
 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+import {
+  DestinationCard,
+  PlatformIcon,
+  type Destination,
+} from "./dashboard-destination-card";
 
 // ── Types ──────────────────────────────────────────────
-
-type Destination = {
-  uid: string;
-  platform: string;
-  lang: string;
-  rtmp_url: string;
-  stream_key: string;
-  /** Fargate holds the original host media this long (ms) before pushing to
-   *  RTMP. Default 2000 ms covers typical STT + TTS latency. */
-  delay_ms: number;
-  /** 0.0–1.0: how loud the delayed original audio sits under translated TTS.
-   *  1.0 = pure passthrough (source lang), 0.2 = ducked underlay (target). */
-  host_gain: number;
-};
 
 const DEFAULT_DELAY_MS = 2000;
 const DEFAULT_HOST_GAIN_TARGET = 0.2;
@@ -46,21 +33,6 @@ function getUserId(): string {
     localStorage.setItem("brivva_user_id", id);
   }
   return id;
-}
-
-// ── Platform icons ─────────────────────────────────────
-
-function PlatformIcon({ id, className }: { id: string; className?: string }) {
-  switch (id) {
-    case "youtube":
-      return <Youtube className={className} />;
-    case "twitch":
-      return <Tv className={className} />;
-    case "local-test":
-      return <Monitor className={className} />;
-    default:
-      return <Globe className={className} />;
-  }
 }
 
 // ── Region grouping for the picker ─────────────────────
@@ -671,223 +643,3 @@ export default function DashboardPage() {
   );
 }
 
-// ── Destination Card ──────────────────────────────────
-
-function StreamSlider({
-  label,
-  valueLabel,
-  min,
-  max,
-  step,
-  value,
-  onChange,
-  hint,
-}: {
-  label: string;
-  valueLabel: string;
-  min: number;
-  max: number;
-  step: number;
-  value: number;
-  onChange: (v: number) => void;
-  hint?: string;
-}) {
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-3 mb-1">
-        <span className="text-[11px] font-label text-on-surface-variant uppercase tracking-wider">
-          {label}
-        </span>
-        <span className="text-xs font-label font-bold text-on-surface tabular-nums">
-          {valueLabel}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-primary h-1"
-      />
-      {hint && (
-        <p className="text-[10px] text-on-surface-variant/60 leading-snug mt-1">
-          {hint}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function DestinationCard({
-  dest,
-  sourceLang,
-  savedCreds,
-  user: _user,
-  privacyStatus: _privacyStatus,
-  onPrivacyChange: _onPrivacyChange,
-  onUpdate,
-  onRemove,
-}: {
-  dest: Destination;
-  sourceLang: string;
-  savedCreds: Record<string, api.PlatformCredential>;
-  user: api.UserInfo | null;
-  privacyStatus: string;
-  onPrivacyChange: (v: string) => void;
-  onUpdate: (patch: Partial<Destination>) => void;
-  onRemove: () => void;
-}) {
-  const [expanded, setExpanded] = useState(() => {
-    const p = api.PLATFORMS.find((x) => x.id === dest.platform);
-    // Auto-expand if needs manual config and no saved creds
-    return !!(p && !p.auto && !savedCreds[dest.platform]);
-  });
-
-  const platform = api.PLATFORMS.find((p) => p.id === dest.platform);
-  const fixedLang = api.PLATFORM_LANG[dest.platform];
-  if (!platform) return null;
-
-  const needsConfig = !platform.auto;
-  const hasConfig = !!(dest.rtmp_url || dest.stream_key);
-  const hasSavedCreds = !!savedCreds[dest.platform];
-
-  return (
-    <div className="bg-surface-container-low rounded-xl overflow-hidden">
-      {/* Compact header — always visible */}
-      <div className="flex items-center gap-3 px-4 py-3">
-        <PlatformIcon id={dest.platform} className="w-4 h-4 text-primary" />
-        <span className="font-label font-bold text-on-surface text-sm flex-1 truncate">
-          {platform.label}
-        </span>
-
-        {/* Language: badge or picker */}
-        {fixedLang ? (
-          <span className="text-[10px] font-label font-bold uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded">
-            {api.langFlag(dest.lang)} {api.langLabel(dest.lang)}
-          </span>
-        ) : (
-          <div className="relative">
-            <select
-              className="appearance-none bg-surface-container-highest border-none rounded px-2.5 py-1 text-on-surface font-label text-xs focus:ring-2 focus:ring-primary/50 outline-none pr-6 cursor-pointer"
-              value={dest.lang}
-              onChange={(e) => onUpdate({ lang: e.target.value })}
-            >
-              {api.LANGS.filter((l) => l.code !== sourceLang).map((l) => (
-                <option key={l.code} value={l.code}>
-                  {l.flag} {l.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-on-surface-variant pointer-events-none" />
-          </div>
-        )}
-
-        {/* Status dot */}
-        {needsConfig && (
-          <span
-            className={cn(
-              "w-2 h-2 rounded-full shrink-0",
-              hasConfig || hasSavedCreds ? "bg-success" : "bg-error/60"
-            )}
-            title={hasConfig || hasSavedCreds ? "Configured" : "Needs stream key"}
-          />
-        )}
-
-        {/* Expand toggle for manual platforms */}
-        {needsConfig && (
-          <button
-            className="text-on-surface-variant hover:text-on-surface p-1 transition-colors"
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? (
-              <ChevronDown className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronRight className="w-3.5 h-3.5" />
-            )}
-          </button>
-        )}
-
-        <button
-          className="text-on-surface-variant hover:text-error transition-colors p-1"
-          onClick={onRemove}
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
-
-      {/* Always-on timing + mix controls — apply to every stream */}
-      <div className="px-4 pb-3 pt-1 space-y-2">
-        <StreamSlider
-          label="Output delay"
-          valueLabel={`${dest.delay_ms} ms`}
-          min={0}
-          max={5000}
-          step={100}
-          value={dest.delay_ms}
-          onChange={(v) => onUpdate({ delay_ms: v })}
-          hint="Fargate holds the original media this long before emitting, leaving time for STT + translate + TTS."
-        />
-        <StreamSlider
-          label={
-            dest.lang === sourceLang ? "Original audio volume" : "Under-voice volume"
-          }
-          valueLabel={`${Math.round(dest.host_gain * 100)}%`}
-          min={0}
-          max={100}
-          step={5}
-          value={Math.round(dest.host_gain * 100)}
-          onChange={(v) => onUpdate({ host_gain: v / 100 })}
-          hint={
-            dest.lang === sourceLang
-              ? "100% for source streams — no translation overlay to duck under."
-              : "How loud the original voice sits under the translated speech."
-          }
-        />
-      </div>
-
-      {/* Expandable config section */}
-      {needsConfig && expanded && (
-        <div className="px-4 pb-4 space-y-2">
-          {hasSavedCreds && (
-            <span className="text-[10px] font-label text-success uppercase tracking-widest">
-              Pre-filled from saved credentials
-            </span>
-          )}
-          {platform.settingsUrl && (
-            <a
-              href={platform.settingsUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-primary text-xs font-label hover:underline"
-            >
-              Open {platform.label} Settings
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          )}
-          <p className="text-on-surface-variant/60 text-xs leading-relaxed">
-            {platform.help}
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {!platform.keyOnly && (
-              <input
-                className="bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none"
-                placeholder="Server URL"
-                value={dest.rtmp_url}
-                onChange={(e) => onUpdate({ rtmp_url: e.target.value })}
-              />
-            )}
-            <input
-              className="bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none"
-              placeholder="Stream Key"
-              type="password"
-              value={dest.stream_key}
-              onChange={(e) => onUpdate({ stream_key: e.target.value })}
-            />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
