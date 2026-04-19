@@ -57,6 +57,13 @@ export type Env = {
   GOOGLE_SIGNIN_REDIRECT_URI: string; // Sign-in redirect — separate Google Console entry
   FRONTEND_URL: string;
   INTERNAL_SECRET: string; // shared between Workers and Fargate (server→worker calls)
+  // Grip Cloud Seller API credentials (set 2026-04-19). When both are
+  // present and the session destination includes `platform=grip`, Workers
+  // calls the Seller API to provision fresh RTMP creds per session. When
+  // absent, orchestration falls back to the paste-creds row saved via
+  // POST /auth/grip.
+  GRIP_ACCESS_KEY?: string;
+  GRIP_SECRET_KEY?: string;
   // Optional — unset during early dev, required before turning billing on.
   STRIPE_WEBHOOK_SECRET?: string;
 };

@@ -286,6 +286,7 @@ const schemas = {
       stream_key: { type: "string" },
       delay_ms: { type: "integer" },
       host_gain: { type: "number" },
+      product_id: { type: "string" },
     },
   },
   CreateSessionRequest: {

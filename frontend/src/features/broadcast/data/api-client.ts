@@ -257,6 +257,29 @@ export function deleteCredential(userId: string, platform: string): Promise<{ st
   );
 }
 
+// Grip + TikTok have no real OAuth — the host pastes a session token + RTMP
+// URL + stream key from their platform dashboard. We store that tuple as a
+// platform_credentials row so the next session can pre-fill the inputs.
+export function saveGripAuth(body: {
+  user_id: string;
+  session_token: string;
+  stream_key: string;
+  rtmp_url?: string;
+  display_name?: string;
+}): Promise<PlatformCredential> {
+  return parseResult(client().POST("/auth/grip", { body }), PlatformCredentialSchema);
+}
+
+export function saveTikTokAuth(body: {
+  user_id: string;
+  session_token: string;
+  stream_key: string;
+  rtmp_url?: string;
+  display_name?: string;
+}): Promise<PlatformCredential> {
+  return parseResult(client().POST("/auth/tiktok", { body }), PlatformCredentialSchema);
+}
+
 export function detectPlatform(input: string): DetectedPlatform | null {
   const trimmed = input.trim();
 

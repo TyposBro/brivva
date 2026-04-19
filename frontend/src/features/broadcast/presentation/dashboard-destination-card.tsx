@@ -28,6 +28,12 @@ export type Destination = {
   host_gain: number;
 };
 
+// Platforms whose only "auth" is pasting an RTMP URL + stream key from the
+// host dashboard. We surface a Save button in the config panel so the values
+// get persisted into platform_credentials and pre-filled on the next session
+// without pushing the user through a separate "Connected platforms" page.
+const PASTE_CREDS_PLATFORMS = new Set(["grip", "tiktok"]);
+
 export function PlatformIcon({ id, className }: { id: string; className?: string }) {
   switch (id) {
     case "youtube":
@@ -132,7 +138,7 @@ function CardHeader(props: {
   onRemove: () => void;
 }) {
   const { dest, platform, sourceLang, savedCreds, expanded, setExpanded, onUpdate, onRemove } = props;
-  const needsConfig = !platform.auto;
+  const needsConfig = !platform.auto || PASTE_CREDS_PLATFORMS.has(dest.platform);
   const hasConfig = !!(dest.rtmp_url || dest.stream_key);
   const hasSavedCreds = !!savedCreds[dest.platform];
 
@@ -204,14 +210,59 @@ function ConfigPanel(props: {
   dest: Destination;
   platform: PlatformRow;
   hasSavedCreds: boolean;
+  userId: string;
   onUpdate: (patch: Partial<Destination>) => void;
+  onCredentialSaved?: (cred: api.PlatformCredential) => void;
 }) {
-  const { dest, platform, hasSavedCreds, onUpdate } = props;
+  const { dest, platform, hasSavedCreds, userId, onUpdate, onCredentialSaved } = props;
+  const supportsSave = PASTE_CREDS_PLATFORMS.has(dest.platform);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedJustNow, setSavedJustNow] = useState(false);
+
+  const handleSave = async () => {
+    if (!supportsSave) return;
+    if (!dest.stream_key) {
+      setSaveError("Stream key is required");
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const body = {
+        user_id: userId,
+        // The workers endpoint requires a session_token. For the MVP paste
+        // flow we don't actually have a meaningful token — pass the stream
+        // key's tail as a stable fingerprint so the display_name default
+        // works and the backend validation passes.
+        session_token: dest.stream_key.slice(-12) || dest.stream_key,
+        stream_key: dest.stream_key,
+        rtmp_url: dest.rtmp_url || undefined,
+        display_name: `${platform.label} (pasted)`,
+      };
+      const cred =
+        dest.platform === "grip"
+          ? await api.saveGripAuth(body)
+          : await api.saveTikTokAuth(body);
+      setSavedJustNow(true);
+      onCredentialSaved?.(cred);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="px-4 pb-4 space-y-2">
-      {hasSavedCreds && (
+      {hasSavedCreds && !savedJustNow && (
         <span className="text-[10px] font-label text-success uppercase tracking-widest">
           Pre-filled from saved credentials
+        </span>
+      )}
+      {savedJustNow && (
+        <span className="text-[10px] font-label text-success uppercase tracking-widest">
+          Saved — will pre-fill next session
         </span>
       )}
       {platform.settingsUrl && (
@@ -235,6 +286,23 @@ function ConfigPanel(props: {
           onChange={(e) => onUpdate({ stream_key: e.target.value })}
         />
       </div>
+      {supportsSave && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            className="bg-primary hover:bg-primary/90 disabled:bg-primary/40 text-on-primary px-3 py-1.5 rounded-lg text-xs font-label font-bold transition-colors"
+            onClick={handleSave}
+            disabled={saving || !dest.stream_key}
+          >
+            {saving ? "Saving..." : "Save credentials"}
+          </button>
+          {saveError && (
+            <span className="text-error text-xs font-label" role="alert">
+              {saveError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -244,18 +312,29 @@ export function DestinationCard(props: {
   sourceLang: string;
   savedCreds: Record<string, api.PlatformCredential>;
   user: api.UserInfo | null;
+  userId: string;
   privacyStatus: string;
   onPrivacyChange: (v: string) => void;
   onUpdate: (patch: Partial<Destination>) => void;
   onRemove: () => void;
+  /** Called after the user saves pasted creds for a paste-only platform
+   *  (Grip / TikTok). The parent syncs the result into `savedCreds` so the
+   *  next card/session finds the pre-filled values. */
+  onCredentialSaved?: (cred: api.PlatformCredential) => void;
   /** Per-destination client-side validation error. When set, the card shows a
    *  red inline message and the dashboard disables Go Live. `null` = valid. */
   validationError?: string | null;
 }) {
-  const { dest, sourceLang, savedCreds, onUpdate, onRemove, validationError } = props;
-  const [expanded, setExpanded] = useState(() => {
+  const { dest, sourceLang, savedCreds, userId, onUpdate, onRemove, onCredentialSaved, validationError } = props;
+  const [expanded, setExpanded] = useState<boolean>(() => {
     const p = api.PLATFORMS.find((x) => x.id === dest.platform);
-    return !!(p && !p.auto && !savedCreds[dest.platform]);
+    if (!p) return false;
+    // For paste-creds platforms (grip/tiktok) we pretend the card "needs
+    // config" when we don't already have saved creds, even though
+    // `platform.auto` may be true (Grip has a Seller API path for later).
+    const pasteOnly = PASTE_CREDS_PLATFORMS.has(dest.platform);
+    const needsConfig = !p.auto || pasteOnly;
+    return needsConfig && !savedCreds[dest.platform];
   });
   // Pre-expand timing sliders only when the user has already overridden a
   // default — otherwise the curated stream-default is correct and we hide it
@@ -268,7 +347,8 @@ export function DestinationCard(props: {
   );
   const platform = api.PLATFORMS.find((p) => p.id === dest.platform);
   if (!platform) return null;
-  const needsConfig = !platform.auto;
+  const pasteOnly = PASTE_CREDS_PLATFORMS.has(dest.platform);
+  const needsConfig = !platform.auto || pasteOnly;
   const hasSavedCreds = !!savedCreds[dest.platform];
 
   return (
@@ -310,7 +390,14 @@ export function DestinationCard(props: {
         <TimingSliders dest={dest} sourceLang={sourceLang} onUpdate={onUpdate} />
       )}
       {needsConfig && expanded && (
-        <ConfigPanel dest={dest} platform={platform} hasSavedCreds={hasSavedCreds} onUpdate={onUpdate} />
+        <ConfigPanel
+          dest={dest}
+          platform={platform}
+          hasSavedCreds={hasSavedCreds}
+          userId={userId}
+          onUpdate={onUpdate}
+          onCredentialSaved={onCredentialSaved}
+        />
       )}
     </div>
   );

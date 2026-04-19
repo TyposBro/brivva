@@ -369,7 +369,10 @@ export type UpdateStreamRtmp = {
   rtmpUrl: string;
   streamKey: string;
   platformBroadcastId: string;
-  platformStreamId: string;
+  // Nullable to accommodate platforms (e.g. Grip) that don't expose a
+  // separate "stream id" concept — YouTube issues distinct broadcast and
+  // stream ids; Grip bundles both into one broadcast id.
+  platformStreamId: string | null;
 };
 
 export async function updateStreamRtmp(

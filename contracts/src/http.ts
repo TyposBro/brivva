@@ -149,6 +149,10 @@ export const PlatformConfigSchema = z.object({
   stream_key: z.string().min(1).optional(),
   delay_ms: z.number().int().optional(),
   host_gain: z.number().optional(),
+  // Grip-only: when provided with `platform="grip"` Workers will call the
+  // Grip Seller API to provision fresh RTMP creds for this session. Ignored
+  // for all other platforms. Optional — falls back to saved paste-creds.
+  product_id: z.string().min(1).optional(),
 });
 
 export const CreateSessionRequestSchema = z.object({

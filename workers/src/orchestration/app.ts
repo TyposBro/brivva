@@ -37,6 +37,11 @@ import {
   YouTubeBroadcastError,
   type YouTubeBroadcastResult,
 } from "../features/youtube/broadcast-api";
+import {
+  provisionBroadcast as provisionGripBroadcast,
+  GripSellerApiError,
+  type GripBroadcastResult,
+} from "../features/grip/seller-api";
 import * as gsignin from "../features/auth/google-signin-client";
 import { verifyStripeSignature } from "../features/billing/stripe-webhook";
 
@@ -285,6 +290,14 @@ app.post("/api/sessions", async (c) => {
         platform: string;
         delayMs: number;
         hostGain: number;
+      }
+    | {
+        kind: "grip";
+        lang: string;
+        platform: string;
+        productId: string;
+        delayMs: number;
+        hostGain: number;
       };
   const prepared: Prepared[] = [];
   for (const p of body.platforms ?? []) {
@@ -298,6 +311,26 @@ app.post("/api/sessions", async (c) => {
         kind: "youtube",
         lang: p.lang,
         platform: p.platform,
+        delayMs,
+        hostGain,
+      });
+      continue;
+    }
+    // Grip destinations: when Seller API keys are present AND the caller
+    // supplied a product_id, auto-provision fresh RTMP creds. Otherwise
+    // fall through to the manual paste-creds path (which reads from the
+    // `platform_credentials` row upserted via POST /auth/grip).
+    if (
+      p.platform === "grip" &&
+      p.product_id &&
+      c.env.GRIP_ACCESS_KEY &&
+      c.env.GRIP_SECRET_KEY
+    ) {
+      prepared.push({
+        kind: "grip",
+        lang: p.lang,
+        platform: p.platform,
+        productId: p.product_id,
         delayMs,
         hostGain,
       });
@@ -334,6 +367,64 @@ app.post("/api/sessions", async (c) => {
         });
         insertedIds.push(row.id);
         streams.push(row);
+        continue;
+      }
+
+      if (p.kind === "grip") {
+        // Grip Seller-API auto-provision path. Mirrors the YouTube branch —
+        // insert a pending row first so we have a stream id, then call Grip,
+        // then patch the row with the fresh RTMP url + stream key.
+        const pending = await db.createStreamManual(c.env.DB, {
+          sessionId: session.id,
+          lang: p.lang,
+          platform: p.platform,
+          rtmpUrl: null,
+          streamKey: null,
+          delayMs: p.delayMs,
+          hostGain: p.hostGain,
+        });
+        insertedIds.push(pending.id);
+
+        let gripResult: GripBroadcastResult;
+        try {
+          gripResult = await provisionGripBroadcast(c.env, {
+            accessKey: c.env.GRIP_ACCESS_KEY!,
+            secretKey: c.env.GRIP_SECRET_KEY!,
+            productId: p.productId,
+            title: body.title,
+          });
+        } catch (e) {
+          // Roll back like the YouTube failure branch. Surface the Grip API
+          // status back to the caller so the FE can either retry or prompt
+          // the user for paste-creds (Task B fallback).
+          for (const id of insertedIds) {
+            await db.deleteStreamRow(c.env.DB, id);
+          }
+          await db.deleteSessionRow(c.env.DB, session.id);
+          const status = e instanceof GripSellerApiError ? e.status : 500;
+          const message = e instanceof Error ? e.message : String(e);
+          return c.json(
+            { error: `Grip Seller API provision failed: ${message}` },
+            status === 401 || status === 403 ? status : 502,
+          );
+        }
+
+        await db.updateStreamRtmp(c.env.DB, {
+          streamId: pending.id,
+          rtmpUrl: gripResult.rtmpUrl,
+          streamKey: gripResult.streamKey,
+          platformBroadcastId: gripResult.broadcastId,
+          platformStreamId: null,
+        });
+
+        streams.push({
+          ...pending,
+          rtmp_url: gripResult.rtmpUrl,
+          stream_key: gripResult.streamKey,
+          platform_broadcast_id: gripResult.broadcastId,
+          platform_stream_id: null,
+          status: "ready",
+        });
         continue;
       }
 

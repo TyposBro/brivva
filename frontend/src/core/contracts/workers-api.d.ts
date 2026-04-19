@@ -1764,6 +1764,7 @@ export interface components {
             stream_key?: string;
             delay_ms?: number;
             host_gain?: number;
+            product_id?: string;
         };
         CreateSessionRequest: {
             user_id: string;

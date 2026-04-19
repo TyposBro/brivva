@@ -52,6 +52,11 @@ function pickDestinationLang(sourceLang: string): string {
  *     is treated as auto-fillable here)
  *   - platforms without `.auto` need both rtmp_url + stream_key
  */
+// Paste-creds platforms: Grip has a Seller API path that would auto-fill, but
+// for the May 10 launch we treat them as manual-only — the host pastes RTMP
+// url + stream key, the FE persists them via /auth/grip or /auth/tiktok.
+const PASTE_CREDS_PLATFORMS = new Set(["grip", "tiktok"]);
+
 function destinationError(
   dest: Destination,
   sourceLang: string,
@@ -66,7 +71,8 @@ function destinationError(
     return null; // rtmp_url/stream_key are auto-filled server-side
   }
   if (!p) return null;
-  if (!p.auto) {
+  const pasteOnly = PASTE_CREDS_PLATFORMS.has(dest.platform);
+  if (!p.auto || pasteOnly) {
     if (!p.keyOnly && !dest.rtmp_url) return `Enter server URL for ${p.label}`;
     if (!dest.stream_key) return `Enter stream key for ${p.label}`;
   }
@@ -288,7 +294,13 @@ function DashboardInner() {
           delay_ms: d.delay_ms,
           host_gain: d.host_gain,
         };
-        if (p?.auto) return base;
+        // Paste-creds platforms (Grip, TikTok) are marked auto=true so the
+        // picker shows a checkmark for Grip's future Seller API path, but the
+        // FE still needs to ship the pasted rtmp/stream_key with the session
+        // so Workers can insert a manual stream row when the Seller API path
+        // isn't available.
+        const pasteOnly = PASTE_CREDS_PLATFORMS.has(d.platform);
+        if (p?.auto && !pasteOnly) return base;
         const rtmpUrl = p?.keyOnly
           ? p.defaultRtmp
           : d.rtmp_url || p?.defaultRtmp || "";
@@ -456,10 +468,14 @@ function DashboardInner() {
               sourceLang={sourceLang}
               savedCreds={savedCreds}
               user={user}
+              userId={userId}
               privacyStatus={privacyStatus}
               onPrivacyChange={setPrivacyStatus}
               onUpdate={(patch) => updateDestination(dest.uid, patch)}
               onRemove={() => removeDestination(dest.uid)}
+              onCredentialSaved={(cred) =>
+                setSavedCreds((prev) => ({ ...prev, [cred.platform]: cred }))
+              }
               validationError={destinationError(dest, sourceLang, user)}
             />
           ))}
