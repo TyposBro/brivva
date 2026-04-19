@@ -4,69 +4,11 @@
 //! Fargate calls in at session start to fetch context and at session end
 //! (or state change) to report status. Shared secret auth via
 //! `X-Internal-Secret` header.
+//!
+//! Wire types are generated from the Workers OpenAPI export via
+//! `bun run --cwd contracts gen:rust` — see `core::contracts::workers`.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct SessionRow {
-    pub id: String,
-    pub user_id: String,
-    pub voice_id: Option<String>,
-    pub title: String,
-    pub source_lang: String,
-    pub target_langs: String,
-    pub status: String,
-    pub live_session_id: Option<String>,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StreamRow {
-    pub id: String,
-    #[allow(dead_code)]
-    pub session_id: String,
-    pub lang: String,
-    #[allow(dead_code)]
-    pub platform: String,
-    pub rtmp_url: Option<String>,
-    pub stream_key: Option<String>,
-    #[allow(dead_code)]
-    pub status: String,
-    /// Per-stream output delay in ms — Fargate holds original host media
-    /// for this long before emitting to RTMP, giving STT+translate+TTS a
-    /// window to produce the translated audio that overlays at emit time.
-    #[serde(default = "default_delay_ms")]
-    pub delay_ms: u64,
-    /// Gain applied to the delayed host audio at mix time. 1.0 = full volume
-    /// (source-language stream), 0.2 = quiet underlay (target streams where
-    /// translated TTS should dominate).
-    #[serde(default = "default_host_gain")]
-    pub host_gain: f32,
-}
-
-fn default_delay_ms() -> u64 {
-    2000
-}
-fn default_host_gain() -> f32 {
-    0.2
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct VoiceRow {
-    #[allow(dead_code)]
-    pub id: String,
-    pub elevenlabs_voice_id: String,
-    #[allow(dead_code)]
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SessionBundle {
-    pub session: SessionRow,
-    pub streams: Vec<StreamRow>,
-    pub voice: Option<VoiceRow>,
-}
+use crate::core::contracts::workers::{SessionBundle, SessionStatusUpdate};
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -109,12 +51,6 @@ pub async fn fetch_session_bundle(session_id: &str) -> Result<SessionBundle, Str
         .map_err(|e| format!("workers session decode: {e}"))
 }
 
-#[derive(Serialize)]
-struct StatusUpdate<'a> {
-    status: &'a str,
-    live_session_id: Option<&'a str>,
-}
-
 pub async fn update_session_status(
     session_id: &str,
     status: &str,
@@ -127,9 +63,9 @@ pub async fn update_session_status(
             "X-Internal-Secret",
             std::env::var("INTERNAL_SECRET").unwrap_or_default(),
         )
-        .json(&StatusUpdate {
-            status,
-            live_session_id,
+        .json(&SessionStatusUpdate {
+            status: status.to_string(),
+            live_session_id: live_session_id.map(str::to_string),
         })
         .send()
         .await
@@ -142,41 +78,45 @@ pub async fn update_session_status(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::core::contracts::workers::{SessionBundle, Stream};
 
     #[test]
-    fn stream_row_applies_delay_and_gain_defaults_when_absent() {
-        let json = r#"{
+    fn stream_requires_delay_ms_and_host_gain_per_openapi_contract() {
+        let missing_fields = r#"{
             "id": "s1",
             "session_id": "S",
             "lang": "en",
             "platform": "youtube",
+            "platform_broadcast_id": null,
+            "platform_stream_id": null,
             "rtmp_url": "rtmp://a/b",
             "stream_key": "k",
-            "status": "pending"
+            "status": "pending",
+            "created_at": 1
         }"#;
-        let row: StreamRow = serde_json::from_str(json).expect("valid payload");
-
-        assert_eq!(row.id, "s1");
-        assert_eq!(row.lang, "en");
-        assert_eq!(row.delay_ms, 2000, "delay default must match start_stream contract");
-        assert!((row.host_gain - 0.2).abs() < f32::EPSILON, "gain default");
+        assert!(
+            serde_json::from_str::<Stream>(missing_fields).is_err(),
+            "generated Stream must reject payloads missing the delay_ms/host_gain the schema marks required"
+        );
     }
 
     #[test]
-    fn stream_row_keeps_explicit_delay_and_gain_overrides() {
+    fn stream_roundtrips_with_explicit_delay_and_gain() {
         let json = r#"{
             "id": "s1",
             "session_id": "S",
             "lang": "ja",
             "platform": "custom",
+            "platform_broadcast_id": null,
+            "platform_stream_id": null,
             "rtmp_url": null,
             "stream_key": null,
             "status": "live",
             "delay_ms": 500,
-            "host_gain": 1.0
+            "host_gain": 1.0,
+            "created_at": 42
         }"#;
-        let row: StreamRow = serde_json::from_str(json).expect("valid payload");
+        let row: Stream = serde_json::from_str(json).expect("valid payload");
 
         assert_eq!(row.delay_ms, 500);
         assert!((row.host_gain - 1.0).abs() < f32::EPSILON);
@@ -227,14 +167,21 @@ mod tests {
                 "session_id": "abc",
                 "lang": "ja",
                 "platform": "youtube",
+                "platform_broadcast_id": null,
+                "platform_stream_id": null,
                 "rtmp_url": "rtmp://x/y",
                 "stream_key": "k",
-                "status": "pending"
+                "status": "pending",
+                "delay_ms": 2000,
+                "host_gain": 0.2,
+                "created_at": 123
             }],
             "voice": {
                 "id": "v",
+                "user_id": "u",
                 "elevenlabs_voice_id": "EL123",
-                "name": "cloned"
+                "name": "cloned",
+                "created_at": 456
             }
         }"#;
 

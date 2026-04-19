@@ -11,6 +11,9 @@
     "./platforms": "./src/platforms.ts",
     "./ws": "./src/ws.ts"
   },
+  "scripts": {
+    "gen:rust": "bun scripts/gen-rust.ts"
+  },
   "dependencies": {
     "zod": "^4.1.13"
   }

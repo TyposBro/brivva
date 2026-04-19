@@ -107,8 +107,10 @@ async fn get_session_json(
         "streams": [],
         "voice": {
             "id": "voice-row-1",
+            "user_id": state.session_user_id.clone(),
             "elevenlabs_voice_id": "voice-clone-123",
-            "name": "Cloned Voice"
+            "name": "Cloned Voice",
+            "created_at": 1
         }
     }))
 }

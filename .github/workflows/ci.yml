@@ -14,6 +14,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: contracts (generated types drift check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: regenerate Rust bindings from OpenAPI
+        run: bun run contracts:gen-rust
+
+      - name: fail if regeneration produced a diff
+        run: |
+          if ! git diff --exit-code server-rs/src/core/contracts/; then
+            echo "::error::server-rs/src/core/contracts is out of sync with contracts/openapi/brivva-workers.json"
+            echo "Run 'bun run contracts:gen-rust' locally and commit the result."
+            exit 1
+          fi
+
   server-rs:
     name: server-rs (Rust)
     runs-on: ubuntu-latest
