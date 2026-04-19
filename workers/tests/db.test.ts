@@ -220,6 +220,26 @@ describe("db.sessions + streams", () => {
     expect(s1Streams[0].lang).toBe("ja");
   });
 
+  it("deleteStreamRow removes just one row (edge)", async () => {
+    await db.getOrCreateUser(env.DB, "u-del");
+    const s = await db.createSession(env.DB, {
+      userId: "u-del", voiceId: null, title: "D",
+      sourceLang: "en", targetLangs: "[]",
+    });
+    const a = await db.createStreamManual(env.DB, {
+      sessionId: s.id, lang: "ja", platform: "tw",
+      rtmpUrl: "rtmp://a", streamKey: "k", delayMs: 0, hostGain: 1,
+    });
+    await db.createStreamManual(env.DB, {
+      sessionId: s.id, lang: "ko", platform: "tw",
+      rtmpUrl: "rtmp://b", streamKey: "k", delayMs: 0, hostGain: 1,
+    });
+    await db.deleteStreamRow(env.DB, a.id);
+    const remaining = await db.listStreams(env.DB, s.id);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].lang).toBe("ko");
+  });
+
   it("updateStreamPlatform flips status to ready and fills YouTube-generated ids", async () => {
     await db.getOrCreateUser(env.DB, "u-s");
     const s = await db.createSession(env.DB, {
@@ -248,6 +268,135 @@ describe("db.sessions + streams", () => {
 
   it("getSession returns null for an unknown id (sad path)", async () => {
     expect(await db.getSession(env.DB, "does-not-exist")).toBeNull();
+  });
+
+  it("listSessions returns newest-first rows (happy)", async () => {
+    await db.getOrCreateUser(env.DB, "u-list");
+    await db.createSession(env.DB, {
+      userId: "u-list",
+      voiceId: null,
+      title: "A",
+      sourceLang: "en",
+      targetLangs: "[]",
+    });
+    await new Promise((r) => setTimeout(r, 1100));
+    await db.createSession(env.DB, {
+      userId: "u-list",
+      voiceId: null,
+      title: "B",
+      sourceLang: "en",
+      targetLangs: "[]",
+    });
+    const list = await db.listSessions(env.DB, "u-list");
+    expect(list).toHaveLength(2);
+    expect(list[0].title).toBe("B");
+    expect(list[1].title).toBe("A");
+  });
+});
+
+describe("db.session_metrics", () => {
+  it("upsertSessionMetrics merges per-lang outputs (edge)", async () => {
+    await db.getOrCreateUser(env.DB, "u-m");
+    const s = await db.createSession(env.DB, {
+      userId: "u-m", voiceId: null, title: "T",
+      sourceLang: "ko", targetLangs: JSON.stringify(["ja", "en"]),
+    });
+
+    const first = await db.upsertSessionMetrics(env.DB, {
+      sessionId: s.id,
+      sourceSeconds: 60,
+      outputSecondsByLang: { ja: 30 },
+    });
+    expect(first.source_seconds).toBe(60);
+
+    const second = await db.upsertSessionMetrics(env.DB, {
+      sessionId: s.id,
+      sourceSeconds: undefined,
+      outputSecondsByLang: { en: 45 },
+    });
+    // source_seconds kept from prior, ja + en both present.
+    expect(second.source_seconds).toBe(60);
+    const outputs = JSON.parse(second.output_seconds_json) as Record<string, number>;
+    expect(outputs.ja).toBe(30);
+    expect(outputs.en).toBe(45);
+  });
+
+  it("listUserSessionMetrics returns [] when user has no sessions (edge)", async () => {
+    const rows = await db.listUserSessionMetrics(env.DB, "u-empty");
+    expect(rows).toEqual([]);
+  });
+
+  it("listUserSessionMetrics fans sessions → metrics for a user (happy)", async () => {
+    await db.getOrCreateUser(env.DB, "u-fan");
+    const s1 = await db.createSession(env.DB, {
+      userId: "u-fan", voiceId: null, title: "1",
+      sourceLang: "en", targetLangs: "[]",
+    });
+    const s2 = await db.createSession(env.DB, {
+      userId: "u-fan", voiceId: null, title: "2",
+      sourceLang: "en", targetLangs: "[]",
+    });
+    await db.upsertSessionMetrics(env.DB, {
+      sessionId: s1.id, sourceSeconds: 10, outputSecondsByLang: undefined,
+    });
+    await db.upsertSessionMetrics(env.DB, {
+      sessionId: s2.id, sourceSeconds: 20, outputSecondsByLang: undefined,
+    });
+
+    // Metrics for a *different* user's session must not leak in.
+    await db.getOrCreateUser(env.DB, "u-other");
+    const sOther = await db.createSession(env.DB, {
+      userId: "u-other", voiceId: null, title: "X",
+      sourceLang: "en", targetLangs: "[]",
+    });
+    await db.upsertSessionMetrics(env.DB, {
+      sessionId: sOther.id, sourceSeconds: 99, outputSecondsByLang: undefined,
+    });
+
+    const rows = await db.listUserSessionMetrics(env.DB, "u-fan");
+    expect(rows).toHaveLength(2);
+    const totals = rows.map((r) => r.source_seconds).sort();
+    expect(totals).toEqual([10, 20]);
+  });
+});
+
+describe("db.users onboarding + active_voice_id", () => {
+  it("markOnboardingCompleted stamps the timestamp + is idempotent", async () => {
+    await db.getOrCreateUser(env.DB, "u-ob");
+    const first = await db.markOnboardingCompleted(env.DB, "u-ob");
+    expect(first.onboarding_completed_at).toBeGreaterThan(0);
+    const second = await db.markOnboardingCompleted(env.DB, "u-ob");
+    expect(second.onboarding_completed_at).toBeGreaterThan(0);
+  });
+
+  it("setActiveVoice toggles the pointer + accepts null to clear", async () => {
+    await db.getOrCreateUser(env.DB, "u-av");
+    const v = await db.createVoice(env.DB, {
+      userId: "u-av",
+      elevenlabsVoiceId: "el-x",
+      name: "V",
+      sourceLang: null,
+    });
+    await db.setActiveVoice(env.DB, "u-av", v.id);
+    let user = await db.getOrCreateUser(env.DB, "u-av");
+    expect(user.active_voice_id).toBe(v.id);
+    await db.setActiveVoice(env.DB, "u-av", null);
+    user = await db.getOrCreateUser(env.DB, "u-av");
+    expect(user.active_voice_id).toBeNull();
+  });
+
+  it("updateUserProfile persists email/name/picture (happy)", async () => {
+    await db.getOrCreateUser(env.DB, "u-prof");
+    await db.updateUserProfile(env.DB, {
+      userId: "u-prof",
+      email: "x@y",
+      name: "Y",
+      picture: "p",
+    });
+    const u = await db.getOrCreateUser(env.DB, "u-prof");
+    expect(u.email).toBe("x@y");
+    expect(u.name).toBe("Y");
+    expect(u.picture).toBe("p");
   });
 });
 

@@ -1,10 +1,10 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, type ViteUserConfig } from "vitest/config";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 
 // Tests run inside miniflare so D1 is a real in-memory SQLite honoring our
 // migrations. Non-secret bindings are fake by design — they exist only so
 // `c.env.FOO` dereferences work.
-export default defineConfig(async () => {
+export default defineConfig(async (): Promise<ViteUserConfig> => {
   const migrations = await readD1Migrations("./migrations");
 
   return {
@@ -33,6 +33,18 @@ export default defineConfig(async () => {
     ],
     test: {
       setupFiles: ["./tests/setup.ts"],
+      // istanbul instruments source at transform time so it works inside the
+      // workerd sandbox, where the v8 provider's `node:inspector` usage errors
+      // with `ERR_METHOD_NOT_IMPLEMENTED`.
+      coverage: {
+        provider: "istanbul",
+        reporter: ["text", "html"],
+        include: ["src/**"],
+        exclude: [
+          "src/orchestration/openapi.ts",
+          "src/**/*.d.ts",
+        ],
+      },
     },
   };
 });
