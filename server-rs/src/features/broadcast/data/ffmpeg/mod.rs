@@ -60,12 +60,27 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Pick the Noto Sans CJK regional variant whose glyph forms match the
+/// caption language. The single `NotoSansCJK.ttc` ships all four; selecting
+/// the right family name avoids cross-region glyph substitution (e.g.
+/// Chinese variants of kanji on a Japanese stream).
+fn caption_font_for_lang(lang: &str) -> &'static str {
+    match lang {
+        "ja" => "Noto Sans CJK JP",
+        "ko" => "Noto Sans CJK KR",
+        "zh" | "zh-CN" | "zh-Hans" => "Noto Sans CJK SC",
+        "zh-TW" | "zh-Hant" => "Noto Sans CJK TC",
+        _ => "Noto Sans CJK JP",
+    }
+}
+
 /// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
 /// so tests can pin the command shape without spawning an FFmpeg child.
 fn build_ffmpeg_args(
     audio_fifo: &str,
     caption_textfile_path: Option<&str>,
     rtmp_url: &str,
+    caption_lang: Option<&str>,
 ) -> Vec<String> {
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".into(),
@@ -96,9 +111,10 @@ fn build_ffmpeg_args(
         // Escape the textfile path for drawtext — it uses `\` as an escape and
         // `:` as a filter-option separator.
         let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
+        let font = caption_font_for_lang(caption_lang.unwrap_or(""));
         let drawtext = format!(
-            "drawtext=textfile={}:reload=1:fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=10:x=(w-text_w)/2:y=h-120",
-            escaped
+            "drawtext=textfile={}:reload=1:font={}:fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=10:x=(w-text_w)/2:y=h-120",
+            escaped, font
         );
         ffmpeg_args.extend_from_slice(&["-vf".into(), drawtext]);
     }
@@ -535,6 +551,7 @@ impl RtmpManager {
             &audio_fifo,
             caption.as_ref().map(|c| c.path.as_str()),
             &args.rtmp_url,
+            Some(args.lang.as_str()),
         );
 
         let mut child = std::process::Command::new("ffmpeg")
@@ -627,7 +644,10 @@ impl RtmpManager {
                 }
                 Err(e) => tracing::error!(stream_id = %id, error = %e, "ffmpeg kill failed"),
             }
-            let join_timeout = Duration::from_secs(3);
+            // Drain threads exit on the next tick (≤20 ms) once they observe
+            // stop_flag or hit EPIPE; 500 ms covers a worst-case scheduler
+            // gap. Longer than that we let go without blocking session teardown.
+            let join_timeout = Duration::from_millis(500);
             for (label, handle) in [
                 ("video", stream.video_handle.take()),
                 ("audio", stream.audio_handle.take()),
@@ -646,9 +666,10 @@ impl RtmpManager {
                         Ok(Err(_)) => {
                             eprintln!("[FFMPEG:{}] {} thread join cancelled", id_clone, label)
                         }
-                        Err(_) => eprintln!(
-                            "[FFMPEG:{}] {} thread join timed out (3s), abandoning",
-                            id_clone, label
+                        Err(_) => tracing::debug!(
+                            stream_id = %id_clone,
+                            thread = label,
+                            "drain thread join timed out, will exit on next tick"
                         ),
                     }
                 }
@@ -842,7 +863,7 @@ mod tests {
 
     #[test]
     fn build_ffmpeg_args_source_stream_skips_drawtext_vf_filter() {
-        let args = build_ffmpeg_args("/tmp/fifo_src", None, "rtmp://x/y");
+        let args = build_ffmpeg_args("/tmp/fifo_src", None, "rtmp://x/y", None);
         let joined = args.join(" ");
         assert!(!joined.contains("-vf"), "source must not add drawtext");
         assert!(joined.ends_with("rtmp://x/y"));
@@ -856,6 +877,7 @@ mod tests {
             "/tmp/fifo_tgt",
             Some("/tmp/caption:with:colons"),
             "rtmps://edge/live/KEY",
+            Some("ja"),
         );
         let vf_index = args
             .iter()
@@ -871,15 +893,23 @@ mod tests {
     }
 
     #[test]
+    fn build_ffmpeg_args_picks_cjk_font_matching_caption_lang() {
+        let ko = build_ffmpeg_args("/tmp/f", Some("/tmp/c"), "rtmp://x", Some("ko"));
+        assert!(ko.iter().any(|a| a.contains("font=Noto Sans CJK KR")));
+        let zh = build_ffmpeg_args("/tmp/f", Some("/tmp/c"), "rtmp://x", Some("zh"));
+        assert!(zh.iter().any(|a| a.contains("font=Noto Sans CJK SC")));
+    }
+
+    #[test]
     fn build_ffmpeg_args_always_passes_f_flv_for_rtmp_family_publish() {
-        let args = build_ffmpeg_args("/tmp/fifo", None, "rtmp://localhost/live");
+        let args = build_ffmpeg_args("/tmp/fifo", None, "rtmp://localhost/live", None);
         let idx = args.iter().rposition(|s| s == "-f").expect("-f present");
         assert_eq!(args[idx + 1], "flv");
     }
 
     #[test]
     fn build_ffmpeg_args_passes_44100_mono_s16le_for_audio_fifo_input() {
-        let args = build_ffmpeg_args("/tmp/fifo", None, "rtmp://x");
+        let args = build_ffmpeg_args("/tmp/fifo", None, "rtmp://x", None);
         let ar_idx = args.iter().position(|s| s == "-ar").unwrap();
         assert_eq!(args[ar_idx + 1], "44100");
         let ac_idx = args.iter().position(|s| s == "-ac").unwrap();

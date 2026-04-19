@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
@@ -200,15 +201,20 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             &output
         };
         let n = bytes.len() as u64;
-        if fifo.write_all(bytes).is_err() {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] write error, exiting", stream_id);
+        match fifo_write_nonblocking(&mut fifo, bytes, &stop) {
+            FifoWrite::Ok => {
+                last_write_ms.store(now_unix_ms(), Ordering::Release);
+                if let Some(m) = &metrics {
+                    m.record_bytes_out(n);
+                }
             }
-            break;
-        }
-        last_write_ms.store(now_unix_ms(), Ordering::Release);
-        if let Some(m) = &metrics {
-            m.record_bytes_out(n);
+            FifoWrite::Stopped => break,
+            FifoWrite::Err => {
+                if !stop.load(Ordering::Acquire) {
+                    eprintln!("[AUDIO:{}] write error, exiting", stream_id);
+                }
+                break;
+            }
         }
     }
 
@@ -221,7 +227,19 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
 
 fn open_audio_fifo(path: &str, stream_id: &str, stop: &AtomicBool) -> Option<std::fs::File> {
     match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(f) => Some(f),
+        Ok(f) => {
+            // Switch the writer fd to non-blocking so a dead reader (ffmpeg
+            // killed mid-stream) cannot deadlock the drain thread on the next
+            // tick. The drain loop polls stop_flag between WouldBlock retries.
+            unsafe {
+                let fd = f.as_raw_fd();
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+            Some(f)
+        }
         Err(e) => {
             if !stop.load(Ordering::Acquire) {
                 eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
@@ -229,6 +247,33 @@ fn open_audio_fifo(path: &str, stream_id: &str, stop: &AtomicBool) -> Option<std
             None
         }
     }
+}
+
+enum FifoWrite {
+    Ok,
+    Stopped,
+    Err,
+}
+
+/// Write all bytes to a non-blocking FIFO. On WouldBlock, sleeps briefly and
+/// rechecks `stop` so the drain thread reacts to shutdown within ~1ms even if
+/// the FIFO buffer is full. Returns `Stopped` if the flag flips mid-write.
+fn fifo_write_nonblocking(fifo: &mut std::fs::File, bytes: &[u8], stop: &AtomicBool) -> FifoWrite {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        if stop.load(Ordering::Acquire) {
+            return FifoWrite::Stopped;
+        }
+        match fifo.write(&bytes[written..]) {
+            Ok(0) => return FifoWrite::Err,
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return FifoWrite::Err,
+        }
+    }
+    FifoWrite::Ok
 }
 
 fn wait_audio_tick(next_tick: &mut Instant) -> Instant {
