@@ -1,7 +1,7 @@
 import { useReducer, useRef, useCallback } from "react";
-import * as api from "../data/api-client";
 import { AudioPipeline } from "../../../shared/audio/audio-pipeline";
 import { SessionSocket } from "../../../shared/networking/session-socket";
+import { ensureFreshToken } from "../../../shared/auth/auth-store";
 import { useTimings, type UtteranceTiming } from "./use-timings";
 import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
@@ -30,11 +30,20 @@ export function useHostSession() {
     () => socket.current.isOpen,
   );
 
-  const { startVoiceRecording, stopVoiceRecording, skipVoiceSetup } = useVoiceClone(
+  const voiceClone = useVoiceClone(
     dispatch,
     () => activeSessionIdRef.current,
     () => activeUserIdRef.current,
   );
+  const {
+    startVoiceRecording,
+    stopVoiceRecording,
+    skipVoiceSetup,
+    voiceElapsedSec,
+    voiceIsRecording,
+    voiceMinSec,
+    voiceMaxSec,
+  } = voiceClone;
 
   // Latency stopwatch needs to know which targets are active so it can create
   // a slot per-lang. We stash the most recent set in a ref; the hook's caller
@@ -56,10 +65,9 @@ export function useHostSession() {
     dispatch({ type: "recording_stopped" });
   };
 
-  const fetchAuthToken = async (userId: string): Promise<string | null> => {
+  const fetchAuthToken = async (): Promise<string | null> => {
     try {
-      const { token } = await api.getAuthToken(userId);
-      return token;
+      return await ensureFreshToken();
     } catch (e) {
       dispatch({
         type: "error",
@@ -84,7 +92,7 @@ export function useHostSession() {
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
 
-    const token = await fetchAuthToken(opts.userId);
+    const token = await fetchAuthToken();
     if (!token) return;
 
     const params: Record<string, string> = { sourceLang: opts.sourceLang ?? "en", token };
@@ -118,6 +126,7 @@ export function useHostSession() {
     ...state, timings, videoRef,
     connectSession, startRecording, stopRecording, closeSession,
     startVoiceRecording, stopVoiceRecording, skipVoiceSetup,
+    voiceElapsedSec, voiceIsRecording, voiceMinSec, voiceMaxSec,
     setActiveTargetLangs,
   };
 }

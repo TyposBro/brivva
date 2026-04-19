@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+import { SignInGate } from "../../../shared/auth/sign-in-gate";
+import { useAuth } from "../../../shared/auth/use-auth";
 import {
   DestinationCard,
   PlatformIcon,
@@ -25,15 +27,6 @@ import {
 const DEFAULT_DELAY_MS = 2000;
 const DEFAULT_HOST_GAIN_TARGET = 0.2;
 const DEFAULT_HOST_GAIN_SOURCE = 1.0;
-
-function getUserId(): string {
-  let id = localStorage.getItem("brivva_user_id");
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem("brivva_user_id", id);
-  }
-  return id;
-}
 
 // ── Region grouping for the picker ─────────────────────
 
@@ -48,9 +41,18 @@ const REGION_GROUPS = [
 // ── Component ──────────────────────────────────────────
 
 export default function DashboardPage() {
+  return (
+    <SignInGate>
+      <DashboardInner />
+    </SignInGate>
+  );
+}
+
+function DashboardInner() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const userId = getUserId();
+  // SignInGate guarantees we only mount when userId is set.
+  const userId = useAuth().userId!;
 
   const [user, setUser] = useState<api.UserInfo | null>(null);
   const [voices, setVoices] = useState<api.Voice[]>([]);
@@ -251,7 +253,7 @@ export default function DashboardPage() {
       });
 
       if (result.errors?.length) setError(result.errors.join("; "));
-      navigate(`/session/${result.session.id}`);
+      navigate(`/session/${result.session.id}/setup`);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to create session");
       setCreating(false);

@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 
-// Mock api
+// Mock api + auth store. ensureFreshToken is the seam that connectSession
+// goes through to obtain a JWT — keeping it as a vi.fn() lets each test
+// scenario simulate happy / sad cases without touching real fetch.
 vi.mock("../data/api-client", () => ({
-  getAuthToken: vi.fn(),
   cloneSessionVoice: vi.fn(),
+}));
+vi.mock("../../../shared/auth/auth-store", () => ({
+  ensureFreshToken: vi.fn(),
 }));
 
 type Callbacks = {
@@ -74,9 +78,10 @@ vi.mock("../../../shared/audio/audio-pipeline", () => ({ AudioPipeline: FakePipe
 vi.mock("../../../shared/networking/session-socket", () => ({ SessionSocket: FakeSocket }));
 
 import * as api from "../data/api-client";
+import { ensureFreshToken } from "../../../shared/auth/auth-store";
 import { useHostSession } from "./use-host-session";
 
-const mockedGetAuthToken = api.getAuthToken as unknown as ReturnType<typeof vi.fn>;
+const mockedEnsureFreshToken = ensureFreshToken as unknown as ReturnType<typeof vi.fn>;
 const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<typeof vi.fn>;
 
 function installMedia() {
@@ -115,7 +120,7 @@ describe("useHostSession", () => {
   beforeEach(() => {
     pipelineInstances.length = 0;
     socketInstances.length = 0;
-    mockedGetAuthToken.mockReset();
+    mockedEnsureFreshToken.mockReset();
     mockedCloneSessionVoice.mockReset();
     installMedia();
   });
@@ -139,14 +144,14 @@ describe("useHostSession", () => {
   });
 
   it("connectSession happy path → reset, token fetched, WS connected, status→voice_setup on open", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "tok_1" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("tok_1");
     const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
       await result.current.connectSession({ userId: "u1", sessionId: "s1", sourceLang: "en" });
     });
 
-    expect(mockedGetAuthToken).toHaveBeenCalledWith("u1");
+    expect(mockedEnsureFreshToken).toHaveBeenCalledTimes(1);
     const connected = socketInstances.filter((s) => s.callbacks);
     expect(connected).toHaveLength(1);
     expect(connected[0].params).toMatchObject({
@@ -159,7 +164,7 @@ describe("useHostSession", () => {
   });
 
   it("auth token fetch failure (sad)", async () => {
-    mockedGetAuthToken.mockRejectedValueOnce(new Error("401 unauthorized"));
+    mockedEnsureFreshToken.mockRejectedValueOnce(new Error("401 unauthorized"));
     const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
@@ -171,7 +176,7 @@ describe("useHostSession", () => {
   });
 
   it("skipVoiceSetup → ready", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -180,7 +185,7 @@ describe("useHostSession", () => {
   });
 
   it("stopVoiceRecording clones through Workers for the active session", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     mockedCloneSessionVoice.mockResolvedValueOnce({
       voice: { id: "v1", user_id: "u1", elevenlabs_voice_id: "el1", name: "n", created_at: 1 },
     });
@@ -216,7 +221,7 @@ describe("useHostSession", () => {
   });
 
   it("startRecording when open → pipeline starts, status=recording, audio forwarded", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -233,7 +238,7 @@ describe("useHostSession", () => {
   });
 
   it("stopRecording → pipeline stop + status=ready", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -246,7 +251,7 @@ describe("useHostSession", () => {
   });
 
   it("full pipeline: interim → final → translation → tts_end populates timings + transcripts", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     act(() => result.current.setActiveTargetLangs(["ja"]));
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
@@ -276,7 +281,7 @@ describe("useHostSession", () => {
   });
 
   it("WS disconnect mid-recording → status=disconnected, pipeline stopped (sad)", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -289,7 +294,7 @@ describe("useHostSession", () => {
   });
 
   it("error message → error field populated, status unchanged (sad)", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -298,7 +303,7 @@ describe("useHostSession", () => {
   });
 
   it("closeSession sends host:end + closes WS + stops pipeline", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());
@@ -311,7 +316,7 @@ describe("useHostSession", () => {
   });
 
   it("unknown msg.type ignored (sad: forward compat)", async () => {
-    mockedGetAuthToken.mockResolvedValueOnce({ token: "t" });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     await act(async () => { await result.current.connectSession({ userId: "u1" }); });
     act(() => socketInstances[0].fireOpen());

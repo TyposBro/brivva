@@ -5,13 +5,14 @@ import {
   FrontendOAuthLandingQuerySchema,
   FrontendOAuthTokenFragmentSchema,
 } from "@brivva/contracts/oauth";
+import { signIn, isSignedIn } from "../../../shared/auth/auth-store";
 
 export default function HomePage() {
   const navigate = useNavigate();
 
   // OAuth callback lands at `/?user_id=X#token=Y`. Extract the JWT from the
   // fragment (fragments never hit the server → safe to carry a bearer token),
-  // persist user_id + token, and forward the visitor to /dashboard.
+  // hand it to the in-memory auth store, and forward the visitor to /dashboard.
   useEffect(() => {
     const query = FrontendOAuthLandingQuerySchema.parse(
       Object.fromEntries(new URLSearchParams(window.location.search).entries()),
@@ -22,11 +23,12 @@ export default function HomePage() {
     const userId = query.user_id;
     const token = fragment.token;
     if (userId) {
-      localStorage.setItem("brivva_user_id", userId);
+      signIn(userId, token);
     }
     if (token) {
-      localStorage.setItem("brivva_jwt", token);
       window.history.replaceState(null, "", "/");
+      navigate("/dashboard", { replace: true });
+    } else if (userId && isSignedIn()) {
       navigate("/dashboard", { replace: true });
     }
   }, [navigate]);

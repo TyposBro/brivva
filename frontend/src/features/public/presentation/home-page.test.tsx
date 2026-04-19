@@ -3,6 +3,11 @@ import { render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import HomePage from "./home-page";
+import {
+  _resetForTesting as resetAuth,
+  getCachedToken,
+  getUserId,
+} from "../../../shared/auth/auth-store";
 
 // Mock useNavigate so we can assert the OAuth flow forwards to /dashboard.
 const navigate = vi.fn();
@@ -40,27 +45,34 @@ describe("HomePage OAuth callback", () => {
   beforeEach(() => {
     vi.stubGlobal("localStorage", new FakeStorage());
     navigate.mockReset();
+    resetAuth();
   });
 
-  it("does not touch localStorage or navigate on a clean landing (happy)", () => {
+  it("does not touch auth state or navigate on a clean landing (happy)", () => {
     renderAt("/");
-    expect(localStorage.getItem("brivva_user_id")).toBeNull();
-    expect(localStorage.getItem("brivva_jwt")).toBeNull();
+    expect(getUserId()).toBeNull();
+    expect(getCachedToken()).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
   });
 
-  it("persists user_id + JWT and navigates to /dashboard (happy)", () => {
+  it("persists user_id + JWT in memory and navigates to /dashboard (happy)", () => {
     renderAt("/?user_id=callback-user#token=fake.jwt.token");
+    // user_id survives reloads (localStorage); JWT lives only in memory.
     expect(localStorage.getItem("brivva_user_id")).toBe("callback-user");
-    expect(localStorage.getItem("brivva_jwt")).toBe("fake.jwt.token");
+    expect(localStorage.getItem("brivva_jwt")).toBeNull();
+    expect(getUserId()).toBe("callback-user");
+    expect(getCachedToken()).toBe("fake.jwt.token");
     expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 
-  it("persists user_id alone without navigating when no token fragment (edge)", () => {
+  it("persists user_id alone and navigates without a token fragment (edge)", () => {
     renderAt("/?user_id=only-user");
     expect(localStorage.getItem("brivva_user_id")).toBe("only-user");
-    expect(localStorage.getItem("brivva_jwt")).toBeNull();
-    expect(navigate).not.toHaveBeenCalled();
+    expect(getUserId()).toBe("only-user");
+    expect(getCachedToken()).toBeNull();
+    // user_id-only landings still forward to the dashboard so the gated UI
+    // can decide whether to demand a fresh OAuth round-trip.
+    expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 
   it("clears the token fragment from the URL so a refresh doesn't re-persist it (edge)", () => {
@@ -71,8 +83,8 @@ describe("HomePage OAuth callback", () => {
 
   it("ignores a fragment that carries no token= key (sad)", () => {
     renderAt("/?user_id=u1#something_else=yes");
-    expect(localStorage.getItem("brivva_user_id")).toBe("u1");
-    expect(localStorage.getItem("brivva_jwt")).toBeNull();
-    expect(navigate).not.toHaveBeenCalled();
+    expect(getUserId()).toBe("u1");
+    expect(getCachedToken()).toBeNull();
+    expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 });

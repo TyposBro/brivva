@@ -5,6 +5,8 @@
 // a string lookup at boot, not a live env probe.
 
 import { _setAppConfig } from "../core/config/app-config";
+import { configureAuth, loadPersistedUser } from "../shared/auth/auth-store";
+import { getAuthToken } from "../features/broadcast/data/api-client";
 
 const DEFAULT_API_BASE = "http://localhost:3000";
 const DEFAULT_MEDIA_WS_BASE = "http://localhost:8787";
@@ -22,4 +24,12 @@ export function bootstrap(): void {
     workersApiBase,
     mediaWsBase: mediaHttp.replace(/^http/, "ws"),
   });
+
+  configureAuth({
+    fetchToken: async (userId) => {
+      const { token } = await getAuthToken(userId);
+      return token;
+    },
+  });
+  loadPersistedUser();
 }

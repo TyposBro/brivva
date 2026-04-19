@@ -252,11 +252,12 @@ export default function SessionPage() {
           {isLive && (
             <button
               className="monolith-gradient text-white px-8 py-3 rounded-xl font-headline font-extrabold hover:scale-[0.98] transition-all shadow-xl flex items-center justify-center gap-2"
-              onClick={() =>
-                navigate(
-                  `/host?sessionId=${session.id}&sourceLang=${session.source_lang}`
-                )
-              }
+              onClick={() => {
+                const target = session.voice_id
+                  ? `/session/${session.id}/live`
+                  : `/session/${session.id}/setup`;
+                navigate(target);
+              }}
             >
               <Radio className="w-5 h-5" />
               {session.live_session_id ? "Resume Broadcast" : "Start Broadcasting"}
