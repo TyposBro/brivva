@@ -88,6 +88,11 @@ jobs:
 
       # Graviton ARM64 image. Buildx uses QEMU on GH's amd64 runner which is
       # slow but correct — swap to a self-hosted arm64 runner later for speed.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
