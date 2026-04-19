@@ -51,6 +51,11 @@ function makeSession(over: Partial<Record<string, unknown>> = {}) {
     id: "s1",
     user_id: "u1",
     voice_id: null,
+    // Session was created with clone intent, so a missing voice blocks Go Live
+    // until the host either finishes the clone or explicitly skips to a
+    // default voice. Sessions created with `voice_preset: "female" | "male"`
+    // don't need the clone step and go straight to ready.
+    voice_preset: "cloned",
     title: "Setup test",
     source_lang: "ko",
     target_langs: '["zh"]',
@@ -141,7 +146,9 @@ describe("SessionSetupPage", () => {
     await userEvent.click(stopBtn);
     await waitFor(() => expect(cloneSessionVoice).toHaveBeenCalled());
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Re-record sample/i })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /Re-record voice sample/i }),
+      ).toBeInTheDocument(),
     );
   });
 });
