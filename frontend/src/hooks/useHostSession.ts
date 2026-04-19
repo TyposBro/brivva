@@ -1,5 +1,5 @@
 import { useReducer, useRef, useCallback } from "react";
-import * as api from "../lib/api";
+import * as api from "../features/broadcast/data/api-client";
 import { AudioPipeline } from "../shared/audio/audio-pipeline";
 import { SessionSocket } from "../shared/networking/session-socket";
 import { useTimings, type UtteranceTiming } from "./useTimings";

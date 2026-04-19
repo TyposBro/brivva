@@ -29,7 +29,7 @@ import {
   type DetectedPlatform,
   type PlatformCatalogEntry,
 } from "@brivva/contracts/platforms";
-import { client } from "../core/contracts/workers-client";
+import { client } from "../../../core/contracts/workers-client";
 
 export type {
   AuthTokenResponse,

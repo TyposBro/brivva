@@ -9,7 +9,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "../core/cn";
-import * as api from "../lib/api";
+import * as api from "../features/broadcast/data/api-client";
 
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();

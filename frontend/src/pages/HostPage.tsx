@@ -11,7 +11,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { cn } from "../core/cn";
-import * as api from "../lib/api";
+import * as api from "../features/broadcast/data/api-client";
 
 function getUserId(): string {
   let id = localStorage.getItem("brivva_user_id");

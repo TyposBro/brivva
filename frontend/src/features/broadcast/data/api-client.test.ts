@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectPlatform, langLabel, langFlag } from "./api";
+import { detectPlatform, langLabel, langFlag } from "./api-client";
 
 describe("detectPlatform", () => {
   it("Instagram RTMPS URL — extracts streamKey after base", () => {

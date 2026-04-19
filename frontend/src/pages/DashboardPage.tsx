@@ -17,7 +17,7 @@ import {
   Clipboard,
 } from "lucide-react";
 import { cn } from "../core/cn";
-import * as api from "../lib/api";
+import * as api from "../features/broadcast/data/api-client";
 
 // ── Types ──────────────────────────────────────────────
 
