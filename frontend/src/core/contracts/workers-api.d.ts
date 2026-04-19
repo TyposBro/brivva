@@ -1801,7 +1801,7 @@ export interface components {
             expected_minutes: number;
             output_minutes: number;
             per_output_minute_usd: number;
-            cost_usd: number;
+            estimated_cost_usd: number;
         };
         SessionSummaryResponse: {
             session_id: string;

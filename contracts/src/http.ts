@@ -265,7 +265,7 @@ export const SessionQuoteResponseSchema = z.object({
   expected_minutes: z.number().positive(),
   output_minutes: z.number(),
   per_output_minute_usd: z.number(),
-  cost_usd: z.number(),
+  estimated_cost_usd: z.number(),
 });
 
 export const SessionSummaryResponseSchema = z.object({

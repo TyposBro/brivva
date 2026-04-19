@@ -810,7 +810,7 @@
           "expected_minutes",
           "output_minutes",
           "per_output_minute_usd",
-          "cost_usd"
+          "estimated_cost_usd"
         ],
         "properties": {
           "session_id": {
@@ -825,7 +825,7 @@
           "per_output_minute_usd": {
             "type": "number"
           },
-          "cost_usd": {
+          "estimated_cost_usd": {
             "type": "number"
           }
         }

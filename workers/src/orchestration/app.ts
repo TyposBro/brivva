@@ -399,6 +399,11 @@ function parseTargetLangs(raw: string): string[] {
 // Pre-stream cost projection. `output_minutes = expected_minutes × target_lang_count`
 // because we produce one translated stream per target language. Used by the
 // FE "you'll spend ~$X" banner on session start.
+//
+// Rate decision: flat PER_OUTPUT_MINUTE_USD for all users — pricing is
+// voice-agnostic today, so a missing active_voice_id does NOT affect the
+// quote. `estimated_cost_usd` is therefore always a finite, 2-decimal number
+// (never null/undefined) even for freshly-signed-up users with no clone yet.
 app.get("/api/sessions/:id/quote", async (c) => {
   const params = parseWithSchema(c, SessionIdParamsSchema, {
     id: c.req.param("id"),
@@ -415,14 +420,19 @@ app.get("/api/sessions/:id/quote", async (c) => {
 
   const langCount = parseTargetLangs(session.target_langs).length;
   const outputMinutes = Math.round(expectedMinutes * langCount * 100) / 100;
-  const costUsd = Math.round(outputMinutes * PER_OUTPUT_MINUTE_USD * 100) / 100;
+  const rawCost = outputMinutes * PER_OUTPUT_MINUTE_USD;
+  // Defensive: if anything upstream returns NaN/Infinity we still respond
+  // with a number — the FE renderer must never see null for this field.
+  const estimatedCostUsd = Number.isFinite(rawCost)
+    ? Math.round(rawCost * 100) / 100
+    : 0;
 
   return c.json({
     session_id: params.id,
     expected_minutes: expectedMinutes,
     output_minutes: outputMinutes,
     per_output_minute_usd: PER_OUTPUT_MINUTE_USD,
-    cost_usd: costUsd,
+    estimated_cost_usd: estimatedCostUsd,
   });
 });
 

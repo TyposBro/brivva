@@ -14,8 +14,12 @@ const QuoteBreakdownItemSchema = z.object({
   cost_usd: z.number(),
 });
 
+// `estimated_cost_usd` is relaxed to `number | null | undefined` so a quote
+// that fails to price (e.g. upstream missing data) surfaces as a UI "—"
+// instead of a Zod crash. This is the ONLY field we relax — any other
+// missing/wrong field still throws loudly.
 const QuoteResponseSchema = z.object({
-  estimated_cost_usd: z.number(),
+  estimated_cost_usd: z.number().nullable().optional(),
   expected_minutes: z.number().optional(),
   breakdown: z.array(QuoteBreakdownItemSchema).optional(),
 });
@@ -27,7 +31,8 @@ export interface QuoteBreakdownItem {
 }
 
 export interface QuoteResponse {
-  estimatedCostUsd: number;
+  // null ⇒ server didn't price this quote; renderer should show "—".
+  estimatedCostUsd: number | null;
   expectedMinutes: number | null;
   breakdown: QuoteBreakdownItem[];
 }
@@ -40,8 +45,9 @@ export async function fetchSessionQuote(
   const res = await fetch(url, { credentials: "omit" });
   if (!res.ok) throw new Error(`fetchSessionQuote: ${res.status}`);
   const parsed = QuoteResponseSchema.parse(await res.json());
+  const cost = parsed.estimated_cost_usd;
   return {
-    estimatedCostUsd: parsed.estimated_cost_usd,
+    estimatedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     expectedMinutes: parsed.expected_minutes ?? expectedMinutes,
     breakdown:
       parsed.breakdown?.map((b) => ({

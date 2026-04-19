@@ -468,14 +468,14 @@ const schemas = {
       "expected_minutes",
       "output_minutes",
       "per_output_minute_usd",
-      "cost_usd",
+      "estimated_cost_usd",
     ],
     properties: {
       session_id: { type: "string" },
       expected_minutes: { type: "number" },
       output_minutes: { type: "number" },
       per_output_minute_usd: { type: "number" },
-      cost_usd: { type: "number" },
+      estimated_cost_usd: { type: "number" },
     },
   },
   SessionSummaryResponse: {

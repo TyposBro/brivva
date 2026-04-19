@@ -57,6 +57,26 @@ describe("QuoteModal", () => {
     expect(screen.getByText(/upstream 500/)).toBeInTheDocument();
   });
 
+  it("edge: null cost renders '—' + pending helper, NOT the raw Zod blob", async () => {
+    // Reproduces the production bug on a fresh user: server 200s but
+    // estimatedCostUsd is null. The modal must stay human-readable.
+    fetchSessionQuote.mockResolvedValue({
+      estimatedCostUsd: null,
+      expectedMinutes: 30,
+      breakdown: [],
+    });
+    render(<QuoteModal sessionId="s1" onConfirm={vi.fn()} onCancel={vi.fn()} />);
+    await waitFor(() => expect(fetchSessionQuote).toHaveBeenCalled());
+
+    // Neutral dash in place of "$..."
+    expect(await screen.findByLabelText(/Estimate pending/i)).toBeInTheDocument();
+    expect(screen.getByText(/billing reflects actual usage/i)).toBeInTheDocument();
+
+    // Critically: the raw Zod issues JSON must NOT be visible.
+    expect(screen.queryByText(/invalid_type/)).toBeNull();
+    expect(screen.queryByText(/"expected":\s*"number"/)).toBeNull();
+  });
+
   it("Cancel button + close icon both invoke onCancel", async () => {
     fetchSessionQuote.mockResolvedValue({
       estimatedCostUsd: 1,

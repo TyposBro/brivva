@@ -100,10 +100,28 @@ export function QuoteModal({ sessionId, onConfirm, onCancel }: Props) {
                 <span className="text-on-surface-variant text-xs font-label uppercase tracking-widest">
                   Estimated cost
                 </span>
-                <span className="text-on-surface font-headline font-bold text-2xl tabular-nums">
-                  ${quote.estimatedCostUsd.toFixed(2)}
-                </span>
+                {quote.estimatedCostUsd === null ? (
+                  // Server parsed fine but didn't produce a price — show a
+                  // neutral dash + helper line instead of a hard error.
+                  // Real validation failures (wrong shape elsewhere) still
+                  // throw and land in the `error` branch below.
+                  <span
+                    className="text-on-surface-variant font-headline font-bold text-2xl tabular-nums"
+                    aria-label="Estimate pending"
+                  >
+                    —
+                  </span>
+                ) : (
+                  <span className="text-on-surface font-headline font-bold text-2xl tabular-nums">
+                    ${quote.estimatedCostUsd.toFixed(2)}
+                  </span>
+                )}
               </div>
+              {quote.estimatedCostUsd === null && (
+                <p className="text-on-surface-variant/60 text-xs font-label">
+                  Estimate pending — billing reflects actual usage.
+                </p>
+              )}
               {quote.breakdown.length > 0 && (
                 <div className="space-y-1 pt-1 border-t border-outline-variant/10">
                   {quote.breakdown.map((b) => (

@@ -1703,12 +1703,120 @@ describe("GET /api/sessions/:id/quote", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
-      cost_usd: number;
+      estimated_cost_usd: number;
       per_output_minute_usd: number;
     };
     expect(body.output_minutes).toBe(60); // 20 minutes × 3 targets
-    expect(body.cost_usd).toBe(90); // 60 × 1.5
+    expect(body.estimated_cost_usd).toBe(90); // 60 × 1.5
     expect(body.per_output_minute_usd).toBe(1.5);
+  });
+
+  it("user with an active voice clone receives a finite quote (happy)", async () => {
+    // User onboarded + has cloned their voice. Rate is voice-agnostic, but
+    // this guards against a regression where the handler branches on voice.
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-voiced", Math.floor(Date.now() / 1000)).run();
+    // Seed a real voice row + attach it so the FK holds.
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind("v-voiced-1", "u-voiced", "el-voiced-1", "Aziz", Math.floor(Date.now() / 1000))
+      .run();
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-voiced-1", "u-voiced")
+      .run();
+
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-voiced",
+        title: "With voice",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { estimated_cost_usd: number };
+    expect(Number.isFinite(body.estimated_cost_usd)).toBe(true);
+    expect(body.estimated_cost_usd).toBe(45); // 30 × 1 × 1.5
+  });
+
+  it("fresh user without an active voice still gets a finite quote (no null)", async () => {
+    // Reproduces the production bug: a user with no active_voice_id opens
+    // the quote modal. Response must be a real number, not null/undefined.
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-fresh", Math.floor(Date.now() / 1000)).run();
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-fresh",
+        title: "No voice yet",
+        source_lang: "ko",
+        target_langs: ["en", "ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { estimated_cost_usd: number | null };
+    expect(body.estimated_cost_usd).not.toBeNull();
+    expect(typeof body.estimated_cost_usd).toBe("number");
+    expect(Number.isFinite(body.estimated_cost_usd as number)).toBe(true);
+    expect(body.estimated_cost_usd).toBe(90); // 30 × 2 × 1.5
+  });
+
+  it("10-minute slider floor is a finite quote (edge)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-10",
+        title: "Ten",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=10`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      output_minutes: number;
+      estimated_cost_usd: number;
+    };
+    expect(body.output_minutes).toBe(10);
+    expect(body.estimated_cost_usd).toBe(15); // 10 × 1 × 1.5
+  });
+
+  it("180-minute slider ceiling is a finite quote (edge)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-180",
+        title: "Big",
+        source_lang: "en",
+        target_langs: ["ja", "zh"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=180`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      output_minutes: number;
+      estimated_cost_usd: number;
+    };
+    expect(body.output_minutes).toBe(360); // 180 × 2
+    expect(body.estimated_cost_usd).toBe(540); // 360 × 1.5
   });
 
   it("400 when expected_minutes missing or non-positive (sad)", async () => {
@@ -1757,9 +1865,9 @@ describe("GET /api/sessions/:id/quote", () => {
     ).bind("not json at all", session.id).run();
 
     const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=10`);
-    const body = (await res.json()) as { output_minutes: number; cost_usd: number };
+    const body = (await res.json()) as { output_minutes: number; estimated_cost_usd: number };
     expect(body.output_minutes).toBe(0); // 10 × 0-langs
-    expect(body.cost_usd).toBe(0);
+    expect(body.estimated_cost_usd).toBe(0);
   });
 });
 

@@ -48,6 +48,32 @@ describe("fetchSessionQuote", () => {
     expect(r.breakdown).toEqual([]);
   });
 
+  it("maps missing estimated_cost_usd to null instead of crashing (edge)", async () => {
+    // Reproduces the production bug: server responds 200 but the cost field
+    // is absent. Prior behaviour was a ZodError whose JSON-stringified
+    // issues blob leaked into the modal. Now: soft fallback to null.
+    fetchMock.mockReturnValue(ok({ expected_minutes: 30 }));
+    const r = await fetchSessionQuote("s1", 30);
+    expect(r.estimatedCostUsd).toBeNull();
+    expect(r.expectedMinutes).toBe(30);
+  });
+
+  it("maps explicit null estimated_cost_usd to null (edge)", async () => {
+    fetchMock.mockReturnValue(ok({ estimated_cost_usd: null }));
+    const r = await fetchSessionQuote("s1", 30);
+    expect(r.estimatedCostUsd).toBeNull();
+  });
+
+  it("still throws for unrelated schema violations (sad — don't swallow)", async () => {
+    // Narrow fallback: only estimated_cost_usd is tolerated. A totally
+    // wrong shape (e.g. non-array breakdown) must still raise so bugs
+    // elsewhere stay visible.
+    fetchMock.mockReturnValue(
+      ok({ estimated_cost_usd: 1, breakdown: "not-an-array" }),
+    );
+    await expect(fetchSessionQuote("s1", 30)).rejects.toThrow();
+  });
+
   it("rejects on non-2xx (sad)", async () => {
     fetchMock.mockReturnValue(
       Promise.resolve(new Response("err", { status: 503 })),
