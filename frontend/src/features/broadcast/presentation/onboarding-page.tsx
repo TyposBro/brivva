@@ -403,11 +403,11 @@ function LangStep({ value, onChange, onFinish, submitting }: LangStepProps) {
     <section className="space-y-4">
       <div>
         <h2 className="font-headline font-bold text-2xl text-on-surface mb-2">
-          Pick a default target language
+          Default audience language
         </h2>
         <p className="text-on-surface-variant text-sm leading-relaxed">
-          We'll pre-fill new destinations with this language so you don't have
-          to choose it every time.
+          Pre-fills when you add a new destination. You can override
+          per-destination.
         </p>
       </div>
 

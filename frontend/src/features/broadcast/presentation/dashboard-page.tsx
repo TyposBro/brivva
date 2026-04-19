@@ -6,7 +6,6 @@ import {
   X,
   Youtube,
   ChevronDown,
-  ChevronRight,
   Settings2,
   Clipboard,
 } from "lucide-react";
@@ -25,16 +24,6 @@ import {
 import { YourVoiceSection } from "./your-voice-section";
 import { QuoteModal } from "./quote-modal";
 
-// ── Region grouping for the picker ─────────────────────
-
-const REGION_GROUPS = [
-  { key: "Global", label: "Global", icon: "🌐" },
-  { key: "Korea", label: "Korean Platforms", icon: "🇰🇷" },
-  { key: "Japan", label: "Japanese Platforms", icon: "🇯🇵" },
-  { key: "China", label: "Chinese Platforms", icon: "🇨🇳" },
-  { key: "Other", label: "Other", icon: "⚙️" },
-];
-
 // ── Component ──────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -45,7 +34,10 @@ export default function DashboardPage() {
   );
 }
 
-function pickFallbackLang(sourceLang: string): string {
+// Per-destination target language defaults to the user's onboarding pick.
+// Falls back to a sane "not the source" choice if the stored default would
+// equal the source language.
+function pickDestinationLang(sourceLang: string): string {
   const stored = readDefaultTargetLang();
   if (stored && stored !== sourceLang) return stored;
   return sourceLang === "en" ? "ja" : "en";
@@ -78,7 +70,6 @@ function DashboardInner() {
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [expandedRegion, setExpandedRegion] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
 
@@ -148,8 +139,7 @@ function DashboardInner() {
     const platform = api.PLATFORMS.find((p) => p.id === platformId);
     if (!platform) return;
 
-    const autoLang = api.PLATFORM_LANG[platformId];
-    const lang = autoLang ?? pickFallbackLang(sourceLang);
+    const lang = pickDestinationLang(sourceLang);
     const cred = savedCreds[platformId];
     const tuned = streamDefault(sourceLang, lang);
 
@@ -166,7 +156,6 @@ function DashboardInner() {
       },
     ]);
     setPickerOpen(false);
-    setExpandedRegion(null);
   };
 
   const removeDestination = (uid: string) => {
@@ -183,8 +172,7 @@ function DashboardInner() {
     setMagicPaste(value);
     const detected = api.detectPlatform(value);
     if (detected) {
-      const autoLang = api.PLATFORM_LANG[detected.platform];
-      const destLang = autoLang ?? pickFallbackLang(sourceLang);
+      const destLang = pickDestinationLang(sourceLang);
       const tuned = streamDefault(sourceLang, destLang);
       setDestinations((prev) => [
         ...prev,
@@ -455,90 +443,27 @@ function DashboardInner() {
                   />
                 </div>
 
-                {/* Region groups */}
-                {REGION_GROUPS.map((group) => {
-                  const platforms = api.PLATFORMS.filter(
-                    (p) => p.region === group.key
-                  );
-                  if (platforms.length === 0) return null;
-
-                  const isExpanded = expandedRegion === group.key;
-
-                  return (
-                    <div key={group.key}>
-                      <button
-                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-container-high transition-colors text-left"
-                        onClick={() =>
-                          setExpandedRegion(isExpanded ? null : group.key)
-                        }
-                      >
-                        <span className="text-sm">{group.icon}</span>
-                        <span className="text-on-surface font-label text-sm flex-1">
-                          {group.label}
-                        </span>
-                        <span className="text-on-surface-variant/40 text-xs font-label">
-                          {platforms.length}
-                        </span>
-                        {isExpanded ? (
-                          <ChevronDown className="w-3.5 h-3.5 text-on-surface-variant" />
-                        ) : (
-                          <ChevronRight className="w-3.5 h-3.5 text-on-surface-variant" />
-                        )}
-                      </button>
-
-                      {isExpanded && (
-                        <div className="pb-2">
-                          {platforms.map((p) => {
-                            const autoLang = api.PLATFORM_LANG[p.id];
-                            const disabled =
-                              autoLang !== null && autoLang === sourceLang;
-
-                            return (
-                              <button
-                                key={p.id}
-                                disabled={disabled}
-                                className={cn(
-                                  "w-full flex items-center gap-3 px-4 pl-10 py-2.5 text-left transition-colors",
-                                  disabled
-                                    ? "text-on-surface-variant/30 cursor-not-allowed"
-                                    : "text-on-surface hover:bg-surface-container-high cursor-pointer"
-                                )}
-                                onClick={() => addDestination(p.id)}
-                              >
-                                <PlatformIcon
-                                  id={p.id}
-                                  className="w-4 h-4 shrink-0"
-                                />
-                                <span className="font-label text-sm flex-1">
-                                  {p.label}
-                                </span>
-                                {autoLang && !disabled && (
-                                  <span className="text-xs text-on-surface-variant/50">
-                                    {api.langFlag(autoLang)}{" "}
-                                    {api.langLabel(autoLang)}
-                                  </span>
-                                )}
-                                {disabled && (
-                                  <span className="text-[10px] text-on-surface-variant/30 font-label">
-                                    same as source
-                                  </span>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                {/* Flat platform grid — language is chosen per destination
+                    on the destination card, not gated by platform. */}
+                <div className="grid grid-cols-2 gap-1 p-2">
+                  {api.PLATFORMS.map((p) => (
+                    <button
+                      key={p.id}
+                      className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-on-surface hover:bg-surface-container-high cursor-pointer transition-colors text-left"
+                      onClick={() => addDestination(p.id)}
+                    >
+                      <PlatformIcon id={p.id} className="w-4 h-4 shrink-0 text-primary" />
+                      <span className="font-label text-sm flex-1 truncate">
+                        {p.label}
+                      </span>
+                    </button>
+                  ))}
+                </div>
 
                 {/* Close */}
                 <button
                   className="w-full py-2.5 text-on-surface-variant text-xs font-label hover:bg-surface-container-high transition-colors border-t border-outline-variant/10"
-                  onClick={() => {
-                    setPickerOpen(false);
-                    setExpandedRegion(null);
-                  }}
+                  onClick={() => setPickerOpen(false)}
                 >
                   Cancel
                 </button>

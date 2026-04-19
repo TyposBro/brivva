@@ -122,7 +122,7 @@ describe("OnboardingPage", () => {
     expect(await screen.findByRole("heading", { name: /Clone your voice/i })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Skip for now/i }));
     // Step 3 — language. Default 'en' selected.
-    expect(await screen.findByRole("heading", { name: /default target language/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Default audience language/i })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Finish/i }));
     await waitFor(() =>
       expect(completeOnboarding).toHaveBeenCalledWith({
@@ -204,7 +204,7 @@ describe("OnboardingPage", () => {
     await userEvent.click(screen.getByRole("button", { name: /Skip for now/i }));
     await screen.findByRole("heading", { name: /Clone your voice/i });
     await userEvent.click(screen.getByRole("button", { name: /Skip for now/i }));
-    await screen.findByRole("heading", { name: /default target language/i });
+    await screen.findByRole("heading", { name: /Default audience language/i });
     await userEvent.click(screen.getByRole("button", { name: /Finish/i }));
     expect(await screen.findByText(/server down/)).toBeInTheDocument();
   });

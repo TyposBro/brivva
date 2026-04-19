@@ -142,7 +142,7 @@ describe("DashboardPage", () => {
     expect(screen.getByText("Aziz")).toBeInTheDocument();
   });
 
-  it("Add destination opens the platform picker (happy)", async () => {
+  it("Add destination opens a flat platform picker (no regional grouping)", async () => {
     getUser.mockResolvedValue(fullUser());
     listVoices.mockResolvedValue({ voices: [] });
     listSessions.mockResolvedValue({ sessions: [] });
@@ -159,7 +159,43 @@ describe("DashboardPage", () => {
     const addBtn = await screen.findByRole("button", { name: /Add destination/i });
     await u.click(addBtn);
     expect(screen.getByPlaceholderText(/Paste RTMP URL/i)).toBeInTheDocument();
-    expect(screen.getByText(/Korean Platforms/i)).toBeInTheDocument();
+    // Regional groupings are gone — no "Korean Platforms" heading.
+    expect(screen.queryByText(/Korean Platforms/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Japanese Platforms/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Chinese Platforms/i)).not.toBeInTheDocument();
+    // Flat picker exposes platforms directly.
+    expect(screen.getByRole("button", { name: /YouTube/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /TikTok/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Bilibili/i })).toBeInTheDocument();
+  });
+
+  it("adds a destination with target_lang seeded from default-target-lang storage", async () => {
+    getUser.mockResolvedValue(fullUser());
+    listVoices.mockResolvedValue({ voices: [] });
+    listSessions.mockResolvedValue({ sessions: [] });
+    listCredentials.mockResolvedValue({ credentials: [] });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: 1 });
+
+    const storage = new FakeStorage();
+    storage.setItem("brivva_default_target_lang", "ja");
+    vi.stubGlobal("localStorage", storage);
+    signIn("u1");
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <DashboardPage />
+      </MemoryRouter>,
+    );
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const u = userEvent.setup();
+    const addBtn = await screen.findByRole("button", { name: /Add destination/i });
+    await u.click(addBtn);
+    await u.click(screen.getByRole("button", { name: /^TikTok$/i }));
+
+    // Per-destination dropdown reflects the onboarding default.
+    // Combobox order: [0] source-lang select, [1] new destination's lang select.
+    const selects = await screen.findAllByRole("combobox");
+    expect((selects[1] as HTMLSelectElement).value).toBe("ja");
   });
 
   it("recent sessions render in the list (happy)", async () => {

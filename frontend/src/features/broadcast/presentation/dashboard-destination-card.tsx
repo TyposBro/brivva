@@ -120,7 +120,6 @@ function CardHeader(props: {
   onRemove: () => void;
 }) {
   const { dest, platform, sourceLang, savedCreds, expanded, setExpanded, onUpdate, onRemove } = props;
-  const fixedLang = api.PLATFORM_LANG[dest.platform];
   const needsConfig = !platform.auto;
   const hasConfig = !!(dest.rtmp_url || dest.stream_key);
   const hasSavedCreds = !!savedCreds[dest.platform];
@@ -129,13 +128,7 @@ function CardHeader(props: {
     <div className="flex items-center gap-3 px-4 py-3">
       <PlatformIcon id={dest.platform} className="w-4 h-4 text-primary" />
       <span className="font-label font-bold text-on-surface text-sm flex-1 truncate">{platform.label}</span>
-      {fixedLang ? (
-        <span className="text-[10px] font-label font-bold uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded">
-          {api.langFlag(dest.lang)} {api.langLabel(dest.lang)}
-        </span>
-      ) : (
-        <LangSelect dest={dest} sourceLang={sourceLang} onUpdate={onUpdate} />
-      )}
+      <LangSelect dest={dest} sourceLang={sourceLang} onUpdate={onUpdate} />
       {needsConfig && (
         <span
           className={cn("w-2 h-2 rounded-full shrink-0", hasConfig || hasSavedCreds ? "bg-success" : "bg-error/60")}
