@@ -125,6 +125,13 @@ resource "aws_security_group" "task" {
 
 resource "aws_ecs_cluster" "app" {
   name = var.project
+
+  # Required for ECS/ContainerInsights metrics (RunningTaskCount, etc.)
+  # that the brivva-ecs-running-tasks-low alarm depends on.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 locals {
@@ -162,9 +169,9 @@ locals {
   # Init container writes cloudflared config + creds to the shared volume.
   # cloudflared image is distroless (no sh) so we can't render config in it.
   cloudflared_init_container = {
-    name      = "cloudflared-init"
-    image     = "public.ecr.aws/docker/library/alpine:3"
-    essential = false
+    name       = "cloudflared-init"
+    image      = "public.ecr.aws/docker/library/alpine:3"
+    essential  = false
     entryPoint = ["sh", "-c"]
     command = [
       "echo \"$TUNNEL_CREDS\" > /shared/creds.json && printf 'tunnel: ${var.tunnel_id}\\ncredentials-file: /shared/creds.json\\ningress:\\n  - hostname: ${var.domain}\\n    service: http://localhost:3000\\n  - service: http_status:404\\n' > /shared/config.yml"
