@@ -1,10 +1,10 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import HomePage from "./pages/HomePage";
-import HostPage from "./features/broadcast/presentation/host-page";
-import DashboardPage from "./features/broadcast/presentation/dashboard-page";
-import SessionPage from "./features/broadcast/presentation/session-page";
-import PrivacyPage from "./pages/PrivacyPage";
-import TermsPage from "./pages/TermsPage";
+import HomePage from "../features/public/presentation/home-page";
+import HostPage from "../features/broadcast/presentation/host-page";
+import DashboardPage from "../features/broadcast/presentation/dashboard-page";
+import SessionPage from "../features/broadcast/presentation/session-page";
+import PrivacyPage from "../features/public/presentation/privacy-page";
+import TermsPage from "../features/public/presentation/terms-page";
 
 export default function App() {
   return (
