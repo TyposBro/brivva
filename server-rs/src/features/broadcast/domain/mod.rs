@@ -261,4 +261,119 @@ mod tests {
 
         assert_eq!(session.active_langs(), vec![Lang::Ja, Lang::Ko, Lang::Zh]);
     }
+
+    #[test]
+    fn active_langs_returns_empty_when_no_rtmp_langs_registered() {
+        let session = LiveSession::new("ROOM".into(), Lang::En, None, test_pipeline_config());
+        assert!(session.active_langs().is_empty());
+    }
+
+    #[test]
+    fn lang_display_uses_iso_code_for_every_variant() {
+        assert_eq!(Lang::En.to_string(), "en");
+        assert_eq!(Lang::Ja.to_string(), "ja");
+        assert_eq!(Lang::Zh.to_string(), "zh");
+        assert_eq!(Lang::Ko.to_string(), "ko");
+    }
+
+    #[test]
+    fn lang_voice_id_returns_distinct_default_per_language() {
+        let ids = [
+            Lang::En.voice_id(),
+            Lang::Ja.voice_id(),
+            Lang::Zh.voice_id(),
+            Lang::Ko.voice_id(),
+        ];
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), 4, "every lang should map to a distinct voice");
+    }
+
+    #[test]
+    fn server_msg_serializes_translation_with_camel_case_external_keys() {
+        let msg = ServerMsg::Translation {
+            text: "hi".into(),
+            utterance_id: 7,
+            target_lang: "ja".into(),
+            translate_ms: 250,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"translation\""));
+        assert!(json.contains("\"utteranceId\":7"));
+        assert!(json.contains("\"targetLang\":\"ja\""));
+        assert!(json.contains("\"translateMs\":250"));
+    }
+
+    #[test]
+    fn server_msg_serializes_tts_end_with_camel_case_external_keys() {
+        let msg = ServerMsg::TtsEnd {
+            utterance_id: 11,
+            target_lang: "ko".into(),
+            tts_ms: 12,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"tts_end\""));
+        assert!(json.contains("\"ttsMs\":12"));
+    }
+
+    #[test]
+    fn server_msg_serializes_video_end_error_and_final_variants() {
+        let final_msg = ServerMsg::Final {
+            transcript: "hi".into(),
+            utterance_id: 1,
+        };
+        let video = ServerMsg::VideoEnd { utterance_id: 9 };
+        let error = ServerMsg::Error {
+            message: "boom".into(),
+        };
+        let interim = ServerMsg::Interim {
+            transcript: "uh".into(),
+        };
+
+        assert!(
+            serde_json::to_string(&final_msg)
+                .unwrap()
+                .contains("\"type\":\"final\"")
+        );
+        assert!(
+            serde_json::to_string(&video)
+                .unwrap()
+                .contains("\"type\":\"video_end\"")
+        );
+        assert!(
+            serde_json::to_string(&error)
+                .unwrap()
+                .contains("\"type\":\"error\"")
+        );
+        assert!(
+            serde_json::to_string(&interim)
+                .unwrap()
+                .contains("\"type\":\"interim\"")
+        );
+    }
+
+    #[test]
+    fn live_session_send_to_host_is_noop_when_host_tx_unset() {
+        let session = LiveSession::new("ROOM".into(), Lang::En, None, test_pipeline_config());
+        session.send_to_host(Message::Text("anything".into()));
+    }
+
+    #[test]
+    fn live_session_send_to_host_forwards_to_channel_when_set() {
+        let mut session = LiveSession::new("ROOM".into(), Lang::En, None, test_pipeline_config());
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        session.host_tx = Some(tx);
+        session.send_to_host(Message::Text("hello".into()));
+        match rx.try_recv().expect("message forwarded") {
+            Message::Text(t) => assert_eq!(t.as_str(), "hello"),
+            other => panic!("expected text message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn live_session_handle_new_stores_id_and_sessions() {
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        let handle = LiveSessionHandle::new("Z".into(), sessions.clone());
+        assert_eq!(handle.id, "Z");
+        assert_eq!(Arc::as_ptr(&handle.sessions), Arc::as_ptr(&sessions));
+    }
 }

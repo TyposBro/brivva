@@ -85,4 +85,46 @@ mod tests {
 
         assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
     }
+
+    #[test]
+    fn verify_rejects_wrong_issuer() {
+        let err = verify(
+            &make_token("test-secret", "wrong-issuer", JWT_AUDIENCE),
+            "test-secret",
+        )
+        .expect_err("verify should fail for wrong iss");
+        assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_signature_mismatch() {
+        let token = make_token("a-secret", JWT_ISSUER, JWT_AUDIENCE);
+        let err = verify(&token, "different-secret")
+            .expect_err("verify should fail when signature does not match");
+        assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_garbage_token() {
+        let err =
+            verify("not.a.token", "test-secret").expect_err("verify should fail on garbage input");
+        assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_expired_token() {
+        let expired = encode(
+            &Header::default(),
+            &TestClaims {
+                sub: "user-123",
+                exp: 0,
+                iss: JWT_ISSUER,
+                aud: JWT_AUDIENCE,
+            },
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .expect("encode expired token");
+        let err = verify(&expired, "test-secret").expect_err("expired tokens must fail");
+        assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
+    }
 }

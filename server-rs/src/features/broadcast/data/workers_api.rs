@@ -117,7 +117,236 @@ impl WorkersApi {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::core::contracts::workers::{SessionBundle, Stream};
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        http::StatusCode,
+        routing::{get, patch, post},
+    };
+    use serde_json::{Value, json};
+    use std::sync::Arc as StdArc;
+    use tokio::task::JoinHandle;
+
+    async fn spawn_mock(router: Router) -> (String, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    #[tokio::test]
+    async fn fetch_session_bundle_errors_when_base_url_is_empty() {
+        let api = WorkersApi::new("", "sec");
+        let err = api
+            .fetch_session_bundle("X")
+            .await
+            .expect_err("empty base url must error");
+        assert!(err.contains("WORKERS_API_URL not set"));
+    }
+
+    #[tokio::test]
+    async fn update_session_status_errors_when_base_url_is_empty() {
+        let api = WorkersApi::new("", "sec");
+        let err = api
+            .update_session_status("X", "live", None)
+            .await
+            .expect_err("empty base url must error");
+        assert!(err.contains("WORKERS_API_URL not set"));
+    }
+
+    #[tokio::test]
+    async fn report_session_metrics_errors_when_base_url_is_empty() {
+        let api = WorkersApi::new("", "sec");
+        let err = api
+            .report_session_metrics("X", &json!({}))
+            .await
+            .expect_err("empty base url must error");
+        assert!(err.contains("WORKERS_API_URL not set"));
+    }
+
+    #[tokio::test]
+    async fn fetch_session_bundle_errors_on_network_failure() {
+        // Port 1 is reserved/refused on most systems — simulates connection failure.
+        let api = WorkersApi::new("http://127.0.0.1:1", "sec");
+        let err = api
+            .fetch_session_bundle("X")
+            .await
+            .expect_err("refused connection must error");
+        assert!(err.starts_with("workers fetch error"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_session_bundle_errors_on_non_2xx() {
+        async fn not_found(Path(_): Path<String>) -> StatusCode {
+            StatusCode::NOT_FOUND
+        }
+        let app = Router::new().route("/internal/sessions/{id}", get(not_found));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let err = api
+            .fetch_session_bundle("X")
+            .await
+            .expect_err("404 must error");
+        assert!(err.contains("→ 404"), "got {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_session_bundle_errors_on_malformed_json() {
+        async fn bad_json(Path(_): Path<String>) -> (StatusCode, String) {
+            (StatusCode::OK, "not json".into())
+        }
+        let app = Router::new().route("/internal/sessions/{id}", get(bad_json));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let err = api
+            .fetch_session_bundle("X")
+            .await
+            .expect_err("bad json must error");
+        assert!(err.contains("workers session decode"), "got {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_session_bundle_decodes_minimal_valid_body() {
+        async fn ok_json(Path(id): Path<String>) -> Json<Value> {
+            Json(json!({
+                "session": {
+                    "id": id,
+                    "user_id": "u",
+                    "voice_id": null,
+                    "title": "",
+                    "source_lang": "en",
+                    "target_langs": "[]",
+                    "status": "created",
+                    "live_session_id": null,
+                    "created_at": 0
+                },
+                "streams": [],
+                "voice": null
+            }))
+        }
+        let app = Router::new().route("/internal/sessions/{id}", get(ok_json));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let bundle = api.fetch_session_bundle("abc").await.expect("ok");
+        assert_eq!(bundle.session.id, "abc");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn update_session_status_errors_on_5xx() {
+        async fn boom() -> StatusCode {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        let app = Router::new().route("/internal/sessions/{id}", patch(boom));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let err = api
+            .update_session_status("X", "live", Some("LIVE01"))
+            .await
+            .expect_err("5xx must error");
+        assert!(err.contains("→ 500"), "got {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn update_session_status_network_error_is_wrapped() {
+        let api = WorkersApi::new("http://127.0.0.1:1", "sec");
+        let err = api
+            .update_session_status("X", "live", None)
+            .await
+            .expect_err("refused connection must error");
+        assert!(err.starts_with("workers status update error"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn update_session_status_succeeds_on_2xx_and_sends_payload() {
+        #[derive(Clone)]
+        struct S(StdArc<tokio::sync::Mutex<Option<Value>>>);
+
+        async fn capture(
+            State(s): State<S>,
+            Path(_): Path<String>,
+            Json(body): Json<Value>,
+        ) -> StatusCode {
+            *s.0.lock().await = Some(body);
+            StatusCode::OK
+        }
+
+        let shared = StdArc::new(tokio::sync::Mutex::new(None));
+        let state = S(shared.clone());
+        let app = Router::new()
+            .route("/internal/sessions/{id}", patch(capture))
+            .with_state(state);
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        api.update_session_status("X", "live", Some("LIVE01"))
+            .await
+            .expect("ok");
+
+        let body = shared.lock().await.clone().expect("captured");
+        assert_eq!(body["status"].as_str().unwrap(), "live");
+        assert_eq!(body["live_session_id"].as_str().unwrap(), "LIVE01");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn report_session_metrics_errors_on_404() {
+        async fn not_found() -> StatusCode {
+            StatusCode::NOT_FOUND
+        }
+        let app = Router::new().route("/internal/sessions/{id}/metrics", post(not_found));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let err = api
+            .report_session_metrics("X", &json!({"k":1}))
+            .await
+            .expect_err("404 must error");
+        assert!(err.contains("→ 404"), "got {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn report_session_metrics_succeeds_on_2xx() {
+        async fn ok() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new().route("/internal/sessions/{id}/metrics", post(ok));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        api.report_session_metrics("X", &json!({"k":1}))
+            .await
+            .expect("ok");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn report_session_metrics_network_error_is_wrapped() {
+        let api = WorkersApi::new("http://127.0.0.1:1", "sec");
+        let err = api
+            .report_session_metrics("X", &json!({}))
+            .await
+            .expect_err("refused connection must error");
+        assert!(err.starts_with("workers metrics error"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn workers_api_new_trims_trailing_slash_from_base_url() {
+        let api = WorkersApi::new("http://example.com/", "sec");
+        assert_eq!(api.base_url, "http://example.com");
+    }
 
     #[test]
     fn stream_requires_delay_ms_and_host_gain_per_openapi_contract() {

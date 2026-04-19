@@ -370,4 +370,274 @@ mod tests {
 
         assert_eq!(final_text, "prefix added");
     }
+
+    use crate::features::broadcast::domain::{LiveSession, LiveSessions, PipelineConfig};
+    use axum::extract::ws::Message;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn session_with_host_tx(id: &str) -> (LiveSessions, mpsc::UnboundedReceiver<Message>) {
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = LiveSession::new(
+            id.into(),
+            Lang::En,
+            None,
+            Arc::new(PipelineConfig::default()),
+        );
+        session.host_tx = Some(tx);
+        sessions.insert(id.into(), session);
+        (sessions, rx)
+    }
+
+    #[test]
+    fn emit_interim_in_source_mode_forwards_joined_text_to_host() {
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        emit_interim_if_needed(InterimArgs {
+            mode: &SonioxMode::Source { lang: Lang::En },
+            handle: &handle,
+            final_text: "hello ",
+            interim_tail: "world",
+        });
+
+        match rx.try_recv().expect("message forwarded") {
+            Message::Text(t) => {
+                assert!(t.as_str().contains("\"type\":\"interim\""));
+                assert!(t.as_str().contains("hello world"));
+            }
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_interim_skips_send_when_mode_is_translate() {
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        emit_interim_if_needed(InterimArgs {
+            mode: &SonioxMode::Translate {
+                source_lang: Lang::En,
+                target_lang: Lang::Ja,
+            },
+            handle: &handle,
+            final_text: "x",
+            interim_tail: "y",
+        });
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn emit_interim_skips_send_when_buffer_is_empty() {
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        emit_interim_if_needed(InterimArgs {
+            mode: &SonioxMode::Source { lang: Lang::En },
+            handle: &handle,
+            final_text: "",
+            interim_tail: "",
+        });
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn emit_final_source_forwards_full_message_to_host() {
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        emit_final_source("commit", 7, &handle);
+        match rx.try_recv().expect("message forwarded") {
+            Message::Text(t) => {
+                assert!(t.as_str().contains("\"type\":\"final\""));
+                assert!(t.as_str().contains("\"utteranceId\":7"));
+                assert!(t.as_str().contains("\"transcript\":\"commit\""));
+            }
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_final_source_is_noop_when_live_session_missing() {
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        let handle = LiveSessionHandle::new("missing".into(), sessions);
+        emit_final_source("commit", 1, &handle);
+    }
+
+    #[tokio::test]
+    async fn finalize_utterance_drops_empty_text_without_bumping_counter() {
+        let (sessions, _rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let mut text = "   ".to_string();
+        let new_counter = finalize_utterance_if_needed(FinalizeArgs {
+            mode: &SonioxMode::Source { lang: Lang::En },
+            utterance_counter: 5,
+            handle: &handle,
+            final_text: &mut text,
+        })
+        .await;
+        assert_eq!(new_counter, 5);
+        assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalize_utterance_commits_non_empty_source_text_and_bumps_counter() {
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let mut text = "hello".to_string();
+        let new_counter = finalize_utterance_if_needed(FinalizeArgs {
+            mode: &SonioxMode::Source { lang: Lang::En },
+            utterance_counter: 3,
+            handle: &handle,
+            final_text: &mut text,
+        })
+        .await;
+        assert_eq!(new_counter, 4);
+        assert!(text.is_empty());
+        match rx.try_recv().expect("forwarded") {
+            Message::Text(t) => assert!(t.as_str().contains("\"utteranceId\":4")),
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    async fn spawn_ws_soniox_fixture(
+        messages: Vec<String>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            use futures_util::SinkExt;
+            for m in messages {
+                if ws
+                    .send(tokio_tungstenite::tungstenite::Message::Text(m.into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = ws.close(None).await;
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn spawn_response_processor_emits_final_transcript_on_end_token_in_source_mode() {
+        let fixture = vec![
+            serde_json::json!({
+                "tokens": [
+                    {"text": "hello ", "is_final": true},
+                    {"text": "world", "is_final": true},
+                    {"text": super::super::soniox::SONIOX_END_TOKEN, "is_final": true},
+                ]
+            })
+            .to_string(),
+        ];
+        let (addr, server) = spawn_ws_soniox_fixture(fixture).await;
+
+        let url = format!("ws://{}", addr);
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        use futures_util::StreamExt;
+        let (_sink, stream) = ws.split();
+
+        let (sessions, mut rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        let processor = spawn_response_processor(ProcessorArgs {
+            handle,
+            mode: SonioxMode::Source { lang: Lang::En },
+            tag: "tag".into(),
+            utterance_counter: 0,
+            stt_stream: stream,
+        });
+
+        let (counter, disconnected) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), processor)
+                .await
+                .expect("processor completes")
+                .expect("task panic");
+        assert_eq!(counter, 1, "end-token should bump utterance counter by 1");
+        assert!(disconnected);
+
+        let mut saw_final = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let Message::Text(t) = msg
+                && t.as_str().contains("\"type\":\"final\"")
+                && t.as_str().contains("\"transcript\":\"hello world\"")
+            {
+                saw_final = true;
+            }
+        }
+        assert!(
+            saw_final,
+            "expected final host message with joined transcript"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn emit_translation_sends_translation_message_and_triggers_push_caption_when_manager_present()
+     {
+        use crate::features::broadcast::data::ffmpeg::RtmpManager;
+
+        let (sessions, mut rx) = session_with_host_tx("room");
+        // Attach an empty RtmpManager so the push_caption branch is exercised.
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.rtmp_manager = Some(Arc::new(tokio::sync::Mutex::new(RtmpManager::new())));
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        super::emit_translation(super::EmitTranslationArgs {
+            committed: "konnichiwa",
+            utterance_id: 2,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+        })
+        .await;
+
+        let mut saw_translation = false;
+        while let Ok(Message::Text(t)) = rx.try_recv() {
+            if t.as_str().contains("\"type\":\"translation\"") {
+                saw_translation = true;
+            }
+        }
+        assert!(saw_translation);
+    }
+
+    #[tokio::test]
+    async fn spawn_response_processor_exits_when_soniox_reports_error_code() {
+        let fixture = vec![
+            serde_json::json!({
+                "error_code": "auth_failed",
+                "error_message": "bad key"
+            })
+            .to_string(),
+        ];
+        let (addr, server) = spawn_ws_soniox_fixture(fixture).await;
+        let url = format!("ws://{}", addr);
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        use futures_util::StreamExt;
+        let (_sink, stream) = ws.split();
+
+        let (sessions, _rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let processor = spawn_response_processor(ProcessorArgs {
+            handle,
+            mode: SonioxMode::Source { lang: Lang::En },
+            tag: "tag".into(),
+            utterance_counter: 0,
+            stt_stream: stream,
+        });
+        let (_counter, disconnected) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), processor)
+                .await
+                .expect("processor completes")
+                .expect("task panic");
+        // Current contract: error_code → return (counter, true) — treat as
+        // disconnect so outer loop may attempt reconnect.
+        assert!(disconnected);
+        server.abort();
+    }
 }

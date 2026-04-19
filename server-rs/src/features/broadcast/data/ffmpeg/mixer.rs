@@ -53,8 +53,68 @@ mod tests {
     }
 
     #[test]
+    fn apply_gain_returns_empty_on_zero_length_input() {
+        let out = apply_gain(&[], 1.0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn apply_gain_returns_empty_when_only_odd_byte_supplied() {
+        let out = apply_gain(&[0x42], 1.0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn apply_gain_clips_to_i16_range_on_positive_overflow() {
+        // 20_000 * 2.0 overflows positive → clips to i16::MAX.
+        let out = apply_gain(&pcm(&[20_000]), 2.0);
+        assert_eq!(decode_samples(&out), vec![i16::MAX]);
+    }
+
+    #[test]
+    fn apply_gain_clips_to_i16_range_on_negative_overflow() {
+        // -20_000 * 2.0 overflows negative → clips to i16::MIN.
+        let out = apply_gain(&pcm(&[-20_000]), 2.0);
+        assert_eq!(decode_samples(&out), vec![i16::MIN]);
+    }
+
+    #[test]
+    fn apply_gain_zero_produces_silence() {
+        let out = apply_gain(&pcm(&[10_000, -10_000, 30]), 0.0);
+        assert_eq!(decode_samples(&out), vec![0, 0, 0]);
+    }
+
+    #[test]
     fn mix_pcm_s16le_clips_on_overflow() {
         let mixed = mix_pcm_s16le(&pcm(&[30_000, -30_000]), 1.0, &pcm(&[10_000, -10_000]), 1.0);
         assert_eq!(decode_samples(&mixed), vec![32_767, -32_768]);
+    }
+
+    #[test]
+    fn mix_pcm_s16le_applies_independent_gains_then_sums() {
+        let mixed = mix_pcm_s16le(&pcm(&[10_000]), 0.5, &pcm(&[10_000]), 1.0);
+        assert_eq!(decode_samples(&mixed), vec![15_000]);
+    }
+
+    #[test]
+    fn mix_pcm_s16le_truncates_to_shortest_even_byte_length() {
+        // a has 2 samples (4 bytes), b has 1 sample (2 bytes) — output 1 sample.
+        let mixed = mix_pcm_s16le(&pcm(&[5, 6]), 1.0, &pcm(&[7]), 1.0);
+        assert_eq!(decode_samples(&mixed), vec![12]);
+    }
+
+    #[test]
+    fn mix_pcm_s16le_returns_empty_when_either_stream_is_empty() {
+        assert!(mix_pcm_s16le(&[], 1.0, &pcm(&[1]), 1.0).is_empty());
+        assert!(mix_pcm_s16le(&pcm(&[1]), 1.0, &[], 1.0).is_empty());
+    }
+
+    #[test]
+    fn mix_pcm_s16le_rounds_shared_length_down_to_even_byte_count() {
+        // min length 5 bytes → rounds down to 4, emitting 2 samples.
+        let a = vec![0x10, 0x00, 0x20, 0x00, 0xFF];
+        let b = vec![0x05, 0x00, 0x03, 0x00, 0xFF];
+        let mixed = mix_pcm_s16le(&a, 1.0, &b, 1.0);
+        assert_eq!(decode_samples(&mixed), vec![0x15, 0x23]);
     }
 }

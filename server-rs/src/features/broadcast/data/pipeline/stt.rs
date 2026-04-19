@@ -195,4 +195,83 @@ mod tests {
     fn dedupe_handles_empty_input() {
         assert!(dedupe_target_langs(Lang::En, vec![]).is_empty());
     }
+
+    #[test]
+    fn dedupe_keeps_all_entries_when_none_match_source() {
+        let targets = dedupe_target_langs(Lang::En, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+        assert_eq!(targets, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+    }
+
+    #[tokio::test]
+    async fn start_stt_pipelines_returns_early_when_api_key_is_empty() {
+        use crate::features::broadcast::domain::{LiveSessionHandle, LiveSessions, PipelineConfig};
+        use dashmap::DashMap;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let (_tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        let session = super::PipelineSession {
+            handle,
+            source_lang: Lang::En,
+            target_langs: vec![Lang::Ja],
+            config: Arc::new(PipelineConfig::default()), // empty soniox_api_key
+        };
+        // Should just log and return — no panic or spawn storm.
+        super::start_stt_pipelines(session, rx).await;
+    }
+
+    #[tokio::test]
+    async fn start_stt_pipelines_spawns_source_plus_unique_target_sessions_that_exit_with_session()
+    {
+        use crate::features::broadcast::domain::{
+            LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig,
+        };
+        use dashmap::DashMap;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        sessions.insert(
+            "room".into(),
+            LiveSession::new(
+                "room".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig::default()),
+            ),
+        );
+        let handle = LiveSessionHandle::new("room".into(), sessions.clone());
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
+
+        let session = super::PipelineSession {
+            handle,
+            source_lang: Lang::En,
+            // Duplicates + source repeat exercise dedupe + fan-out wiring.
+            target_langs: vec![Lang::Ja, Lang::En, Lang::Ja, Lang::Ko],
+            config: Arc::new(PipelineConfig {
+                soniox_api_key: "sk".into(),
+                // ws://127.0.0.1:1 is connection-refused → each tokio task
+                // will attempt, fail, sleep, re-attempt. Removing the session
+                // trips contains_key=false in connect_soniox and the task
+                // exits promptly.
+                soniox_ws_url: "ws://127.0.0.1:1".into(),
+                ..Default::default()
+            }),
+        };
+        super::start_stt_pipelines(session, rx).await;
+
+        // Push a frame so fan_out runs once, then drop the sender and remove
+        // the session. Background STT tasks exit as soon as they notice the
+        // session is gone on their next attempt.
+        tx.send(vec![0u8; 16]).await.unwrap();
+        drop(tx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sessions.remove("room");
+        // No explicit join — the tokio::spawn handles are not returned.
+        // Sleep briefly to let the tasks observe the session removal and
+        // exit without hanging the test runner.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }

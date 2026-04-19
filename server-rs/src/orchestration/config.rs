@@ -110,4 +110,89 @@ mod tests {
         assert_eq!(cfg.workers_api_url, "https://example.com");
         assert_eq!(cfg.elevenlabs_base_url, "https://el.example.com");
     }
+
+    #[test]
+    fn env_flag_accepts_truthy_values_regardless_of_case() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        for truthy in [
+            "1", "true", "yes", "on", "TRUE", "Yes", "ON", " true ", "1\n",
+        ] {
+            unsafe {
+                std::env::set_var("BRIVVA_TEST_FLAG", truthy);
+            }
+            assert!(
+                env_flag("BRIVVA_TEST_FLAG"),
+                "expected {truthy:?} to be truthy"
+            );
+        }
+        unsafe {
+            std::env::remove_var("BRIVVA_TEST_FLAG");
+        }
+    }
+
+    #[test]
+    fn env_flag_rejects_falsy_values_including_empty_and_non_literal() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        for falsy in ["0", "false", "no", "off", "", "2", "enabled", "disabled"] {
+            unsafe {
+                std::env::set_var("BRIVVA_TEST_FLAG", falsy);
+            }
+            assert!(
+                !env_flag("BRIVVA_TEST_FLAG"),
+                "expected {falsy:?} to be falsy"
+            );
+        }
+        unsafe {
+            std::env::remove_var("BRIVVA_TEST_FLAG");
+        }
+    }
+
+    #[test]
+    fn env_flag_is_false_when_env_var_unset() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("BRIVVA_TEST_FLAG_MISSING");
+        }
+        assert!(!env_flag("BRIVVA_TEST_FLAG_MISSING"));
+    }
+
+    #[test]
+    fn from_env_populates_secrets_and_kill_switches_from_environment() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", "abc");
+            std::env::set_var("INTERNAL_SECRET", "xyz");
+            std::env::set_var("SONIOX_API_KEY", "sk-soniox");
+            std::env::set_var("SONIOX_WS_URL", "wss://custom");
+            std::env::set_var("ELEVENLABS_API_KEY", "sk-eleven");
+            std::env::set_var("ELEVENLABS_BASE_URL", "https://el");
+            std::env::set_var("BRIVVA_FALLBACK_TO_DEFAULT_VOICE", "yes");
+            std::env::set_var("BRIVVA_FORCE_RTMP_NOT_RTMPS", "on");
+        }
+
+        let cfg = AppConfig::from_env();
+        assert_eq!(cfg.jwt_secret, "abc");
+        assert_eq!(cfg.internal_secret, "xyz");
+        assert_eq!(cfg.soniox_api_key, "sk-soniox");
+        assert_eq!(cfg.soniox_ws_url, "wss://custom");
+        assert_eq!(cfg.elevenlabs_api_key, "sk-eleven");
+        assert_eq!(cfg.elevenlabs_base_url, "https://el");
+        assert!(cfg.force_default_voice);
+        assert!(cfg.force_rtmp_not_rtmps);
+
+        unsafe {
+            for key in [
+                "JWT_SECRET",
+                "INTERNAL_SECRET",
+                "SONIOX_API_KEY",
+                "SONIOX_WS_URL",
+                "ELEVENLABS_API_KEY",
+                "ELEVENLABS_BASE_URL",
+                "BRIVVA_FALLBACK_TO_DEFAULT_VOICE",
+                "BRIVVA_FORCE_RTMP_NOT_RTMPS",
+            ] {
+                std::env::remove_var(key);
+            }
+        }
+    }
 }

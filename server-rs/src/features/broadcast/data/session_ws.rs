@@ -503,7 +503,8 @@ async fn teardown_session(args: TeardownArgs<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::broadcast::domain::{Lang, PipelineConfig};
+    use crate::features::broadcast::data::state::BroadcastState;
+    use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
 
     #[test]
     fn next_available_live_session_id_skips_existing_entries() {
@@ -523,5 +524,94 @@ mod tests {
             assert_ne!(id, "ABC123");
             assert!(!id.is_empty());
         }
+    }
+
+    #[test]
+    fn generate_live_session_id_produces_6_char_uppercase_hex() {
+        for _ in 0..8 {
+            let id = generate_live_session_id();
+            assert_eq!(id.len(), 6);
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+            );
+        }
+    }
+
+    #[test]
+    fn maybe_downgrade_rtmps_preserves_url_when_flag_is_off_even_for_rtmps() {
+        let rewritten = maybe_downgrade_rtmps("rtmps://x/y", false);
+        assert_eq!(rewritten, "rtmps://x/y");
+    }
+
+    #[test]
+    fn maybe_downgrade_rtmps_does_not_rewrite_non_rtmps_schemes_even_with_flag() {
+        assert_eq!(maybe_downgrade_rtmps("rtmp://x/y", true), "rtmp://x/y");
+        assert_eq!(
+            maybe_downgrade_rtmps("srt://host:9999?x=1", true),
+            "srt://host:9999?x=1"
+        );
+    }
+
+    #[test]
+    fn pipeline_config_from_maps_every_broadcast_state_field() {
+        let mut state = BroadcastState::new();
+        state.soniox_api_key = "sk-s".into();
+        state.soniox_ws_url = "wss://s".into();
+        state.elevenlabs_api_key = "sk-e".into();
+        state.elevenlabs_base_url = "https://e".into();
+        state.force_default_voice = true;
+        state.force_rtmp_not_rtmps = true;
+
+        let cfg = pipeline_config_from(&state);
+        assert_eq!(cfg.soniox_api_key, "sk-s");
+        assert_eq!(cfg.soniox_ws_url, "wss://s");
+        assert_eq!(cfg.elevenlabs_api_key, "sk-e");
+        assert_eq!(cfg.elevenlabs_base_url, "https://e");
+        assert!(cfg.force_default_voice);
+        assert!(cfg.force_rtmp_not_rtmps);
+    }
+
+    #[tokio::test]
+    async fn teardown_session_is_noop_when_live_session_id_missing() {
+        let live_sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
+        let workers_api = Arc::new(WorkersApi::new("", ""));
+        let stop = Arc::new(AtomicBool::new(false));
+        teardown_session(TeardownArgs {
+            live_sessions: &live_sessions,
+            live_session_id: "MISSING",
+            workers_api: &workers_api,
+            ffmpeg_monitor_stop: stop.clone(),
+        })
+        .await;
+        assert!(
+            stop.load(Ordering::Acquire),
+            "stop flag still set on noop path"
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_session_removes_live_session_and_sets_stop_flag() {
+        let live_sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
+        live_sessions.insert(
+            "LIVE01".into(),
+            LiveSession::new(
+                "LIVE01".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig::default()),
+            ),
+        );
+        let workers_api = Arc::new(WorkersApi::new("", ""));
+        let stop = Arc::new(AtomicBool::new(false));
+        teardown_session(TeardownArgs {
+            live_sessions: &live_sessions,
+            live_session_id: "LIVE01",
+            workers_api: &workers_api,
+            ffmpeg_monitor_stop: stop.clone(),
+        })
+        .await;
+        assert!(live_sessions.is_empty());
+        assert!(stop.load(Ordering::Acquire));
     }
 }

@@ -108,4 +108,61 @@ mod tests {
         m.record_tts_pcm("ja", 10);
         assert!(!m.snapshot().output_minutes_by_lang.contains_key("ja"));
     }
+
+    #[test]
+    fn record_bytes_out_with_zero_is_a_noop() {
+        let m = SessionMetrics::new();
+        m.record_bytes_out(0);
+        assert_eq!(m.snapshot().bytes_out_total, 0);
+    }
+
+    #[test]
+    fn record_tts_pcm_with_zero_bytes_is_a_noop() {
+        let m = SessionMetrics::new();
+        m.record_tts_pcm("ja", 0);
+        assert!(!m.snapshot().output_minutes_by_lang.contains_key("ja"));
+    }
+
+    #[test]
+    fn snapshot_sums_repeated_calls_per_lang() {
+        let m = SessionMetrics::new();
+        m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND * 2);
+        m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
+        let snap = m.snapshot();
+        let minutes = snap.output_minutes_by_lang["ja"];
+        assert!((minutes - 3.0 / 60.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn snapshot_tracks_multiple_langs_independently() {
+        let m = SessionMetrics::new();
+        m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
+        m.record_tts_pcm("ko", PCM_BYTES_PER_SECOND * 2);
+        let snap = m.snapshot();
+        assert!(snap.output_minutes_by_lang.contains_key("ja"));
+        assert!(snap.output_minutes_by_lang.contains_key("ko"));
+        assert!(snap.output_minutes_by_lang["ko"] > snap.output_minutes_by_lang["ja"]);
+    }
+
+    #[test]
+    fn metrics_payload_serializes_with_expected_field_names() {
+        let m = SessionMetrics::new();
+        m.record_bytes_out(42);
+        m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
+        let json = serde_json::to_string(&m.snapshot()).unwrap();
+        assert!(json.contains("\"source_minutes\""));
+        assert!(json.contains("\"output_minutes_by_lang\""));
+        assert!(json.contains("\"bytes_out_total\":42"));
+        assert!(json.contains("\"ja\""));
+    }
+
+    #[test]
+    fn snapshot_source_minutes_is_non_negative_and_monotonic() {
+        let m = SessionMetrics::new();
+        let first = m.snapshot().source_minutes;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = m.snapshot().source_minutes;
+        assert!(first >= 0.0);
+        assert!(second >= first);
+    }
 }

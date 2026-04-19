@@ -103,6 +103,87 @@ async fn websocket_without_token_is_rejected_and_never_creates_live_session() {
 }
 
 #[tokio::test]
+async fn websocket_forwards_binary_and_text_without_panicking_before_host_end() {
+    let (_guard, base_url, state, server) = {
+        let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", "integration-secret");
+        }
+        let (base_url, state, server) = spawn_app().await;
+        (guard, base_url, state, server)
+    };
+
+    let token = make_token("integration-secret", "host-1");
+    let ws_url = format!(
+        "{}/api/session?token={}&sourceLang=en",
+        base_url.replacen("http", "ws", 1),
+        token
+    );
+    use futures_util::SinkExt;
+    let (mut socket, _) = connect_async(&ws_url).await.expect("connect ws");
+
+    wait_for_live_session_count(&state, 1).await;
+
+    // Exercise the handle_binary path — first binary frame spawns STT
+    // pipelines; subsequent frames reuse the sender. Soniox is not mocked
+    // here so STT will fail silently, but handle_binary itself must not
+    // panic.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(
+            vec![0u8; 16].into(),
+        ))
+        .await
+        .expect("send binary");
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(
+            vec![1u8; 32].into(),
+        ))
+        .await
+        .expect("send binary");
+
+    // Exercise the handle_text path — unknown json type is tolerated.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "{\"type\":\"unknown\"}".into(),
+        ))
+        .await
+        .expect("send unknown text");
+    // Exercise the face:frame branch — base64 decode should succeed but
+    // rtmp_manager is absent so the path ends with a noop.
+    let face_frame = format!(
+        "{{\"type\":\"face:frame\",\"data\":\"{}\"}}",
+        "Zm9v" // "foo"
+    );
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            face_frame.into(),
+        ))
+        .await
+        .expect("send face frame");
+
+    // Send an invalid JSON text — json parse fails, branch returns early.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "not-json".into(),
+        ))
+        .await
+        .expect("send bad text");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.live_sessions.len(), 1);
+
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "host:end".into(),
+        ))
+        .await
+        .expect("send host:end");
+    wait_for_live_session_count(&state, 0).await;
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_with_valid_token_uses_default_en_for_invalid_source_lang() {
     let (_guard, base_url, state, server) = {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());

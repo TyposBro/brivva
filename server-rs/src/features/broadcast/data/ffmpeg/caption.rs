@@ -93,4 +93,100 @@ mod tests {
         assert!(out.contains('\n'));
         assert_eq!(out.chars().count(), 200);
     }
+
+    #[test]
+    fn sanitize_caption_passes_through_empty_input() {
+        assert_eq!(sanitize_caption(""), "");
+    }
+
+    #[test]
+    fn sanitize_caption_keeps_short_text_unchanged() {
+        assert_eq!(sanitize_caption("안녕하세요"), "안녕하세요");
+    }
+
+    #[test]
+    fn sanitize_caption_strips_other_control_chars_but_keeps_newline() {
+        let out = sanitize_caption("a\x07\tb\n");
+        assert_eq!(out, "ab\n");
+    }
+
+    #[test]
+    fn write_caption_atomic_writes_file_at_target_path() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("brivva_caption_test_{}.txt", std::process::id()));
+        let path_str = path.to_str().unwrap().to_string();
+
+        write_caption_atomic(&path_str, "hello");
+        let contents = std::fs::read_to_string(&path).expect("caption file written");
+        assert_eq!(contents, "hello");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn caption_state_push_and_shutdown_drains_gracefully() {
+        let id = format!("test-{}", std::process::id());
+        let mut state = CaptionState::spawn(&id);
+        assert!(state.path.contains(&id));
+        state.push("hi");
+        state.shutdown();
+        // Second shutdown is a no-op.
+        state.shutdown();
+        let _ = std::fs::remove_file(&state.path);
+    }
+
+    #[tokio::test]
+    async fn caption_state_push_flushes_first_write_immediately_and_coalesces_bursts() {
+        let id = format!("flush-{}", std::process::id());
+        let mut state = CaptionState::spawn(&id);
+        let path = state.path.clone();
+
+        // First write has no dwell-time debt → land within a few ms.
+        state.push("first");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let first = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            first, "first",
+            "first write should flush before dwell timer"
+        );
+
+        // Two rapid writes inside the dwell window — only the latest should
+        // land, because the worker coalesces via `try_recv`.
+        state.push("second");
+        state.push("third");
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+        let final_contents = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            final_contents, "third",
+            "burst should coalesce to the newest text after dwell"
+        );
+
+        state.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_caption_atomic_overwrites_existing_file_contents() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "brivva_caption_atomic_test_{}.txt",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+
+        write_caption_atomic(&path_str, "one");
+        write_caption_atomic(&path_str, "two");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "two");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_caption_atomic_handles_unwritable_directory_gracefully() {
+        // Writing under a non-existent directory tree triggers the error
+        // branch for `fs::write(tmp, ...)`. The function must not panic.
+        let path = "/this/does/not/exist/brivva_caption_test.txt";
+        write_caption_atomic(path, "hi"); // returns early with log
+    }
 }
