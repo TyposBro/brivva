@@ -1,7 +1,7 @@
 import { useReducer, useRef, useCallback } from "react";
 import * as api from "../lib/api";
 import { AudioPipeline } from "../lib/AudioPipeline";
-import { SessionSocket } from "../lib/SessionSocket";
+import { SessionSocket } from "../shared/networking/session-socket";
 import { useTimings, type UtteranceTiming } from "./useTimings";
 import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
 import { createMessageHandler } from "../state/host/messageHandler";

@@ -71,7 +71,7 @@ const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } = vi.hois
 });
 
 vi.mock("../lib/AudioPipeline", () => ({ AudioPipeline: FakePipeline }));
-vi.mock("../lib/SessionSocket", () => ({ SessionSocket: FakeSocket }));
+vi.mock("../shared/networking/session-socket", () => ({ SessionSocket: FakeSocket }));
 
 import * as api from "../lib/api";
 import { useHostSession } from "./useHostSession";

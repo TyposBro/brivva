@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { SessionSocket } from "./SessionSocket";
+import { SessionSocket } from "./session-socket";
 
 class FakeWebSocket {
   static OPEN = 1;
