@@ -107,6 +107,30 @@ export async function updateUserProfile(
     .run();
 }
 
+export async function markOnboardingCompleted(
+  db: D1Database,
+  userId: string,
+): Promise<User> {
+  await wrap(db)
+    .update(schema.users)
+    .set({ onboarding_completed_at: now() })
+    .where(eq(schema.users.id, userId))
+    .run();
+  return await getOrCreateUser(db, userId);
+}
+
+export async function setActiveVoice(
+  db: D1Database,
+  userId: string,
+  voiceId: string | null,
+): Promise<void> {
+  await wrap(db)
+    .update(schema.users)
+    .set({ active_voice_id: voiceId })
+    .where(eq(schema.users.id, userId))
+    .run();
+}
+
 // ── voices ────────────────────────────────────────────────
 
 export async function listVoices(

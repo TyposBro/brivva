@@ -26,6 +26,16 @@ export const users = sqliteTable("users", {
   email: text("email"),
   name: text("name"),
   picture: text("picture"),
+  onboarding_completed_at: integer("onboarding_completed_at"),
+  // Points at the user's current voice clone row. POST /api/voices is upsert:
+  // old voice (+ ElevenLabs voice) is deleted, new row created, this flips.
+  active_voice_id: text("active_voice_id"),
+  // 'self_serve' | 'b2b'. B2B rows are flagged by ops via wrangler d1 execute;
+  // see docs/b2b-onboarding-notes.md.
+  billing_tier: text("billing_tier").notNull().default("self_serve"),
+  // Free-text invoice target (company name / AP contact). Nullable because
+  // self-serve users don't need it; B2B rows do.
+  bills_to: text("bills_to"),
   created_at: integer("created_at").notNull(),
 });
 

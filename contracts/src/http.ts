@@ -14,6 +14,10 @@ export const UserInfoSchema = z.object({
   email: z.string().nullable(),
   name: z.string().nullable(),
   picture: z.string().nullable(),
+  onboarding_completed_at: z.number().int().nullable(),
+  active_voice_id: z.string().nullable(),
+  billing_tier: z.string().min(1),
+  bills_to: z.string().nullable(),
   created_at: z.number().int(),
 });
 
@@ -27,6 +31,10 @@ export const InternalUserSchema = z.object({
   email: z.string().nullable(),
   name: z.string().nullable(),
   picture: z.string().nullable(),
+  onboarding_completed_at: z.number().int().nullable(),
+  active_voice_id: z.string().nullable(),
+  billing_tier: z.string().min(1),
+  bills_to: z.string().nullable(),
   created_at: z.number().int(),
 });
 
@@ -240,6 +248,36 @@ export const InternalSessionMetricsUpdateSchema = z.object({
   output_seconds_by_lang: z.record(z.string(), z.number().nonnegative()).optional(),
 });
 
+export const CompleteOnboardingRequestSchema = z.object({
+  user_id: z.string().min(1),
+});
+
+export const BillingRateResponseSchema = z.object({
+  per_output_minute_usd: z.number(),
+});
+
+export const SessionQuoteQuerySchema = z.object({
+  expected_minutes: z.number().positive(),
+});
+
+export const SessionQuoteResponseSchema = z.object({
+  session_id: z.string().min(1),
+  expected_minutes: z.number().positive(),
+  output_minutes: z.number(),
+  per_output_minute_usd: z.number(),
+  cost_usd: z.number(),
+});
+
+export const SessionSummaryResponseSchema = z.object({
+  session_id: z.string().min(1),
+  status: z.string().min(1),
+  is_final: z.boolean(),
+  source_minutes: z.number(),
+  output_minutes_by_lang: z.record(z.string(), z.number()),
+  estimated_cost_usd: z.number(),
+  updated_at: z.number().int().nullable(),
+});
+
 export const InternalSessionBundleSchema = z.object({
   session: SessionSchema,
   streams: z.array(StreamSchema),
@@ -283,3 +321,7 @@ export type SessionUsageResponse = z.infer<typeof SessionUsageResponseSchema>;
 export type InternalSessionMetricsUpdate = z.infer<typeof InternalSessionMetricsUpdateSchema>;
 export type InternalSessionBundle = z.infer<typeof InternalSessionBundleSchema>;
 export type InternalSessionStatusUpdate = z.infer<typeof InternalSessionStatusUpdateSchema>;
+export type CompleteOnboardingRequest = z.infer<typeof CompleteOnboardingRequestSchema>;
+export type BillingRateResponse = z.infer<typeof BillingRateResponseSchema>;
+export type SessionQuoteResponse = z.infer<typeof SessionQuoteResponseSchema>;
+export type SessionSummaryResponse = z.infer<typeof SessionSummaryResponseSchema>;

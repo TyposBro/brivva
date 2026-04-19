@@ -104,6 +104,10 @@ const schemas = {
       "email",
       "name",
       "picture",
+      "onboarding_completed_at",
+      "active_voice_id",
+      "billing_tier",
+      "bills_to",
       "created_at",
     ],
     properties: {
@@ -114,6 +118,10 @@ const schemas = {
       email: { type: "string", nullable: true },
       name: { type: "string", nullable: true },
       picture: { type: "string", nullable: true },
+      onboarding_completed_at: { type: "integer", nullable: true },
+      active_voice_id: { type: "string", nullable: true },
+      billing_tier: { type: "string" },
+      bills_to: { type: "string", nullable: true },
       created_at: { type: "integer" },
     },
   },
@@ -129,6 +137,10 @@ const schemas = {
       "email",
       "name",
       "picture",
+      "onboarding_completed_at",
+      "active_voice_id",
+      "billing_tier",
+      "bills_to",
       "created_at",
     ],
     properties: {
@@ -141,6 +153,10 @@ const schemas = {
       email: { type: "string", nullable: true },
       name: { type: "string", nullable: true },
       picture: { type: "string", nullable: true },
+      onboarding_completed_at: { type: "integer", nullable: true },
+      active_voice_id: { type: "string", nullable: true },
+      billing_tier: { type: "string" },
+      bills_to: { type: "string", nullable: true },
       created_at: { type: "integer" },
     },
   },
@@ -431,6 +447,61 @@ const schemas = {
       estimated_cost_usd: { type: "number" },
     },
   },
+  CompleteOnboardingRequest: {
+    type: "object",
+    required: ["user_id"],
+    properties: {
+      user_id: { type: "string" },
+    },
+  },
+  BillingRateResponse: {
+    type: "object",
+    required: ["per_output_minute_usd"],
+    properties: {
+      per_output_minute_usd: { type: "number" },
+    },
+  },
+  SessionQuoteResponse: {
+    type: "object",
+    required: [
+      "session_id",
+      "expected_minutes",
+      "output_minutes",
+      "per_output_minute_usd",
+      "cost_usd",
+    ],
+    properties: {
+      session_id: { type: "string" },
+      expected_minutes: { type: "number" },
+      output_minutes: { type: "number" },
+      per_output_minute_usd: { type: "number" },
+      cost_usd: { type: "number" },
+    },
+  },
+  SessionSummaryResponse: {
+    type: "object",
+    required: [
+      "session_id",
+      "status",
+      "is_final",
+      "source_minutes",
+      "output_minutes_by_lang",
+      "estimated_cost_usd",
+      "updated_at",
+    ],
+    properties: {
+      session_id: { type: "string" },
+      status: { type: "string" },
+      is_final: { type: "boolean" },
+      source_minutes: { type: "number" },
+      output_minutes_by_lang: {
+        type: "object",
+        additionalProperties: { type: "number" },
+      },
+      estimated_cost_usd: { type: "number" },
+      updated_at: { type: "integer", nullable: true },
+    },
+  },
   InternalSessionMetricsUpdate: {
     type: "object",
     properties: {
@@ -483,6 +554,14 @@ function userPaths() {
         400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
       }, {
         parameters: [queryParam("user_id")],
+      }),
+    },
+    "/api/user/complete-onboarding": {
+      post: getOperation("Mark first-run onboarding as complete", {
+        200: jsonResponse(ref("UserInfo"), "Updated user profile"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("CompleteOnboardingRequest")),
       }),
     },
   };
@@ -609,6 +688,26 @@ function sessionPaths() {
         parameters: [pathParam("id", "Session id")],
       }),
     },
+    "/api/sessions/{id}/quote": {
+      get: getOperation("Pre-stream cost quote", {
+        200: jsonResponse(ref("SessionQuoteResponse"), "Cost projection"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid expected_minutes"),
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        parameters: [
+          pathParam("id", "Session id"),
+          queryParam("expected_minutes", true, "Expected host-speaking minutes"),
+        ],
+      }),
+    },
+    "/api/sessions/{id}/summary": {
+      get: getOperation("Session summary (live or final)", {
+        200: jsonResponse(ref("SessionSummaryResponse"), "Summary rollup"),
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+      }),
+    },
   };
 }
 
@@ -682,6 +781,11 @@ function authPaths() {
 
 function billingPaths() {
   return {
+    "/api/billing/rate": {
+      get: getOperation("Get published per-output-minute USD rate", {
+        200: jsonResponse(ref("BillingRateResponse"), "Current rate"),
+      }),
+    },
     "/api/billing/summary": {
       get: getOperation("Current-month usage + estimated cost", {
         200: jsonResponse(ref("BillingSummaryResponse"), "Billing summary"),

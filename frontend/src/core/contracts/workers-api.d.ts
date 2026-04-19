@@ -87,6 +87,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/user/complete-onboarding": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark first-run onboarding as complete */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CompleteOnboardingRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated user profile */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserInfo"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/voices": {
         parameters: {
             query?: never;
@@ -707,6 +756,114 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{id}/quote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pre-stream cost quote */
+        get: {
+            parameters: {
+                query: {
+                    /** @description Expected host-speaking minutes */
+                    expected_minutes: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Session id */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Cost projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionQuoteResponse"];
+                    };
+                };
+                /** @description Invalid expected_minutes */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Session not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Session summary (live or final) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Session id */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Summary rollup */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionSummaryResponse"];
+                    };
+                };
+                /** @description Session not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/youtube": {
         parameters: {
             query?: never;
@@ -1047,6 +1204,42 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/billing/rate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get published per-output-minute USD rate */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current rate */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BillingRateResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1429,6 +1622,10 @@ export interface components {
             email: string | null;
             name: string | null;
             picture: string | null;
+            onboarding_completed_at: number | null;
+            active_voice_id: string | null;
+            billing_tier: string;
+            bills_to: string | null;
             created_at: number;
         };
         InternalUser: {
@@ -1441,6 +1638,10 @@ export interface components {
             email: string | null;
             name: string | null;
             picture: string | null;
+            onboarding_completed_at: number | null;
+            active_voice_id: string | null;
+            billing_tier: string;
+            bills_to: string | null;
             created_at: number;
         };
         Voice: {
@@ -1588,6 +1789,30 @@ export interface components {
                 [key: string]: number;
             };
             estimated_cost_usd: number;
+        };
+        CompleteOnboardingRequest: {
+            user_id: string;
+        };
+        BillingRateResponse: {
+            per_output_minute_usd: number;
+        };
+        SessionQuoteResponse: {
+            session_id: string;
+            expected_minutes: number;
+            output_minutes: number;
+            per_output_minute_usd: number;
+            cost_usd: number;
+        };
+        SessionSummaryResponse: {
+            session_id: string;
+            status: string;
+            is_final: boolean;
+            source_minutes: number;
+            output_minutes_by_lang: {
+                [key: string]: number;
+            };
+            estimated_cost_usd: number;
+            updated_at: number | null;
         };
         InternalSessionMetricsUpdate: {
             source_seconds?: number;

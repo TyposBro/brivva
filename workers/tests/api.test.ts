@@ -1178,3 +1178,273 @@ describe("POST /stripe/webhook", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("POST /api/user/complete-onboarding", () => {
+  it("400 without user_id (sad)", async () => {
+    const res = await call("/api/user/complete-onboarding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("stamps onboarding_completed_at on the user (happy)", async () => {
+    const before = await call("/api/user?user_id=u-onb");
+    const beforeBody = (await before.json()) as {
+      onboarding_completed_at: number | null;
+    };
+    expect(beforeBody.onboarding_completed_at).toBeNull();
+
+    const res = await call("/api/user/complete-onboarding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "u-onb" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      onboarding_completed_at: number | null;
+    };
+    expect(body.onboarding_completed_at).toBeGreaterThan(0);
+  });
+
+  it("is idempotent — second call keeps a truthy stamp (happy)", async () => {
+    await call("/api/user/complete-onboarding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "u-onb-2" }),
+    });
+    const second = await call("/api/user/complete-onboarding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "u-onb-2" }),
+    });
+    const body = (await second.json()) as { onboarding_completed_at: number };
+    expect(body.onboarding_completed_at).toBeGreaterThan(0);
+  });
+});
+
+describe("POST /api/voices upsert behaviour", () => {
+  it("deletes prior ElevenLabs voice + row before creating a new one (happy)", async () => {
+    const elCalls: Array<{ method: string; url: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = (
+          init?.method ?? (input instanceof Request ? input.method : "GET")
+        ).toUpperCase();
+        elCalls.push({ method, url });
+        if (/api\.elevenlabs\.io\/v1\/voices\/add/.test(url)) {
+          return new Response(JSON.stringify({ voice_id: `el-${elCalls.length}` }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (/api\.elevenlabs\.io\/v1\/voices\//.test(url) && method === "DELETE") {
+          return new Response("", { status: 200 });
+        }
+        throw new Error(`unstubbed fetch: ${method} ${url}`);
+      }),
+    );
+
+    const first = await call("/api/voices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-upsert",
+        name: "v1",
+        audio_base64: VALID_WAV_B64,
+      }),
+    });
+    expect(first.status).toBe(200);
+    const firstVoice = (await first.json()) as {
+      id: string;
+      elevenlabs_voice_id: string;
+    };
+
+    const second = await call("/api/voices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-upsert",
+        name: "v2",
+        audio_base64: VALID_WAV_B64,
+      }),
+    });
+    expect(second.status).toBe(200);
+    const secondVoice = (await second.json()) as {
+      id: string;
+      elevenlabs_voice_id: string;
+    };
+    expect(secondVoice.id).not.toBe(firstVoice.id);
+
+    // One ADD per create, plus one DELETE for the prior clone.
+    const adds = elCalls.filter((x) => /voices\/add/.test(x.url));
+    const deletes = elCalls.filter(
+      (x) => x.method === "DELETE" && /voices\//.test(x.url),
+    );
+    expect(adds).toHaveLength(2);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.url).toContain(firstVoice.elevenlabs_voice_id);
+
+    // Only the new voice remains + user's active_voice_id points at it.
+    const list = await call("/api/voices?user_id=u-upsert");
+    const listBody = (await list.json()) as { voices: Array<{ id: string }> };
+    expect(listBody.voices).toHaveLength(1);
+    expect(listBody.voices[0].id).toBe(secondVoice.id);
+
+    const user = await call("/api/user?user_id=u-upsert");
+    const userBody = (await user.json()) as { active_voice_id: string | null };
+    expect(userBody.active_voice_id).toBe(secondVoice.id);
+  });
+});
+
+describe("GET /api/billing/rate", () => {
+  it("returns the published self-serve rate (happy)", async () => {
+    const res = await call("/api/billing/rate");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { per_output_minute_usd: number };
+    expect(body.per_output_minute_usd).toBe(1.5);
+  });
+});
+
+describe("GET /api/sessions/:id/quote", () => {
+  it("projects cost across all target langs (happy)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-quote",
+        title: "Quote",
+        source_lang: "ko",
+        target_langs: ["en", "ja", "zh"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=20`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      output_minutes: number;
+      cost_usd: number;
+      per_output_minute_usd: number;
+    };
+    expect(body.output_minutes).toBe(60); // 20 minutes × 3 targets
+    expect(body.cost_usd).toBe(90); // 60 × 1.5
+    expect(body.per_output_minute_usd).toBe(1.5);
+  });
+
+  it("400 when expected_minutes missing or non-positive (sad)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-q2",
+        title: "Q",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const missing = await call(`/api/sessions/${session.id}/quote`);
+    expect(missing.status).toBe(400);
+
+    const zero = await call(`/api/sessions/${session.id}/quote?expected_minutes=0`);
+    expect(zero.status).toBe(400);
+  });
+
+  it("404 when session does not exist (sad)", async () => {
+    const res = await call("/api/sessions/nope/quote?expected_minutes=10");
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/sessions/:id/summary", () => {
+  it("is_final=false while session is in setup/live (happy)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-sum",
+        title: "S",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/summary`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      status: string;
+      is_final: boolean;
+      source_minutes: number;
+      estimated_cost_usd: number;
+    };
+    expect(body.status).toBe("setup");
+    expect(body.is_final).toBe(false);
+    expect(body.source_minutes).toBe(0);
+    expect(body.estimated_cost_usd).toBe(0);
+  });
+
+  it("is_final=true once status leaves setup/live; uses 1.5 rate (happy)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-sum-2",
+        title: "S",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    await call(`/internal/sessions/${session.id}/metrics`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        source_seconds: 120,
+        output_seconds_by_lang: { ja: 120 },
+      }),
+    });
+    await call(`/internal/sessions/${session.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({ status: "ended" }),
+    });
+
+    const res = await call(`/api/sessions/${session.id}/summary`);
+    const body = (await res.json()) as {
+      status: string;
+      is_final: boolean;
+      source_minutes: number;
+      output_minutes_by_lang: Record<string, number>;
+      estimated_cost_usd: number;
+    };
+    expect(body.status).toBe("ended");
+    expect(body.is_final).toBe(true);
+    expect(body.source_minutes).toBe(2); // 120s → 2min
+    expect(body.output_minutes_by_lang.ja).toBe(2);
+    expect(body.estimated_cost_usd).toBe(3); // 2 × 1.5
+  });
+
+  it("404 when session does not exist (sad)", async () => {
+    const res = await call("/api/sessions/nope/summary");
+    expect(res.status).toBe(404);
+  });
+});
+

@@ -6,6 +6,7 @@ import {
   AuthTokenRequestSchema,
   BillingSummaryQuerySchema,
   CloneSessionVoiceRequestSchema,
+  CompleteOnboardingRequestSchema,
   CreateSessionRequestSchema,
   CreateVoiceRequestSchema,
   GripAuthRequestSchema,
@@ -96,6 +97,16 @@ app.get("/api/user", async (c) => {
   return c.json(toUserInfo(user));
 });
 
+// Marks first-run onboarding as finished so the FE can stop gating UI on it.
+// Idempotent — re-posting is a no-op after the first call.
+app.post("/api/user/complete-onboarding", async (c) => {
+  const body = parseWithSchema(c, CompleteOnboardingRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
+  await db.getOrCreateUser(c.env.DB, body.user_id);
+  const user = await db.markOnboardingCompleted(c.env.DB, body.user_id);
+  return c.json(toUserInfo(user));
+});
+
 // ── voices ───────────────────────────────────────────────
 
 app.get("/api/voices", async (c) => {
@@ -107,6 +118,11 @@ app.get("/api/voices", async (c) => {
   return c.json({ voices });
 });
 
+// Upsert semantics: a user has at most one active voice clone. Creating a
+// new one deletes the previous (both locally and in ElevenLabs) before the
+// new row lands, and flips `users.active_voice_id` to the new id. This keeps
+// the ElevenLabs voice library from accumulating stale clones and matches
+// the FE "Re-record" flow, which conceptually replaces rather than adds.
 app.post("/api/voices", async (c) => {
   const body = parseWithSchema(c, CreateVoiceRequestSchema, await c.req.json());
   if (body instanceof Response) return body;
@@ -116,7 +132,22 @@ app.post("/api/voices", async (c) => {
     return c.json({ error: validation.error }, 400);
   }
 
-  await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
+  const user = await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
+
+  // Delete prior clone first — failure here shouldn't block a new clone
+  // (stale row is tolerable), but we try.
+  if (user.active_voice_id) {
+    const prior = await db.getVoice(c.env.DB, user.active_voice_id);
+    if (prior) {
+      try {
+        await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
+      } catch (e) {
+        console.warn(`[voices] failed to delete prior ElevenLabs voice: ${String(e)}`);
+      }
+      await db.deleteVoiceRow(c.env.DB, prior.id);
+    }
+  }
+
   const { voice_id } = await el.cloneVoice(c.env.ELEVENLABS_API_KEY, {
     name: body.name,
     audioBase64: body.audio_base64,
@@ -128,6 +159,7 @@ app.post("/api/voices", async (c) => {
     name: body.name,
     sourceLang: body.source_lang ?? null,
   });
+  await db.setActiveVoice(c.env.DB, body.user_id, voice.id);
   return c.json(voice);
 });
 
@@ -137,6 +169,11 @@ app.delete("/api/voices/:id", async (c) => {
   if (!v) return c.json({ error: "not found" }, 404);
   await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, v.elevenlabs_voice_id);
   await db.deleteVoiceRow(c.env.DB, id);
+  // Clear active pointer if the deleted voice was the active one.
+  const user = await db.getOrCreateUser(c.env.DB, v.user_id);
+  if (user.active_voice_id === id) {
+    await db.setActiveVoice(c.env.DB, v.user_id, null);
+  }
   return c.json({ status: "deleted" });
 });
 
@@ -336,13 +373,87 @@ function minutesFromSeconds(s: number): number {
   return Math.round((s / 60) * 100) / 100;
 }
 
-const ESTIMATED_COST_PER_OUTPUT_MINUTE_USD = 0; // stub — no pricing locked in yet
+// Self-serve rate. B2B clients may land at a custom rate via a contract, but
+// that's handled outside the API today (see docs/b2b-onboarding-notes.md).
+const PER_OUTPUT_MINUTE_USD = 1.5;
 
 function estimateCost(outputByLang: Record<string, number>): number {
   let total = 0;
   for (const v of Object.values(outputByLang)) total += v;
-  return Math.round(total * ESTIMATED_COST_PER_OUTPUT_MINUTE_USD * 100) / 100;
+  return Math.round(total * PER_OUTPUT_MINUTE_USD * 100) / 100;
 }
+
+function parseTargetLangs(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// Pre-stream cost projection. `output_minutes = expected_minutes × target_lang_count`
+// because we produce one translated stream per target language. Used by the
+// FE "you'll spend ~$X" banner on session start.
+app.get("/api/sessions/:id/quote", async (c) => {
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const rawMinutes = c.req.query("expected_minutes");
+  const expectedMinutes = Number(rawMinutes);
+  if (!Number.isFinite(expectedMinutes) || expectedMinutes <= 0) {
+    return c.json({ error: "expected_minutes must be a positive number" }, 400);
+  }
+
+  const session = await db.getSession(c.env.DB, params.id);
+  if (!session) return c.json({ error: "not found" }, 404);
+
+  const langCount = parseTargetLangs(session.target_langs).length;
+  const outputMinutes = Math.round(expectedMinutes * langCount * 100) / 100;
+  const costUsd = Math.round(outputMinutes * PER_OUTPUT_MINUTE_USD * 100) / 100;
+
+  return c.json({
+    session_id: params.id,
+    expected_minutes: expectedMinutes,
+    output_minutes: outputMinutes,
+    per_output_minute_usd: PER_OUTPUT_MINUTE_USD,
+    cost_usd: costUsd,
+  });
+});
+
+// Unified live-or-final rollup. `is_final` is true once status is no longer
+// `live`/`setup`, but the shape of the payload doesn't change — FE renders
+// the same panel either way.
+app.get("/api/sessions/:id/summary", async (c) => {
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+
+  const session = await db.getSession(c.env.DB, params.id);
+  if (!session) return c.json({ error: "not found" }, 404);
+
+  const metrics = await db.getSessionMetrics(c.env.DB, params.id);
+  const outputByLangSeconds: Record<string, number> = metrics
+    ? (JSON.parse(metrics.output_seconds_json) as Record<string, number>)
+    : {};
+  const outputByLangMinutes: Record<string, number> = {};
+  for (const [k, v] of Object.entries(outputByLangSeconds)) {
+    outputByLangMinutes[k] = minutesFromSeconds(v);
+  }
+
+  const liveStatuses = new Set(["setup", "live"]);
+  return c.json({
+    session_id: params.id,
+    status: session.status,
+    is_final: !liveStatuses.has(session.status),
+    source_minutes: minutesFromSeconds(metrics?.source_seconds ?? 0),
+    output_minutes_by_lang: outputByLangMinutes,
+    estimated_cost_usd: estimateCost(outputByLangMinutes),
+    updated_at: metrics?.updated_at ?? null,
+  });
+});
 
 app.get("/api/sessions/:id/usage", async (c) => {
   const params = parseWithSchema(c, SessionIdParamsSchema, {
@@ -514,6 +625,12 @@ function monthWindow(nowSeconds: number): { start: number; end: number } {
   const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000;
   return { start, end };
 }
+
+// Flat published rate. B2B contract rates are negotiated offline; the FE
+// displays this for self-serve users and for quoting.
+app.get("/api/billing/rate", (c) => {
+  return c.json({ per_output_minute_usd: PER_OUTPUT_MINUTE_USD });
+});
 
 app.get("/api/billing/summary", async (c) => {
   const query = parseWithSchema(c, BillingSummaryQuerySchema, {

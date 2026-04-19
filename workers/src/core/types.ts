@@ -22,6 +22,10 @@ export type UserInfo = {
   email: string | null;
   name: string | null;
   picture: string | null;
+  onboarding_completed_at: number | null;
+  active_voice_id: string | null;
+  billing_tier: string;
+  bills_to: string | null;
   created_at: number;
 };
 
@@ -34,6 +38,10 @@ export function toUserInfo(u: User): UserInfo {
     email: u.email,
     name: u.name,
     picture: u.picture,
+    onboarding_completed_at: u.onboarding_completed_at,
+    active_voice_id: u.active_voice_id,
+    billing_tier: u.billing_tier,
+    bills_to: u.bills_to,
     created_at: u.created_at,
   };
 }

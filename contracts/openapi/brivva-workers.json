@@ -83,6 +83,10 @@
           "email",
           "name",
           "picture",
+          "onboarding_completed_at",
+          "active_voice_id",
+          "billing_tier",
+          "bills_to",
           "created_at"
         ],
         "properties": {
@@ -112,6 +116,21 @@
             "type": "string",
             "nullable": true
           },
+          "onboarding_completed_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "active_voice_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "billing_tier": {
+            "type": "string"
+          },
+          "bills_to": {
+            "type": "string",
+            "nullable": true
+          },
           "created_at": {
             "type": "integer"
           }
@@ -129,6 +148,10 @@
           "email",
           "name",
           "picture",
+          "onboarding_completed_at",
+          "active_voice_id",
+          "billing_tier",
+          "bills_to",
           "created_at"
         ],
         "properties": {
@@ -164,6 +187,21 @@
             "nullable": true
           },
           "picture": {
+            "type": "string",
+            "nullable": true
+          },
+          "onboarding_completed_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "active_voice_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "billing_tier": {
+            "type": "string"
+          },
+          "bills_to": {
             "type": "string",
             "nullable": true
           },
@@ -743,6 +781,94 @@
           }
         }
       },
+      "CompleteOnboardingRequest": {
+        "type": "object",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "BillingRateResponse": {
+        "type": "object",
+        "required": [
+          "per_output_minute_usd"
+        ],
+        "properties": {
+          "per_output_minute_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "SessionQuoteResponse": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "expected_minutes",
+          "output_minutes",
+          "per_output_minute_usd",
+          "cost_usd"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "expected_minutes": {
+            "type": "number"
+          },
+          "output_minutes": {
+            "type": "number"
+          },
+          "per_output_minute_usd": {
+            "type": "number"
+          },
+          "cost_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "SessionSummaryResponse": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "status",
+          "is_final",
+          "source_minutes",
+          "output_minutes_by_lang",
+          "estimated_cost_usd",
+          "updated_at"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "is_final": {
+            "type": "boolean"
+          },
+          "source_minutes": {
+            "type": "number"
+          },
+          "output_minutes_by_lang": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "estimated_cost_usd": {
+            "type": "number"
+          },
+          "updated_at": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
       "InternalSessionMetricsUpdate": {
         "type": "object",
         "properties": {
@@ -868,6 +994,43 @@
             }
           }
         ]
+      }
+    },
+    "/api/user/complete-onboarding": {
+      "post": {
+        "summary": "Mark first-run onboarding as complete",
+        "responses": {
+          "200": {
+            "description": "Updated user profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteOnboardingRequest"
+              }
+            }
+          }
+        }
       }
     },
     "/api/voices": {
@@ -1442,6 +1605,101 @@
         ]
       }
     },
+    "/api/sessions/{id}/quote": {
+      "get": {
+        "summary": "Pre-stream cost quote",
+        "responses": {
+          "200": {
+            "description": "Cost projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionQuoteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid expected_minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Session id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_minutes",
+            "required": true,
+            "description": "Expected host-speaking minutes",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/sessions/{id}/summary": {
+      "get": {
+        "summary": "Session summary (live or final)",
+        "responses": {
+          "200": {
+            "description": "Summary rollup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Session id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/auth/youtube": {
       "get": {
         "summary": "Redirect to YouTube OAuth (add-channel, not sign-in)",
@@ -1731,6 +1989,23 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/AuthTokenRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/billing/rate": {
+      "get": {
+        "summary": "Get published per-output-minute USD rate",
+        "responses": {
+          "200": {
+            "description": "Current rate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingRateResponse"
+                }
               }
             }
           }
