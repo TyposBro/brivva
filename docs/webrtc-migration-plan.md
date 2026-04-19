@@ -59,9 +59,12 @@ without touching the downstream STT / TTS / FFmpeg pipeline.
 ### In scope — step 2 (video, later PR)
 
 - Add a video transceiver to the WHIP offer.
-- Server accepts H.264 or VP8, either forwards to the existing ffmpeg
-  per-stream input or re-encodes.
+- Server accepts H.264 (preferred, matches what ffmpeg emits already)
+  or VP8.
 - Replace the `face:frame` JSON-over-WS JPEG flow with WebRTC video.
+- **Re-encode per target, not passthrough** — see "Caption burn-in
+  compatibility" below. The tempting "WebRTC → RTMP copy" shortcut is
+  not available to us.
 
 ### Out of scope
 
@@ -118,6 +121,72 @@ Two options to keep the data+control plane working:
 
 Recommendation: **A** for step 1. Cheaper to reason about. Delete the
 WS entirely in step 2 when video moves to a media track.
+
+## Caption burn-in compatibility
+
+The current architecture burns translated captions into each target
+RTMP output via ffmpeg's `drawtext` filter, reading `/tmp/subs-<lang>.txt`
+with `reload=1`. This is per-target and per-language because every
+stream needs different text.
+
+**Burn-in forces a re-encode**, no matter what the ingest format is:
+`drawtext` operates on decoded raw frames, so the pipeline is always
+`decode → overlay → re-encode` for every target. The WebRTC "send
+H.264 once, fan out to N RTMP outputs with `-c:v copy`" optimization
+that some docs sell is **not available to this product** as long as
+captions are burned in.
+
+### What step 1 (audio) changes for burn-in
+
+Nothing. Audio ingest → STT → TTS → caption-text write → drawtext
+reload is untouched. The exact same per-language `subs-<lang>.txt`
+files still feed the exact same per-target ffmpeg processes.
+Migrating audio to WebRTC gives us the latency win without touching
+the caption path at all.
+
+### What step 2 (video) must preserve
+
+Step 2 replaces the JPEG `face:frame` input to each ffmpeg with a
+decoded H.264/VP8 frame source. The per-target ffmpeg invocation still
+carries its own `drawtext=textfile=/tmp/subs-<lang>.txt:reload=1:…`
+argument — that filter is **unchanged**. Only the video input side
+changes.
+
+Two candidate topologies for step 2:
+
+1. **Single decode, per-target encode.** Server decodes the incoming
+   WebRTC video once, produces raw frames on an internal broadcast
+   channel, then each target's ffmpeg reads raw frames from stdin +
+   applies `drawtext` + encodes H.264 + muxes to RTMP. One decode, N
+   encodes. Caption-text files stay exactly where they are.
+2. **Per-target decode+encode.** Each target ffmpeg gets the raw
+   H.264 packets from the WebRTC track and does the full
+   decode→drawtext→encode chain itself. N decodes, N encodes, simpler
+   plumbing, more CPU.
+
+Recommendation for step 2: **topology 1**. Linear in N on CPU for
+encode (unavoidable), constant on decode, and keeps the per-target
+ffmpeg command invocation almost identical to today. Burn-in
+implementation survives untouched.
+
+### Cost implication
+
+This locks us into **~50–80% CPU per 1080p30 target** (current
+baseline from `infra/README.md`). Step 2 does not make video cheaper,
+it only makes video ingest cleaner. If we later want to skip burn-in
+for platforms that accept text captions natively (YouTube, Facebook),
+topology 1 still lets us drop `drawtext` on those specific target
+ffmpegs and flip them to `-c:v copy` — **per-target, not global**.
+That's a followup optimization, not part of this migration.
+
+### Action items this affects
+
+- Step 2 design doc (future, separate PR) must call out the "decode
+  once, fan out raw frames" topology explicitly.
+- The `core/audio/` resampler planned for step 1 establishes the
+  pattern for a `core/video/` decoder + broadcast in step 2.
+- `infra/README.md` "Sizing" table already assumes re-encode per
+  target; no infra change needed.
 
 ## Server-side implementation
 
@@ -396,3 +465,7 @@ and stress testing.
 4. Target browsers — do we care about Safari 16 (had WebRTC + WHIP
    quirks) or only modern evergreen?
 5. Any compliance / SRTP encryption audit required before shipping?
+6. For step 2: are we OK committing to "decode once, encode N times"
+   as the video topology, or do we want the option to explore a
+   no-burn-in path (platform-native captions) for the 2-3 platforms
+   that support it? Affects the step 2 design scope.
