@@ -1,14 +1,19 @@
-import createClient from "openapi-fetch";
+import createClient, { type Client } from "openapi-fetch";
 import type { paths } from "./workers-api";
+import { appConfig } from "../config/app-config";
 
-const API_BASE =
-  import.meta.env.VITE_API_URL ??
-  import.meta.env.VITE_WORKER_URL ??
-  "http://localhost:3000";
+// Lazy — the client is constructed on first use so the orchestration
+// bootstrap has had a chance to populate AppConfig. Do not reach for
+// `import.meta.env` here; that is an orchestration concern.
 
-export const client = createClient<paths>({
-  baseUrl: API_BASE,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+let cached: Client<paths> | null = null;
+
+export function client(): Client<paths> {
+  if (!cached) {
+    cached = createClient<paths>({
+      baseUrl: appConfig().workersApiBase,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return cached;
+}

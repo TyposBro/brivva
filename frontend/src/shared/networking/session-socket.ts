@@ -1,6 +1,4 @@
-const WS_BASE = (
-  import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787"
-).replace(/^http/, "ws");
+import { appConfig } from "../../core/config/app-config";
 
 export type SessionSocketCallbacks = {
   onOpen?: () => void;
@@ -29,7 +27,7 @@ export class SessionSocket {
   }
 
   private buildUrl(params: Record<string, string>): string {
-    const url = new URL(`${WS_BASE}/api/session`);
+    const url = new URL(`${appConfig().mediaWsBase}/api/session`);
     for (const [key, value] of Object.entries(params))
       url.searchParams.set(key, value);
     return url.toString();

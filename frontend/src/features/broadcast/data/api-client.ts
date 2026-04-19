@@ -30,6 +30,7 @@ import {
   type PlatformCatalogEntry,
 } from "@brivva/contracts/platforms";
 import { client } from "../../../core/contracts/workers-client";
+import { appConfig } from "../../../core/config/app-config";
 
 export type {
   AuthTokenResponse,
@@ -75,24 +76,20 @@ async function parseResult<T>(
 
 export function getUser(userId: string): Promise<UserInfo> {
   return parseResult(
-    client.GET("/api/user", { params: { query: { user_id: userId } } }),
+    client().GET("/api/user", { params: { query: { user_id: userId } } }),
     UserInfoSchema,
   );
 }
 
 export function getAuthToken(userId: string): Promise<AuthTokenResponse> {
   return parseResult(
-    client.POST("/auth/token", { body: { user_id: userId } }),
+    client().POST("/auth/token", { body: { user_id: userId } }),
     AuthTokenResponseSchema,
   );
 }
 
 export function youtubeAuthUrl(userId: string): string {
-  const base =
-    import.meta.env.VITE_API_URL ??
-    import.meta.env.VITE_WORKER_URL ??
-    "http://localhost:3000";
-  return `${base}/auth/youtube?user_id=${encodeURIComponent(userId)}`;
+  return `${appConfig().workersApiBase}/auth/youtube?user_id=${encodeURIComponent(userId)}`;
 }
 
 export const PLATFORMS: readonly Platform[] = PLATFORM_CATALOG;
@@ -123,7 +120,7 @@ export function createSession(body: {
   privacy_status?: string;
 }): Promise<CreateSessionResponse> {
   return parseResult(
-    client.POST("/api/sessions", { body }),
+    client().POST("/api/sessions", { body }),
     CreateSessionResponseSchema.transform((response) => ({
       ...response,
       streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
@@ -133,14 +130,14 @@ export function createSession(body: {
 
 export function listSessions(userId: string): Promise<{ sessions: Session[] }> {
   return parseResult(
-    client.GET("/api/sessions", { params: { query: { user_id: userId } } }),
+    client().GET("/api/sessions", { params: { query: { user_id: userId } } }),
     ListSessionsResponseSchema,
   );
 }
 
 export function getSession(id: string): Promise<{ session: Session | null; streams: StreamInfo[] }> {
   return parseResult(
-    client.GET("/api/sessions/{id}", { params: { path: { id } } }),
+    client().GET("/api/sessions/{id}", { params: { path: { id } } }),
     GetSessionResponseSchema.transform((response) => ({
       ...response,
       streams: response.streams.map((stream) => StreamInfoSchema.parse(stream)),
@@ -153,7 +150,7 @@ export function cloneSessionVoice(
   body: CloneSessionVoiceRequest,
 ): Promise<{ voice: Voice }> {
   return parseResult(
-    client.POST("/api/sessions/{id}/voice", {
+    client().POST("/api/sessions/{id}/voice", {
       params: { path: { id: sessionId } },
       body,
     }),
@@ -163,7 +160,7 @@ export function cloneSessionVoice(
 
 export function deleteSession(id: string): Promise<{ status: string }> {
   return parseResult(
-    client.DELETE("/api/sessions/{id}", { params: { path: { id } } }),
+    client().DELETE("/api/sessions/{id}", { params: { path: { id } } }),
     StatusResponseSchema,
   );
 }
@@ -173,7 +170,7 @@ export function addStream(
   body: { lang: string; platform: string; rtmp_url: string; stream_key: string; delay_ms?: number; host_gain?: number },
 ): Promise<StreamInfo> {
   return parseResult(
-    client.POST("/api/sessions/{id}/streams", {
+    client().POST("/api/sessions/{id}/streams", {
       params: { path: { id: sessionId } },
       body,
     }),
@@ -183,7 +180,7 @@ export function addStream(
 
 export function removeStream(sessionId: string, streamId: string): Promise<{ status: string }> {
   return parseResult(
-    client.DELETE("/api/sessions/{session_id}/streams/{stream_id}", {
+    client().DELETE("/api/sessions/{session_id}/streams/{stream_id}", {
       params: { path: { session_id: sessionId, stream_id: streamId } },
     }),
     StatusResponseSchema,
@@ -192,7 +189,7 @@ export function removeStream(sessionId: string, streamId: string): Promise<{ sta
 
 export function listVoices(userId: string): Promise<{ voices: Voice[] }> {
   return parseResult(
-    client.GET("/api/voices", { params: { query: { user_id: userId } } }),
+    client().GET("/api/voices", { params: { query: { user_id: userId } } }),
     ListVoicesResponseSchema,
   );
 }
@@ -202,19 +199,19 @@ export function createVoice(body: {
   name: string;
   audio_base64: string;
 }): Promise<Voice> {
-  return parseResult(client.POST("/api/voices", { body }), VoiceSchema);
+  return parseResult(client().POST("/api/voices", { body }), VoiceSchema);
 }
 
 export function deleteVoice(id: string): Promise<{ status: string }> {
   return parseResult(
-    client.DELETE("/api/voices/{id}", { params: { path: { id } } }),
+    client().DELETE("/api/voices/{id}", { params: { path: { id } } }),
     StatusResponseSchema,
   );
 }
 
 export function listCredentials(userId: string): Promise<{ credentials: PlatformCredential[] }> {
   return parseResult(
-    client.GET("/api/credentials", { params: { query: { user_id: userId } } }),
+    client().GET("/api/credentials", { params: { query: { user_id: userId } } }),
     ListCredentialsResponseSchema,
   );
 }
@@ -226,12 +223,12 @@ export function saveCredential(body: {
   stream_key?: string;
   display_name?: string;
 }): Promise<PlatformCredential> {
-  return parseResult(client.POST("/api/credentials", { body }), PlatformCredentialSchema);
+  return parseResult(client().POST("/api/credentials", { body }), PlatformCredentialSchema);
 }
 
 export function deleteCredential(userId: string, platform: string): Promise<{ status: string }> {
   return parseResult(
-    client.DELETE("/api/credentials", {
+    client().DELETE("/api/credentials", {
       params: { query: { user_id: userId, platform } },
     }),
     StatusResponseSchema,
