@@ -265,6 +265,31 @@ API endpoints:
 
 ---
 
+## What's Intentionally Not In The Product
+
+**Brivva does NOT serve end viewers.** End audiences watch on the
+streaming platforms (YouTube, Grip, TikTok, etc.) where the RTMP output
+lands. The Brivva frontend is operator-facing only — broadcasters +
+Simon/MJ. No "Join Session", no "Audience Resume", no "Quick Session"
+/ no-auth demo button on the landing page. These were demo-era artifacts
+from before the pivot to RTMP-out SaaS.
+
+If anyone tries to re-introduce audience-facing UI (another "Quick
+Session" on the home page, a `/watch/:id` route, a public session list,
+etc.), it's a drift from the product and should be rejected at review.
+
+The Brivva UI surface is:
+- `/` — public landing with a single CTA to Stream Dashboard (OAuth gate)
+- `/auth/*` — OAuth handshake
+- `/onboarding` — 3-step wizard for first-time broadcasters
+- `/dashboard` — session + voice + platform management for broadcasters
+- `/session/:id/setup` — per-session platform + lang config
+- `/session/:id/live` — live broadcast view for the host
+- `/session/:id` — post-stream summary for the host
+- `/privacy`, `/terms` — legal
+
+Everything else is out of scope.
+
 ## What's NOT In Scope For May 10
 
 Explicitly deferred. Do not let these creep in.
@@ -416,3 +441,9 @@ until the company hires. Stay disciplined about what to take on.
 ## Change Log
 
 - `2026-04-19` — File created. Consolidates vision + 5 product decisions + 21-day roadmap.
+- `2026-04-19` — Added "What's Intentionally Not In The Product" section.
+  Brivva serves broadcasters only, not end-audiences; streams out to
+  YouTube/Grip/TikTok/etc. via RTMP, audience watches there. Home page
+  `Quick Session` button + `Audience Resume Session` input are demo-era
+  cruft, slated for removal in next frontend pass after coverage agents
+  land.
