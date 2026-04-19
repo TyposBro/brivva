@@ -314,7 +314,7 @@ describe("POST /api/sessions — defaults + clamping", () => {
         source_lang: "en",
         target_langs: ["ja"],
         platforms: [
-          { platform: "youtube", lang: "ja" }, // auto-only, skipped
+          { platform: "youtube", lang: "ja" }, // no YT token → skipped
           {
             platform: "twitch",
             lang: "ja",
@@ -329,6 +329,270 @@ describe("POST /api/sessions — defaults + clamping", () => {
     };
     expect(body.streams).toHaveLength(1);
     expect(body.streams[0].platform).toBe("twitch");
+  });
+});
+
+// ── YouTube auto-fill (broadcast-create) ─────────────────
+// When a user adds a YouTube destination and has an OAuth access_token in
+// users, Workers creates the broadcast + stream + binds them, populates the
+// D1 streams row with rtmp_url/stream_key/platform_broadcast_id, and returns
+// a watch_url so the FE can surface a shareable link.
+
+async function seedYoutubeUser(
+  id: string,
+  opts: { accessToken?: string; refreshToken?: string; expiresAt?: number } = {},
+): Promise<void> {
+  await seedUser(id);
+  const access = opts.accessToken ?? "yt-access-token";
+  const refresh = opts.refreshToken ?? "yt-refresh-token";
+  const expires = opts.expiresAt ?? Math.floor(Date.now() / 1000) + 3600;
+  await env.DB.prepare(
+    `UPDATE users SET
+       youtube_access_token = ?,
+       youtube_refresh_token = ?,
+       youtube_token_expires_at = ?,
+       youtube_channel_id = ?,
+       youtube_channel_name = ?
+     WHERE id = ?`,
+  )
+    .bind(access, refresh, expires, "UC-test", "Test Channel", id)
+    .run();
+}
+
+function jsonReply(body: unknown, status = 200): () => Response {
+  return () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+}
+
+describe("POST /api/sessions — YouTube auto-fill", () => {
+  it("auto-creates broadcast + stream + bind; populates rtmp_url + watch_url (happy)", async () => {
+    await seedYoutubeUser("u-yt-happy");
+
+    installFetchStub([
+      {
+        match: /liveBroadcasts\?/,
+        method: "POST",
+        reply: jsonReply({ id: "bcast-1" }),
+      },
+      {
+        match: /liveStreams\?/,
+        method: "POST",
+        reply: jsonReply({
+          id: "stream-1",
+          cdn: {
+            ingestionInfo: {
+              ingestionAddress: "rtmp://a.rtmp.youtube.com/live2",
+              streamName: "k-abc",
+            },
+          },
+        }),
+      },
+      {
+        match: /liveBroadcasts\/bind/,
+        method: "POST",
+        reply: jsonReply({ id: "bcast-1" }),
+      },
+    ]);
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-yt-happy",
+        title: "My Live Show",
+        source_lang: "en",
+        target_langs: ["ja"],
+        privacy_status: "unlisted",
+        platforms: [{ platform: "youtube", lang: "ja" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      session: { id: string };
+      streams: Array<{
+        platform: string;
+        rtmp_url: string | null;
+        stream_key: string | null;
+        platform_broadcast_id: string | null;
+        platform_stream_id: string | null;
+        watch_url?: string | null;
+      }>;
+    };
+    expect(body.streams).toHaveLength(1);
+    const s = body.streams[0]!;
+    expect(s.platform).toBe("youtube");
+    expect(s.rtmp_url).toBe("rtmp://a.rtmp.youtube.com/live2");
+    expect(s.stream_key).toBe("k-abc");
+    expect(s.platform_broadcast_id).toBe("bcast-1");
+    expect(s.platform_stream_id).toBe("stream-1");
+    expect(s.watch_url).toBe("https://www.youtube.com/watch?v=bcast-1");
+
+    // D1 row must persist the populated values (Fargate will read it later).
+    const row = await env.DB.prepare(
+      "SELECT rtmp_url, stream_key, platform_broadcast_id FROM streams WHERE session_id = ?",
+    )
+      .bind(body.session.id)
+      .first<{
+        rtmp_url: string;
+        stream_key: string;
+        platform_broadcast_id: string;
+      }>();
+    expect(row?.rtmp_url).toBe("rtmp://a.rtmp.youtube.com/live2");
+    expect(row?.stream_key).toBe("k-abc");
+    expect(row?.platform_broadcast_id).toBe("bcast-1");
+  });
+
+  it("refreshes an expired OAuth token before retrying broadcast-create (edge)", async () => {
+    await seedYoutubeUser("u-yt-refresh", {
+      accessToken: "expired-token",
+      refreshToken: "rtok",
+    });
+
+    installFetchStub([
+      // First attempt → 401 (access token expired at YouTube's end).
+      {
+        match: /liveBroadcasts\?/,
+        method: "POST",
+        reply: () => new Response("unauthorized", { status: 401 }),
+      },
+      // OAuth refresh call.
+      {
+        match: /oauth2\.googleapis\.com\/token/,
+        method: "POST",
+        reply: jsonReply({ access_token: "new-token", expires_in: 3600 }),
+      },
+      // Retry succeeds.
+      {
+        match: /liveBroadcasts\?/,
+        method: "POST",
+        reply: jsonReply({ id: "bcast-2" }),
+      },
+      {
+        match: /liveStreams\?/,
+        method: "POST",
+        reply: jsonReply({
+          id: "stream-2",
+          cdn: {
+            ingestionInfo: {
+              ingestionAddress: "rtmp://a.rtmp.youtube.com/live2",
+              streamName: "k-2",
+            },
+          },
+        }),
+      },
+      {
+        match: /liveBroadcasts\/bind/,
+        method: "POST",
+        reply: jsonReply({ id: "bcast-2" }),
+      },
+    ]);
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-yt-refresh",
+        title: "Refresh test",
+        source_lang: "en",
+        target_langs: ["ja"],
+        platforms: [{ platform: "youtube", lang: "ja" }],
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    // Refreshed access token must persist to D1 so the next session
+    // doesn't need to refresh again.
+    const user = await env.DB.prepare(
+      "SELECT youtube_access_token FROM users WHERE id = ?",
+    )
+      .bind("u-yt-refresh")
+      .first<{ youtube_access_token: string }>();
+    expect(user?.youtube_access_token).toBe("new-token");
+  });
+
+  it("cleans up session + streams when YouTube returns 403 (sad)", async () => {
+    await seedYoutubeUser("u-yt-403");
+
+    installFetchStub([
+      {
+        match: /liveBroadcasts\?/,
+        method: "POST",
+        reply: () => new Response("quotaExceeded", { status: 403 }),
+      },
+    ]);
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-yt-403",
+        title: "403 test",
+        source_lang: "en",
+        target_langs: ["ja"],
+        platforms: [{ platform: "youtube", lang: "ja" }],
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/YouTube broadcast create failed/);
+    expect(body.error).toMatch(/quotaExceeded/);
+
+    // No orphan rows — session + streams must be gone.
+    const sessionCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM sessions WHERE user_id = ?",
+    )
+      .bind("u-yt-403")
+      .first<{ c: number }>();
+    expect(sessionCount?.c).toBe(0);
+    const streamCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM streams",
+    ).first<{ c: number }>();
+    expect(streamCount?.c).toBe(0);
+  });
+
+  it("rolls back an already-inserted manual stream when a later YouTube call fails (edge)", async () => {
+    await seedYoutubeUser("u-yt-mix");
+
+    installFetchStub([
+      {
+        match: /liveBroadcasts\?/,
+        method: "POST",
+        reply: () => new Response("permissionDenied", { status: 403 }),
+      },
+    ]);
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-yt-mix",
+        title: "Mixed",
+        source_lang: "en",
+        target_langs: ["ja"],
+        platforms: [
+          {
+            platform: "twitch",
+            lang: "ja",
+            rtmp_url: "rtmp://tw",
+            stream_key: "k-tw",
+          },
+          { platform: "youtube", lang: "ja" },
+        ],
+      }),
+    });
+    expect(res.status).toBe(403);
+
+    // The twitch row that landed first must be cleaned up along with the
+    // failed session — otherwise `POST /api/sessions` ends up with half-baked
+    // D1 state.
+    const streamCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM streams",
+    ).first<{ c: number }>();
+    expect(streamCount?.c).toBe(0);
   });
 });
 

@@ -208,6 +208,8 @@ const schemas = {
       delay_ms: { type: "integer" },
       host_gain: { type: "number" },
       created_at: { type: "integer" },
+      // Auto-populated for YouTube; absent on other platforms.
+      watch_url: { type: "string", nullable: true },
     },
   },
   Session: {

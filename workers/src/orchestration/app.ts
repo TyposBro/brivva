@@ -31,6 +31,11 @@ import * as el from "../features/voices/elevenlabs-client";
 import { buildOpenApiDocument } from "./openapi";
 import { toUserInfo, type Env } from "../core/types";
 import * as yt from "../features/youtube/google-oauth-client";
+import {
+  createYouTubeBroadcast,
+  YouTubeBroadcastError,
+  type YouTubeBroadcastResult,
+} from "../features/youtube/broadcast-api";
 import * as gsignin from "../features/auth/google-signin-client";
 import { verifyStripeSignature } from "../features/billing/stripe-webhook";
 
@@ -257,20 +262,155 @@ app.post("/api/sessions", async (c) => {
     targetLangs: JSON.stringify(body.target_langs),
   });
 
-  const streams = [];
+  const privacyStatus = body.privacy_status ?? "unlisted";
+
+  // Build an in-memory list first so we can roll back cleanly if any YouTube
+  // broadcast create fails mid-way. A session with some streams inserted and
+  // others failed would confuse the FE ("waiting for utterances forever" on a
+  // stream that has a NULL rtmp_url). All-or-nothing is simpler.
+  type Prepared =
+    | {
+        kind: "manual";
+        lang: string;
+        platform: string;
+        rtmpUrl: string;
+        streamKey: string;
+        delayMs: number;
+        hostGain: number;
+      }
+    | {
+        kind: "youtube";
+        lang: string;
+        platform: string;
+        delayMs: number;
+        hostGain: number;
+      };
+  const prepared: Prepared[] = [];
   for (const p of body.platforms ?? []) {
-    if (!p.rtmp_url || !p.stream_key || !p.lang) continue;
-    streams.push(
-      await db.createStreamManual(c.env.DB, {
+    if (!p.lang) continue;
+    const delayMs = p.delay_ms ?? DEFAULT_DELAY_MS;
+    const hostGain = resolveHostGain(p, body.source_lang);
+    // YouTube destinations are auto-fillable even when the FE didn't populate
+    // rtmp_url/stream_key — Workers will resolve them via YouTube API below.
+    if (p.platform === "youtube" && user.youtube_access_token) {
+      prepared.push({
+        kind: "youtube",
+        lang: p.lang,
+        platform: p.platform,
+        delayMs,
+        hostGain,
+      });
+      continue;
+    }
+    if (!p.rtmp_url || !p.stream_key) continue;
+    prepared.push({
+      kind: "manual",
+      lang: p.lang,
+      platform: p.platform,
+      rtmpUrl: p.rtmp_url,
+      streamKey: p.stream_key,
+      delayMs,
+      hostGain,
+    });
+  }
+
+  // Insert pending/manual rows first so we always have a stream id to
+  // associate with the YouTube broadcast. Track insertion order so we can
+  // cleanup on failure without re-querying.
+  const insertedIds: string[] = [];
+  const streams = [];
+  try {
+    for (const p of prepared) {
+      if (p.kind === "manual") {
+        const row = await db.createStreamManual(c.env.DB, {
+          sessionId: session.id,
+          lang: p.lang,
+          platform: p.platform,
+          rtmpUrl: p.rtmpUrl,
+          streamKey: p.streamKey,
+          delayMs: p.delayMs,
+          hostGain: p.hostGain,
+        });
+        insertedIds.push(row.id);
+        streams.push(row);
+        continue;
+      }
+
+      // YouTube auto-fill path.
+      const pending = await db.createStreamManual(c.env.DB, {
         sessionId: session.id,
         lang: p.lang,
         platform: p.platform,
-        rtmpUrl: p.rtmp_url,
-        streamKey: p.stream_key,
-        delayMs: p.delay_ms ?? DEFAULT_DELAY_MS,
-        hostGain: resolveHostGain(p, body.source_lang),
-      }),
-    );
+        rtmpUrl: null,
+        streamKey: null,
+        delayMs: p.delayMs,
+        hostGain: p.hostGain,
+      });
+      insertedIds.push(pending.id);
+
+      let result: YouTubeBroadcastResult;
+      try {
+        result = await createYouTubeBroadcast(
+          c.env,
+          {
+            accessToken: user.youtube_access_token!,
+            title: body.title,
+            scheduledStartTime: new Date().toISOString(),
+            privacyStatus,
+          },
+          {
+            refreshToken: user.youtube_refresh_token,
+            onTokenRefresh: async (newToken, expiresAt) => {
+              await db.updateAccessToken(c.env.DB, {
+                userId: user.id,
+                accessToken: newToken,
+                expiresAt,
+              });
+            },
+          },
+        );
+      } catch (e) {
+        // Roll back the session + all previously inserted stream rows so the
+        // FE never sees a half-baked session with orphan streams. Surface the
+        // error to the caller — the dashboard renders the message inline.
+        for (const id of insertedIds) {
+          await db.deleteStreamRow(c.env.DB, id);
+        }
+        await db.deleteSessionRow(c.env.DB, session.id);
+        const status = e instanceof YouTubeBroadcastError ? e.status : 500;
+        const message = e instanceof Error ? e.message : String(e);
+        return c.json(
+          { error: `YouTube broadcast create failed: ${message}` },
+          status === 401 || status === 403 ? status : 502,
+        );
+      }
+
+      await db.updateStreamRtmp(c.env.DB, {
+        streamId: pending.id,
+        rtmpUrl: result.rtmpUrl,
+        streamKey: result.streamKey,
+        platformBroadcastId: result.broadcastId,
+        platformStreamId: result.streamId,
+      });
+
+      streams.push({
+        ...pending,
+        rtmp_url: result.rtmpUrl,
+        stream_key: result.streamKey,
+        platform_broadcast_id: result.broadcastId,
+        platform_stream_id: result.streamId,
+        status: "ready",
+        watch_url: result.watchUrl,
+      });
+    }
+  } catch (e) {
+    // Defensive — we already return early on the YouTube failure branch, so
+    // this catches e.g. D1 transient errors during manual inserts.
+    for (const id of insertedIds) {
+      await db.deleteStreamRow(c.env.DB, id);
+    }
+    await db.deleteSessionRow(c.env.DB, session.id);
+    throw e;
   }
 
   return c.json({ session, streams });

@@ -298,6 +298,10 @@
           },
           "created_at": {
             "type": "integer"
+          },
+          "watch_url": {
+            "type": "string",
+            "nullable": true
           }
         }
       },

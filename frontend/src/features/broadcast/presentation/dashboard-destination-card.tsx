@@ -248,8 +248,11 @@ export function DestinationCard(props: {
   onPrivacyChange: (v: string) => void;
   onUpdate: (patch: Partial<Destination>) => void;
   onRemove: () => void;
+  /** Per-destination client-side validation error. When set, the card shows a
+   *  red inline message and the dashboard disables Go Live. `null` = valid. */
+  validationError?: string | null;
 }) {
-  const { dest, sourceLang, savedCreds, onUpdate, onRemove } = props;
+  const { dest, sourceLang, savedCreds, onUpdate, onRemove, validationError } = props;
   const [expanded, setExpanded] = useState(() => {
     const p = api.PLATFORMS.find((x) => x.id === dest.platform);
     return !!(p && !p.auto && !savedCreds[dest.platform]);
@@ -269,12 +272,26 @@ export function DestinationCard(props: {
   const hasSavedCreds = !!savedCreds[dest.platform];
 
   return (
-    <div className="bg-surface-container-low rounded-xl overflow-hidden">
+    <div
+      className={cn(
+        "bg-surface-container-low rounded-xl overflow-hidden",
+        validationError && "ring-1 ring-error/60",
+      )}
+    >
       <CardHeader
         dest={dest} platform={platform} sourceLang={sourceLang}
         savedCreds={savedCreds} expanded={expanded} setExpanded={setExpanded}
         onUpdate={onUpdate} onRemove={onRemove}
       />
+
+      {validationError && (
+        <p
+          className="px-4 pb-2 -mt-1 text-error text-xs font-label"
+          role="alert"
+        >
+          {validationError}
+        </p>
+      )}
 
       <button
         className="w-full flex items-center gap-2 px-4 py-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors text-[11px] font-label uppercase tracking-widest"

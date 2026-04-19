@@ -180,8 +180,20 @@ async fn handle_host(mut socket: HostSocket) {
             ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
         })
         .await;
-        if matches!(outcome, BootstrapOutcome::Abort) {
-            return;
+        match outcome {
+            BootstrapOutcome::Continue => {}
+            BootstrapOutcome::Abort => return,
+            BootstrapOutcome::AbortWithError(msg) => {
+                // Surface the failure to the FE so it can render a banner
+                // instead of the default "Waiting for utterances..." spinner.
+                let payload = serde_json::json!({ "type": "error", "message": msg });
+                let _ = socket
+                    .sender
+                    .send(Message::Text(payload.to_string().into()))
+                    .await;
+                let _ = socket.sender.close().await;
+                return;
+            }
         }
     }
 
@@ -242,7 +254,13 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
 
 enum BootstrapOutcome {
     Continue,
+    /// Abort silently (auth failure, session-owner mismatch — the FE was
+    /// never going to succeed so we close without an explanatory frame).
     Abort,
+    /// Abort with a user-visible message. The host receives an
+    /// `{"type":"error","message":..}` frame before the socket closes so the
+    /// FE renders a banner instead of hanging.
+    AbortWithError(String),
 }
 
 struct BootstrapArgs<'a> {
@@ -282,6 +300,22 @@ async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
             "ws host upgrade rejected: session owner mismatch"
         );
         return BootstrapOutcome::Abort;
+    }
+
+    // Fail-fast on any stream missing RTMP ingest info. Previously this path
+    // silently skipped the stream, which produced the "Waiting for
+    // utterances..." ghost-session bug when Workers hadn't auto-filled a
+    // YouTube row. Surface the error to the host instead so they can fix it.
+    if let StreamPreflight::MissingRtmp { stream_id, lang } = preflight_streams(&bundle) {
+        tracing::error!(
+            session_id = %sid,
+            stream_id = %stream_id,
+            lang = %lang,
+            "session aborted: stream has no RTMP ingest — platform broadcast was never created"
+        );
+        return BootstrapOutcome::AbortWithError(format!(
+            "Stream {stream_id} ({lang}) has no RTMP URL. The destination's broadcast was never created — check the connection to the platform and try again."
+        ));
     }
 
     if let Some(v) = bundle.voice.clone() {
@@ -327,6 +361,35 @@ struct RtmpStartArgs<'a> {
     metrics: Arc<SessionMetrics>,
 }
 
+/// Outcome of pre-flighting the stream list. `Ok(..)` means we can proceed;
+/// `Err(..)` carries a user-visible message routed back to the FE as a host
+/// `error:` text frame before the socket is closed.
+pub enum StreamPreflight {
+    Ok,
+    MissingRtmp { stream_id: String, lang: String },
+}
+
+/// Inspects every stream in the bundle and rejects the session if any
+/// non-passthrough row is missing RTMP ingest data. Passthrough streams
+/// (`lang == PASS_LANG_CODE`) legitimately skip start_stream today — they
+/// still need rtmp + key, so they are checked too. The previous "silently
+/// continue" behavior here was the production bug: a YouTube row landed in
+/// D1 with NULL rtmp_url/stream_key (no server-side auto-create) and the
+/// session hung on "Waiting for utterances...".
+pub fn preflight_streams(bundle: &SessionBundle) -> StreamPreflight {
+    for s in &bundle.streams {
+        if s.rtmp_url.as_deref().unwrap_or("").is_empty()
+            || s.stream_key.as_deref().unwrap_or("").is_empty()
+        {
+            return StreamPreflight::MissingRtmp {
+                stream_id: s.id.clone(),
+                lang: s.lang.clone(),
+            };
+        }
+    }
+    StreamPreflight::Ok
+}
+
 fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     let RtmpStartArgs {
         bundle,
@@ -345,6 +408,15 @@ fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
+            // Pre-flight guards this path; the only way to reach it now is a
+            // bug upstream. Log loudly — the session has already been
+            // accepted by this point and we don't want silent data-loss.
+            tracing::error!(
+                session_id = %sid,
+                stream_id = %s.id,
+                lang = %s.lang,
+                "stream row passed preflight but has no rtmp_url/stream_key — pipeline bug"
+            );
             continue;
         };
         let full_url_with_key = if stream_key.is_empty() {
@@ -721,5 +793,111 @@ mod tests {
         let flags = resolve_stream_flags("th", &Lang::En, 0.2);
         assert!(!flags.passthrough);
         assert!(!flags.is_source);
+    }
+
+    // ── Stream pre-flight (May 10 launch blocker) ────────────
+
+    use crate::core::contracts::workers::{Session, Stream};
+
+    fn stub_session() -> Session {
+        Session {
+            id: "sess-1".into(),
+            user_id: "u-1".into(),
+            voice_id: None,
+            title: "t".into(),
+            source_lang: "en".into(),
+            target_langs: "[\"ja\"]".into(),
+            status: "setup".into(),
+            live_session_id: None,
+            created_at: 0,
+        }
+    }
+
+    fn stream_with(rtmp: Option<&str>, key: Option<&str>) -> Stream {
+        Stream {
+            id: "st-1".into(),
+            session_id: "sess-1".into(),
+            lang: "ja".into(),
+            platform: "youtube".into(),
+            platform_broadcast_id: None,
+            platform_stream_id: None,
+            stream_key: key.map(|s| s.to_string()),
+            rtmp_url: rtmp.map(|s| s.to_string()),
+            status: "ready".into(),
+            delay_ms: 2000,
+            host_gain: 0.2,
+            created_at: 0,
+            watch_url: None,
+        }
+    }
+
+    #[test]
+    fn preflight_streams_accepts_fully_populated_stream() {
+        let bundle = SessionBundle {
+            session: stub_session(),
+            streams: vec![stream_with(
+                Some("rtmp://a.rtmp.youtube.com/live2/"),
+                Some("key-abc"),
+            )],
+            voice: None,
+        };
+        assert!(matches!(preflight_streams(&bundle), StreamPreflight::Ok));
+    }
+
+    #[test]
+    fn preflight_streams_rejects_missing_rtmp_url_on_non_passthrough_stream() {
+        let bundle = SessionBundle {
+            session: stub_session(),
+            streams: vec![stream_with(None, Some("key-abc"))],
+            voice: None,
+        };
+        match preflight_streams(&bundle) {
+            StreamPreflight::MissingRtmp { stream_id, lang } => {
+                assert_eq!(stream_id, "st-1");
+                assert_eq!(lang, "ja");
+            }
+            StreamPreflight::Ok => panic!("expected MissingRtmp"),
+        }
+    }
+
+    #[test]
+    fn preflight_streams_rejects_missing_stream_key() {
+        let bundle = SessionBundle {
+            session: stub_session(),
+            streams: vec![stream_with(Some("rtmp://a.rtmp.youtube.com/live2/"), None)],
+            voice: None,
+        };
+        assert!(matches!(
+            preflight_streams(&bundle),
+            StreamPreflight::MissingRtmp { .. }
+        ));
+    }
+
+    #[test]
+    fn preflight_streams_rejects_empty_string_rtmp_url() {
+        // D1 can store `""` (not just NULL) — the pre-flight treats both the
+        // same way so a legacy migration path can't slip an empty string past.
+        let bundle = SessionBundle {
+            session: stub_session(),
+            streams: vec![stream_with(Some(""), Some("key"))],
+            voice: None,
+        };
+        assert!(matches!(
+            preflight_streams(&bundle),
+            StreamPreflight::MissingRtmp { .. }
+        ));
+    }
+
+    #[test]
+    fn preflight_streams_accepts_empty_stream_bundle() {
+        // A quick-start session with no destinations is still valid — the
+        // host is testing STT without pushing RTMP anywhere. Pre-flight must
+        // not trip on an empty streams vec.
+        let bundle = SessionBundle {
+            session: stub_session(),
+            streams: vec![],
+            voice: None,
+        };
+        assert!(matches!(preflight_streams(&bundle), StreamPreflight::Ok));
     }
 }

@@ -1665,6 +1665,7 @@ export interface components {
             delay_ms: number;
             host_gain: number;
             created_at: number;
+            watch_url?: string | null;
         };
         Session: {
             id: string;

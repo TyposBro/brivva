@@ -281,8 +281,10 @@ export type CreateStreamManual = {
   sessionId: string;
   lang: string;
   platform: string;
-  rtmpUrl: string;
-  streamKey: string;
+  /** Nullable for auto-fill platforms (e.g. YouTube) where Workers populates
+   *  RTMP ingest after the row exists via `updateStreamRtmp`. */
+  rtmpUrl: string | null;
+  streamKey: string | null;
   delayMs: number;
   hostGain: number;
 };
@@ -300,7 +302,11 @@ export async function createStreamManual(
     platform_stream_id: null,
     stream_key: args.streamKey,
     rtmp_url: args.rtmpUrl,
-    status: "ready",
+    // "pending" = auto-fill platforms whose RTMP hasn't been populated yet.
+    // Fargate ignores these rows in session_ws's start_rtmp_streams because
+    // rtmp_url is None; the auto-fill path flips this to "ready" after it
+    // calls the platform API.
+    status: args.rtmpUrl && args.streamKey ? "ready" : "pending",
     delay_ms: args.delayMs,
     host_gain: args.hostGain,
     created_at: now(),
@@ -328,6 +334,38 @@ export async function updateStreamPlatform(
       platform_stream_id: args.platformStreamId,
       stream_key: args.streamKey,
       rtmp_url: args.rtmpUrl,
+      status: "ready",
+    })
+    .where(eq(schema.streams.id, args.streamId))
+    .run();
+}
+
+/**
+ * Populates the RTMP ingest + platform IDs on a stream row that was inserted
+ * without them (the auto-fill path for platforms that expose a real API —
+ * YouTube today, possibly others later). Mirrors `updateStreamPlatform`
+ * semantically — kept as a separate export so the call site in
+ * `POST /api/sessions` reads top-to-bottom as "create row, fill RTMP".
+ */
+export type UpdateStreamRtmp = {
+  streamId: string;
+  rtmpUrl: string;
+  streamKey: string;
+  platformBroadcastId: string;
+  platformStreamId: string;
+};
+
+export async function updateStreamRtmp(
+  db: D1Database,
+  args: UpdateStreamRtmp,
+): Promise<void> {
+  await wrap(db)
+    .update(schema.streams)
+    .set({
+      rtmp_url: args.rtmpUrl,
+      stream_key: args.streamKey,
+      platform_broadcast_id: args.platformBroadcastId,
+      platform_stream_id: args.platformStreamId,
       status: "ready",
     })
     .where(eq(schema.streams.id, args.streamId))

@@ -72,6 +72,10 @@ export const StreamSchema = z.object({
   delay_ms: z.number().int(),
   host_gain: z.number(),
   created_at: z.number().int(),
+  // Populated for auto-created YouTube broadcasts — the canonical
+  // https://www.youtube.com/watch?v=<id> URL the host can share before
+  // they go live. Absent on non-YouTube streams.
+  watch_url: z.string().nullable().optional(),
 });
 
 export const PlatformCredentialSchema = z.object({

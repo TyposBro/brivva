@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ExternalLink, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useHostSession } from "./use-host-session";
 import { AudioRecorder } from "./audio-recorder";
 import { LatencyDashboard } from "./latency-dashboard";
@@ -244,80 +244,127 @@ function StreamCards({ streams, translations, isRecording }: StreamCardsProps) {
         </span>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {streams.map((s) => (
-          <div key={s.id} className="bg-surface-container-low rounded-xl p-4 space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-label font-bold uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded">
-                {s.lang?.toUpperCase()}
-              </span>
-              <span className="text-on-surface font-label text-sm">
-                {getPlatformLabel(s.platform ?? "custom")}
-              </span>
-              <span
-                className={cn(
-                  "ml-auto text-[10px] font-label font-bold uppercase tracking-widest px-2 py-0.5 rounded",
-                  s.error
-                    ? "text-error bg-error-container/30"
-                    : isRecording
-                      ? "text-success bg-success/10"
-                      : "text-on-surface-variant bg-surface-container-highest",
-                )}
-              >
-                {s.error ? "ERR" : isRecording ? "LIVE" : "READY"}
-              </span>
-            </div>
-
-            {s.error && <p className="text-error text-xs font-label">{s.error}</p>}
-
-            {translations[s.lang ?? ""] && (
-              <p className="text-on-surface text-sm font-label leading-snug border-l-2 border-primary/40 pl-2">
-                {translations[s.lang ?? ""].text}
-              </p>
-            )}
-
-            {s.rtmp_url && (
-              <code className="text-on-surface-variant text-[10px] font-mono block truncate">
-                {displayUrl(s.rtmp_url)}
-              </code>
-            )}
-
-            {s.platform === "local-test" && s.rtmp_url && (
-              <div className="flex flex-col gap-0.5">
-                <a
-                  href={`http://localhost:8889${streamPath(s.rtmp_url)}/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline"
+        {streams.map((s) => {
+          // Prefer the server-provided watch_url (present for auto-created
+          // YouTube broadcasts after this PR). Fall back to reconstructing it
+          // from broadcast_id for rows that were created pre-deploy.
+          const watchUrl =
+            s.watch_url ??
+            (s.broadcast_id ? `https://www.youtube.com/watch?v=${s.broadcast_id}` : null);
+          return (
+            <div key={s.id} className="bg-surface-container-low rounded-xl p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-label font-bold uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded">
+                  {s.lang?.toUpperCase()}
+                </span>
+                <span className="text-on-surface font-label text-sm">
+                  {getPlatformLabel(s.platform ?? "custom")}
+                </span>
+                <span
+                  className={cn(
+                    "ml-auto text-[10px] font-label font-bold uppercase tracking-widest px-2 py-0.5 rounded",
+                    s.error
+                      ? "text-error bg-error-container/30"
+                      : isRecording
+                        ? "text-success bg-success/10"
+                        : "text-on-surface-variant bg-surface-container-highest",
+                  )}
                 >
-                  <ExternalLink className="w-2.5 h-2.5" />
-                  WebRTC
-                </a>
-                <a
-                  href={`http://localhost:8888${streamPath(s.rtmp_url)}/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline"
-                >
-                  <ExternalLink className="w-2.5 h-2.5" />
-                  HLS
-                </a>
+                  {s.error ? "ERR" : isRecording ? "LIVE" : "READY"}
+                </span>
               </div>
-            )}
 
-            {s.broadcast_id && (
-              <a
-                href={`https://youtube.com/watch?v=${s.broadcast_id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline"
-              >
-                <ExternalLink className="w-2.5 h-2.5" />
-                YouTube
-              </a>
-            )}
-          </div>
-        ))}
+              {s.error && <p className="text-error text-xs font-label">{s.error}</p>}
+
+              {translations[s.lang ?? ""] && (
+                <p className="text-on-surface text-sm font-label leading-snug border-l-2 border-primary/40 pl-2">
+                  {translations[s.lang ?? ""].text}
+                </p>
+              )}
+
+              {s.rtmp_url && (
+                <code className="text-on-surface-variant text-[10px] font-mono block truncate">
+                  {displayUrl(s.rtmp_url)}
+                </code>
+              )}
+
+              {s.platform === "local-test" && s.rtmp_url && (
+                <div className="flex flex-col gap-0.5">
+                  <a
+                    href={`http://localhost:8889${streamPath(s.rtmp_url)}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline"
+                  >
+                    <ExternalLink className="w-2.5 h-2.5" />
+                    WebRTC
+                  </a>
+                  <a
+                    href={`http://localhost:8888${streamPath(s.rtmp_url)}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline"
+                  >
+                    <ExternalLink className="w-2.5 h-2.5" />
+                    HLS
+                  </a>
+                </div>
+              )}
+
+              {watchUrl && (
+                <WatchUrlRow url={watchUrl} />
+              )}
+            </div>
+          );
+        })}
       </div>
     </section>
+  );
+}
+
+function WatchUrlRow({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API may be blocked (iframe, insecure context). Fall back
+      // to a no-op — the user can still click the link and copy it manually.
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-1 text-primary text-[10px] font-label hover:underline truncate"
+      >
+        <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+        Watch link
+      </a>
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="ml-auto flex items-center gap-1 text-on-surface-variant hover:text-on-surface text-[10px] font-label px-1.5 py-0.5 rounded hover:bg-surface-container-high transition-colors"
+        title="Copy watch URL"
+      >
+        {copied ? (
+          <>
+            <Check className="w-2.5 h-2.5" />
+            Copied
+          </>
+        ) : (
+          <>
+            <Copy className="w-2.5 h-2.5" />
+            Copy
+          </>
+        )}
+      </button>
+    </div>
   );
 }

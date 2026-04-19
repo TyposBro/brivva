@@ -43,6 +43,36 @@ function pickDestinationLang(sourceLang: string): string {
   return sourceLang === "en" ? "ja" : "en";
 }
 
+/**
+ * Returns a user-visible error if a destination can't be shipped as-is,
+ * otherwise null. Mirrors the server-side expectations in POST /api/sessions:
+ *   - source lang can't also be a destination lang
+ *   - YouTube needs an OAuth-connected account (server will auto-create the
+ *     broadcast, so rtmp_url/stream_key are OPTIONAL on the client — YouTube
+ *     is treated as auto-fillable here)
+ *   - platforms without `.auto` need both rtmp_url + stream_key
+ */
+function destinationError(
+  dest: Destination,
+  sourceLang: string,
+  user: api.UserInfo | null,
+): string | null {
+  if (dest.lang === sourceLang) {
+    return `${api.langLabel(dest.lang)} is your source language — change or remove this destination`;
+  }
+  const p = api.PLATFORMS.find((x) => x.id === dest.platform);
+  if (dest.platform === "youtube") {
+    if (!user?.youtube_connected) return "Connect your YouTube account first";
+    return null; // rtmp_url/stream_key are auto-filled server-side
+  }
+  if (!p) return null;
+  if (!p.auto) {
+    if (!p.keyOnly && !dest.rtmp_url) return `Enter server URL for ${p.label}`;
+    if (!dest.stream_key) return `Enter stream key for ${p.label}`;
+  }
+  return null;
+}
+
 function DashboardInner() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -304,6 +334,12 @@ function DashboardInner() {
   }
 
   const hasYoutubeDest = destinations.some((d) => d.platform === "youtube");
+  // Disable Go Live when any destination has a client-side validation error.
+  // Prevents the "stream row created with NULL rtmp_url → session hangs"
+  // production bug from reaching the backend a second time (Apr 19, 2026).
+  const hasInvalidDestination = destinations.some(
+    (d) => destinationError(d, sourceLang, user) !== null,
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -424,6 +460,7 @@ function DashboardInner() {
               onPrivacyChange={setPrivacyStatus}
               onUpdate={(patch) => updateDestination(dest.uid, patch)}
               onRemove={() => removeDestination(dest.uid)}
+              validationError={destinationError(dest, sourceLang, user)}
             />
           ))}
 
@@ -524,12 +561,12 @@ function DashboardInner() {
         <button
           className={cn(
             "w-full py-4 rounded-xl font-headline font-extrabold text-lg uppercase tracking-tight transition-all",
-            destinations.length > 0
+            destinations.length > 0 && !hasInvalidDestination
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
           )}
           onClick={handleCreateSession}
-          disabled={creating || destinations.length === 0}
+          disabled={creating || destinations.length === 0 || hasInvalidDestination}
         >
           <span className="flex items-center justify-center gap-2">
             <Radio className="w-5 h-5" />
@@ -537,7 +574,9 @@ function DashboardInner() {
               ? "Creating..."
               : destinations.length === 0
                 ? "Add a destination to go live"
-                : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+                : hasInvalidDestination
+                  ? "Fix destination errors to go live"
+                  : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
           </span>
         </button>
 

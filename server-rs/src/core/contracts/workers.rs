@@ -37,6 +37,8 @@ pub struct Stream {
     pub delay_ms: u64,
     pub host_gain: f32,
     pub created_at: i64,
+    #[serde(default)]
+    pub watch_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

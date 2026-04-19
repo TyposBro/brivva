@@ -50,6 +50,9 @@ export type {
 type StreamInfo = StreamRecord & {
   broadcast_id?: string;
   stream_id?: string;
+  /** Runtime-only surface for sharing the YouTube link; `null`/undefined on
+   *  non-YouTube destinations. */
+  watch_url?: string | null;
   error?: string;
 };
 
@@ -61,6 +64,7 @@ const StreamInfoSchema = StreamSchema.transform((stream): StreamInfo => ({
   ...stream,
   broadcast_id: stream.platform_broadcast_id ?? undefined,
   stream_id: stream.platform_stream_id ?? undefined,
+  watch_url: stream.watch_url ?? undefined,
 }));
 
 async function parseResult<T>(
