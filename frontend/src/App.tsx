@@ -1,8 +1,8 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import HomePage from "./pages/HomePage";
-import HostPage from "./pages/HostPage";
-import DashboardPage from "./pages/DashboardPage";
-import SessionPage from "./pages/SessionPage";
+import HostPage from "./features/broadcast/presentation/host-page";
+import DashboardPage from "./features/broadcast/presentation/dashboard-page";
+import SessionPage from "./features/broadcast/presentation/session-page";
 import PrivacyPage from "./pages/PrivacyPage";
 import TermsPage from "./pages/TermsPage";
 

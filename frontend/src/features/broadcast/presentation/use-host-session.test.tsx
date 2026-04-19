@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 
 // Mock api
-vi.mock("../features/broadcast/data/api-client", () => ({
+vi.mock("../data/api-client", () => ({
   getAuthToken: vi.fn(),
   cloneSessionVoice: vi.fn(),
 }));
@@ -70,11 +70,11 @@ const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } = vi.hois
   return { pipelineInstances, socketInstances, FakePipeline, FakeSocket };
 });
 
-vi.mock("../shared/audio/audio-pipeline", () => ({ AudioPipeline: FakePipeline }));
-vi.mock("../shared/networking/session-socket", () => ({ SessionSocket: FakeSocket }));
+vi.mock("../../../shared/audio/audio-pipeline", () => ({ AudioPipeline: FakePipeline }));
+vi.mock("../../../shared/networking/session-socket", () => ({ SessionSocket: FakeSocket }));
 
-import * as api from "../features/broadcast/data/api-client";
-import { useHostSession } from "./useHostSession";
+import * as api from "../data/api-client";
+import { useHostSession } from "./use-host-session";
 
 const mockedGetAuthToken = api.getAuthToken as unknown as ReturnType<typeof vi.fn>;
 const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<typeof vi.fn>;

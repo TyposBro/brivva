@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useHostSession } from "../hooks/useHostSession";
-import { AudioRecorder } from "../components/AudioRecorder";
-import { LatencyDashboard } from "../components/LatencyDashboard";
+import { useHostSession } from "./use-host-session";
+import { AudioRecorder } from "./audio-recorder";
+import { LatencyDashboard } from "./latency-dashboard";
 import {
   ArrowLeft,
   Loader2,
@@ -10,8 +10,8 @@ import {
   SkipForward,
   ExternalLink,
 } from "lucide-react";
-import { cn } from "../core/cn";
-import * as api from "../features/broadcast/data/api-client";
+import { cn } from "../../../core/cn";
+import * as api from "../data/api-client";
 
 function getUserId(): string {
   let id = localStorage.getItem("brivva_user_id");

@@ -1,13 +1,13 @@
 import { useReducer, useRef, useCallback } from "react";
-import * as api from "../features/broadcast/data/api-client";
-import { AudioPipeline } from "../shared/audio/audio-pipeline";
-import { SessionSocket } from "../shared/networking/session-socket";
-import { useTimings, type UtteranceTiming } from "./useTimings";
-import { hostReducer, INITIAL_STATE } from "../state/host/reducer";
-import { createMessageHandler } from "../state/host/messageHandler";
+import * as api from "../data/api-client";
+import { AudioPipeline } from "../../../shared/audio/audio-pipeline";
+import { SessionSocket } from "../../../shared/networking/session-socket";
+import { useTimings, type UtteranceTiming } from "./use-timings";
+import { hostReducer, INITIAL_STATE } from "./reducer";
+import { createMessageHandler } from "./message-handler";
 
 export type { UtteranceTiming };
-export type { HostStatus, HostUtterance } from "../state/host/reducer";
+export type { HostStatus, HostUtterance } from "./reducer";
 
 const VOICE_SAMPLE_SECONDS = 30;
 const VOICE_SAMPLE_RATE = 44100;

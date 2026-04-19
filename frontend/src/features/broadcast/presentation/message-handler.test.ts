@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createMessageHandler } from "./messageHandler";
+import { createMessageHandler } from "./message-handler";
 import type { HostAction } from "./reducer";
 
 function makeHarness(langs: string[] = ["ja", "zh"]) {

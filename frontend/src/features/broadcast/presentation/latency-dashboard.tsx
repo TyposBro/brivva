@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Loader2, Zap } from "lucide-react";
-import { cn } from "../core/cn";
-import type { UtteranceTiming } from "../hooks/useHostSession";
+import { cn } from "../../../core/cn";
+import type { UtteranceTiming } from "./use-host-session";
 
 const TARGET_MS = 300;
 const DEFAULT_MAX_MS = 3000;
