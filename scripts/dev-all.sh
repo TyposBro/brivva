@@ -84,6 +84,27 @@ for port in "$SERVER_PORT" "$WORKERS_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
+# ── Shared secrets: source workers/.dev.vars so server-rs picks them up ─
+# Workers signs JWTs with JWT_SECRET and talks to server-rs via INTERNAL_SECRET.
+# server-rs has to read the SAME values or WS/internal POSTs fail. Rather than
+# duplicate secrets across files, source .dev.vars here and export. SONIOX
+# lives in the repo-root .env (server-rs-specific historical path).
+if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
+  fail "workers/.dev.vars is missing — copy from .dev.vars.example + fill in secrets"
+  exit 2
+fi
+# shellcheck disable=SC2046,SC2002
+set -a   # export every var sourced
+# Silence POSIX-mode failures on comment-only or blank lines.
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/workers/.dev.vars"
+if [ -f "${REPO_ROOT}/.env" ]; then
+  # shellcheck source=/dev/null
+  . "${REPO_ROOT}/.env"
+fi
+set +a
+export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
+
 # ── Boot server-rs ──────────────────────────────────────────
 info "[server-rs] starting → ${LOG_DIR}/server-rs.log"
 ( cd "${REPO_ROOT}/server-rs" && cargo run ) >"${LOG_DIR}/server-rs.log" 2>&1 &
