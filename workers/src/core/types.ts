@@ -5,6 +5,7 @@
 export type {
   PlatformCredential,
   Session,
+  SessionMetrics,
   StreamRecord,
   User,
   Voice,
@@ -18,6 +19,9 @@ export type UserInfo = {
   youtube_connected: boolean;
   youtube_channel_name: string | null;
   youtube_channel_id: string | null;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
   created_at: number;
 };
 
@@ -27,6 +31,9 @@ export function toUserInfo(u: User): UserInfo {
     youtube_connected: Boolean(u.youtube_refresh_token),
     youtube_channel_name: u.youtube_channel_name,
     youtube_channel_id: u.youtube_channel_id,
+    email: u.email,
+    name: u.name,
+    picture: u.picture,
     created_at: u.created_at,
   };
 }
@@ -38,7 +45,10 @@ export type Env = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   JWT_SECRET: string;
-  OAUTH_REDIRECT_URI: string; // full URL — must match Google Console
+  OAUTH_REDIRECT_URI: string; // YouTube add-channel redirect — matches Google Console
+  GOOGLE_SIGNIN_REDIRECT_URI: string; // Sign-in redirect — separate Google Console entry
   FRONTEND_URL: string;
   INTERNAL_SECRET: string; // shared between Workers and Fargate (server→worker calls)
+  // Optional — unset during early dev, required before turning billing on.
+  STRIPE_WEBHOOK_SECRET?: string;
 };

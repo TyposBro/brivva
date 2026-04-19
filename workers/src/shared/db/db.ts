@@ -11,6 +11,7 @@ import * as schema from "../../core/schema";
 import type {
   PlatformCredential,
   Session,
+  SessionMetrics,
   StreamRecord,
   User,
   Voice,
@@ -88,6 +89,24 @@ export async function updateAccessToken(
     .run();
 }
 
+export type UpdateUserProfile = {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
+};
+
+export async function updateUserProfile(
+  db: D1Database,
+  args: UpdateUserProfile,
+): Promise<void> {
+  await wrap(db)
+    .update(schema.users)
+    .set({ email: args.email, name: args.name, picture: args.picture })
+    .where(eq(schema.users.id, args.userId))
+    .run();
+}
+
 // ── voices ────────────────────────────────────────────────
 
 export async function listVoices(
@@ -114,6 +133,7 @@ export type CreateVoice = {
   userId: string;
   elevenlabsVoiceId: string;
   name: string;
+  sourceLang: string | null;
 };
 
 export async function createVoice(db: D1Database, args: CreateVoice): Promise<Voice> {
@@ -122,6 +142,7 @@ export async function createVoice(db: D1Database, args: CreateVoice): Promise<Vo
     user_id: args.userId,
     elevenlabs_voice_id: args.elevenlabsVoiceId,
     name: args.name,
+    source_lang: args.sourceLang,
     created_at: now(),
   };
   await wrap(db).insert(schema.voices).values(row).run();
@@ -215,6 +236,7 @@ export async function deleteSessionRow(
   id: string,
 ): Promise<void> {
   const d = wrap(db);
+  await d.delete(schema.session_metrics).where(eq(schema.session_metrics.session_id, id)).run();
   await d.delete(schema.streams).where(eq(schema.streams.session_id, id)).run();
   await d.delete(schema.sessions).where(eq(schema.sessions.id, id)).run();
 }
@@ -386,4 +408,81 @@ export async function deleteCredentialRow(
       ),
     )
     .run();
+}
+
+// ── session metrics ───────────────────────────────────────
+
+export async function getSessionMetrics(
+  db: D1Database,
+  sessionId: string,
+): Promise<SessionMetrics | null> {
+  const row = await wrap(db).query.session_metrics.findFirst({
+    where: eq(schema.session_metrics.session_id, sessionId),
+  });
+  return row ?? null;
+}
+
+export type UpsertSessionMetrics = {
+  sessionId: string;
+  sourceSeconds: number | undefined;
+  outputSecondsByLang: Record<string, number> | undefined;
+};
+
+// Merge-semantic upsert: if the caller omits a field, prior values are kept.
+// output_seconds_json is shallow-merged by lang so Fargate can PATCH a
+// single target-language delta without clobbering the others.
+export async function upsertSessionMetrics(
+  db: D1Database,
+  args: UpsertSessionMetrics,
+): Promise<SessionMetrics> {
+  const d = wrap(db);
+  const prior = await getSessionMetrics(db, args.sessionId);
+  const ts = now();
+
+  const nextSource =
+    args.sourceSeconds ?? prior?.source_seconds ?? 0;
+
+  const priorOutputs: Record<string, number> = prior
+    ? (JSON.parse(prior.output_seconds_json) as Record<string, number>)
+    : {};
+  const mergedOutputs = { ...priorOutputs, ...(args.outputSecondsByLang ?? {}) };
+
+  const row: SessionMetrics = {
+    session_id: args.sessionId,
+    source_seconds: nextSource,
+    output_seconds_json: JSON.stringify(mergedOutputs),
+    updated_at: ts,
+  };
+
+  await d
+    .insert(schema.session_metrics)
+    .values(row)
+    .onConflictDoUpdate({
+      target: schema.session_metrics.session_id,
+      set: {
+        source_seconds: row.source_seconds,
+        output_seconds_json: row.output_seconds_json,
+        updated_at: row.updated_at,
+      },
+    })
+    .run();
+
+  return row;
+}
+
+export async function listUserSessionMetrics(
+  db: D1Database,
+  userId: string,
+): Promise<SessionMetrics[]> {
+  // Join-free: fetch session ids for the user, then metrics for those ids.
+  const d = wrap(db);
+  const userSessions = await d.query.sessions.findMany({
+    where: eq(schema.sessions.user_id, userId),
+    columns: { id: true },
+  });
+  if (userSessions.length === 0) return [];
+  const ids = userSessions.map((s) => s.id);
+  return await d.query.session_metrics.findMany({
+    where: (m, { inArray }) => inArray(m.session_id, ids),
+  });
 }

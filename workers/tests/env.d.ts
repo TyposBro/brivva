@@ -14,7 +14,9 @@ declare global {
       JWT_SECRET: string;
       INTERNAL_SECRET: string;
       OAUTH_REDIRECT_URI: string;
+      GOOGLE_SIGNIN_REDIRECT_URI: string;
       FRONTEND_URL: string;
+      STRIPE_WEBHOOK_SECRET: string;
       TEST_MIGRATIONS: D1Migration[];
     }
   }

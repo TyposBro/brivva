@@ -4,24 +4,34 @@ import { swaggerUI } from "@hono/swagger-ui";
 import {
   AddStreamRequestSchema,
   AuthTokenRequestSchema,
+  BillingSummaryQuerySchema,
   CloneSessionVoiceRequestSchema,
   CreateSessionRequestSchema,
   CreateVoiceRequestSchema,
+  GripAuthRequestSchema,
+  InternalSessionMetricsUpdateSchema,
   InternalSessionStatusUpdateSchema,
   PlatformQuerySchema,
   SaveCredentialRequestSchema,
   SessionIdParamsSchema,
   SessionStreamParamsSchema,
+  TikTokAuthRequestSchema,
   UserQuerySchema,
 } from "@brivva/contracts/http";
-import { YoutubeCallbackQuerySchema } from "@brivva/contracts/oauth";
+import {
+  GoogleSigninCallbackQuerySchema,
+  YoutubeCallbackQuerySchema,
+} from "@brivva/contracts/oauth";
 
 import { signJwt } from "../shared/auth/jwt";
 import * as db from "../shared/db/db";
+import { validateVoiceSample } from "../shared/audio/wav-duration";
 import * as el from "../features/voices/elevenlabs-client";
 import { buildOpenApiDocument } from "./openapi";
 import { toUserInfo, type Env } from "../core/types";
 import * as yt from "../features/youtube/google-oauth-client";
+import * as gsignin from "../features/auth/google-signin-client";
+import { verifyStripeSignature } from "../features/billing/stripe-webhook";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -100,16 +110,23 @@ app.get("/api/voices", async (c) => {
 app.post("/api/voices", async (c) => {
   const body = parseWithSchema(c, CreateVoiceRequestSchema, await c.req.json());
   if (body instanceof Response) return body;
+
+  const validation = validateVoiceSample(body.audio_base64);
+  if (!validation.ok) {
+    return c.json({ error: validation.error }, 400);
+  }
+
   await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
-  const { voice_id } = await el.cloneVoice(
-    c.env.ELEVENLABS_API_KEY,
-    body.name,
-    body.audio_base64,
-  );
+  const { voice_id } = await el.cloneVoice(c.env.ELEVENLABS_API_KEY, {
+    name: body.name,
+    audioBase64: body.audio_base64,
+    sourceLang: body.source_lang ?? null,
+  });
   const voice = await db.createVoice(c.env.DB, {
     userId: body.user_id,
     elevenlabsVoiceId: voice_id,
     name: body.name,
+    sourceLang: body.source_lang ?? null,
   });
   return c.json(voice);
 });
@@ -242,16 +259,23 @@ app.post("/api/sessions/:id/voice", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
 
+  const validation = validateVoiceSample(body.audio_base64);
+  if (!validation.ok) {
+    return c.json({ error: validation.error }, 400);
+  }
+
+  const sourceLang = body.source_lang ?? session.source_lang;
   const voiceName = body.name?.trim() || `${session.title} Host Voice`;
-  const { voice_id } = await el.cloneVoice(
-    c.env.ELEVENLABS_API_KEY,
-    voiceName,
-    body.audio_base64,
-  );
+  const { voice_id } = await el.cloneVoice(c.env.ELEVENLABS_API_KEY, {
+    name: voiceName,
+    audioBase64: body.audio_base64,
+    sourceLang,
+  });
   const voice = await db.createVoice(c.env.DB, {
     userId: body.user_id,
     elevenlabsVoiceId: voice_id,
     name: voiceName,
+    sourceLang,
   });
   await db.updateSessionVoiceId(c.env.DB, params.id, voice.id);
   return c.json({ voice });
@@ -302,7 +326,54 @@ app.delete("/api/sessions/:session_id/streams/:stream_id", async (c) => {
   return c.json({ status: "deleted" });
 });
 
-// ── OAuth (YouTube) ──────────────────────────────────────
+// ── session usage (billing feeder) ───────────────────────
+// Populated from /internal/sessions/:id/metrics PATCHes that Fargate writes
+// as STT/TTS minutes accumulate. Returns zeros for sessions that haven't
+// produced metrics yet (status=setup, or no PATCHes happened during a short
+// session).
+
+function minutesFromSeconds(s: number): number {
+  return Math.round((s / 60) * 100) / 100;
+}
+
+const ESTIMATED_COST_PER_OUTPUT_MINUTE_USD = 0; // stub — no pricing locked in yet
+
+function estimateCost(outputByLang: Record<string, number>): number {
+  let total = 0;
+  for (const v of Object.values(outputByLang)) total += v;
+  return Math.round(total * ESTIMATED_COST_PER_OUTPUT_MINUTE_USD * 100) / 100;
+}
+
+app.get("/api/sessions/:id/usage", async (c) => {
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+
+  const session = await db.getSession(c.env.DB, params.id);
+  if (!session) return c.json({ error: "not found" }, 404);
+
+  const metrics = await db.getSessionMetrics(c.env.DB, params.id);
+  const outputByLangSeconds: Record<string, number> = metrics
+    ? (JSON.parse(metrics.output_seconds_json) as Record<string, number>)
+    : {};
+  const outputByLangMinutes: Record<string, number> = {};
+  for (const [k, v] of Object.entries(outputByLangSeconds)) {
+    outputByLangMinutes[k] = minutesFromSeconds(v);
+  }
+
+  return c.json({
+    session_id: params.id,
+    source_minutes: minutesFromSeconds(metrics?.source_seconds ?? 0),
+    output_minutes_by_lang: outputByLangMinutes,
+    estimated_cost_usd: estimateCost(outputByLangMinutes),
+  });
+});
+
+// ── OAuth (YouTube add-channel) ──────────────────────────
+// /auth/youtube is the ADD-CHANNEL flow — grants YouTube scopes to an
+// already-authenticated user so we can create broadcasts on their behalf.
+// It is NOT the sign-in flow: /auth/google below owns sign-in.
 
 app.get("/auth/youtube", (c) => {
   const query = parseWithSchema(c, UserQuerySchema, {
@@ -348,6 +419,49 @@ app.get("/auth/youtube/callback", async (c) => {
   }
 });
 
+// ── OAuth (Google sign-in) ───────────────────────────────
+// Separate Google Client redirect entry. Uses openid+email+profile scope,
+// identifies users by the Google `sub` (never user-supplied), and mints
+// the same JWT shape /auth/token returns so the FE path after sign-in is
+// unchanged.
+
+app.get("/auth/google", (c) => {
+  // State is an opaque CSRF token; for sign-in we don't have a user_id yet.
+  const state = crypto.randomUUID();
+  return c.redirect(gsignin.authorizeUrl(c.env, state));
+});
+
+app.get("/auth/google/callback", async (c) => {
+  const query = parseWithSchema(c, GoogleSigninCallbackQuerySchema, {
+    code: c.req.query("code"),
+    state: c.req.query("state"),
+    error: c.req.query("error"),
+  });
+  if (query instanceof Response) return query;
+  if (query.error) {
+    return c.redirect(`${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(query.error)}`);
+  }
+  if (!query.code) return c.json({ error: "code required" }, 400);
+
+  try {
+    const tokens = await gsignin.exchangeCode(c.env, query.code);
+    const info = await gsignin.fetchUserInfo(tokens.access_token);
+    const user = await db.getOrCreateUser(c.env.DB, info.sub);
+    await db.updateUserProfile(c.env.DB, {
+      userId: user.id,
+      email: info.email,
+      name: info.name,
+      picture: info.picture,
+    });
+    const jwt = await signJwt(c.env.JWT_SECRET, { sub: user.id });
+    return c.redirect(
+      `${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(user.id)}#token=${jwt}`,
+    );
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
 // Short-lived JWT issuance for already-authenticated users (called by FE on
 // page load if it has a user_id but no fresh JWT).
 app.post("/auth/token", async (c) => {
@@ -356,6 +470,106 @@ app.post("/auth/token", async (c) => {
   const user = await db.getOrCreateUser(c.env.DB, body.user_id);
   const jwt = await signJwt(c.env.JWT_SECRET, { sub: user.id });
   return c.json({ token: jwt });
+});
+
+// ── Platform credential paste flows (Grip, TikTok) ───────
+// These platforms don't expose real OAuth for live streaming — the creator
+// pastes a session token + stream key from their host dashboard. The
+// session token is stored as display_name metadata; the stream key + RTMP
+// URL are what Fargate actually pushes to.
+
+app.post("/auth/grip", async (c) => {
+  const body = parseWithSchema(c, GripAuthRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
+  await db.getOrCreateUser(c.env.DB, body.user_id);
+  const row = await db.upsertCredential(c.env.DB, {
+    userId: body.user_id,
+    platform: "grip",
+    rtmpUrl: body.rtmp_url ?? null,
+    streamKey: body.stream_key,
+    displayName: body.display_name ?? `grip:${body.session_token.slice(0, 6)}…`,
+  });
+  return c.json(row);
+});
+
+app.post("/auth/tiktok", async (c) => {
+  const body = parseWithSchema(c, TikTokAuthRequestSchema, await c.req.json());
+  if (body instanceof Response) return body;
+  await db.getOrCreateUser(c.env.DB, body.user_id);
+  const row = await db.upsertCredential(c.env.DB, {
+    userId: body.user_id,
+    platform: "tiktok",
+    rtmpUrl: body.rtmp_url ?? null,
+    streamKey: body.stream_key,
+    displayName: body.display_name ?? `tiktok:${body.session_token.slice(0, 6)}…`,
+  });
+  return c.json(row);
+});
+
+// ── Billing (Stripe scaffolding) ─────────────────────────
+
+function monthWindow(nowSeconds: number): { start: number; end: number } {
+  const d = new Date(nowSeconds * 1000);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000;
+  const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000;
+  return { start, end };
+}
+
+app.get("/api/billing/summary", async (c) => {
+  const query = parseWithSchema(c, BillingSummaryQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+
+  const metrics = await db.listUserSessionMetrics(c.env.DB, query.user_id);
+  let sourceSeconds = 0;
+  const outputByLangSeconds: Record<string, number> = {};
+  for (const m of metrics) {
+    sourceSeconds += m.source_seconds;
+    const perSession = JSON.parse(m.output_seconds_json) as Record<string, number>;
+    for (const [lang, secs] of Object.entries(perSession)) {
+      outputByLangSeconds[lang] = (outputByLangSeconds[lang] ?? 0) + secs;
+    }
+  }
+
+  const outputByLangMinutes: Record<string, number> = {};
+  for (const [k, v] of Object.entries(outputByLangSeconds)) {
+    outputByLangMinutes[k] = minutesFromSeconds(v);
+  }
+  const window = monthWindow(Math.floor(Date.now() / 1000));
+
+  return c.json({
+    user_id: query.user_id,
+    period_start: window.start,
+    period_end: window.end,
+    source_minutes: minutesFromSeconds(sourceSeconds),
+    output_minutes_by_lang: outputByLangMinutes,
+    estimated_cost_usd: estimateCost(outputByLangMinutes),
+  });
+});
+
+app.post("/stripe/webhook", async (c) => {
+  const payload = await c.req.text();
+  const sigHeader = c.req.header("Stripe-Signature") ?? null;
+  const secret = c.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!secret) {
+    console.warn("[stripe] webhook received without STRIPE_WEBHOOK_SECRET set");
+    return c.json({ received: true, verified: false }, 200);
+  }
+
+  const result = await verifyStripeSignature(
+    payload,
+    sigHeader,
+    secret,
+    Math.floor(Date.now() / 1000),
+  );
+  if (!result.ok) {
+    console.warn(`[stripe] signature rejected: ${result.reason}`);
+    return c.json({ error: result.reason }, 400);
+  }
+  console.log(`[stripe] webhook verified: ${result.eventType ?? "unknown"}`);
+  return c.json({ received: true, verified: true }, 200);
 });
 
 // ── Internal (Fargate → Worker) ──────────────────────────
@@ -403,6 +617,35 @@ app.patch("/internal/sessions/:id", async (c) => {
     id: params.id,
     status: body.status,
     liveSessionId: body.live_session_id ?? null,
+  });
+  return c.json({ status: "ok" });
+});
+
+// Metrics update (Fargate → Workers as STT/TTS minutes accumulate).
+// Merge-semantics: omitted fields leave prior values alone; per-lang output
+// seconds are shallow-merged so a single target-language delta doesn't clobber
+// the others.
+app.patch("/internal/sessions/:id/metrics", async (c) => {
+  const err = requireInternal(c);
+  if (err) return err;
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const body = parseWithSchema(
+    c,
+    InternalSessionMetricsUpdateSchema,
+    await c.req.json(),
+  );
+  if (body instanceof Response) return body;
+
+  const session = await db.getSession(c.env.DB, params.id);
+  if (!session) return c.json({ error: "not found" }, 404);
+
+  await db.upsertSessionMetrics(c.env.DB, {
+    sessionId: params.id,
+    sourceSeconds: body.source_seconds,
+    outputSecondsByLang: body.output_seconds_by_lang,
   });
   return c.json({ status: "ok" });
 });

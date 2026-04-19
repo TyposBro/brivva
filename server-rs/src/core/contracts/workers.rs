@@ -45,6 +45,7 @@ pub struct Voice {
     pub user_id: String,
     pub elevenlabs_voice_id: String,
     pub name: String,
+    pub source_lang: Option<String>,
     pub created_at: i64,
 }
 

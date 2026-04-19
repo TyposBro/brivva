@@ -101,6 +101,9 @@ const schemas = {
       "youtube_connected",
       "youtube_channel_name",
       "youtube_channel_id",
+      "email",
+      "name",
+      "picture",
       "created_at",
     ],
     properties: {
@@ -108,6 +111,9 @@ const schemas = {
       youtube_connected: { type: "boolean" },
       youtube_channel_name: { type: "string", nullable: true },
       youtube_channel_id: { type: "string", nullable: true },
+      email: { type: "string", nullable: true },
+      name: { type: "string", nullable: true },
+      picture: { type: "string", nullable: true },
       created_at: { type: "integer" },
     },
   },
@@ -120,6 +126,9 @@ const schemas = {
       "youtube_access_token",
       "youtube_refresh_token",
       "youtube_token_expires_at",
+      "email",
+      "name",
+      "picture",
       "created_at",
     ],
     properties: {
@@ -129,17 +138,28 @@ const schemas = {
       youtube_access_token: { type: "string", nullable: true },
       youtube_refresh_token: { type: "string", nullable: true },
       youtube_token_expires_at: { type: "integer", nullable: true },
+      email: { type: "string", nullable: true },
+      name: { type: "string", nullable: true },
+      picture: { type: "string", nullable: true },
       created_at: { type: "integer" },
     },
   },
   Voice: {
     type: "object",
-    required: ["id", "user_id", "elevenlabs_voice_id", "name", "created_at"],
+    required: [
+      "id",
+      "user_id",
+      "elevenlabs_voice_id",
+      "name",
+      "source_lang",
+      "created_at",
+    ],
     properties: {
       id: { type: "string" },
       user_id: { type: "string" },
       elevenlabs_voice_id: { type: "string" },
       name: { type: "string" },
+      source_lang: { type: "string", nullable: true },
       created_at: { type: "integer" },
     },
   },
@@ -292,6 +312,7 @@ const schemas = {
       user_id: { type: "string" },
       audio_base64: { type: "string" },
       name: { type: "string" },
+      source_lang: { type: "string" },
     },
   },
   CloneSessionVoiceResponse: {
@@ -327,6 +348,7 @@ const schemas = {
       user_id: { type: "string" },
       name: { type: "string" },
       audio_base64: { type: "string" },
+      source_lang: { type: "string" },
     },
   },
   ListCredentialsResponse: {
@@ -345,6 +367,78 @@ const schemas = {
       rtmp_url: { type: "string" },
       stream_key: { type: "string" },
       display_name: { type: "string" },
+    },
+  },
+  GripAuthRequest: {
+    type: "object",
+    required: ["user_id", "session_token", "stream_key"],
+    properties: {
+      user_id: { type: "string" },
+      session_token: { type: "string" },
+      stream_key: { type: "string" },
+      rtmp_url: { type: "string" },
+      display_name: { type: "string" },
+    },
+  },
+  TikTokAuthRequest: {
+    type: "object",
+    required: ["user_id", "session_token", "stream_key"],
+    properties: {
+      user_id: { type: "string" },
+      session_token: { type: "string" },
+      stream_key: { type: "string" },
+      rtmp_url: { type: "string" },
+      display_name: { type: "string" },
+    },
+  },
+  BillingSummaryResponse: {
+    type: "object",
+    required: [
+      "user_id",
+      "period_start",
+      "period_end",
+      "source_minutes",
+      "output_minutes_by_lang",
+      "estimated_cost_usd",
+    ],
+    properties: {
+      user_id: { type: "string" },
+      period_start: { type: "integer" },
+      period_end: { type: "integer" },
+      source_minutes: { type: "number" },
+      output_minutes_by_lang: {
+        type: "object",
+        additionalProperties: { type: "number" },
+      },
+      estimated_cost_usd: { type: "number" },
+    },
+  },
+  SessionUsageResponse: {
+    type: "object",
+    required: [
+      "session_id",
+      "source_minutes",
+      "output_minutes_by_lang",
+      "estimated_cost_usd",
+    ],
+    properties: {
+      session_id: { type: "string" },
+      source_minutes: { type: "number" },
+      output_minutes_by_lang: {
+        type: "object",
+        additionalProperties: { type: "number" },
+      },
+      estimated_cost_usd: { type: "number" },
+    },
+  },
+  InternalSessionMetricsUpdate: {
+    type: "object",
+    properties: {
+      source_seconds: { type: "number" },
+      output_seconds_by_lang: {
+        type: "object",
+        additionalProperties: { type: "number" },
+      },
     },
   },
   InternalSessionBundle: {
@@ -507,13 +601,21 @@ function sessionPaths() {
         ],
       }),
     },
+    "/api/sessions/{id}/usage": {
+      get: getOperation("Get session usage for billing", {
+        200: jsonResponse(ref("SessionUsageResponse"), "Usage rollup"),
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+      }),
+    },
   };
 }
 
 function authPaths() {
   return {
     "/auth/youtube": {
-      get: getOperation("Redirect to YouTube OAuth", {
+      get: getOperation("Redirect to YouTube OAuth (add-channel, not sign-in)", {
         302: redirectResponse("Redirect to Google OAuth"),
         400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
       }, {
@@ -533,12 +635,65 @@ function authPaths() {
         ],
       }),
     },
+    "/auth/google": {
+      get: getOperation("Redirect to Google OAuth for sign-in", {
+        302: redirectResponse("Redirect to Google OAuth"),
+      }),
+    },
+    "/auth/google/callback": {
+      get: getOperation("Handle Google sign-in callback", {
+        302: redirectResponse("Redirect back to frontend with JWT"),
+        400: jsonResponse(ref("ErrorResponse"), "Missing code"),
+        500: jsonResponse(ref("ErrorResponse"), "OAuth exchange failed"),
+      }, {
+        parameters: [
+          queryParam("code", false),
+          queryParam("state", false),
+          queryParam("error", false),
+        ],
+      }),
+    },
+    "/auth/grip": {
+      post: getOperation("Save Grip RTMP credentials (no real OAuth)", {
+        200: jsonResponse(ref("PlatformCredential"), "Saved credential"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("GripAuthRequest")),
+      }),
+    },
+    "/auth/tiktok": {
+      post: getOperation("Save TikTok RTMP credentials (no real OAuth)", {
+        200: jsonResponse(ref("PlatformCredential"), "Saved credential"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        requestBody: jsonBody(ref("TikTokAuthRequest")),
+      }),
+    },
     "/auth/token": {
       post: getOperation("Issue short-lived JWT for media websocket", {
         200: jsonResponse(ref("AuthTokenResponse"), "Signed JWT"),
         400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
       }, {
         requestBody: jsonBody(ref("AuthTokenRequest")),
+      }),
+    },
+  };
+}
+
+function billingPaths() {
+  return {
+    "/api/billing/summary": {
+      get: getOperation("Current-month usage + estimated cost", {
+        200: jsonResponse(ref("BillingSummaryResponse"), "Billing summary"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+    },
+    "/stripe/webhook": {
+      post: getOperation("Stripe webhook receiver (scaffold, no billing logic)", {
+        200: jsonResponse(ref("StatusResponse"), "Received"),
+        400: jsonResponse(ref("ErrorResponse"), "Signature verification failed"),
       }),
     },
   };
@@ -583,6 +738,18 @@ function internalPaths() {
         requestBody: jsonBody(ref("InternalSessionStatusUpdate")),
       }),
     },
+    "/internal/sessions/{id}/metrics": {
+      patch: getOperation("Merge per-session usage metrics from media backend", {
+        200: jsonResponse(ref("InternalSessionStatusResponse"), "Metrics merged"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+        401: { description: "Unauthorized" },
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        security: [{ InternalSecret: [] }],
+        parameters: [pathParam("id", "Session id")],
+        requestBody: jsonBody(ref("InternalSessionMetricsUpdate")),
+      }),
+    },
   };
 }
 
@@ -598,6 +765,7 @@ function buildPaths() {
     ...credentialPaths(),
     ...sessionPaths(),
     ...authPaths(),
+    ...billingPaths(),
     ...internalPaths(),
   };
 }

@@ -11,6 +11,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM platform_credentials"),
+    env.DB.prepare("DELETE FROM session_metrics"),
     env.DB.prepare("DELETE FROM streams"),
     env.DB.prepare("DELETE FROM sessions"),
     env.DB.prepare("DELETE FROM voices"),

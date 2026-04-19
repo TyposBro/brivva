@@ -4,6 +4,41 @@ import { env } from "cloudflare:test";
 import app from "../src/orchestration/app";
 import { verifyJwt } from "../src/shared/auth/jwt";
 
+// Build a minimal PCM WAV of the requested duration, encoded as base64.
+// 4000 Hz / 1ch / 8-bit is within the voice-sample validator and keeps the
+// fixture small enough to live in memory during tests.
+function makeWavBase64(seconds: number): string {
+  const sampleRate = 4000;
+  const channels = 1;
+  const bitsPerSample = 8;
+  const bytesPerSample = bitsPerSample / 8;
+  const dataSize = Math.round(seconds * sampleRate * channels * bytesPerSample);
+  const buf = new Uint8Array(44 + dataSize);
+  const view = new DataView(buf.buffer);
+  const ascii = (s: string, offset: number) => {
+    for (let i = 0; i < s.length; i++) buf[offset + i] = s.charCodeAt(i);
+  };
+  ascii("RIFF", 0);
+  view.setUint32(4, 36 + dataSize, true);
+  ascii("WAVE", 8);
+  ascii("fmt ", 12);
+  view.setUint32(16, 16, true); // fmt chunk size
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true); // byteRate
+  view.setUint16(32, channels * bytesPerSample, true); // blockAlign
+  view.setUint16(34, bitsPerSample, true);
+  ascii("data", 36);
+  view.setUint32(40, dataSize, true);
+  // data stays zero-filled (silence) — content is irrelevant for these tests.
+  let binary = "";
+  for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i]!);
+  return btoa(binary);
+}
+
+const VALID_WAV_B64 = makeWavBase64(32);
+
 async function seedUser(id: string): Promise<void> {
   await env.DB.prepare(
     "INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)",
@@ -579,7 +614,7 @@ describe("POST /api/voices (ElevenLabs clone, fetch-mocked)", () => {
       },
     ]);
 
-    const audio = btoa("\0\0\0\0\0\0\0\0"); // 8 bytes — content ignored by the stub
+    const audio = VALID_WAV_B64;
     const res = await call("/api/voices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -614,7 +649,7 @@ describe("POST /api/voices (ElevenLabs clone, fetch-mocked)", () => {
       },
     ]);
 
-    const audio = btoa("\0\0\0\0");
+    const audio = VALID_WAV_B64;
     const res = await call("/api/voices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -689,7 +724,7 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         user_id: "u-session-voice",
-        audio_base64: btoa("\0\0\0\0"),
+        audio_base64: VALID_WAV_B64,
       }),
     });
     expect(res.status).toBe(200);
@@ -705,6 +740,31 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
       session: { voice_id: string | null };
     };
     expect(linkedSession.session.voice_id).toBe(body.voice.id);
+  });
+
+  it("rejects voice samples shorter than 30 seconds (sad)", async () => {
+    const sessionRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-short",
+        title: "Short",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    const { session } = (await sessionRes.json()) as { session: { id: string } };
+    const res = await call(`/api/sessions/${session.id}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-short",
+        audio_base64: makeWavBase64(10), // too short
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/too short/);
   });
 
   it("403 when the caller does not own the session (sad)", async () => {
@@ -727,9 +787,394 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         user_id: "other-user",
-        audio_base64: btoa("\0\0\0\0"),
+        audio_base64: VALID_WAV_B64,
       }),
     });
     expect(res.status).toBe(403);
+  });
+
+  it("forwards source_lang to ElevenLabs as labels + persists on voice row (happy)", async () => {
+    let seenLabels: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (/api\.elevenlabs\.io\/v1\/voices\/add/.test(url)) {
+          const form = init?.body as FormData;
+          seenLabels = (form.get("labels") as string | null) ?? null;
+          return new Response(JSON.stringify({ voice_id: "el-lang-1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unstubbed fetch: ${url}`);
+      }),
+    );
+
+    const sessionRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-lang",
+        title: "Lang Session",
+        source_lang: "ko",
+        target_langs: ["en"],
+      }),
+    });
+    const { session } = (await sessionRes.json()) as { session: { id: string } };
+    const res = await call(`/api/sessions/${session.id}/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-lang",
+        audio_base64: VALID_WAV_B64,
+        source_lang: "ko",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(seenLabels).toBe(JSON.stringify({ language: "ko" }));
+
+    const body = (await res.json()) as { voice: { source_lang: string | null } };
+    expect(body.voice.source_lang).toBe("ko");
+  });
+});
+
+describe("POST /api/voices rejects short samples (sad)", () => {
+  it("400 when audio_base64 is a <30s WAV", async () => {
+    const res = await call("/api/voices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tiny",
+        name: "Tiny",
+        audio_base64: makeWavBase64(5),
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/too short/);
+  });
+});
+
+describe("GET /auth/google (happy)", () => {
+  it("redirects to Google with openid+email+profile scope", async () => {
+    const res = await call("/auth/google", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("accounts.google.com");
+    expect(location).toContain("scope=openid+email+profile");
+    expect(location).toContain(encodeURIComponent(env.GOOGLE_SIGNIN_REDIRECT_URI));
+  });
+});
+
+describe("GET /auth/google/callback (fetch-stubbed, happy)", () => {
+  it("mints JWT by Google sub + persists email/name/picture", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (/oauth2\.googleapis\.com\/token/.test(url)) {
+          return new Response(
+            JSON.stringify({
+              access_token: "goog-access",
+              expires_in: 3600,
+              token_type: "Bearer",
+              scope: "openid email profile",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (/openidconnect\.googleapis\.com\/v1\/userinfo/.test(url)) {
+          return new Response(
+            JSON.stringify({
+              sub: "google-sub-123",
+              email: "host@example.com",
+              name: "Host Name",
+              picture: "https://cdn.example.com/host.png",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unstubbed fetch: ${url}`);
+      }),
+    );
+
+    const res = await call("/auth/google/callback?code=auth-code&state=any", {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("user_id=google-sub-123");
+    expect(location).toMatch(/#token=eyJ/);
+
+    const jwt = /#token=([^&]+)/.exec(location)![1]!;
+    const claims = await verifyJwt(env.JWT_SECRET, jwt);
+    expect(claims.sub).toBe("google-sub-123");
+
+    const row = (await env.DB.prepare("SELECT * FROM users WHERE id = ?")
+      .bind("google-sub-123")
+      .first()) as {
+      email: string;
+      name: string;
+      picture: string;
+    } | null;
+    expect(row?.email).toBe("host@example.com");
+    expect(row?.name).toBe("Host Name");
+    expect(row?.picture).toBe("https://cdn.example.com/host.png");
+  });
+
+  it("redirects with oauth_error when Google signals error (sad)", async () => {
+    const res = await call("/auth/google/callback?error=access_denied", {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    expect(location.startsWith(env.FRONTEND_URL)).toBe(true);
+    expect(location).toContain("oauth_error=access_denied");
+  });
+});
+
+describe("POST /auth/grip + /auth/tiktok", () => {
+  it("upserts a Grip credential row with platform=grip (happy)", async () => {
+    const res = await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip",
+        session_token: "sess-abc-def",
+        stream_key: "grip-stream-key",
+        rtmp_url: "rtmps://live.grip.fans:443/live/",
+        display_name: "Grip main",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      platform: string;
+      stream_key: string;
+      display_name: string;
+    };
+    expect(body.platform).toBe("grip");
+    expect(body.stream_key).toBe("grip-stream-key");
+    expect(body.display_name).toBe("Grip main");
+  });
+
+  it("400 when required fields missing on /auth/tiktok (sad)", async () => {
+    const res = await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "u-t", session_token: "x" }), // no stream_key
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("upserts a TikTok credential row (happy)", async () => {
+    const res = await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tt",
+        session_token: "tiktok-session-xxx",
+        stream_key: "tiktok-key",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { platform: string; display_name: string };
+    expect(body.platform).toBe("tiktok");
+    expect(body.display_name).toContain("tiktok:");
+  });
+});
+
+describe("GET /api/billing/summary", () => {
+  it("returns zeros for a user with no sessions (happy)", async () => {
+    const res = await call("/api/billing/summary?user_id=u-none");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      source_minutes: number;
+      output_minutes_by_lang: Record<string, number>;
+      estimated_cost_usd: number;
+    };
+    expect(body.source_minutes).toBe(0);
+    expect(body.output_minutes_by_lang).toEqual({});
+    expect(body.estimated_cost_usd).toBe(0);
+  });
+
+  it("400 when user_id missing (sad)", async () => {
+    const res = await call("/api/billing/summary");
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", () => {
+  it("GET returns zeros until metrics are PATCHed (happy)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-usage", Math.floor(Date.now() / 1000)).run();
+    const create = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-usage",
+        title: "U",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await create.json()) as { session: { id: string } };
+
+    const before = await call(`/api/sessions/${session.id}/usage`);
+    const beforeBody = (await before.json()) as {
+      source_minutes: number;
+      output_minutes_by_lang: Record<string, number>;
+    };
+    expect(beforeBody.source_minutes).toBe(0);
+    expect(beforeBody.output_minutes_by_lang).toEqual({});
+
+    const patch = await call(`/internal/sessions/${session.id}/metrics`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        source_seconds: 180,
+        output_seconds_by_lang: { ja: 120 },
+      }),
+    });
+    expect(patch.status).toBe(200);
+
+    const after = await call(`/api/sessions/${session.id}/usage`);
+    const afterBody = (await after.json()) as {
+      source_minutes: number;
+      output_minutes_by_lang: Record<string, number>;
+    };
+    expect(afterBody.source_minutes).toBe(3);
+    expect(afterBody.output_minutes_by_lang.ja).toBe(2);
+  });
+
+  it("PATCH merges per-lang outputs without clobbering prior langs (edge)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-merge", Math.floor(Date.now() / 1000)).run();
+    const create = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-merge",
+        title: "M",
+        source_lang: "en",
+        target_langs: ["ja", "ko"],
+      }),
+    });
+    const { session } = (await create.json()) as { session: { id: string } };
+    const patchOnce = async (payload: unknown) =>
+      call(`/internal/sessions/${session.id}/metrics`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Secret": env.INTERNAL_SECRET,
+        },
+        body: JSON.stringify(payload),
+      });
+
+    await patchOnce({ output_seconds_by_lang: { ja: 60 } });
+    await patchOnce({ output_seconds_by_lang: { ko: 90 } });
+
+    const res = await call(`/api/sessions/${session.id}/usage`);
+    const body = (await res.json()) as {
+      output_minutes_by_lang: Record<string, number>;
+    };
+    expect(body.output_minutes_by_lang.ja).toBe(1);
+    expect(body.output_minutes_by_lang.ko).toBe(1.5);
+  });
+
+  it("PATCH without X-Internal-Secret → 401 (sad)", async () => {
+    const res = await call("/internal/sessions/any/metrics", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_seconds: 1 }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("PATCH on unknown session → 404 (sad)", async () => {
+    const res = await call("/internal/sessions/does-not-exist/metrics", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({ source_seconds: 10 }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /stripe/webhook", () => {
+  async function hmacHex(secret: string, payload: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      new TextEncoder().encode(payload),
+    );
+    let out = "";
+    for (const byte of new Uint8Array(sig)) out += byte.toString(16).padStart(2, "0");
+    return out;
+  }
+
+  it("400 when signature is missing (sad)", async () => {
+    const res = await call("/stripe/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "ping" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("200 when signature valid (happy)", async () => {
+    const t = Math.floor(Date.now() / 1000);
+    const payload = JSON.stringify({ type: "invoice.paid" });
+    const sig = await hmacHex(env.STRIPE_WEBHOOK_SECRET, `${t}.${payload}`);
+    const res = await call("/stripe/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Stripe-Signature": `t=${t},v1=${sig}`,
+      },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { received: boolean; verified: boolean };
+    expect(body.verified).toBe(true);
+  });
+
+  it("400 when signature tampered (sad)", async () => {
+    const t = Math.floor(Date.now() / 1000);
+    const payload = JSON.stringify({ type: "invoice.paid" });
+    const res = await call("/stripe/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Stripe-Signature": `t=${t},v1=${"0".repeat(64)}`,
+      },
+      body: payload,
+    });
+    expect(res.status).toBe(400);
   });
 });

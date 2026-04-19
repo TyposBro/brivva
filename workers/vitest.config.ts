@@ -22,7 +22,10 @@ export default defineConfig(async () => {
             INTERNAL_SECRET: "test-internal-secret",
             OAUTH_REDIRECT_URI:
               "https://test-api.example.com/auth/youtube/callback",
+            GOOGLE_SIGNIN_REDIRECT_URI:
+              "https://test-api.example.com/auth/google/callback",
             FRONTEND_URL: "https://test-app.example.com",
+            STRIPE_WEBHOOK_SECRET: "whsec_test_secret",
             TEST_MIGRATIONS: migrations,
           },
         },

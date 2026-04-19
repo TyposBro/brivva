@@ -80,6 +80,9 @@
           "youtube_connected",
           "youtube_channel_name",
           "youtube_channel_id",
+          "email",
+          "name",
+          "picture",
           "created_at"
         ],
         "properties": {
@@ -97,6 +100,18 @@
             "type": "string",
             "nullable": true
           },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "picture": {
+            "type": "string",
+            "nullable": true
+          },
           "created_at": {
             "type": "integer"
           }
@@ -111,6 +126,9 @@
           "youtube_access_token",
           "youtube_refresh_token",
           "youtube_token_expires_at",
+          "email",
+          "name",
+          "picture",
           "created_at"
         ],
         "properties": {
@@ -137,6 +155,18 @@
             "type": "integer",
             "nullable": true
           },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "picture": {
+            "type": "string",
+            "nullable": true
+          },
           "created_at": {
             "type": "integer"
           }
@@ -149,6 +179,7 @@
           "user_id",
           "elevenlabs_voice_id",
           "name",
+          "source_lang",
           "created_at"
         ],
         "properties": {
@@ -163,6 +194,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "source_lang": {
+            "type": "string",
+            "nullable": true
           },
           "created_at": {
             "type": "integer"
@@ -478,6 +513,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "source_lang": {
+            "type": "string"
           }
         }
       },
@@ -551,6 +589,9 @@
           },
           "audio_base64": {
             "type": "string"
+          },
+          "source_lang": {
+            "type": "string"
           }
         }
       },
@@ -589,6 +630,130 @@
           },
           "display_name": {
             "type": "string"
+          }
+        }
+      },
+      "GripAuthRequest": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "session_token",
+          "stream_key"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "session_token": {
+            "type": "string"
+          },
+          "stream_key": {
+            "type": "string"
+          },
+          "rtmp_url": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          }
+        }
+      },
+      "TikTokAuthRequest": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "session_token",
+          "stream_key"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "session_token": {
+            "type": "string"
+          },
+          "stream_key": {
+            "type": "string"
+          },
+          "rtmp_url": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          }
+        }
+      },
+      "BillingSummaryResponse": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "period_start",
+          "period_end",
+          "source_minutes",
+          "output_minutes_by_lang",
+          "estimated_cost_usd"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "period_start": {
+            "type": "integer"
+          },
+          "period_end": {
+            "type": "integer"
+          },
+          "source_minutes": {
+            "type": "number"
+          },
+          "output_minutes_by_lang": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "estimated_cost_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "SessionUsageResponse": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "source_minutes",
+          "output_minutes_by_lang",
+          "estimated_cost_usd"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "source_minutes": {
+            "type": "number"
+          },
+          "output_minutes_by_lang": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "estimated_cost_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "InternalSessionMetricsUpdate": {
+        "type": "object",
+        "properties": {
+          "source_seconds": {
+            "type": "number"
+          },
+          "output_seconds_by_lang": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
           }
         }
       },
@@ -1239,9 +1404,47 @@
         ]
       }
     },
+    "/api/sessions/{id}/usage": {
+      "get": {
+        "summary": "Get session usage for billing",
+        "responses": {
+          "200": {
+            "description": "Usage rollup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUsageResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Session id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/auth/youtube": {
       "get": {
-        "summary": "Redirect to YouTube OAuth",
+        "summary": "Redirect to YouTube OAuth (add-channel, not sign-in)",
         "responses": {
           "302": {
             "description": "Redirect to Google OAuth",
@@ -1341,6 +1544,162 @@
         ]
       }
     },
+    "/auth/google": {
+      "get": {
+        "summary": "Redirect to Google OAuth for sign-in",
+        "responses": {
+          "302": {
+            "description": "Redirect to Google OAuth",
+            "headers": {
+              "Location": {
+                "description": "Redirect target",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/google/callback": {
+      "get": {
+        "summary": "Handle Google sign-in callback",
+        "responses": {
+          "302": {
+            "description": "Redirect back to frontend with JWT",
+            "headers": {
+              "Location": {
+                "description": "Redirect target",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "OAuth exchange failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/auth/grip": {
+      "post": {
+        "summary": "Save Grip RTMP credentials (no real OAuth)",
+        "responses": {
+          "200": {
+            "description": "Saved credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GripAuthRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/tiktok": {
+      "post": {
+        "summary": "Save TikTok RTMP credentials (no real OAuth)",
+        "responses": {
+          "200": {
+            "description": "Saved credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TikTokAuthRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/token": {
       "post": {
         "summary": "Issue short-lived JWT for media websocket",
@@ -1372,6 +1731,70 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/AuthTokenRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/billing/summary": {
+      "get": {
+        "summary": "Current-month usage + estimated cost",
+        "responses": {
+          "200": {
+            "description": "Billing summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/stripe/webhook": {
+      "post": {
+        "summary": "Stripe webhook receiver (scaffold, no billing logic)",
+        "responses": {
+          "200": {
+            "description": "Received",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Signature verification failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
               }
             }
           }
@@ -1549,6 +1972,72 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/InternalSessionStatusUpdate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/sessions/{id}/metrics": {
+      "patch": {
+        "summary": "Merge per-session usage metrics from media backend",
+        "responses": {
+          "200": {
+            "description": "Metrics merged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalSessionStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "InternalSecret": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Session id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalSessionMetricsUpdate"
               }
             }
           }

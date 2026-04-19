@@ -25,6 +25,8 @@ FRONTEND_URL = "https://brivva.pages.dev"
 # https://brivva-api.<subdomain>.workers.dev/auth/youtube/callback — use that
 # until a custom domain is attached.
 OAUTH_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/youtube/callback"
+# Sign-in flow — separate redirect registered in the Google OAuth Client.
+GOOGLE_SIGNIN_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/google/callback"
 
 # ── Secrets (set via `wrangler secret put`) ───────────────
 # ELEVENLABS_API_KEY
@@ -32,3 +34,4 @@ OAUTH_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/youtu
 # GOOGLE_CLIENT_SECRET
 # JWT_SECRET
 # INTERNAL_SECRET
+# STRIPE_WEBHOOK_SECRET   (optional until billing is live)

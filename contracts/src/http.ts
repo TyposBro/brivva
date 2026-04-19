@@ -11,6 +11,9 @@ export const UserInfoSchema = z.object({
   youtube_connected: z.boolean(),
   youtube_channel_name: z.string().nullable(),
   youtube_channel_id: z.string().nullable(),
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  picture: z.string().nullable(),
   created_at: z.number().int(),
 });
 
@@ -21,6 +24,9 @@ export const InternalUserSchema = z.object({
   youtube_access_token: z.string().nullable(),
   youtube_refresh_token: z.string().nullable(),
   youtube_token_expires_at: z.number().int().nullable(),
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  picture: z.string().nullable(),
   created_at: z.number().int(),
 });
 
@@ -29,6 +35,7 @@ export const VoiceSchema = z.object({
   user_id: z.string().min(1),
   elevenlabs_voice_id: z.string().min(1),
   name: z.string().min(1),
+  source_lang: z.string().nullable(),
   created_at: z.number().int(),
 });
 
@@ -150,6 +157,7 @@ export const CloneSessionVoiceRequestSchema = z.object({
   user_id: z.string().min(1),
   audio_base64: z.string().min(1),
   name: z.string().min(1).optional(),
+  source_lang: z.string().min(1).optional(),
 });
 
 export const CloneSessionVoiceResponseSchema = z.object({
@@ -173,6 +181,7 @@ export const CreateVoiceRequestSchema = z.object({
   user_id: z.string().min(1),
   name: z.string().min(1),
   audio_base64: z.string().min(1),
+  source_lang: z.string().min(1).optional(),
 });
 
 export const ListCredentialsResponseSchema = z.object({
@@ -185,6 +194,50 @@ export const SaveCredentialRequestSchema = z.object({
   rtmp_url: z.string().optional(),
   stream_key: z.string().optional(),
   display_name: z.string().optional(),
+});
+
+// Specialised credential-paste flows for platforms without real OAuth.
+// Grip + TikTok host dashboards emit an RTMP URL + stream key; the frontend
+// pastes them here and we upsert as a platform_credentials row.
+export const GripAuthRequestSchema = z.object({
+  user_id: z.string().min(1),
+  session_token: z.string().min(1),
+  stream_key: z.string().min(1),
+  rtmp_url: z.string().min(1).optional(),
+  display_name: z.string().min(1).optional(),
+});
+
+export const TikTokAuthRequestSchema = z.object({
+  user_id: z.string().min(1),
+  session_token: z.string().min(1),
+  stream_key: z.string().min(1),
+  rtmp_url: z.string().min(1).optional(),
+  display_name: z.string().min(1).optional(),
+});
+
+export const BillingSummaryQuerySchema = z.object({
+  user_id: z.string().min(1),
+});
+
+export const BillingSummaryResponseSchema = z.object({
+  user_id: z.string().min(1),
+  period_start: z.number().int(),
+  period_end: z.number().int(),
+  source_minutes: z.number(),
+  output_minutes_by_lang: z.record(z.string(), z.number()),
+  estimated_cost_usd: z.number(),
+});
+
+export const SessionUsageResponseSchema = z.object({
+  session_id: z.string().min(1),
+  source_minutes: z.number(),
+  output_minutes_by_lang: z.record(z.string(), z.number()),
+  estimated_cost_usd: z.number(),
+});
+
+export const InternalSessionMetricsUpdateSchema = z.object({
+  source_seconds: z.number().nonnegative().optional(),
+  output_seconds_by_lang: z.record(z.string(), z.number().nonnegative()).optional(),
 });
 
 export const InternalSessionBundleSchema = z.object({
@@ -223,5 +276,10 @@ export type CloneSessionVoiceResponse = z.infer<typeof CloneSessionVoiceResponse
 export type AddStreamRequest = z.infer<typeof AddStreamRequestSchema>;
 export type CreateVoiceRequest = z.infer<typeof CreateVoiceRequestSchema>;
 export type SaveCredentialRequest = z.infer<typeof SaveCredentialRequestSchema>;
+export type GripAuthRequest = z.infer<typeof GripAuthRequestSchema>;
+export type TikTokAuthRequest = z.infer<typeof TikTokAuthRequestSchema>;
+export type BillingSummaryResponse = z.infer<typeof BillingSummaryResponseSchema>;
+export type SessionUsageResponse = z.infer<typeof SessionUsageResponseSchema>;
+export type InternalSessionMetricsUpdate = z.infer<typeof InternalSessionMetricsUpdateSchema>;
 export type InternalSessionBundle = z.infer<typeof InternalSessionBundleSchema>;
 export type InternalSessionStatusUpdate = z.infer<typeof InternalSessionStatusUpdateSchema>;

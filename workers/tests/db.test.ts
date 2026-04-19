@@ -68,6 +68,7 @@ describe("db.voices", () => {
       userId: "u-v",
       elevenlabsVoiceId: "el-abc",
       name: "Host Voice",
+      sourceLang: null,
     });
     expect(v.id).toBeTruthy();
 
@@ -90,11 +91,13 @@ describe("db.voices", () => {
       userId: "user-a",
       elevenlabsVoiceId: "el-a",
       name: "A-voice",
+      sourceLang: null,
     });
     await db.createVoice(env.DB, {
       userId: "user-b",
       elevenlabsVoiceId: "el-b",
       name: "B-voice",
+      sourceLang: null,
     });
 
     const aList = await db.listVoices(env.DB, "user-a");

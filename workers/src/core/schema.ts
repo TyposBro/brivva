@@ -23,6 +23,9 @@ export const users = sqliteTable("users", {
   youtube_access_token: text("youtube_access_token"),
   youtube_refresh_token: text("youtube_refresh_token"),
   youtube_token_expires_at: integer("youtube_token_expires_at"),
+  email: text("email"),
+  name: text("name"),
+  picture: text("picture"),
   created_at: integer("created_at").notNull(),
 });
 
@@ -35,6 +38,9 @@ export const voices = sqliteTable(
       .references(() => users.id),
     elevenlabs_voice_id: text("elevenlabs_voice_id").notNull(),
     name: text("name").notNull(),
+    // Host-sample language hint sent to ElevenLabs at clone time. Nullable for
+    // historical rows cloned before language-hint support shipped.
+    source_lang: text("source_lang"),
     created_at: integer("created_at").notNull(),
   },
   (t) => [index("voices_user_id_idx").on(t.user_id)],
@@ -103,6 +109,19 @@ export const platform_credentials = sqliteTable(
   ],
 );
 
+// Per-session usage rollup. Fargate PATCHes /internal/sessions/:id/metrics as
+// host seconds + translated-output seconds per target language accumulate; the
+// billing + usage endpoints read from here. Row is lazily upserted on the
+// first PATCH after a session starts.
+export const session_metrics = sqliteTable("session_metrics", {
+  session_id: text("session_id").primaryKey(),
+  source_seconds: real("source_seconds").notNull().default(0),
+  // JSON-encoded { [lang]: seconds }. Stored as text so we don't need a
+  // separate (session_id, lang) table for what is effectively a small map.
+  output_seconds_json: text("output_seconds_json").notNull().default("{}"),
+  updated_at: integer("updated_at").notNull(),
+});
+
 // Row types inferred directly from schema. Use these in handler signatures
 // instead of hand-written mirror types.
 export type User = typeof users.$inferSelect;
@@ -110,6 +129,7 @@ export type Voice = typeof voices.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type StreamRecord = typeof streams.$inferSelect;
 export type PlatformCredential = typeof platform_credentials.$inferSelect;
+export type SessionMetrics = typeof session_metrics.$inferSelect;
 
 // Used below if/when we need a raw-SQL escape hatch from inside Drizzle land.
 export const _sqlEscape = sql;

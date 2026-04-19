@@ -659,6 +659,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get session usage for billing */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Session id */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Usage rollup */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SessionUsageResponse"];
+                    };
+                };
+                /** @description Session not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/youtube": {
         parameters: {
             query?: never;
@@ -666,7 +714,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Redirect to YouTube OAuth */
+        /** Redirect to YouTube OAuth (add-channel, not sign-in) */
         get: {
             parameters: {
                 query: {
@@ -764,6 +812,198 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/google": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Redirect to Google OAuth for sign-in */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Redirect to Google OAuth */
+                302: {
+                    headers: {
+                        /** @description Redirect target */
+                        Location?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/google/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Handle Google sign-in callback */
+        get: {
+            parameters: {
+                query?: {
+                    code?: string;
+                    state?: string;
+                    error?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Redirect back to frontend with JWT */
+                302: {
+                    headers: {
+                        /** @description Redirect target */
+                        Location?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Missing code */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description OAuth exchange failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/grip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save Grip RTMP credentials (no real OAuth) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["GripAuthRequest"];
+                };
+            };
+            responses: {
+                /** @description Saved credential */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlatformCredential"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/tiktok": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save TikTok RTMP credentials (no real OAuth) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TikTokAuthRequest"];
+                };
+            };
+            responses: {
+                /** @description Saved credential */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlatformCredential"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/token": {
         parameters: {
             query?: never;
@@ -797,6 +1037,98 @@ export interface paths {
                     };
                 };
                 /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/billing/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Current-month usage + estimated cost */
+        get: {
+            parameters: {
+                query: {
+                    user_id: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Billing summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BillingSummaryResponse"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stripe/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stripe webhook receiver (scaffold, no billing logic) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Received */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["StatusResponse"];
+                    };
+                };
+                /** @description Signature verification failed */
                 400: {
                     headers: {
                         [name: string]: unknown;
@@ -1003,6 +1335,74 @@ export interface paths {
         };
         trace?: never;
     };
+    "/internal/sessions/{id}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Merge per-session usage metrics from media backend */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Session id */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["InternalSessionMetricsUpdate"];
+                };
+            };
+            responses: {
+                /** @description Metrics merged */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InternalSessionStatusResponse"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Unauthorized */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Session not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1026,6 +1426,9 @@ export interface components {
             youtube_connected: boolean;
             youtube_channel_name: string | null;
             youtube_channel_id: string | null;
+            email: string | null;
+            name: string | null;
+            picture: string | null;
             created_at: number;
         };
         InternalUser: {
@@ -1035,6 +1438,9 @@ export interface components {
             youtube_access_token: string | null;
             youtube_refresh_token: string | null;
             youtube_token_expires_at: number | null;
+            email: string | null;
+            name: string | null;
+            picture: string | null;
             created_at: number;
         };
         Voice: {
@@ -1042,6 +1448,7 @@ export interface components {
             user_id: string;
             elevenlabs_voice_id: string;
             name: string;
+            source_lang: string | null;
             created_at: number;
         };
         Stream: {
@@ -1118,6 +1525,7 @@ export interface components {
             user_id: string;
             audio_base64: string;
             name?: string;
+            source_lang?: string;
         };
         CloneSessionVoiceResponse: {
             voice: components["schemas"]["Voice"];
@@ -1137,6 +1545,7 @@ export interface components {
             user_id: string;
             name: string;
             audio_base64: string;
+            source_lang?: string;
         };
         ListCredentialsResponse: {
             credentials: components["schemas"]["PlatformCredential"][];
@@ -1147,6 +1556,44 @@ export interface components {
             rtmp_url?: string;
             stream_key?: string;
             display_name?: string;
+        };
+        GripAuthRequest: {
+            user_id: string;
+            session_token: string;
+            stream_key: string;
+            rtmp_url?: string;
+            display_name?: string;
+        };
+        TikTokAuthRequest: {
+            user_id: string;
+            session_token: string;
+            stream_key: string;
+            rtmp_url?: string;
+            display_name?: string;
+        };
+        BillingSummaryResponse: {
+            user_id: string;
+            period_start: number;
+            period_end: number;
+            source_minutes: number;
+            output_minutes_by_lang: {
+                [key: string]: number;
+            };
+            estimated_cost_usd: number;
+        };
+        SessionUsageResponse: {
+            session_id: string;
+            source_minutes: number;
+            output_minutes_by_lang: {
+                [key: string]: number;
+            };
+            estimated_cost_usd: number;
+        };
+        InternalSessionMetricsUpdate: {
+            source_seconds?: number;
+            output_seconds_by_lang?: {
+                [key: string]: number;
+            };
         };
         InternalSessionBundle: {
             session: components["schemas"]["Session"];
