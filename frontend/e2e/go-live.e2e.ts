@@ -42,8 +42,8 @@ test.describe("Scenario 2 — existing user go-live", () => {
     await page.goto("/dashboard");
 
     // Add the local-test platform from the picker (simplest, no creds needed).
+    // Picker is now a flat grid — no more regional grouping (Task C).
     await page.getByRole("button", { name: /Add destination/i }).click();
-    await page.getByRole("button", { name: /Other/i }).click();
     await page.getByRole("button", { name: /Local Test/i }).click();
 
     // Title + Go Live.

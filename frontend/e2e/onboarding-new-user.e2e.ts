@@ -83,9 +83,9 @@ test.describe("Scenario 1 — new user full onboarding", () => {
     ).toBeVisible();
     await page.getByRole("button", { name: /Skip for now/i }).click();
 
-    // ── Step 3 — pick default target language and finish.
+    // ── Step 3 — pick default audience language and finish.
     await expect(
-      page.getByRole("heading", { name: /default target language/i }),
+      page.getByRole("heading", { name: /default audience language/i }),
     ).toBeVisible();
     await page.getByRole("button", { name: /Japanese/i }).click();
     await page.getByRole("button", { name: /Finish/i }).click();
