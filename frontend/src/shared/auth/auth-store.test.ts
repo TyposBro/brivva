@@ -83,6 +83,25 @@ describe("auth-store", () => {
       loadPersistedUser();
       expect(getUserId()).toBe("stored-user");
     });
+
+    it("swallows localStorage failures so SSR / private mode still boots (sad)", () => {
+      vi.stubGlobal("localStorage", {
+        getItem: () => {
+          throw new Error("blocked");
+        },
+        setItem: () => {
+          throw new Error("blocked");
+        },
+        removeItem: () => {
+          throw new Error("blocked");
+        },
+      });
+      expect(() => loadPersistedUser()).not.toThrow();
+      expect(getUserId()).toBeNull();
+      // signIn must also not throw when localStorage is unavailable.
+      expect(() => signIn("u-no-storage")).not.toThrow();
+      expect(getUserId()).toBe("u-no-storage");
+    });
   });
 
   describe("ensureFreshToken", () => {
@@ -123,6 +142,28 @@ describe("auth-store", () => {
       expect(a).toBe(fresh);
       expect(b).toBe(fresh);
       expect(fetchToken).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("scheduled refresh", () => {
+    it("scheduled refresh swallows fetcher errors so the next ensure can retry (sad)", async () => {
+      // Sign in with a token whose lead-time (exp - REFRESH_LEAD) is already
+      // past — the schedule clamps to a 1s delay. After the fake clock
+      // advances past 1s, the scheduled refresh fires and the fetcher
+      // rejection must be swallowed (covers the inner .catch on line 72).
+      const expSec = Math.floor(Date.now() / 1000) + 30;
+      const stale = jwt(expSec);
+      const fetchToken = vi.fn().mockRejectedValue(new Error("network"));
+      configureAuth({ fetchToken });
+      signIn("u1", stale);
+      await vi.advanceTimersByTimeAsync(1_200);
+      // Drain the rejected promise so the .catch handler runs before assertions.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(fetchToken).toHaveBeenCalled();
+      // Cached token unchanged: the inner .catch swallows the rejection so
+      // the next ensure call gets a fresh attempt instead of crashing.
+      expect(getCachedToken()).toBe(stale);
     });
   });
 

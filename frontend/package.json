@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test",
     "typecheck": "tsc --noEmit",
@@ -37,16 +38,17 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "@vitest/coverage-v8": "^4.1.4",
     "@vitest/ui": "^4.1.4",
     "autoprefixer": "^10.4.27",
     "babel-plugin-react-compiler": "^1.0.0",
     "jsdom": "^29.0.2",
     "postcss": "^8.5.8",
-    "zod": "^4.1.13",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
     "vitest": "^4.1.4",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "zod": "^4.1.13"
   }
 }
