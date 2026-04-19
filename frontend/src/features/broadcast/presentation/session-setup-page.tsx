@@ -9,6 +9,7 @@ import { useAuth } from "../../../shared/auth/use-auth";
 import { useVoiceRecorder } from "../../../shared/audio/voice-recorder";
 import { VoicePresetPicker } from "./voice-preset-picker";
 import { VoiceSetupCard } from "./voice-setup-card";
+import { SOURCE_LANGS, type SourceLang } from "./source-lang-picker";
 
 const MIN_SEC = 30;
 const MAX_SEC = 180;
@@ -213,6 +214,11 @@ function SetupInner() {
             onStart={handleStart}
             onStop={handleStop}
             onSkip={handleSkip}
+            sourceLang={
+              (SOURCE_LANGS as readonly string[]).includes(session.source_lang)
+                ? (session.source_lang as SourceLang)
+                : "en"
+            }
           />
         ) : (
           <VoicePresetPicker

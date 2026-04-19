@@ -118,6 +118,7 @@ export function YourVoiceSection({ userId, voice, defaultName, onChange }: Props
             onStart={handleStart}
             onStop={handleStop}
             onSkip={() => setRecording(false)}
+            sourceLang={sourceLang}
           />
         )}
         {error && <p className="text-error text-xs font-label">{error}</p>}

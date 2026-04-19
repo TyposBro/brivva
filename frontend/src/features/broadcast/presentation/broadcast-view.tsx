@@ -5,6 +5,7 @@ import { useHostSession } from "./use-host-session";
 import { AudioRecorder } from "./audio-recorder";
 import { LatencyDashboard } from "./latency-dashboard";
 import { VoiceSetupCard } from "./voice-setup-card";
+import { SOURCE_LANGS, type SourceLang } from "./source-lang-picker";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
 
@@ -155,6 +156,11 @@ export function BroadcastView({
             onStart={startVoiceRecording}
             onStop={stopVoiceRecording}
             onSkip={skipVoiceSetup}
+            sourceLang={
+              (SOURCE_LANGS as readonly string[]).includes(sourceLang)
+                ? (sourceLang as SourceLang)
+                : "en"
+            }
           />
         )}
 

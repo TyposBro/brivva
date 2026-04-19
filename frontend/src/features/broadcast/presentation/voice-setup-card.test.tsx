@@ -9,6 +9,7 @@ const baseProps = {
   onStart: vi.fn(),
   onStop: vi.fn(),
   onSkip: vi.fn(),
+  sourceLang: "en" as const,
 };
 
 describe("VoiceSetupCard", () => {
@@ -55,6 +56,38 @@ describe("VoiceSetupCard", () => {
     expect(stop).not.toBeDisabled();
     await userEvent.click(stop);
     expect(onStop).toHaveBeenCalled();
+  });
+
+  it("renders a Korean script when sourceLang='ko' (localized sample)", () => {
+    const { container } = render(
+      <VoiceSetupCard
+        {...baseProps}
+        sourceLang="ko"
+        elapsedSec={15}
+        isRecording={true}
+      />,
+    );
+    // Hangul substring from the Korean script
+    expect(screen.getByText(/여러분 안녕하세요/)).toBeInTheDocument();
+    // `lang` attribute on the script wrapper helps screen readers pick the
+    // right voice — regression-guard it.
+    const langged = container.querySelector('[lang="ko"]');
+    expect(langged).not.toBeNull();
+  });
+
+  it("renders the English script when sourceLang='en' (default)", () => {
+    render(
+      <VoiceSetupCard
+        {...baseProps}
+        sourceLang="en"
+        elapsedSec={15}
+        isRecording={true}
+      />,
+    );
+    // Classic pangram substring from the English script
+    expect(
+      screen.getByText(/quick brown fox jumps over the lazy dog/i),
+    ).toBeInTheDocument();
   });
 
   it("Skip button always available (sad: bypass voice clone)", async () => {

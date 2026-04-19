@@ -335,6 +335,7 @@ function VoiceStep({
           onStart={handleStart}
           onStop={handleStop}
           onSkip={onContinue}
+          sourceLang={sourceLang}
         />
       )}
 
