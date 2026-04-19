@@ -89,6 +89,22 @@ info "[server-rs] starting → ${LOG_DIR}/server-rs.log"
 ( cd "${REPO_ROOT}/server-rs" && cargo run ) >"${LOG_DIR}/server-rs.log" 2>&1 &
 SERVER_PID=$!
 
+# ── Apply D1 migrations to the local sqlite file ───────────
+# `wrangler dev` creates an empty SQLite under .wrangler/state/ but does
+# NOT auto-apply migrations — every table query 500s until we do. Run
+# `migrations apply --local` synchronously BEFORE starting the worker so
+# it's ready on first boot. Subsequent runs are idempotent (wrangler
+# tracks applied migrations in `d1_migrations`).
+info "[workers] applying D1 migrations (local)…"
+( cd "${REPO_ROOT}/workers" && bun wrangler d1 migrations apply brivva --local ) \
+  >"${LOG_DIR}/migrations.log" 2>&1
+if [ $? -ne 0 ]; then
+  fail "D1 migrations failed — see ${LOG_DIR}/migrations.log"
+  tail -n 30 "${LOG_DIR}/migrations.log" | sed 's/^/  /'
+  exit 2
+fi
+pass "D1 migrations up to date"
+
 # ── Boot workers ────────────────────────────────────────────
 info "[workers] starting → ${LOG_DIR}/workers.log"
 ( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \
