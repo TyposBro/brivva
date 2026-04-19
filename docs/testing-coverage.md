@@ -204,3 +204,99 @@ below 100%, the reviewer should request either:
    and a note in the PR description.
 
 No silent drops.
+
+## Frontend (`frontend/`)
+
+### How to run
+
+```bash
+bun run --cwd frontend test:coverage   # vitest + v8 coverage gates
+bun run --cwd frontend test:e2e        # Playwright (mock backend)
+bun run --cwd frontend typecheck       # tsc --noEmit
+bun run --cwd frontend check:layers    # CLAUDE.md §1.2 audit
+```
+
+HTML drill-down: `open frontend/coverage/index.html` after `test:coverage`.
+
+### Two layers — vitest + Playwright
+
+| Layer | What it catches | CI job |
+|---|---|---|
+| **vitest (jsdom)** | Pure logic, reducer transitions, error mapping, network parsing, hook state machines, branch coverage on critical paths | `frontend` |
+| **Playwright (chromium)** | Multi-page user journeys, real DOM/event timing, OAuth callback handling, modal state, gate redirects | `frontend-e2e` |
+
+vitest is fast and exhaustive. Playwright is slower but verifies that the
+pieces compose. The `claude.md §1.2` dependency rule keeps the seams
+vitest mocks from drifting out of sync with what Playwright observes from
+the outside.
+
+### Coverage thresholds (vitest.config.ts)
+
+Global gates:
+
+| Metric | Threshold |
+|---|---|
+| lines | 80% |
+| statements | 80% |
+| functions | 70% |
+| branches | 65% |
+
+Page-level branch coverage is intentionally lower than line/statement
+coverage; the un-exercised branches are pageful UI permutations the
+Playwright e2e suite covers end-to-end.
+
+Per-module gates (must hit 100% line/statement/function/branch — except
+where noted):
+
+| File | Why 100% |
+|---|---|
+| `src/shared/auth/auth-store.ts` | Token cache + refresh-ahead-of-expiry. A regression here logs every host out mid-stream. |
+| `src/shared/auth/sign-in-gate.tsx` | Single point of authentication enforcement for every protected route. |
+| `src/shared/audio/voice-recorder.ts` | 30s minimum / 180s cap is a product invariant — the Indian-accent regression came from a too-short sample. Branches set to 80% to allow two defensive nullable cleanup guards that are unreachable in the real call flow. |
+| `src/features/broadcast/presentation/reducer.ts` | The host-session state machine. Every action is exercised, including no-op transitions for spurious events. |
+| `src/core/config/stream-defaults.ts` | The curated delay/host-gain table. Regressions here change every new destination's defaults. |
+
+### Playwright scenarios
+
+Three end-to-end user journeys live in `frontend/e2e/`. They share the
+in-process mock backend in `frontend/e2e/mock-server.mjs`, which speaks the
+same Workers OpenAPI shape as `tests/e2e/stubs/workers.ts` (the docker
+compose smoke harness for the media pipeline).
+
+| File | Scenario | What it asserts |
+|---|---|---|
+| `onboarding-new-user.e2e.ts` | New host signs in with Google, walks the 3-step onboarding wizard, lands on the dashboard | OAuth fragment handoff + onboarding gate redirect + `POST /api/user/complete-onboarding` |
+| `go-live.e2e.ts` | Existing onboarded host adds a destination, hits Go Live, confirms the quote modal at 60 min, runs through `/setup` → `/live`, ends the session | Pre-stream quote slider math, navigation between session sub-routes, post-stream summary modal totals |
+| `session-rollback.e2e.ts` | Mid-session WS drop + simulated kill-switch + summary endpoint failure | Reconnect / disconnected banner, graceful "summary unavailable" fallback when Workers is down |
+
+The legacy `host-session.e2e.ts` covers the older `/host?sessionId=X`
+direct-entry flow — kept passing for backward compatibility (the route is
+still wired for resume-from-link cases).
+
+### Mock backend test endpoints
+
+`frontend/e2e/mock-server.mjs` exposes a small control surface so tests
+can shape responses without touching Workers code:
+
+```
+POST /test/reset             — wipe all flags + user store
+POST /test/seed-user         — seed a user_id with arbitrary fields
+POST /test/set-auth-fail     — next /auth/token returns 401
+POST /test/set-voice-fail    — next /api/voices POST returns 500
+POST /test/set-summary-fail  — /summary returns 500 until reset
+POST /test/fire-kill-switch  — pushes a kill-switch error frame on the WS
+POST /test/emit              — push an arbitrary JSON message to the WS client
+POST /test/close             — close the WS from the server side
+GET  /test/state             — inspect WS / kill-switch state
+```
+
+`set-summary-fail` is sticky on purpose: React StrictMode double-mounts
+`SummaryModal`'s effect in dev mode, and a one-shot flag would let the
+second pass overwrite the error state.
+
+### When coverage drops
+
+Same policy as Workers + server-rs: a PR that drops overall line coverage
+below 80% or a critical-path file below its 100% threshold needs either a
+new test or an explicit `// PRAGMATIC:` comment with a note in the PR
+description. No silent drops.

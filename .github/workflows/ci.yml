@@ -113,8 +113,38 @@ jobs:
       - name: layer audit (CLAUDE.md §1.2 dependency rule)
         run: bun run --cwd frontend check:layers
 
-      - name: vitest (component + reducer + message-handler tests)
-        run: bun run --cwd frontend test
+      - name: vitest with v8 coverage thresholds
+        run: bun run --cwd frontend test:coverage
 
       - name: production build (smoke test vite can emit a bundle)
         run: bun run --cwd frontend build
+
+  frontend-e2e:
+    name: frontend e2e (Playwright + mock backend)
+    runs-on: ubuntu-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: bun install (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      - name: run Playwright e2e (3 user-journey scenarios + host-session smoke)
+        run: bun run --cwd frontend test:e2e
+        env:
+          CI: "true"
+
+      - name: upload Playwright trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/**/trace.zip
+          retention-days: 7
