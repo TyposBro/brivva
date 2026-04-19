@@ -15,21 +15,21 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::core::contracts::workers::SessionBundle;
+use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::data::{auth, pipeline};
 use crate::features::broadcast::domain::{Lang, LiveSession, LiveSessions, PipelineConfig, SessionQuery};
-use crate::orchestration::state::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<SessionQuery>,
-    State(state): State<AppState>,
+    State(state): State<BroadcastState>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_host_socket(socket, state, query))
 }
 
-async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQuery) {
+async fn handle_host_socket(socket: WebSocket, state: BroadcastState, query: SessionQuery) {
     let Some(claims) = authenticate(&state, &query) else {
         return;
     };
@@ -50,7 +50,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQu
     .await;
 }
 
-fn authenticate(state: &AppState, query: &SessionQuery) -> Option<auth::Claims> {
+fn authenticate(state: &BroadcastState, query: &SessionQuery) -> Option<auth::Claims> {
     let token = match query.token.as_deref() {
         Some(t) if !t.is_empty() => t,
         _ => {
@@ -58,7 +58,7 @@ fn authenticate(state: &AppState, query: &SessionQuery) -> Option<auth::Claims> 
             return None;
         }
     };
-    match auth::verify(token, &state.config.jwt_secret) {
+    match auth::verify(token, &state.jwt_secret) {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::warn!(error = %e, "ws host upgrade rejected: jwt verify failed");
@@ -92,7 +92,7 @@ fn next_available_live_session_id(live_sessions: &dashmap::DashMap<String, LiveS
 struct HostSocket {
     sender: SplitSink<WebSocket, Message>,
     receiver: SplitStream<WebSocket>,
-    state: AppState,
+    state: BroadcastState,
     user_id: String,
     source_lang: Lang,
     session_id: Option<String>,
@@ -104,8 +104,8 @@ async fn handle_host(mut socket: HostSocket) {
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
     let workers_api = Arc::new(WorkersApi::new(
-        &socket.state.config.workers_api_url,
-        &socket.state.config.internal_secret,
+        &socket.state.workers_api_url,
+        &socket.state.internal_secret,
     ));
 
     let mut live_session = LiveSession::new(
@@ -178,12 +178,12 @@ async fn handle_host(mut socket: HostSocket) {
     tracing::info!(live_session_id = %live_session_id, "live session closed");
 }
 
-fn pipeline_config_from(state: &AppState) -> Arc<PipelineConfig> {
+fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
     Arc::new(PipelineConfig {
-        soniox_api_key: state.config.soniox_api_key.clone(),
-        soniox_ws_url: state.config.soniox_ws_url.clone(),
-        elevenlabs_api_key: state.config.elevenlabs_api_key.clone(),
-        elevenlabs_base_url: state.config.elevenlabs_base_url.clone(),
+        soniox_api_key: state.soniox_api_key.clone(),
+        soniox_ws_url: state.soniox_ws_url.clone(),
+        elevenlabs_api_key: state.elevenlabs_api_key.clone(),
+        elevenlabs_base_url: state.elevenlabs_base_url.clone(),
     })
 }
 

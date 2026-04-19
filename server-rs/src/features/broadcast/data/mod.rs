@@ -2,6 +2,8 @@ pub mod auth;
 pub mod ffmpeg;
 pub mod pipeline;
 mod session_ws;
+pub mod state;
 pub mod workers_api;
 
 pub use session_ws::session_ws_handler;
+pub use state::BroadcastState;

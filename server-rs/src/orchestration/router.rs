@@ -1,9 +1,8 @@
-use crate::features::broadcast::data::session_ws_handler;
-use crate::orchestration::state::AppState;
+use crate::features::broadcast::data::{BroadcastState, session_ws_handler};
 use axum::{Router, routing::get};
 use tower_http::cors::{Any, CorsLayer};
 
-pub fn build_app(state: AppState) -> Router {
+pub fn build_app(state: BroadcastState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)

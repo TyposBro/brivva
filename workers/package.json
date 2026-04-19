@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "openapi:export": "bun run ./scripts/export-openapi.ts",
     "typecheck": "tsc --noEmit",
+    "check:layers": "bun scripts/check-layers.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",

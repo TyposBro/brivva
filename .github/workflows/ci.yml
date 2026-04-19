@@ -55,6 +55,9 @@ jobs:
         with:
           workspaces: server-rs
 
+      - name: layer audit (CLAUDE.md §1.2 dependency rule)
+        run: scripts/check-layers.sh
+
       - name: cargo check
         run: cargo check --all-targets
 
@@ -80,6 +83,9 @@ jobs:
 
       - name: typecheck
         run: bun run --cwd workers typecheck
+
+      - name: layer audit (CLAUDE.md §1.2 dependency rule)
+        run: bun run --cwd workers check:layers
 
       - name: vitest (unit + integration + e2e against in-memory D1)
         run: bun run --cwd workers test
