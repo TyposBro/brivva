@@ -34,6 +34,43 @@ pub fn maybe_downgrade_rtmps(url: &str, force_rtmp: bool) -> String {
     url.to_string()
 }
 
+/// Wire value the frontend sends on a destination's `lang` field when the
+/// user picks "Passthrough (source)" — the pipeline re-broadcasts host audio
+/// unchanged and skips STT/translate/TTS for that stream. Kept in sync with
+/// `@brivva/contracts/platforms` PASS_LANG_CODE.
+pub const PASS_LANG_CODE: &str = "pass";
+
+/// Per-stream pipeline flags derived from the Workers-provided stream row +
+/// the session's source language. Pulled out of `start_rtmp_streams` so the
+/// decision ("passthrough? is_source? what gain?") can be unit-tested without
+/// spawning FFmpeg.
+#[derive(Debug, PartialEq)]
+pub struct StreamPipelineFlags {
+    pub is_source: bool,
+    pub passthrough: bool,
+    pub host_gain: f32,
+}
+
+pub fn resolve_stream_flags(
+    stream_lang: &str,
+    source_lang: &Lang,
+    raw_gain: f32,
+) -> StreamPipelineFlags {
+    let passthrough = stream_lang == PASS_LANG_CODE;
+    let is_source_match = Lang::from_str(stream_lang).is_some_and(|l| &l == source_lang);
+    let is_source = passthrough || is_source_match;
+    let host_gain = if passthrough {
+        1.0
+    } else {
+        raw_gain.clamp(0.0, 1.0)
+    };
+    StreamPipelineFlags {
+        is_source,
+        passthrough,
+        host_gain,
+    }
+}
+
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
     ws: WebSocketUpgrade,
@@ -322,22 +359,38 @@ fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
                 "kill-switch FORCE_RTMP_NOT_RTMPS: downgraded rtmps:// to rtmp://"
             );
         }
-        let is_source = Lang::from_str(&s.lang).is_some_and(|l| &l == source_lang);
-        if let Err(e) = manager.start_stream(
-            &s.id,
-            &s.lang,
-            &full_url,
-            s.delay_ms,
-            is_source,
-            s.host_gain.clamp(0.0, 1.0),
-        ) {
+        // User explicitly picked "Passthrough (source)" on this destination.
+        // The pipeline MUST skip STT/translate/TTS: host audio RTMP'd raw at
+        // full gain, no caption overlay. We implement it via the same
+        // `is_source=true` switch target-lang streams already use, and carry
+        // a dedicated `passthrough` flag so downstream code can distinguish
+        // "user chose passthrough" from "stream's lang happens to equal
+        // source_lang" for tracing / future bifurcation.
+        let flags = resolve_stream_flags(&s.lang, source_lang, s.host_gain);
+        let spawn_args = crate::features::broadcast::data::ffmpeg::StartStreamArgs {
+            stream_id: &s.id,
+            lang: &s.lang,
+            rtmp_url: &full_url,
+            delay_ms: s.delay_ms,
+            is_source: flags.is_source,
+            host_gain: flags.host_gain,
+            passthrough: flags.passthrough,
+        };
+        if let Err(e) = manager.start_stream(spawn_args) {
             tracing::error!(
                 stream_id = %s.id,
                 lang = %s.lang,
                 error = %e,
                 "rtmp stream start failed"
             );
-        } else if let Some(lang) = Lang::from_str(&s.lang) {
+            continue;
+        }
+        // Passthrough streams don't participate in translation, so they must
+        // not seed an STT/translate pipeline. Source-lang matches are pushed
+        // like before — `dedupe_target_langs` filters them against the source.
+        if !flags.passthrough
+            && let Some(lang) = Lang::from_str(&s.lang)
+        {
             rtmp_langs.push(lang);
         }
     }
@@ -613,5 +666,60 @@ mod tests {
         .await;
         assert!(live_sessions.is_empty());
         assert!(stop.load(Ordering::Acquire));
+    }
+
+    // ── Passthrough decision logic ───────────────────────────
+
+    #[test]
+    fn resolve_stream_flags_marks_pass_sentinel_as_passthrough_with_unit_gain() {
+        let flags = resolve_stream_flags(PASS_LANG_CODE, &Lang::En, 0.2);
+        assert!(flags.passthrough);
+        assert!(
+            flags.is_source,
+            "passthrough must short-circuit drain via is_source"
+        );
+        assert!((flags.host_gain - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_stream_flags_pins_host_gain_at_unit_even_if_workers_sent_lower_value() {
+        // Defensive: Workers sets host_gain to 1.0 when lang==source_lang, but
+        // the "pass" sentinel is a separate wire value. If some migration
+        // path slips a passthrough row through with host_gain=0.2 (the stale
+        // target default), Fargate must still emit raw audio at full volume.
+        let flags = resolve_stream_flags(PASS_LANG_CODE, &Lang::Ko, 0.2);
+        assert!((flags.host_gain - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_stream_flags_preserves_existing_source_match_behavior_when_lang_equals_source() {
+        // Historical path: user picked the source language as a target. We
+        // keep treating it as is_source=true (no TTS, gain honored as-is).
+        let flags = resolve_stream_flags("en", &Lang::En, 0.2);
+        assert!(!flags.passthrough);
+        assert!(flags.is_source);
+        assert!((flags.host_gain - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_stream_flags_translated_target_lang_is_not_source_and_clamps_gain() {
+        let flags = resolve_stream_flags("ja", &Lang::En, 5.0);
+        assert!(!flags.passthrough);
+        assert!(!flags.is_source);
+        assert!((flags.host_gain - 1.0).abs() < f32::EPSILON);
+
+        let flags_neg = resolve_stream_flags("ja", &Lang::En, -0.5);
+        assert!(flags_neg.host_gain.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_stream_flags_unknown_lang_code_treated_as_non_source_non_passthrough() {
+        // Future-proofing: a new lang code lands in D1 before the server is
+        // redeployed. Lang::from_str returns None, is_source=false, no
+        // passthrough. The stream still starts (the FFmpeg layer accepts
+        // arbitrary lang strings for caption/metrics labeling).
+        let flags = resolve_stream_flags("th", &Lang::En, 0.2);
+        assert!(!flags.passthrough);
+        assert!(!flags.is_source);
     }
 }

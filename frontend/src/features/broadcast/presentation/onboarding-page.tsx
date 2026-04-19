@@ -412,7 +412,7 @@ function LangStep({ value, onChange, onFinish, submitting }: LangStepProps) {
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        {broadcastApi.LANGS.map((l) => (
+        {broadcastApi.LANGS.filter((l) => !broadcastApi.isPassthroughLang(l.code)).map((l) => (
           <button
             key={l.code}
             className={cn(

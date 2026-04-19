@@ -247,6 +247,11 @@ async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffe
         return;
     };
 
+    // Passthrough streams use the sentinel lang "pass" and never match any
+    // real `Lang` value here — `RtmpManager::push_tts` also guards on
+    // `stream.passthrough` defensively. So translated PCM for lang=ja only
+    // lands in genuine ja-translated streams, never in a parallel
+    // passthrough destination on the same session.
     match crate::features::broadcast::data::ffmpeg::decode_mp3_to_pcm(audio_buffer).await {
         Ok(pcm) => {
             let manager = manager.lock().await;

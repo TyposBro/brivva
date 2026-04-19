@@ -24,9 +24,13 @@ import {
 } from "@brivva/contracts/http";
 import {
   DetectedPlatformSchema,
+  LANGS as CONTRACT_LANGS,
+  PASS_LANG_CODE,
   PLATFORM_CATALOG,
   PLATFORM_DEFAULT_LANG,
+  isPassthroughLang,
   type DetectedPlatform,
+  type LangEntry,
   type PlatformCatalogEntry,
 } from "@brivva/contracts/platforms";
 import { client } from "../../../core/contracts/workers-client";
@@ -95,12 +99,9 @@ export function youtubeAuthUrl(userId: string): string {
 export const PLATFORMS: readonly Platform[] = PLATFORM_CATALOG;
 export const PLATFORM_LANG = PLATFORM_DEFAULT_LANG;
 
-export const LANGS = [
-  { code: "ko", label: "Korean", flag: "\uD83C\uDDF0\uD83C\uDDF7" },
-  { code: "en", label: "English", flag: "\uD83C\uDDEC\uD83C\uDDE7" },
-  { code: "ja", label: "Japanese", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
-  { code: "zh", label: "Chinese", flag: "\uD83C\uDDE8\uD83C\uDDF3" },
-] as const;
+export const LANGS: readonly LangEntry[] = CONTRACT_LANGS;
+export { PASS_LANG_CODE, isPassthroughLang };
+export type { LangEntry };
 
 export function langLabel(code: string): string {
   return LANGS.find((l) => l.code === code)?.label ?? code;

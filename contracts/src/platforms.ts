@@ -51,6 +51,34 @@ export const PLATFORM_CATALOG = [
   { id: "local-test", label: "Local Test (MediaMTX)", region: "Other", auto: true, defaultRtmp: "rtmp://rtmp:1935/live/", help: "Auto-creates one stream per language on local MediaMTX.", settingsUrl: "", keyOnly: false },
 ] as const satisfies readonly z.infer<typeof PlatformCatalogEntrySchema>[];
 
+/**
+ * Language catalog for destination language selection. The trailing `pass`
+ * entry is NOT a real language — it tells Fargate to bypass STT, translate,
+ * and TTS for that destination and RTMP the host's raw audio/video through.
+ * Kept in contracts so frontend + workers + OpenAPI stay aligned.
+ */
+export const LangEntrySchema = z.object({
+  code: z.string().min(1),
+  label: z.string().min(1),
+  flag: z.string().min(1),
+});
+
+export const PASS_LANG_CODE = "pass";
+
+export const LANGS = [
+  { code: "ko", label: "Korean", flag: "\uD83C\uDDF0\uD83C\uDDF7" },
+  { code: "en", label: "English", flag: "\uD83C\uDDEC\uD83C\uDDE7" },
+  { code: "ja", label: "Japanese", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
+  { code: "zh", label: "Chinese", flag: "\uD83C\uDDE8\uD83C\uDDF3" },
+  { code: PASS_LANG_CODE, label: "Passthrough (source)", flag: "\u{1F500}" },
+] as const satisfies readonly z.infer<typeof LangEntrySchema>[];
+
+export type LangEntry = (typeof LANGS)[number];
+
+export function isPassthroughLang(code: string): boolean {
+  return code === PASS_LANG_CODE;
+}
+
 export const PLATFORM_DEFAULT_LANG: Record<string, string | null> = {
   youtube: null,
   instagram: "en",

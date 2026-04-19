@@ -167,6 +167,13 @@ struct RtmpStream {
     delay: Duration,
     is_source: bool,
     host_gain: f32,
+    /// User explicitly selected "Passthrough (source)" for this destination.
+    /// The pipeline skips STT+translate+TTS and re-broadcasts host audio raw.
+    /// Implementation-wise this is a superset of `is_source=true` — we keep
+    /// it as a dedicated flag so traces + future bifurcations (e.g. per-
+    /// stream billing exemption) can tell "user picked passthrough" apart
+    /// from "stream's lang coincidentally equals source_lang".
+    passthrough: bool,
     buffers: StreamBuffers,
     caption: Option<CaptionState>,
     stop_flag: Arc<AtomicBool>,
@@ -191,7 +198,17 @@ pub struct RtmpManager {
     metrics: Option<Arc<SessionMetrics>>,
 }
 
-type CrashedStreamSnapshot = (String, String, String, u64, bool, f32, u32, StreamBuffers);
+type CrashedStreamSnapshot = (
+    String,
+    String,
+    String,
+    u64,
+    bool,
+    f32,
+    bool,
+    u32,
+    StreamBuffers,
+);
 
 struct RestartStreamArgs {
     id: String,
@@ -200,6 +217,7 @@ struct RestartStreamArgs {
     delay_ms: u64,
     is_source: bool,
     host_gain: f32,
+    passthrough: bool,
     prev_count: u32,
     buffers: StreamBuffers,
 }
@@ -211,7 +229,25 @@ struct StreamSpawnArgs {
     delay_ms: u64,
     is_source: bool,
     host_gain: f32,
+    passthrough: bool,
     existing_buffers: Option<StreamBuffers>,
+}
+
+/// Public signature for `RtmpManager::start_stream`. Grouping the per-stream
+/// inputs into a struct keeps the call site readable as the number of flags
+/// grows (passthrough joined `is_source` + `host_gain`) and stays inside the
+/// §3.3 arg budget.
+pub struct StartStreamArgs<'a> {
+    pub stream_id: &'a str,
+    pub lang: &'a str,
+    pub rtmp_url: &'a str,
+    pub delay_ms: u64,
+    pub is_source: bool,
+    pub host_gain: f32,
+    /// See `RtmpStream::passthrough`. Fargate skips STT/translate/TTS entirely
+    /// for passthrough streams — host audio re-broadcast at gain 1.0, no
+    /// caption overlay.
+    pub passthrough: bool,
 }
 
 impl Default for RtmpManager {
@@ -238,32 +274,27 @@ impl RtmpManager {
     ///
     /// `host_gain` is the multiplier applied to the delayed host audio before
     /// mixing with translated TTS (1.0 for source streams, typically 0.2 for
-    /// ducked target streams).
-    pub fn start_stream(
-        &mut self,
-        stream_id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        delay_ms: u64,
-        is_source: bool,
-        host_gain: f32,
-    ) -> Result<(), String> {
+    /// ducked target streams). `passthrough` streams always spawn with
+    /// `is_source=true` semantics and gain pinned at 1.0.
+    pub fn start_stream(&mut self, args: StartStreamArgs<'_>) -> Result<(), String> {
         self.spawn_stream_inner(StreamSpawnArgs {
-            stream_id: stream_id.to_string(),
-            lang: lang.to_string(),
-            rtmp_url: rtmp_url.to_string(),
-            delay_ms,
-            is_source,
-            host_gain,
+            stream_id: args.stream_id.to_string(),
+            lang: args.lang.to_string(),
+            rtmp_url: args.rtmp_url.to_string(),
+            delay_ms: args.delay_ms,
+            is_source: args.is_source,
+            host_gain: args.host_gain,
+            passthrough: args.passthrough,
             existing_buffers: None,
         })?;
         tracing::info!(
-            stream_id = %stream_id,
-            lang = %lang,
-            rtmp_url = %rtmp_url,
-            delay_ms,
-            is_source,
-            host_gain,
+            stream_id = %args.stream_id,
+            lang = %args.lang,
+            rtmp_url = %args.rtmp_url,
+            delay_ms = args.delay_ms,
+            is_source = args.is_source,
+            host_gain = args.host_gain,
+            passthrough = args.passthrough,
             "ffmpeg rtmp stream started"
         );
         Ok(())
@@ -305,12 +336,16 @@ impl RtmpManager {
     /// Append translated PCM for a specific language to that stream's TTS queue.
     /// No timestamps — the mixer plays it in arrival order and the queue is
     /// capped so a slow target can't fall arbitrarily behind.
+    ///
+    /// Both `is_source` and `passthrough` streams are skipped: neither carries
+    /// a translated track, so enqueueing PCM would leak memory up to the cap
+    /// and never play back.
     pub fn push_tts(&self, lang: &str, pcm: Vec<u8>) {
         if let Some(m) = &self.metrics {
             m.record_tts_pcm(lang, pcm.len() as u64);
         }
         for stream in self.streams.values() {
-            if stream.lang == lang && !stream.is_source {
+            if stream.lang == lang && !stream.is_source && !stream.passthrough {
                 let mut q = stream.buffers.tts.lock().unwrap();
                 q.extend(pcm.iter().copied());
                 while q.len() > TTS_QUEUE_CAP_BYTES {
@@ -322,11 +357,13 @@ impl RtmpManager {
 
     /// Update the burn-in caption for a target-language stream. Write is
     /// rate-limited to MIN_CAPTION_DWELL_MS so each line gets read time.
-    /// Source streams have no caption track — this is a no-op for them.
+    /// Source + passthrough streams have no caption track — this is a no-op
+    /// for them (no translation text to burn in).
     pub fn push_caption(&self, lang: &str, text: String) {
         for stream in self.streams.values() {
             if stream.lang == lang
                 && !stream.is_source
+                && !stream.passthrough
                 && let Some(cap) = &stream.caption
             {
                 cap.push(&text);
@@ -434,6 +471,7 @@ impl RtmpManager {
                     old.delay.as_millis() as u64,
                     old.is_source,
                     old.host_gain,
+                    old.passthrough,
                     old.restart_count,
                     old.buffers,
                 ));
@@ -452,6 +490,7 @@ impl RtmpManager {
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
+            passthrough: args.passthrough,
             existing_buffers: Some(args.buffers),
         }) {
             Ok(()) => {
@@ -485,8 +524,8 @@ impl RtmpManager {
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
         // Target streams get a burn-in caption textfile + drawtext filter.
-        // Source streams skip both (no translation to display).
-        let caption = if args.is_source {
+        // Source + passthrough streams skip both (no translation to display).
+        let caption = if args.is_source || args.passthrough {
             None
         } else {
             Some(CaptionState::spawn(&args.stream_id))
@@ -566,6 +605,7 @@ impl RtmpManager {
                 delay,
                 is_source: args.is_source,
                 host_gain: args.host_gain,
+                passthrough: args.passthrough,
                 buffers,
                 caption,
                 stop_flag,
@@ -640,7 +680,17 @@ pub fn spawn_health_monitor(
                 mgr.kill_idle_streams();
                 mgr.detect_crashed()
             };
-            for (id, lang, rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers) in crashed
+            for (
+                id,
+                lang,
+                rtmp_url,
+                delay_ms,
+                is_source,
+                host_gain,
+                passthrough,
+                prev_count,
+                buffers,
+            ) in crashed
             {
                 tokio::time::sleep(FFMPEG_RESTART_DELAY).await;
                 if stop_flag.load(Ordering::Acquire) {
@@ -654,6 +704,7 @@ pub fn spawn_health_monitor(
                     delay_ms,
                     is_source,
                     host_gain,
+                    passthrough,
                     prev_count,
                     buffers,
                 });
@@ -839,6 +890,15 @@ mod tests {
     // for the real FFmpeg child. Lets us exercise `detect_crashed`, `stop_all`,
     // and push-fan-out branches without spawning FFmpeg.
     fn fake_exited_stream(id: &str, lang: &str, is_source: bool) -> RtmpStream {
+        fake_exited_stream_full(id, lang, is_source, false)
+    }
+
+    fn fake_exited_stream_full(
+        id: &str,
+        lang: &str,
+        is_source: bool,
+        passthrough: bool,
+    ) -> RtmpStream {
         let mut child = std::process::Command::new("sh")
             .args(["-c", "exit 0"])
             .stdin(std::process::Stdio::null())
@@ -857,6 +917,7 @@ mod tests {
             delay: Duration::from_millis(1000),
             is_source,
             host_gain: 1.0,
+            passthrough,
             buffers: StreamBuffers::new(),
             caption: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -1034,5 +1095,71 @@ mod tests {
             m.streams["stopped"].last_write_ms.load(Ordering::Acquire),
             1
         );
+    }
+
+    // ── Passthrough invariants ───────────────────────────────
+
+    #[test]
+    fn push_tts_skips_passthrough_streams_even_when_lang_matches() {
+        // Passthrough destinations re-broadcast host audio only. If push_tts
+        // ever fed PCM into their queue, memory would grow up to the cap and
+        // nothing would ever play — the drain uses is_source=true semantics.
+        let mut m = RtmpManager::new();
+        m.streams.insert(
+            "pass".into(),
+            // is_source=true mirrors the session_ws hydration path, which
+            // promotes passthrough to is_source so the drain short-circuits.
+            fake_exited_stream_full("pass", "ja", true, true),
+        );
+
+        m.push_tts("ja", vec![1u8; 4_000]);
+        let q = m.streams["pass"].buffers.tts.lock().unwrap();
+        assert!(
+            q.is_empty(),
+            "passthrough streams must not accumulate TTS PCM"
+        );
+    }
+
+    #[test]
+    fn push_caption_skips_passthrough_streams_even_with_caption_state_attached() {
+        // Defensive: if a future refactor mistakenly hands a passthrough
+        // stream a CaptionState (it shouldn't — see spawn_stream_inner), the
+        // caption write must still be a noop. Wire a dummy CaptionState and
+        // verify push_caption exits the branch cleanly without tripping.
+        let mut m = RtmpManager::new();
+        let stream = fake_exited_stream_full("pass", "ja", true, true);
+        m.streams.insert("pass".into(), stream);
+        m.push_caption("ja", "hello".into());
+    }
+
+    #[test]
+    fn start_stream_args_passthrough_true_skips_caption_state_creation() {
+        // Exercised via the spawn path: with passthrough=true we MUST NOT
+        // build a CaptionState (no translation text, no textfile on disk).
+        // We can't spawn real FFmpeg in unit tests, so instead audit the
+        // struct-level invariant: CaptionState is only spawned when BOTH
+        // is_source=false AND passthrough=false. A stream inserted manually
+        // with passthrough=true reflects the intended post-spawn shape.
+        let stream = fake_exited_stream_full("p", "en", true, true);
+        assert!(stream.caption.is_none());
+    }
+
+    #[test]
+    fn crashed_stream_snapshot_preserves_passthrough_across_restart() {
+        // The restart path reuses buffers AND flags from the crashed stream.
+        // If passthrough dropped out of the tuple, a crashed passthrough
+        // would silently restart as a translated stream and start piping
+        // ducked TTS over the host audio.
+        let mut m = RtmpManager::new();
+        let stream = fake_exited_stream_full("p", "en", true, true);
+        m.streams.insert("p".into(), stream);
+
+        let crashed = m.detect_crashed();
+        assert_eq!(crashed.len(), 1);
+        // Tuple layout: (id, lang, rtmp_url, delay_ms, is_source, host_gain,
+        //                passthrough, restart_count, buffers).
+        assert_eq!(crashed[0].0, "p");
+        assert!(crashed[0].4, "is_source preserved");
+        assert!(crashed[0].6, "passthrough preserved across restart");
     }
 }

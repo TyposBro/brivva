@@ -70,9 +70,9 @@ source audio, more output minutes, negligible extra cost.
 3. Dashboard
    ├─ Create session: pick source_lang=ko, target_langs=[zh, ja]
    ├─ For each target: pick destination platform
-   │     zh → Grip          (defaults: delay=3000ms  gain=0.2)
-   │     ja → TikTok        (defaults: delay=1500ms  gain=0.2)
-   │     ko → YouTube       (passthrough: delay=0ms  gain=1.0)
+   │     zh → Grip                       (defaults: delay=3000ms  gain=0.2)
+   │     ja → TikTok                     (defaults: delay=1500ms  gain=0.2)
+   │     Passthrough (source) → YouTube  (delay=0ms  gain=1.0, STT/translate/TTS bypassed)
    └─ Advanced toggle (collapsed) to tune delay+gain if needed
 
 4. Pre-stream quote
@@ -153,10 +153,26 @@ export const STREAM_DEFAULTS = {
   "ko→th": { delay_ms: 2500, host_gain: 0.2 },
   "ko→vi": { delay_ms: 2500, host_gain: 0.2 },
   "ko→id": { delay_ms: 2500, host_gain: 0.2 },
-  "ko→ko": { delay_ms: 0,    host_gain: 1.0 },
+  "ko→ko":   { delay_ms: 0, host_gain: 1.0 },  // source==target — implicit passthrough
+  "*→pass":  { delay_ms: 0, host_gain: 1.0 },  // explicit "Passthrough (source)" pick
   "_default": { delay_ms: 2500, host_gain: 0.2 },
 };
 ```
+
+### Passthrough destinations
+
+The destination language dropdown includes an explicit **"Passthrough
+(source)"** option (wire code `"pass"`). Picking it tells Fargate to
+bypass STT + translate + TTS entirely for that stream — host audio and
+video RTMP'd through at `host_gain = 1.0`, no caption overlay, no
+ElevenLabs calls, no billing for output minutes (the stream never
+produces translated output).
+
+Source-lang-equals-target-lang is the *implicit* passthrough path
+(historical behaviour). Passthrough-as-destination-choice is the
+*explicit* path — present since a host may want a Korean destination
+with untouched audio even when their session targets are Japanese +
+Chinese (and Korean isn't in `target_langs`).
 
 95% of users never open the Advanced toggle. Over time, analyze
 `session_metrics` + user retry behavior to auto-update the defaults.

@@ -112,6 +112,50 @@ describe("DestinationCard", () => {
     expect(onRemove).toHaveBeenCalled();
   });
 
+  it("selecting Passthrough fires onUpdate with lang=pass (happy)", async () => {
+    const dest = makeDest({ platform: "custom", lang: "ja" });
+    const onUpdate = vi.fn();
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{}}
+        user={null}
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={onUpdate}
+        onRemove={vi.fn()}
+      />,
+    );
+    await userEvent.selectOptions(screen.getByRole("combobox"), "pass");
+    expect(onUpdate).toHaveBeenCalledWith({ lang: "pass" });
+  });
+
+  it("passthrough destination renders raw pill and suppresses timing sliders (happy)", async () => {
+    const dest = makeDest({ platform: "custom", lang: "pass", delay_ms: 0, host_gain: 1.0 });
+    render(
+      <DestinationCard
+        dest={dest}
+        sourceLang="ko"
+        savedCreds={{}}
+        user={null}
+        privacyStatus="unlisted"
+        onPrivacyChange={vi.fn()}
+        onUpdate={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+    // Raw badge sits next to the lang select as a visual cue.
+    expect(screen.getByText(/^raw$/i)).toBeInTheDocument();
+    // Expand Advanced and verify it shows explanatory copy, not the delay
+    // slider a translated destination would have.
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+    expect(screen.queryByText(/Output delay/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/re-broadcast the host's raw audio/i),
+    ).toBeInTheDocument();
+  });
+
   it("returns null for unknown platform (sad)", () => {
     const { container } = render(
       <DestinationCard

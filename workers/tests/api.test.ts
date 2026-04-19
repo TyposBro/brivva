@@ -175,6 +175,46 @@ describe("POST /api/sessions validation", () => {
   });
 });
 
+describe("POST /api/sessions — passthrough destinations", () => {
+  it("accepts lang=pass sentinel in target_langs + platforms (happy)", async () => {
+    // Passthrough destinations bypass STT/translate/TTS on Fargate. Workers
+    // doesn't interpret the sentinel — it just persists it. The pipeline
+    // layer reads `streams.lang == "pass"` to switch into passthrough mode.
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-pass",
+        title: "Passthrough",
+        source_lang: "en",
+        target_langs: ["ja", "pass"],
+        platforms: [
+          {
+            platform: "tw",
+            lang: "ja",
+            rtmp_url: "rtmp://tw-ja",
+            stream_key: "ja-key",
+          },
+          {
+            platform: "yt",
+            lang: "pass",
+            rtmp_url: "rtmp://yt-pass",
+            stream_key: "pass-key",
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      streams: Array<{ lang: string; host_gain: number }>;
+    };
+    expect(body.streams).toHaveLength(2);
+    const byLang = Object.fromEntries(body.streams.map((s) => [s.lang, s]));
+    expect(byLang["ja"]).toBeDefined();
+    expect(byLang["pass"]).toBeDefined();
+  });
+});
+
 describe("POST /api/sessions — defaults + clamping", () => {
   it("uses DEFAULT_DELAY_MS=2000 when omitted (happy)", async () => {
     const res = await call("/api/sessions", {

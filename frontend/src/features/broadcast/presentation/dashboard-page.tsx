@@ -165,7 +165,25 @@ function DashboardInner() {
 
   const updateDestination = (uid: string, patch: Partial<Destination>) => {
     setDestinations((prev) =>
-      prev.map((d) => (d.uid === uid ? { ...d, ...patch } : d))
+      prev.map((d) => {
+        if (d.uid !== uid) return d;
+        // When the target language flips and the user hadn't hand-tuned
+        // timing, re-apply the curated defaults. Otherwise switching to
+        // Passthrough would leave a 2500ms delay + 0.2 gain on what is now
+        // a raw-audio stream.
+        const next = { ...d, ...patch };
+        if (patch.lang && patch.lang !== d.lang) {
+          const prior = streamDefault(sourceLang, d.lang);
+          const userHadTuned =
+            prior.delay_ms !== d.delay_ms || prior.host_gain !== d.host_gain;
+          if (!userHadTuned) {
+            const tuned = streamDefault(sourceLang, patch.lang);
+            next.delay_ms = tuned.delay_ms;
+            next.host_gain = tuned.host_gain;
+          }
+        }
+        return next;
+      }),
     );
   };
 
@@ -382,7 +400,7 @@ function DashboardInner() {
               value={sourceLang}
               onChange={(e) => setSourceLang(e.target.value)}
             >
-              {api.LANGS.map((l) => (
+              {api.LANGS.filter((l) => !api.isPassthroughLang(l.code)).map((l) => (
                 <option key={l.code} value={l.code}>
                   {l.flag} {l.label}
                 </option>

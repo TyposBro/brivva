@@ -17,6 +17,10 @@ export interface StreamDefault {
 const PASSTHROUGH: StreamDefault = { delay_ms: 0, host_gain: 1.0 };
 const BASELINE: StreamDefault = { delay_ms: 2000, host_gain: 0.2 };
 
+/** Sentinel target-lang code for explicit source passthrough. Kept in sync
+ *  with `@brivva/contracts/platforms` PASS_LANG_CODE. */
+export const PASS_LANG_CODE = "pass";
+
 const TABLE: Record<string, Record<string, StreamDefault>> = {
   ko: {
     zh: { delay_ms: 3000, host_gain: 0.2 },
@@ -41,6 +45,7 @@ const TABLE: Record<string, Record<string, StreamDefault>> = {
 };
 
 export function streamDefault(sourceLang: string, targetLang: string): StreamDefault {
+  if (targetLang === PASS_LANG_CODE) return PASSTHROUGH;
   if (sourceLang === targetLang) return PASSTHROUGH;
   return TABLE[sourceLang]?.[targetLang] ?? BASELINE;
 }

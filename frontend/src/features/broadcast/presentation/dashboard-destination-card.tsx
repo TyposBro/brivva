@@ -91,10 +91,22 @@ function StreamSlider({
 type PlatformRow = (typeof api.PLATFORMS)[number];
 
 function LangSelect({ dest, sourceLang, onUpdate }: { dest: Destination; sourceLang: string; onUpdate: (patch: Partial<Destination>) => void }) {
+  const isPass = api.isPassthroughLang(dest.lang);
   return (
-    <div className="relative">
+    <div className="relative flex items-center gap-1.5">
+      {isPass && (
+        <span
+          className="px-1.5 py-0.5 rounded bg-surface-container-highest text-[10px] font-label font-bold uppercase tracking-wider text-primary"
+          title="No STT / translate / TTS — host audio goes through unchanged"
+        >
+          raw
+        </span>
+      )}
       <select
-        className="appearance-none bg-surface-container-highest border-none rounded px-2.5 py-1 text-on-surface font-label text-xs focus:ring-2 focus:ring-primary/50 outline-none pr-6 cursor-pointer"
+        className={cn(
+          "appearance-none bg-surface-container-highest border-none rounded px-2.5 py-1 text-on-surface font-label text-xs focus:ring-2 focus:ring-primary/50 outline-none pr-6 cursor-pointer",
+          isPass && "italic",
+        )}
         value={dest.lang}
         onChange={(e) => onUpdate({ lang: e.target.value })}
       >
@@ -149,6 +161,21 @@ function CardHeader(props: {
 
 function TimingSliders({ dest, sourceLang, onUpdate }: { dest: Destination; sourceLang: string; onUpdate: (patch: Partial<Destination>) => void }) {
   const isSource = dest.lang === sourceLang;
+  const isPass = api.isPassthroughLang(dest.lang);
+  // Passthrough destinations skip STT/translate/TTS entirely — the under-voice
+  // mixer has nothing to mix. Sliders would mislead the user into thinking
+  // they can tune something the pipeline won't honor.
+  if (isPass) {
+    return (
+      <div className="px-4 pb-3 pt-1">
+        <p className="text-[11px] text-on-surface-variant/70 leading-snug">
+          Passthrough destinations re-broadcast the host's raw audio and video
+          at full volume. Translation pipeline is skipped, so delay and under-
+          voice mix do not apply.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="px-4 pb-3 pt-1 space-y-2">
       <StreamSlider
