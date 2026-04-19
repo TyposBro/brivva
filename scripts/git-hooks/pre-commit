@@ -64,8 +64,12 @@ if [ -n "$SECRET_HITS" ]; then
   fail "possible secret material in staged files:$SECRET_HITS\nReview the diff. If a false positive, use --no-verify AND explain in commit body."
 fi
 
-# ── 2. No .env files (except examples) ───────────────────────
-ENV_HITS=$(echo "$STAGED" | grep -E '(^|/)\.env($|\.)' | grep -vE '\.env\.example$|\.env\.sample$|\.env\.template$' || true)
+# ── 2. No .env files (except examples + Vite dev template) ──
+# .env.development is Vite's convention for committed dev-mode defaults
+# (only localhost URLs, no secrets). .env.production is where the real
+# prod URLs live and is already committed — Vite loads it at build time.
+# Keep blocking the wide-open .env / .env.local though.
+ENV_HITS=$(echo "$STAGED" | grep -E '(^|/)\.env($|\.)' | grep -vE '\.env\.example$|\.env\.sample$|\.env\.template$|\.env\.development$|\.env\.production$' || true)
 
 if [ -n "$ENV_HITS" ]; then
   fail "staged .env file(s) — never commit these:\n$ENV_HITS"
