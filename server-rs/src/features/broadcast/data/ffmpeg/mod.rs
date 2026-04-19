@@ -156,6 +156,32 @@ fn build_ffmpeg_args(
     ]);
     ffmpeg_args
 }
+/// Pure drain loop for the ffmpeg-child stderr pipe. Reads `BufRead`
+/// line-by-line, invoking `on_line` for each successful line and stopping
+/// on EOF (None) or any io error (logged via `tracing::debug!`).
+///
+/// Factored out of `spawn_stream_inner` so integration tests can pin the
+/// behavior (line-fan-out + EOF termination + error tolerance) against a
+/// stand-in `BufRead` like a captured `/bin/sh` stderr, without spawning
+/// real ffmpeg. The thread in production passes a `|line| tracing::warn!`
+/// closure; tests pass one that collects into an `mpsc` so assertions are
+/// deterministic.
+pub fn drain_stderr_lines<R, F>(reader: R, mut on_line: F)
+where
+    R: BufRead,
+    F: FnMut(String),
+{
+    for line in reader.lines() {
+        match line {
+            Ok(l) => on_line(l),
+            Err(e) => {
+                tracing::debug!(error = %e, "ffmpeg stderr reader ended");
+                break;
+            }
+        }
+    }
+}
+
 // ── Per-stream shared state ───────────────────────────────
 
 /// Timestamped chunk of host media. The tuple is (received_at, bytes). A chunk
@@ -579,24 +605,13 @@ impl RtmpManager {
             let lang_for_log = args.lang.clone();
             let thread_name = format!("stderr-drain-{}", args.stream_id);
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines() {
-                    match line {
-                        Ok(line) => tracing::warn!(
-                            stream_id = %sid_for_log,
-                            lang = %lang_for_log,
-                            "ffmpeg stderr: {line}"
-                        ),
-                        Err(e) => {
-                            tracing::debug!(
-                                stream_id = %sid_for_log,
-                                error = %e,
-                                "ffmpeg stderr reader ended"
-                            );
-                            break;
-                        }
-                    }
-                }
+                drain_stderr_lines(BufReader::new(stderr), |line| {
+                    tracing::warn!(
+                        stream_id = %sid_for_log,
+                        lang = %lang_for_log,
+                        "ffmpeg stderr: {line}"
+                    );
+                });
             }) {
                 tracing::error!(
                     stream_id = %args.stream_id,

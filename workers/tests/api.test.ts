@@ -1667,6 +1667,396 @@ describe("POST /auth/grip + /auth/tiktok", () => {
   });
 });
 
+// Paste-creds round-trip coverage. These tests assert the full lifecycle for
+// both Grip and TikTok: write via /auth/<platform>, read back via
+// GET /api/credentials, validation rejects on missing fields, and repeated
+// writes for the same (user_id, platform) UPSERT rather than duplicate.
+// The Grip and TikTok flows share the schema shape but live under separate
+// describe blocks so regressions in one platform can't silently pass by
+// inheriting the other's assertions.
+
+describe("POST /auth/grip — paste-creds round-trip", () => {
+  it("persists the row and exposes it via GET /api/credentials (happy)", async () => {
+    // Task A-1 + A-2: write → list round-trip lands the stream_key + rtmp_url
+    // the host pasted from their Grip dashboard. The orchestration layer
+    // reads this row later when a session carries platform=grip without a
+    // product_id (manual paste-creds path).
+    const res = await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-rt",
+        session_token: "sess-1234567890",
+        stream_key: "grip-sk-aaa",
+        rtmp_url: "rtmps://live.grip.fans:443/live/",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      platform: string;
+      stream_key: string;
+      rtmp_url: string | null;
+      display_name: string | null;
+    };
+    expect(body.platform).toBe("grip");
+    expect(body.stream_key).toBe("grip-sk-aaa");
+    expect(body.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+
+    // D1 row must actually exist (guard against a handler that returns the
+    // constructed row without persisting — a failure mode we shipped once
+    // before and want a regression pin for).
+    const dbRow = (await env.DB.prepare(
+      "SELECT stream_key, rtmp_url FROM platform_credentials WHERE user_id = ? AND platform = ?",
+    )
+      .bind("u-grip-rt", "grip")
+      .first()) as { stream_key: string; rtmp_url: string } | null;
+    expect(dbRow).not.toBeNull();
+    expect(dbRow!.stream_key).toBe("grip-sk-aaa");
+    expect(dbRow!.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+
+    // Round-trip through the public list endpoint — the FE polls this when
+    // rendering the destination picker.
+    const listRes = await call("/api/credentials?user_id=u-grip-rt");
+    expect(listRes.status).toBe(200);
+    const list = (await listRes.json()) as {
+      credentials: Array<{
+        platform: string;
+        stream_key: string;
+        rtmp_url: string | null;
+      }>;
+    };
+    const gripRow = list.credentials.find((c) => c.platform === "grip");
+    expect(gripRow).toBeDefined();
+    expect(gripRow!.stream_key).toBe("grip-sk-aaa");
+    expect(gripRow!.rtmp_url).toBe("rtmps://live.grip.fans:443/live/");
+  });
+
+  it("400 when stream_key is empty (sad)", async () => {
+    // Task A-3: Zod min(1) on stream_key rejects empty strings. Without this
+    // guard the FE could accidentally save a credential that would later
+    // cause FFmpeg to spawn with an empty stream-key segment and blow up
+    // mid-broadcast.
+    const res = await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-bad",
+        session_token: "sess-abc",
+        stream_key: "",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("400 when user_id is missing (sad)", async () => {
+    // Task A-4: user_id is required by GripAuthRequestSchema. Missing it is
+    // a client bug (anonymous POST to /auth/grip would silently orphan a
+    // credential row if the handler fell through to getOrCreateUser).
+    const res = await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_token: "sess-abc",
+        stream_key: "k",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("repeated saves UPSERT — same user_id+platform yields one row (happy)", async () => {
+    // Task A-5: the handler must not insert duplicates when a host re-pastes
+    // (common when the Grip dashboard expires the old stream key). Schema
+    // has UNIQUE(user_id, platform); db.upsertCredential uses onConflict.
+    await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-upsert",
+        session_token: "sess-1",
+        stream_key: "first-key",
+        rtmp_url: "rtmps://a.example/live/",
+      }),
+    });
+    const res2 = await call("/auth/grip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-upsert",
+        session_token: "sess-2",
+        stream_key: "second-key",
+        rtmp_url: "rtmps://b.example/live/",
+      }),
+    });
+    expect(res2.status).toBe(200);
+
+    const rows = await env.DB.prepare(
+      "SELECT stream_key, rtmp_url FROM platform_credentials WHERE user_id = ? AND platform = ?",
+    )
+      .bind("u-grip-upsert", "grip")
+      .all();
+    expect(rows.results).toHaveLength(1);
+    const row = rows.results[0] as { stream_key: string; rtmp_url: string };
+    expect(row.stream_key).toBe("second-key");
+    expect(row.rtmp_url).toBe("rtmps://b.example/live/");
+  });
+});
+
+describe("POST /auth/tiktok — paste-creds round-trip", () => {
+  // Mirrors the Grip round-trip. Keeping the assertions separate — instead of
+  // parametrizing — guards against a platform-specific regression slipping by
+  // just because the other platform still works.
+
+  it("persists the row and exposes it via GET /api/credentials (happy)", async () => {
+    const res = await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tt-rt",
+        session_token: "tt-sess-xyz",
+        stream_key: "tt-sk-aaa",
+        rtmp_url: "rtmp://live.tiktok.example/live/",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      platform: string;
+      stream_key: string;
+      rtmp_url: string | null;
+    };
+    expect(body.platform).toBe("tiktok");
+    expect(body.stream_key).toBe("tt-sk-aaa");
+
+    const dbRow = (await env.DB.prepare(
+      "SELECT stream_key, rtmp_url FROM platform_credentials WHERE user_id = ? AND platform = ?",
+    )
+      .bind("u-tt-rt", "tiktok")
+      .first()) as { stream_key: string; rtmp_url: string } | null;
+    expect(dbRow).not.toBeNull();
+    expect(dbRow!.stream_key).toBe("tt-sk-aaa");
+    expect(dbRow!.rtmp_url).toBe("rtmp://live.tiktok.example/live/");
+
+    const listRes = await call("/api/credentials?user_id=u-tt-rt");
+    const list = (await listRes.json()) as {
+      credentials: Array<{ platform: string; stream_key: string }>;
+    };
+    const ttRow = list.credentials.find((c) => c.platform === "tiktok");
+    expect(ttRow).toBeDefined();
+    expect(ttRow!.stream_key).toBe("tt-sk-aaa");
+  });
+
+  it("400 when stream_key is empty (sad)", async () => {
+    const res = await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tt-bad",
+        session_token: "sess",
+        stream_key: "",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("400 when user_id is missing (sad)", async () => {
+    const res = await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_token: "sess",
+        stream_key: "k",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("repeated saves UPSERT — same user_id+platform yields one row (happy)", async () => {
+    await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tt-upsert",
+        session_token: "s1",
+        stream_key: "first-key",
+      }),
+    });
+    await call("/auth/tiktok", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-tt-upsert",
+        session_token: "s2",
+        stream_key: "second-key",
+      }),
+    });
+    const rows = await env.DB.prepare(
+      "SELECT stream_key FROM platform_credentials WHERE user_id = ? AND platform = ?",
+    )
+      .bind("u-tt-upsert", "tiktok")
+      .all();
+    expect(rows.results).toHaveLength(1);
+    expect((rows.results[0] as { stream_key: string }).stream_key).toBe(
+      "second-key",
+    );
+  });
+});
+
+describe("POST /api/sessions — Grip paste-creds vs Seller API routing", () => {
+  // Task B: verify the orchestration layer (app.ts §~340-460) correctly
+  // picks the paste-creds path vs the Seller-API path for grip destinations.
+  //
+  // The branch selector lives at app.ts:350-365:
+  //   platform=="grip" && product_id && GRIP_ACCESS_KEY && GRIP_SECRET_KEY
+  //       → Seller API (auto-provision)
+  //   platform=="grip" && !product_id
+  //       → manual paste-creds (use rtmp_url/stream_key from the request)
+  //
+  // Test vitest.config.ts seeds GRIP_ACCESS_KEY/SECRET so the Seller-API
+  // branch is reachable. Tests that want the manual path simply omit
+  // product_id.
+
+  it("without product_id → uses pasted rtmp_url + stream_key and does NOT hit Seller API (happy)", async () => {
+    // Seed a user + a saved Grip credential row (the row is not consulted
+    // by this code path today, but mirrors real-world state: creator has
+    // both pasted AND picked a specific destination).
+    await seedUser("u-grip-paste");
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind(
+        "v-grip-paste",
+        "u-grip-paste",
+        "el-vpaste",
+        "Aziz",
+        "ko",
+        Math.floor(Date.now() / 1000),
+      )
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO platform_credentials (id, user_id, platform, rtmp_url, stream_key, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(
+        "pc-gp",
+        "u-grip-paste",
+        "grip",
+        "rtmps://legacy.grip/live/",
+        "legacy-sk",
+        "grip:legacy",
+        Math.floor(Date.now() / 1000),
+        Math.floor(Date.now() / 1000),
+      )
+      .run();
+
+    // Installation-level fetch sentry: any network call at all is a bug in
+    // the paste-creds path. If the Seller-API branch fires by mistake, it
+    // would call fetch("…/broadcasts…") and our stub would throw.
+    let fetchCalls = 0;
+    const original = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (...args: Parameters<typeof fetch>) => {
+        fetchCalls += 1;
+        // Delegate to the real fetch so any other unrelated call still works.
+        return original(...args);
+      }),
+    );
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-paste",
+        title: "Paste creds",
+        source_lang: "ko",
+        target_langs: ["zh"],
+        // No product_id → orchestration must fall through to manual paste,
+        // using the rtmp_url+stream_key supplied RIGHT HERE (not the
+        // platform_credentials row — that row is for the /auth/grip flow).
+        platforms: [
+          {
+            platform: "grip",
+            lang: "zh",
+            rtmp_url: "rtmps://paste.grip/live/",
+            stream_key: "paste-sk-xxx",
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(fetchCalls).toBe(0); // no Seller-API call
+
+    // The inserted streams row must carry the pasted values, NOT any
+    // stubbed Seller-API response values.
+    const streamRows = await env.DB.prepare(
+      "SELECT rtmp_url, stream_key FROM streams WHERE lang = ? AND platform = ?",
+    )
+      .bind("zh", "grip")
+      .all();
+    expect(streamRows.results).toHaveLength(1);
+    const streamRow = streamRows.results[0] as {
+      rtmp_url: string;
+      stream_key: string;
+    };
+    expect(streamRow.rtmp_url).toBe("rtmps://paste.grip/live/");
+    expect(streamRow.stream_key).toBe("paste-sk-xxx");
+  });
+
+  it("with product_id but Seller API returns 404 → 502 with rolled-back session (sad)", async () => {
+    // Task B negative: when product_id triggers the Seller-API branch and
+    // the API rejects (test env has no real Grip), the orchestration layer
+    // MUST roll back the session + stream rows and surface a non-2xx. The
+    // FE then either prompts the user to paste creds or retries. See
+    // app.ts:423-436 for the rollback + status-mapping logic.
+    await seedUser("u-grip-prod");
+
+    installFetchStub([
+      {
+        // Match any Grip seller-api endpoint and reply with 404 so the
+        // handler goes down the `502` branch (401/403 are passed through;
+        // anything else → 502).
+        match: /grip/i,
+        method: "POST",
+        reply: () => new Response("not found", { status: 404 }),
+      },
+    ]);
+
+    const res = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-grip-prod",
+        title: "Auto provision",
+        source_lang: "en",
+        target_langs: ["ja"],
+        platforms: [
+          {
+            platform: "grip",
+            lang: "ja",
+            product_id: "prod_abc123",
+          },
+        ],
+      }),
+    });
+
+    // 404 on the Seller API maps to 502 per app.ts:435. 401/403 pass
+    // through unchanged — here we deliberately chose 404 to pin the
+    // `502 Bad Gateway` mapping branch.
+    expect(res.status).toBe(502);
+
+    // Rollback invariant: no session + no stream rows survive a failed
+    // auto-provision. The `insertedIds` cleanup + deleteSessionRow chain
+    // is what keeps this promise.
+    const sessionRows = await env.DB.prepare(
+      "SELECT id FROM sessions WHERE user_id = ?",
+    )
+      .bind("u-grip-prod")
+      .all();
+    expect(sessionRows.results).toHaveLength(0);
+
+    const streamRows = await env.DB.prepare("SELECT id FROM streams").all();
+    expect(streamRows.results).toHaveLength(0);
+  });
+});
+
 describe("GET /api/billing/summary", () => {
   it("returns zeros for a user with no sessions (happy)", async () => {
     const res = await call("/api/billing/summary?user_id=u-none");

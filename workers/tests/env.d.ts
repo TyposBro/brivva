@@ -17,6 +17,8 @@ declare global {
       GOOGLE_SIGNIN_REDIRECT_URI: string;
       FRONTEND_URL: string;
       STRIPE_WEBHOOK_SECRET: string;
+      GRIP_ACCESS_KEY: string;
+      GRIP_SECRET_KEY: string;
       TEST_MIGRATIONS: D1Migration[];
     }
   }

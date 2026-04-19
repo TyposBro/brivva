@@ -26,6 +26,13 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
               "https://test-api.example.com/auth/google/callback",
             FRONTEND_URL: "https://test-app.example.com",
             STRIPE_WEBHOOK_SECRET: "whsec_test_secret",
+            // Grip Seller-API bindings. The orchestration layer only routes
+            // through the Seller API when a destination carries `product_id`
+            // AND both keys are set, so defaulting them here keeps the
+            // manual-paste happy path unaffected while letting Task B
+            // exercise the auto-provision branch.
+            GRIP_ACCESS_KEY: "test-grip-access",
+            GRIP_SECRET_KEY: "test-grip-secret",
             TEST_MIGRATIONS: migrations,
           },
         },

@@ -22,3 +22,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+dashmap = "6.1.0"
