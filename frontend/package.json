@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "openapi:generate": "bunx openapi-typescript ../contracts/openapi/brivva-workers.json -o ./src/lib/generated/workers-api.d.ts",
+    "openapi:generate": "bunx openapi-typescript ../contracts/openapi/brivva-workers.json -o ./src/core/contracts/workers-api.d.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
