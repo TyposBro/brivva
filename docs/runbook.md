@@ -108,25 +108,53 @@ omitted. Re-add if/when those providers ship.
 
 ## Rollback — restore last-known-good in <2 min
 
-Every deploy is tagged `v-YYYYMMDD-HHMM` on both git and ECR.
+### Automatic (preferred)
+
+The Fargate service has the **ECS deployment circuit breaker** enabled.
+If a new task-def revision fails to become healthy, ECS rolls back to
+the previous revision automatically — you don't have to do anything.
+Check CloudWatch or `aws ecs describe-services` for the rollback event.
+
+### Manual Fargate rollback
+
+Use the versioned script:
 
 ```bash
-# find last green tag
-git tag --sort=-committerdate | head -5
-
-# redeploy the matching ECS task definition
-aws ecs update-service \
-  --cluster brivva \
-  --service brivva \
-  --task-definition brivva:<PREV_REVISION>
-
-# workers rollback
-cd workers && wrangler rollback
-
-# pages rollback — use dashboard or redeploy prior commit
+./scripts/rollback.sh --list   # show recent revisions with pinned image SHAs
+./scripts/rollback.sh          # roll to the revision immediately before current
+./scripts/rollback.sh 12       # roll to brivva:12 specifically
 ```
 
-Rehearse this **before May 10**. Practice makes 2am fast.
+Each deploy pins the image by git SHA via `:{git-sha}` tag and registers
+a new task-def revision, so every historical deploy is addressable. The
+script confirms before acting and waits for `services-stable`.
+
+### Workers rollback
+
+```bash
+cd workers && wrangler rollback
+```
+
+### Pages rollback
+
+Redeploy prior commit from the Pages dashboard, or:
+
+```bash
+bunx wrangler pages deployment list --project-name=brivva
+bunx wrangler pages rollback --project-name=brivva <DEPLOYMENT_ID>
+```
+
+### Rehearsal
+
+Rehearse the Fargate path **before May 10**:
+```bash
+./scripts/rollback.sh --list       # verify you can read revisions
+./scripts/rollback.sh <prev-rev>   # actually roll, then forward again
+./scripts/smoke-test.sh prod       # confirm still healthy
+./scripts/rollback.sh <new-rev>    # roll forward to latest
+```
+
+Practice makes 2am fast.
 
 ---
 
@@ -194,10 +222,12 @@ if live failed.
 
 ## Pre-May-10 Checklist
 
-- [ ] Rehearse rollback once (full cycle: break something, roll back, verify)
-- [ ] Implement `scripts/smoke-test.sh` for post-rollback validation
-- [ ] Verify all kill-switch env vars are actually read by server-rs
+- [ ] Rehearse `./scripts/rollback.sh` once end-to-end (roll back, smoke-test, roll forward)
+- [x] `scripts/smoke-test.sh` exists — verify it still passes against prod
+- [x] Kill-switch env vars wired in server-rs (`BRIVVA_FALLBACK_TO_DEFAULT_VOICE`, `BRIVVA_FORCE_RTMP_NOT_RTMPS`)
+- [x] ECS circuit breaker enabled — auto-rollback on failed deploys
 - [ ] Bookmark CloudWatch dashboard URL on phone browser
 - [ ] Have Simon's + MJ's phone numbers saved, reachable at 2am KST
 - [ ] Keep a signed Tauri build on laptop as Plan B
 - [ ] Test `aws logs tail` command works from phone hotspot (if home WiFi dies)
+- [ ] Confirm `./scripts/rollback.sh --list` returns a useful history (needs a few prior deploys)
