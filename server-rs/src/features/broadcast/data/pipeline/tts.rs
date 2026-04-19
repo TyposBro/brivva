@@ -19,9 +19,6 @@ pub struct ResolveVoiceArgs<'a> {
 pub struct ResolvedVoice {
     pub voice_id: String,
     pub is_cloned: bool,
-    /// Set when the caller supplied a cloned voice id but the enrollment
-    /// language disagreed with the target — the caller logs a warning.
-    pub is_cloned_fallback_due_to_enrollment: bool,
 }
 
 /// Pure voice-selection decision. Exposed for kill-switch tests.
@@ -30,10 +27,14 @@ pub struct ResolvedVoice {
 /// 1. `force_default_voice` kill-switch wins over everything else and always
 ///    yields the female library default.
 /// 2. `voice_preset == Female|Male` uses the matching library default.
-/// 3. `voice_preset == Cloned` with mismatched `enrollment_lang` falls back
-///    to the female default (April 2026 Indian-accent regression).
-/// 4. `voice_preset == Cloned` with a supplied `selected_voice_id` uses it.
-/// 5. Otherwise the female library default.
+/// 3. `voice_preset == Cloned` with a supplied `selected_voice_id` returns
+///    the clone regardless of enrollment-vs-target language. Cross-lingual
+///    synthesis is delegated to ElevenLabs via the `language_code` body
+///    field set by `build_tts_request_body` (commit cd5943f) — that knob is
+///    what anchors `eleven_flash_v2_5` to the target language while keeping
+///    the cloned timbre.
+/// 4. `voice_preset == Cloned` with no supplied id falls back to the female
+///    default.
 pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
     if args.force_default_voice {
         return default_voice(args.target_lang, VoicePreset::Female);
@@ -45,19 +46,9 @@ pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
             let Some(clone_id) = args.selected_voice_id else {
                 return default_voice(args.target_lang, VoicePreset::Female);
             };
-            if let Some(enroll) = args.enrollment_lang
-                && enroll != args.target_lang
-            {
-                return ResolvedVoice {
-                    voice_id: args.target_lang.voice_id_female().to_string(),
-                    is_cloned: false,
-                    is_cloned_fallback_due_to_enrollment: true,
-                };
-            }
             ResolvedVoice {
                 voice_id: clone_id.to_string(),
                 is_cloned: true,
-                is_cloned_fallback_due_to_enrollment: false,
             }
         }
     }
@@ -71,7 +62,6 @@ fn default_voice(target_lang: &Lang, preset: VoicePreset) -> ResolvedVoice {
     ResolvedVoice {
         voice_id: voice_id.to_string(),
         is_cloned: false,
-        is_cloned_fallback_due_to_enrollment: false,
     }
 }
 
@@ -116,23 +106,14 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         voice_preset: req.voice_preset,
         force_default_voice,
     });
-    if let Some(enroll) = req.selected_voice_enrollment_lang.as_ref()
-        && resolved.is_cloned_fallback_due_to_enrollment
-    {
-        tracing::warn!(
-            utterance_id = req.utterance_id,
-            target_lang = %req.target_lang,
-            enrollment_lang = %enroll,
-            "cloned voice enrollment language differs from target; falling back to default voice"
-        );
-    }
     let voice_id = resolved.voice_id;
     let is_cloned = resolved.is_cloned;
-    let model_id = if is_cloned {
-        "eleven_multilingual_v2"
-    } else {
-        "eleven_flash_v2_5"
-    };
+    // Unified on eleven_flash_v2_5 for both cloned + default paths. Flash v2.5
+    // supports Instant Voice Cloning with `language_code` in the request body
+    // (commit cd5943f), so cross-lingual cloned synthesis is routed through
+    // the same low-latency model used for default voices — critical for live
+    // streaming where eleven_multilingual_v2 adds noticeable TTFB.
+    let model_id = "eleven_flash_v2_5";
     let url = format!(
         "{}/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
         base_url, &voice_id
@@ -362,8 +343,24 @@ mod tests {
             force_default_voice: false,
         });
         assert!(!resolved.is_cloned);
-        assert!(!resolved.is_cloned_fallback_due_to_enrollment);
         assert_eq!(resolved.voice_id, Lang::Ja.voice_id_female());
+    }
+
+    #[test]
+    fn resolve_voice_keeps_cloned_id_for_cross_lingual_targets() {
+        // With eleven_flash_v2_5 + `language_code` in the request body
+        // (commit cd5943f), cross-lingual cloned synthesis works end to end.
+        // The resolver must no longer substitute the default voice just
+        // because enrollment_lang != target_lang.
+        let resolved = resolve_voice(ResolveVoiceArgs {
+            selected_voice_id: Some("EL-clone-xyz"),
+            enrollment_lang: Some(&Lang::En),
+            target_lang: &Lang::Ja,
+            voice_preset: VoicePreset::Cloned,
+            force_default_voice: false,
+        });
+        assert!(resolved.is_cloned);
+        assert_eq!(resolved.voice_id, "EL-clone-xyz");
     }
 
     #[test]
@@ -667,19 +664,34 @@ mod tests {
     }
 
     #[test]
-    fn resolved_voice_selects_multilingual_v2_model_for_cloned() {
-        // Implicit: the dispatcher picks eleven_multilingual_v2 when
-        // is_cloned=true and eleven_flash_v2_5 otherwise. Validate the
-        // branch through body shape.
-        let cloned_body = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
+    fn both_cloned_and_default_paths_now_use_eleven_flash_v2_5() {
+        // Unified on flash v2.5: lower TTFB than multilingual_v2 and it
+        // supports Instant Voice Cloning + `language_code` steering, which
+        // is what makes cross-lingual cloned synthesis work for live RTMP
+        // without the eleven_multilingual_v2 latency penalty.
+        let cloned_body = build_tts_request_body("hi", "eleven_flash_v2_5", true, None);
         assert_eq!(
             cloned_body["model_id"].as_str().unwrap(),
-            "eleven_multilingual_v2"
+            "eleven_flash_v2_5"
         );
         let default_body = build_tts_request_body("hi", "eleven_flash_v2_5", false, None);
         assert_eq!(
             default_body["model_id"].as_str().unwrap(),
             "eleven_flash_v2_5"
         );
+    }
+
+    #[test]
+    fn build_tts_request_body_emits_language_code_and_flash_v2_5_for_cross_lingual_clone() {
+        // Task C acceptance: a cloned voice enrolled in English, synthesized
+        // against a Japanese target, must ship `language_code="ja"` AND
+        // `model_id="eleven_flash_v2_5"`. That combination is what delegates
+        // cross-lingual synthesis to ElevenLabs instead of the old
+        // fall-back-to-default-voice behavior.
+        let body = build_tts_request_body("hi", "eleven_flash_v2_5", true, Some(&Lang::Ja));
+        assert_eq!(body["language_code"].as_str().unwrap(), "ja");
+        assert_eq!(body["model_id"].as_str().unwrap(), "eleven_flash_v2_5");
+        // voice_settings still shipped on the cloned path.
+        assert!(body.get("voice_settings").is_some());
     }
 }

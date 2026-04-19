@@ -26,6 +26,7 @@ use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 use crate::features::broadcast::domain::SessionMetrics;
 
 use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -125,16 +126,20 @@ fn build_ffmpeg_args(
         "ultrafast".into(),
         "-tune".into(),
         "zerolatency".into(),
-        "-crf".into(),
-        "20".into(),
+        // Target bitrate must be set explicitly — with -preset ultrafast the
+        // CRF path alone does not respect -maxrate closely enough, and Grip
+        // (AWS IVS) caps ingest at ~3 Mbps and drops the RTMP connection on
+        // overshoot. Pin 2500k target, 2500k max, 5000k buffer, 1s GOP.
+        "-b:v".into(),
+        "2500k".into(),
         "-maxrate".into(),
-        "35000k".into(),
+        "2500k".into(),
         "-bufsize".into(),
-        "70000k".into(),
+        "5000k".into(),
         "-pix_fmt".into(),
         "yuv420p".into(),
         "-g".into(),
-        "60".into(),
+        "30".into(),
         "-c:a".into(),
         "aac".into(),
         "-ac:a".into(),
@@ -562,6 +567,45 @@ impl RtmpManager {
             .spawn()
             .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
 
+        // Drain ffmpeg's stderr line-by-line so its diagnostics land in our
+        // tracing pipeline. Without this reader the piped stderr fills up
+        // (~64 KB kernel buffer) and eventually blocks ffmpeg's log writes,
+        // but more importantly we were flying blind on every RTMP failure:
+        // Grip drops, ffmpeg exits, the restart loop spins, and no log line
+        // ever told us why. The thread exits naturally when ffmpeg closes
+        // stderr on process exit (BufRead::lines yields None at EOF).
+        if let Some(stderr) = child.stderr.take() {
+            let sid_for_log = args.stream_id.clone();
+            let lang_for_log = args.lang.clone();
+            let thread_name = format!("stderr-drain-{}", args.stream_id);
+            if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => tracing::warn!(
+                            stream_id = %sid_for_log,
+                            lang = %lang_for_log,
+                            "ffmpeg stderr: {line}"
+                        ),
+                        Err(e) => {
+                            tracing::debug!(
+                                stream_id = %sid_for_log,
+                                error = %e,
+                                "ffmpeg stderr reader ended"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }) {
+                tracing::error!(
+                    stream_id = %args.stream_id,
+                    error = %e,
+                    "ffmpeg stderr drain thread spawn failed"
+                );
+            }
+        }
+
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
         let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -914,6 +958,37 @@ mod tests {
         assert_eq!(args[ar_idx + 1], "44100");
         let ac_idx = args.iter().position(|s| s == "-ac").unwrap();
         assert_eq!(args[ac_idx + 1], "1");
+    }
+
+    #[test]
+    fn build_ffmpeg_args_enforces_grip_ivs_bitrate_and_keyframe_caps() {
+        // Grip (AWS IVS) caps RTMP ingest at ~3 Mbps with a 1s keyframe
+        // requirement. Overshooting either value makes IVS drop the stream
+        // silently, which in turn causes the ffmpeg child to exit, the
+        // idle-restart loop to re-fire three times, and the target prompter
+        // to stay dark. Pin: -b:v/-maxrate 2500k, -bufsize 5000k, -g 30.
+        let args = build_ffmpeg_args("/tmp/fifo", None, "rtmp://x", None);
+
+        let b_v_idx = args
+            .iter()
+            .position(|s| s == "-b:v")
+            .expect("-b:v must be set to enforce target bitrate under ultrafast preset");
+        assert_eq!(args[b_v_idx + 1], "2500k");
+
+        let maxrate_idx = args.iter().position(|s| s == "-maxrate").unwrap();
+        assert_eq!(args[maxrate_idx + 1], "2500k");
+
+        let bufsize_idx = args.iter().position(|s| s == "-bufsize").unwrap();
+        assert_eq!(args[bufsize_idx + 1], "5000k");
+
+        let g_idx = args.iter().position(|s| s == "-g").unwrap();
+        assert_eq!(args[g_idx + 1], "30", "1s keyframe interval @ 30fps");
+
+        let b_a_idx = args.iter().position(|s| s == "-b:a").unwrap();
+        assert_eq!(args[b_a_idx + 1], "128k");
+
+        let pix_idx = args.iter().position(|s| s == "-pix_fmt").unwrap();
+        assert_eq!(args[pix_idx + 1], "yuv420p");
     }
 
     // Build a `RtmpStream` around a short-lived shell subprocess — stand-in

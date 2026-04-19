@@ -69,11 +69,17 @@ fn without_kill_switch_cloned_voice_is_kept_when_enrollment_matches_target() {
     });
     assert!(resolved.is_cloned);
     assert_eq!(resolved.voice_id, "EL-clone-123");
-    assert!(!resolved.is_cloned_fallback_due_to_enrollment);
 }
 
 #[test]
-fn cloned_voice_falls_back_when_enrollment_language_differs_from_target() {
+fn cloned_voice_kept_for_cross_lingual_targets_with_language_code_steering() {
+    // Previously the resolver fell back to the default voice when the
+    // clone's enrollment language differed from the target. That defeated
+    // the whole point of `language_code` (commit cd5943f): ElevenLabs flash
+    // v2.5 supports multilingual synthesis on cloned voices as long as the
+    // request body carries `language_code`. The clone must now survive the
+    // resolver — `build_tts_request_body` is what steers the model to the
+    // target lang.
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     clear_kill_switches();
 
@@ -84,9 +90,11 @@ fn cloned_voice_falls_back_when_enrollment_language_differs_from_target() {
         voice_preset: VoicePreset::Cloned,
         force_default_voice: false,
     });
-    assert!(!resolved.is_cloned, "cross-lingual clone must fall back");
-    assert!(resolved.is_cloned_fallback_due_to_enrollment);
-    assert_eq!(resolved.voice_id, Lang::En.voice_id_female().to_string());
+    assert!(
+        resolved.is_cloned,
+        "cross-lingual clone must be kept; language_code steers the model"
+    );
+    assert_eq!(resolved.voice_id, "EL-clone-123");
 }
 
 #[test]
