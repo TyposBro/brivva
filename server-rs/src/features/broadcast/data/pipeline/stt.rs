@@ -186,3 +186,33 @@ async fn run_soniox_session(
         tokio::time::sleep(STT_RECONNECT_DELAY).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::dedupe_target_langs;
+    use crate::features::broadcast::domain::Lang;
+
+    #[test]
+    fn dedupe_drops_source_lang_from_targets() {
+        let targets = dedupe_target_langs(Lang::En, vec![Lang::En, Lang::Ja, Lang::Ko]);
+        assert_eq!(targets, vec![Lang::Ja, Lang::Ko]);
+    }
+
+    #[test]
+    fn dedupe_collapses_duplicates_preserving_first_seen_order() {
+        let targets =
+            dedupe_target_langs(Lang::En, vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko]);
+        assert_eq!(targets, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+    }
+
+    #[test]
+    fn dedupe_returns_empty_when_all_targets_match_source() {
+        let targets = dedupe_target_langs(Lang::Ja, vec![Lang::Ja, Lang::Ja]);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn dedupe_handles_empty_input() {
+        assert!(dedupe_target_langs(Lang::En, vec![]).is_empty());
+    }
+}

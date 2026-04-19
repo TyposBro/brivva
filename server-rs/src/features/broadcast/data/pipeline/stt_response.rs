@@ -241,3 +241,117 @@ async fn emit_translation(
     )
     .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::broadcast::data::pipeline::soniox::SonioxToken;
+    use crate::features::broadcast::domain::Lang;
+
+    fn token(text: &str, is_final: bool, translation_status: Option<&str>) -> SonioxToken {
+        SonioxToken {
+            text: text.to_string(),
+            is_final,
+            translation_status: translation_status.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parse_soniox_response_returns_none_on_empty_string() {
+        assert!(parse_soniox_response("tag", "").is_none());
+    }
+
+    #[test]
+    fn parse_soniox_response_returns_none_on_invalid_json() {
+        assert!(parse_soniox_response("tag", "{not json").is_none());
+    }
+
+    #[test]
+    fn parse_soniox_response_handles_missing_tokens_array() {
+        let resp = parse_soniox_response("tag", "{}").expect("empty object is valid");
+        assert!(resp.tokens.is_empty());
+        assert!(resp.error_code.is_none());
+    }
+
+    #[test]
+    fn parse_soniox_response_captures_error_fields() {
+        let json = r#"{"error_code":"auth_failed","error_message":"bad key"}"#;
+        let resp = parse_soniox_response("tag", json).expect("valid json");
+        assert_eq!(resp.error_code.as_deref(), Some("auth_failed"));
+        assert_eq!(resp.error_message.as_deref(), Some("bad key"));
+    }
+
+    #[test]
+    fn accumulate_source_mode_joins_final_tokens_and_returns_interim_tail() {
+        let mode = SonioxMode::Source { lang: Lang::En };
+        let response = SonioxResponse {
+            tokens: vec![
+                token("hello ", true, None),
+                token("world", true, None),
+                token(" so", false, None),
+            ],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let (interim, endpoint) = accumulate_tokens(&mode, &response, &mut final_text);
+
+        assert_eq!(final_text, "hello world");
+        assert_eq!(interim, " so");
+        assert!(!endpoint);
+    }
+
+    #[test]
+    fn accumulate_flags_endpoint_on_end_token_and_skips_its_text() {
+        let mode = SonioxMode::Source { lang: Lang::En };
+        let response = SonioxResponse {
+            tokens: vec![
+                token("done ", true, None),
+                token(SONIOX_END_TOKEN, true, None),
+            ],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text);
+
+        assert_eq!(final_text, "done ");
+        assert!(endpoint);
+    }
+
+    #[test]
+    fn accumulate_translate_mode_drops_tokens_without_translation_status() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::En,
+            target_lang: Lang::Ja,
+        };
+        let response = SonioxResponse {
+            tokens: vec![
+                token("original ", true, Some("original")),
+                token("konnichiwa", true, Some("translation")),
+                token(" yo", false, Some("translation")),
+            ],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let (interim, _) = accumulate_tokens(&mode, &response, &mut final_text);
+
+        assert_eq!(final_text, "konnichiwa");
+        assert_eq!(interim, " yo");
+    }
+
+    #[test]
+    fn accumulate_preserves_prior_final_text_across_calls() {
+        let mode = SonioxMode::Source { lang: Lang::En };
+        let mut final_text = "prefix ".to_string();
+        let response = SonioxResponse {
+            tokens: vec![token("added", true, None)],
+            error_code: None,
+            error_message: None,
+        };
+        accumulate_tokens(&mode, &response, &mut final_text);
+
+        assert_eq!(final_text, "prefix added");
+    }
+}

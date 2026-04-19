@@ -139,3 +139,109 @@ pub async fn update_session_status(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_row_applies_delay_and_gain_defaults_when_absent() {
+        let json = r#"{
+            "id": "s1",
+            "session_id": "S",
+            "lang": "en",
+            "platform": "youtube",
+            "rtmp_url": "rtmp://a/b",
+            "stream_key": "k",
+            "status": "pending"
+        }"#;
+        let row: StreamRow = serde_json::from_str(json).expect("valid payload");
+
+        assert_eq!(row.id, "s1");
+        assert_eq!(row.lang, "en");
+        assert_eq!(row.delay_ms, 2000, "delay default must match start_stream contract");
+        assert!((row.host_gain - 0.2).abs() < f32::EPSILON, "gain default");
+    }
+
+    #[test]
+    fn stream_row_keeps_explicit_delay_and_gain_overrides() {
+        let json = r#"{
+            "id": "s1",
+            "session_id": "S",
+            "lang": "ja",
+            "platform": "custom",
+            "rtmp_url": null,
+            "stream_key": null,
+            "status": "live",
+            "delay_ms": 500,
+            "host_gain": 1.0
+        }"#;
+        let row: StreamRow = serde_json::from_str(json).expect("valid payload");
+
+        assert_eq!(row.delay_ms, 500);
+        assert!((row.host_gain - 1.0).abs() < f32::EPSILON);
+        assert!(row.rtmp_url.is_none());
+        assert!(row.stream_key.is_none());
+    }
+
+    #[test]
+    fn session_bundle_accepts_null_voice_and_empty_streams() {
+        let json = r#"{
+            "session": {
+                "id": "abc",
+                "user_id": "u",
+                "voice_id": null,
+                "title": "t",
+                "source_lang": "en",
+                "target_langs": "[\"ja\"]",
+                "status": "created",
+                "live_session_id": null,
+                "created_at": 123
+            },
+            "streams": [],
+            "voice": null
+        }"#;
+
+        let bundle: SessionBundle = serde_json::from_str(json).expect("null voice is valid");
+        assert_eq!(bundle.session.id, "abc");
+        assert!(bundle.streams.is_empty());
+        assert!(bundle.voice.is_none());
+    }
+
+    #[test]
+    fn session_bundle_roundtrips_voice_row() {
+        let json = r#"{
+            "session": {
+                "id": "abc",
+                "user_id": "u",
+                "voice_id": "v",
+                "title": "t",
+                "source_lang": "en",
+                "target_langs": "[\"ja\"]",
+                "status": "live",
+                "live_session_id": "LIVE01",
+                "created_at": 123
+            },
+            "streams": [{
+                "id": "s1",
+                "session_id": "abc",
+                "lang": "ja",
+                "platform": "youtube",
+                "rtmp_url": "rtmp://x/y",
+                "stream_key": "k",
+                "status": "pending"
+            }],
+            "voice": {
+                "id": "v",
+                "elevenlabs_voice_id": "EL123",
+                "name": "cloned"
+            }
+        }"#;
+
+        let bundle: SessionBundle = serde_json::from_str(json).expect("valid bundle");
+        assert_eq!(bundle.streams.len(), 1);
+        assert_eq!(bundle.streams[0].lang, "ja");
+        let voice = bundle.voice.expect("voice present");
+        assert_eq!(voice.elevenlabs_voice_id, "EL123");
+    }
+}
