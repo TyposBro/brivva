@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Radio, Users, ArrowRight } from "lucide-react";
+import { Radio } from "lucide-react";
 import {
   FrontendOAuthLandingQuerySchema,
   FrontendOAuthTokenFragmentSchema,
@@ -61,11 +61,13 @@ export default function HomePage() {
             every platform receives translated audio in the host's cloned voice.
           </p>
 
-          {/* CTA Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-3xl mx-auto">
+          {/* Sole CTA — Brivva is host-only; viewer-side flows live on the
+              broadcast platforms themselves (vision.md "What's Intentionally
+              Not In The Product"). */}
+          <div className="flex justify-center">
             <button
               onClick={() => navigate("/dashboard")}
-              className="monolith-gradient group flex flex-col items-center justify-center p-8 rounded-xl hover:scale-[0.98] transition-all duration-300 shadow-xl"
+              className="monolith-gradient group flex flex-col items-center justify-center p-8 rounded-xl hover:scale-[0.98] transition-all duration-300 shadow-xl w-full max-w-xs"
             >
               <Radio className="w-10 h-10 mb-4 text-white" />
               <span className="font-headline font-bold text-lg text-white">
@@ -75,40 +77,6 @@ export default function HomePage() {
                 Go Live Now
               </span>
             </button>
-
-            <button
-              onClick={() => navigate("/host?sourceLang=en")}
-              className="bg-surface-container-high group flex flex-col items-center justify-center p-8 rounded-xl hover:bg-surface-bright transition-all duration-300"
-            >
-              <Users className="w-10 h-10 mb-4 text-primary" />
-              <span className="font-headline font-bold text-lg text-on-surface">
-                Quick Session
-              </span>
-              <span className="text-on-surface-variant text-xs mt-2 uppercase tracking-widest font-label">
-                No setup required
-              </span>
-            </button>
-
-            <div className="bg-surface-container-low p-6 rounded-xl flex flex-col justify-between border border-outline-variant/10">
-              <div className="text-left mb-4">
-                <span className="font-label text-xs font-semibold text-primary uppercase tracking-widest">
-                  Audience
-                </span>
-                <h3 className="font-headline font-bold text-xl text-on-surface">
-                  Resume Session
-                </h3>
-              </div>
-              <div className="space-y-3">
-                <input
-                  className="w-full bg-surface-container-highest border-none rounded-lg px-4 py-3 text-on-surface placeholder:text-on-surface-variant/50 focus:ring-2 focus:ring-primary/50 transition-all font-label outline-none"
-                  placeholder="Enter Session ID"
-                  type="text"
-                />
-                <button className="w-full bg-on-surface text-surface py-3 rounded-lg font-headline font-extrabold hover:opacity-90 transition-opacity uppercase tracking-tighter flex items-center justify-center gap-2">
-                  Resume <ArrowRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       </main>
