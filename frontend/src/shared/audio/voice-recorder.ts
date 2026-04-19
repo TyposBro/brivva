@@ -58,10 +58,18 @@ function encodeWav(samples: Int16Array, sampleRate: number): Uint8Array {
   return buf;
 }
 
+// Chunked base64 encode — a char-at-a-time string concat over a multi-MB
+// audio buffer freezes the main thread for seconds (O(n) string allocs),
+// which made voice-clone uploads silently hang before the POST could fire.
+// String.fromCharCode.apply has a ~65k argument cap, so we batch per chunk.
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, i + CHUNK);
+    parts.push(String.fromCharCode.apply(null, slice as unknown as number[]));
+  }
+  return btoa(parts.join(""));
 }
 
 function float32ToInt16(float32: Float32Array): Int16Array {
