@@ -72,6 +72,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write   # required for docker/build-push-action cache-to=type=gha
     env:
       ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
       ECR_REPO: brivva/server-rs
@@ -95,8 +96,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # Cross-compile on amd64 runner via cargo-zigbuild (see Dockerfile).
-      # Registry cache keeps warm builds fast: cargo-chef's deps layer is
-      # reused unless Cargo.lock changes.
+      # GitHub Actions cache keeps warm builds fast: cargo-chef's deps layer
+      # is reused unless Cargo.lock changes.
+      #
+      # Was: type=registry cache in ECR. Abandoned because ECR lifecycle
+      # prunes untagged blobs referenced by the buildcache manifest →
+      # 403 on pull → full rebuild (~12 min). GHA cache sidesteps both.
       - name: Build and push server-rs
         uses: docker/build-push-action@v6
         with:
@@ -107,8 +112,8 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache
-          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache,mode=max
+          cache-from: type=gha,scope=server-rs
+          cache-to: type=gha,mode=max,scope=server-rs
 
       # Register an immutable task-def revision pinning image:<sha>.
       # Enables rollback to a prior revision via ./scripts/rollback.sh.
