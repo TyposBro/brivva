@@ -160,3 +160,68 @@ Exit: Fargate is stateless, D1 is canonical store. Deploys of Fargate no longer 
 - GPU. CPU transcode fits within 2 vCPU budget.
 - On-prem. Managed cloud only.
 - Self-hosted STT/TTS/translate. Managed APIs.
+
+## Incident Response (May 10 Live Launch)
+
+**Reality:** first live stream is `May 10` with real Korean hosts + real clients. Aziz alone responds. Something will break. Pre-decide the playbook now, not at 2am.
+
+### Rollback
+- Every deploy tagged `v-YYYYMMDD-HHMM` (git tag + ECR image tag matching)
+- One command restores previous working version in `<2min`
+  - Fargate: `aws ecs update-service --force-new-deployment --task-definition <prev-rev>`
+  - Workers: `wrangler rollback` or re-deploy prior commit
+  - Frontend (Pages): redeploy prior commit via dashboard or CI
+- Rehearse once before `May 10`
+
+### Kill-Switches (env vars, no redeploy needed)
+
+| Var | Effect |
+|---|---|
+| `BRIVVA_DISABLE_TIER4=1` | Skip post-processed dubbing if ElevenLabs Dubbing API breaks |
+| `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` | Skip voice cloning if it produces garbage (Indian accent bug) |
+| `BRIVVA_DISABLE_QWEN3=1` | Force ElevenLabs only if DashScope goes down |
+| `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` | Drop to unsecured RTMP if TLS handshake fails with a platform |
+
+### Observability Under Stress
+- `wrangler tail` — Workers logs, pre-opened terminal
+- `aws logs tail /ecs/brivva-tech --follow` — Fargate logs, pre-opened terminal
+- CloudWatch dashboard bookmarked (CPU, memory, task count, error rate)
+- Within 30s of an alert, must identify the failing layer: frontend / auth / pipeline / third-party
+
+### Plan B — Graceful Degradation
+- **Desktop app always works.** If SaaS breaks during a live show, Simon demos off Aziz's laptop via Tauri build = show continues.
+- Voice clone broken → default voice per language (already in voice library)
+- Real-time pipeline broken → Tier 4 post-processed delivered after the show (better than no output)
+- Soniox WS drops → reconnect 5 attempts, 1s delay (already built)
+- ElevenLabs WS slow → REST fallback (already built)
+- ElevenLabs API outage → fall back to default voice cache on disk
+
+### Third-Party Failure Matrix
+
+| Service | Failure | Fallback |
+|---|---|---|
+| Soniox | WS drop | Auto-reconnect (built) |
+| ElevenLabs WS | Slow | REST fallback (built) |
+| ElevenLabs API | Total outage | Kill-switch → default voice cache |
+| Grip RTMPS | TLS handshake fails | `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` if platform allows |
+| Fargate | `~30s` cold start | Pre-warm 1 container during business hours |
+| CF Workers | Auth broken | Desktop app works without auth layer |
+
+### Human Factors
+- Aziz = sole responder. No rotation.
+- Runbook for top 3 likely failures (TTS timeout, RTMP disconnect, browser WS drop) — `docs/runbook.md` (to write)
+- Simon + MJ need a script to tell clients during incident ("technical issue, back shortly — ETA Xmin")
+
+### Recovery Validation
+- `./scripts/smoke-test.sh <session_id>` — creates session, connects WS, streams 30s test audio, validates RTMP output, reports pass/fail
+- Run after every rollback. Do not assume fix until smoke test green.
+
+## Grip Live — Known Quirks
+
+Grip is the primary streaming target for Korean live commerce. Less documented than YouTube/TikTok.
+
+- **RTMPS URL:** must include explicit port `:443`, not default. Format: `rtmps://live.grip.fans:443/live/<STREAM_KEY>`
+- **Stream key:** longer than YouTube/TikTok, contains session auth token. Fetch fresh per stream (no static key).
+- **Regional endpoints:** some drop after `~30min` idle. Need reconnect logic on FFmpeg side.
+- **Stream health API:** undocumented. Do not poll it. Poll Grip's dashboard URL or rely on FFmpeg exit codes.
+- **Credentials:** shared by Simon already, stored in `platform_credentials` table.
