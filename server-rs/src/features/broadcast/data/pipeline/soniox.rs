@@ -1,12 +1,5 @@
 use crate::features::broadcast::domain::Lang;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
-
-const SONIOX_WS_URL_DEFAULT: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
-
-pub static SONIOX_WS_URL: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("SONIOX_WS_URL").unwrap_or_else(|_| SONIOX_WS_URL_DEFAULT.to_string())
-});
 
 pub const SONIOX_MODEL: &str = "stt-rt-preview";
 pub const HOST_SAMPLE_RATE: u32 = 44_100;

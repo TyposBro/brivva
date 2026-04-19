@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::features::broadcast::data::{auth, pipeline, workers_api};
-use crate::features::broadcast::domain::{Lang, LiveSession, SessionQuery};
+use crate::features::broadcast::data::workers_api::WorkersApi;
+use crate::features::broadcast::data::{auth, pipeline};
+use crate::features::broadcast::domain::{Lang, LiveSession, PipelineConfig, SessionQuery};
 use crate::orchestration::state::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
@@ -36,7 +37,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQu
             return;
         }
     };
-    let claims = match auth::verify(token) {
+    let claims = match auth::verify(token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "ws host upgrade rejected: jwt verify failed");
@@ -97,10 +98,22 @@ async fn handle_host(
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
 
+    let pipeline_config = Arc::new(PipelineConfig {
+        soniox_api_key: state.config.soniox_api_key.clone(),
+        soniox_ws_url: state.config.soniox_ws_url.clone(),
+        elevenlabs_api_key: state.config.elevenlabs_api_key.clone(),
+        elevenlabs_base_url: state.config.elevenlabs_base_url.clone(),
+    });
+    let workers_api = Arc::new(WorkersApi::new(
+        &state.config.workers_api_url,
+        &state.config.internal_secret,
+    ));
+
     let mut live_session = LiveSession::new(
         live_session_id.clone(),
         source_lang.clone(),
         session_id.clone(),
+        pipeline_config,
     );
     live_session.host_tx = Some(host_tx);
 
@@ -108,7 +121,7 @@ async fn handle_host(
 
     // Session context lives in Workers/D1. Fetch the bundle + start FFmpeg per stream.
     if let Some(ref sid) = session_id {
-        match workers_api::fetch_session_bundle(sid).await {
+        match workers_api.fetch_session_bundle(sid).await {
             Ok(bundle) => {
                 if bundle.session.user_id != user_id {
                     tracing::warn!(
@@ -175,13 +188,15 @@ async fn handle_host(
                 // Best-effort status update — don't block WS on the write.
                 let sid_clone = sid.clone();
                 let live_session_id_clone = live_session_id.clone();
+                let workers_for_update = workers_api.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = workers_api::update_session_status(
-                        &sid_clone,
-                        "live",
-                        Some(&live_session_id_clone),
-                    )
-                    .await
+                    if let Err(e) = workers_for_update
+                        .update_session_status(
+                            &sid_clone,
+                            "live",
+                            Some(&live_session_id_clone),
+                        )
+                        .await
                     {
                         tracing::warn!(
                             session_id = %sid_clone,
@@ -219,10 +234,10 @@ async fn handle_host(
                     let pipeline_live_sessions = live_sessions.clone();
                     let pipeline_live_session_id = live_session_id.clone();
                     let source_lang = source_lang.clone();
-                    let target_langs = live_sessions
+                    let (target_langs, pipeline_cfg) = live_sessions
                         .get(&live_session_id)
-                        .map(|r| r.rtmp_langs.clone())
-                        .unwrap_or_default();
+                        .map(|r| (r.rtmp_langs.clone(), r.pipeline_config.clone()))
+                        .unwrap_or_else(|| (Vec::new(), Arc::new(Default::default())));
                     tokio::spawn(async move {
                         pipeline::start_stt_pipelines(
                             pipeline_live_session_id,
@@ -230,6 +245,7 @@ async fn handle_host(
                             source_lang,
                             target_langs,
                             rx,
+                            pipeline_cfg,
                         )
                         .await;
                     });
@@ -292,8 +308,9 @@ async fn handle_host(
         }
 
         if let Some(sid) = live_session.session_id {
+            let workers_for_end = workers_api.clone();
             tokio::spawn(async move {
-                if let Err(e) = workers_api::update_session_status(&sid, "ended", None).await {
+                if let Err(e) = workers_for_end.update_session_status(&sid, "ended", None).await {
                     tracing::warn!(
                         session_id = %sid,
                         error = %e,
@@ -311,14 +328,19 @@ async fn handle_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::broadcast::domain::Lang;
+    use crate::features::broadcast::domain::{Lang, PipelineConfig};
 
     #[test]
     fn next_available_live_session_id_skips_existing_entries() {
         let live_sessions = dashmap::DashMap::new();
         live_sessions.insert(
             "ABC123".into(),
-            LiveSession::new("ABC123".into(), Lang::En, None),
+            LiveSession::new(
+                "ABC123".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig::default()),
+            ),
         );
 
         for _ in 0..32 {

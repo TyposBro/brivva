@@ -69,6 +69,20 @@ pub struct SessionQuery {
     pub token: Option<String>,
 }
 
+// ── Pipeline Configuration ────────────────────────────────
+//
+// Holds the upstream-service settings the STT + TTS pipeline needs at
+// runtime. Built once at session start from `AppConfig` so lower layers
+// never read env vars directly (CLAUDE.md §7).
+
+#[derive(Default)]
+pub struct PipelineConfig {
+    pub soniox_api_key: String,
+    pub soniox_ws_url: String,
+    pub elevenlabs_api_key: String,
+    pub elevenlabs_base_url: String,
+}
+
 // ── Live Session Runtime ──────────────────────────────────
 
 pub struct LiveSession {
@@ -84,10 +98,17 @@ pub struct LiveSession {
     pub rtmp_manager: Option<crate::features::broadcast::data::ffmpeg::SharedRtmpManager>,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
+    /// Upstream-service config injected from orchestration at session start.
+    pub pipeline_config: Arc<PipelineConfig>,
 }
 
 impl LiveSession {
-    pub fn new(id: String, source_lang: Lang, session_id: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        source_lang: Lang,
+        session_id: Option<String>,
+        pipeline_config: Arc<PipelineConfig>,
+    ) -> Self {
         Self {
             id,
             source_lang,
@@ -96,6 +117,7 @@ impl LiveSession {
             session_id,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),
+            pipeline_config,
         }
     }
 
@@ -184,9 +206,23 @@ mod tests {
         assert_eq!(Lang::from_str("fr"), None);
     }
 
+    fn test_pipeline_config() -> Arc<PipelineConfig> {
+        Arc::new(PipelineConfig {
+            soniox_api_key: String::new(),
+            soniox_ws_url: String::new(),
+            elevenlabs_api_key: String::new(),
+            elevenlabs_base_url: String::new(),
+        })
+    }
+
     #[test]
     fn active_langs_dedupes_and_preserves_first_seen_order() {
-        let mut session = LiveSession::new("ROOM01".into(), Lang::En, Some("session-1".into()));
+        let mut session = LiveSession::new(
+            "ROOM01".into(),
+            Lang::En,
+            Some("session-1".into()),
+            test_pipeline_config(),
+        );
         session.rtmp_langs = vec![Lang::Ja, Lang::Ko, Lang::Ja, Lang::Zh, Lang::Ko];
 
         assert_eq!(session.active_langs(), vec![Lang::Ja, Lang::Ko, Lang::Zh]);

@@ -9,7 +9,7 @@ use tokio_tungstenite::{
     tungstenite::{self, Message},
 };
 
-use super::soniox::{SONIOX_WS_URL, SonioxMode};
+use super::soniox::SonioxMode;
 
 pub(super) const STT_RECONNECT_MAX: u32 = 5;
 pub(super) const STT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -23,6 +23,7 @@ pub(super) async fn connect_soniox(
     live_sessions: &LiveSessions,
     tag: &str,
     reconnect_count: u32,
+    soniox_ws_url: &str,
 ) -> Option<SonioxWs> {
     let max_attempts = if reconnect_count == 0 {
         10
@@ -36,7 +37,7 @@ pub(super) async fn connect_soniox(
             return None;
         }
 
-        match tokio_tungstenite::connect_async(&**SONIOX_WS_URL).await {
+        match tokio_tungstenite::connect_async(soniox_ws_url).await {
             Ok((stream, _)) => return Some(stream),
             Err(error) => {
                 eprintln!(

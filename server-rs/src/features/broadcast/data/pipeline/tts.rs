@@ -1,21 +1,8 @@
 use crate::features::broadcast::domain::{Lang, LiveSessions, ServerMsg};
 use futures_util::StreamExt;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use super::to_ws;
-
-static ELEVENLABS_API_KEY: LazyLock<String> =
-    LazyLock::new(|| std::env::var("ELEVENLABS_API_KEY").unwrap_or_default());
-
-const ELEVENLABS_BASE_URL_DEFAULT: &str = "https://api.elevenlabs.io";
-
-static ELEVENLABS_BASE_URL: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("ELEVENLABS_BASE_URL")
-        .unwrap_or_else(|_| ELEVENLABS_BASE_URL_DEFAULT.to_string())
-        .trim_end_matches('/')
-        .to_string()
-});
 
 pub async fn broadcast_translated_tts(
     text: &str,
@@ -28,6 +15,13 @@ pub async fn broadcast_translated_tts(
     let tts_start = Instant::now();
     let tts_deadline = Duration::from_secs(5);
 
+    let Some((api_key, base_url)) = live_sessions
+        .get(live_session_id)
+        .map(|s| (s.pipeline_config.elevenlabs_api_key.clone(), s.pipeline_config.elevenlabs_base_url.clone()))
+    else {
+        return;
+    };
+
     let is_cloned = selected_voice_id.is_some();
     let voice_id = selected_voice_id
         .map(str::to_string)
@@ -39,7 +33,7 @@ pub async fn broadcast_translated_tts(
     };
     let url = format!(
         "{}/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
-        &*ELEVENLABS_BASE_URL, &voice_id
+        base_url, &voice_id
     );
 
     let client = reqwest::Client::new();
@@ -48,7 +42,7 @@ pub async fn broadcast_translated_tts(
         let mut audio_buffer = Vec::new();
         let response = client
             .post(&url)
-            .header("xi-api-key", &*ELEVENLABS_API_KEY)
+            .header("xi-api-key", &api_key)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()

@@ -7,73 +7,80 @@
 //!
 //! Wire types are generated from the Workers OpenAPI export via
 //! `bun run --cwd contracts gen:rust` — see `core::contracts::workers`.
+//!
+//! Config is injected at construction time (CLAUDE.md §7) so this module
+//! never reads process env vars directly.
 
 use crate::core::contracts::workers::{SessionBundle, SessionStatusUpdate};
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("reqwest client")
+pub struct WorkersApi {
+    base_url: String,
+    internal_secret: String,
+    client: reqwest::Client,
 }
 
-fn base() -> Result<String, String> {
-    let url = std::env::var("WORKERS_API_URL")
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string();
-    if url.is_empty() {
-        return Err("WORKERS_API_URL not set".into());
+impl WorkersApi {
+    pub fn new(base_url: &str, internal_secret: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            internal_secret: internal_secret.to_string(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .expect("reqwest client"),
+        }
     }
-    Ok(url)
-}
 
-pub async fn fetch_session_bundle(session_id: &str) -> Result<SessionBundle, String> {
-    let url = format!("{}/internal/sessions/{}", base()?, session_id);
-    let resp = client()
-        .get(&url)
-        .header(
-            "X-Internal-Secret",
-            std::env::var("INTERNAL_SECRET").unwrap_or_default(),
-        )
-        .send()
-        .await
-        .map_err(|e| format!("workers fetch error: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "workers session fetch {} → {}",
-            session_id,
-            resp.status()
-        ));
+    pub async fn fetch_session_bundle(&self, session_id: &str) -> Result<SessionBundle, String> {
+        if self.base_url.is_empty() {
+            return Err("WORKERS_API_URL not set".into());
+        }
+        let url = format!("{}/internal/sessions/{}", self.base_url, session_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-Internal-Secret", &self.internal_secret)
+            .send()
+            .await
+            .map_err(|e| format!("workers fetch error: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "workers session fetch {} → {}",
+                session_id,
+                resp.status()
+            ));
+        }
+        resp.json::<SessionBundle>()
+            .await
+            .map_err(|e| format!("workers session decode: {e}"))
     }
-    resp.json::<SessionBundle>()
-        .await
-        .map_err(|e| format!("workers session decode: {e}"))
-}
 
-pub async fn update_session_status(
-    session_id: &str,
-    status: &str,
-    live_session_id: Option<&str>,
-) -> Result<(), String> {
-    let url = format!("{}/internal/sessions/{}", base()?, session_id);
-    let resp = client()
-        .patch(&url)
-        .header(
-            "X-Internal-Secret",
-            std::env::var("INTERNAL_SECRET").unwrap_or_default(),
-        )
-        .json(&SessionStatusUpdate {
-            status: status.to_string(),
-            live_session_id: live_session_id.map(str::to_string),
-        })
-        .send()
-        .await
-        .map_err(|e| format!("workers status update error: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("workers status {} → {}", status, resp.status()));
+    pub async fn update_session_status(
+        &self,
+        session_id: &str,
+        status: &str,
+        live_session_id: Option<&str>,
+    ) -> Result<(), String> {
+        if self.base_url.is_empty() {
+            return Err("WORKERS_API_URL not set".into());
+        }
+        let url = format!("{}/internal/sessions/{}", self.base_url, session_id);
+        let resp = self
+            .client
+            .patch(&url)
+            .header("X-Internal-Secret", &self.internal_secret)
+            .json(&SessionStatusUpdate {
+                status: status.to_string(),
+                live_session_id: live_session_id.map(str::to_string),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("workers status update error: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("workers status {} → {}", status, resp.status()));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]

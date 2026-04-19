@@ -17,8 +17,7 @@ pub struct Claims {
     pub exp: i64,
 }
 
-pub fn verify(token: &str) -> Result<Claims, String> {
-    let secret = std::env::var("JWT_SECRET").unwrap_or_default();
+pub fn verify(token: &str, secret: &str) -> Result<Claims, String> {
     if secret.is_empty() {
         return Err("JWT_SECRET not configured".into());
     }
@@ -36,12 +35,6 @@ mod tests {
     use super::*;
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde::Serialize;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[derive(Serialize)]
     struct TestClaims<'a> {
@@ -67,23 +60,13 @@ mod tests {
 
     #[test]
     fn verify_rejects_when_secret_missing() {
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("JWT_SECRET");
-        }
-
-        let err = verify("ignored").expect_err("verify should fail without env");
+        let err = verify("ignored", "").expect_err("verify should fail without secret");
         assert_eq!(err, "JWT_SECRET not configured");
     }
 
     #[test]
     fn verify_accepts_valid_token() {
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("JWT_SECRET", "test-secret");
-        }
-
-        let claims = verify(&make_token("test-secret", JWT_ISSUER, JWT_AUDIENCE))
+        let claims = verify(&make_token("test-secret", JWT_ISSUER, JWT_AUDIENCE), "test-secret")
             .expect("valid jwt should verify");
 
         assert_eq!(claims.sub, "user-123");
@@ -91,12 +74,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_audience() {
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("JWT_SECRET", "test-secret");
-        }
-
-        let err = verify(&make_token("test-secret", JWT_ISSUER, "wrong-audience"))
+        let err = verify(&make_token("test-secret", JWT_ISSUER, "wrong-audience"), "test-secret")
             .expect_err("verify should fail for wrong aud");
 
         assert!(err.contains("invalid jwt:"), "unexpected error: {err}");
