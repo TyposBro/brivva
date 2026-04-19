@@ -59,3 +59,35 @@ bunx wrangler d1 execute brivva --remote \
   outcome.
 - Don't flag trial accounts as B2B. Wait until the contract is signed —
   the flag is load-bearing for invoicing.
+
+## Grip destination — getting stream key + URL
+
+Grip has no public Seller API (docs gated behind cloud.bd@gripcorp.co,
+email sent 2026-04-19). Until they reply, the prod path is paste-creds:
+host copies stream key + URL from Grip Business Center into Brivva's
+destination card. Walk new B2B hosts through this the day of broadcast.
+
+### Steps (for Simon / MJ to share with the host)
+
+1. Sign in to Grip Business Center → `seller.grip.show`
+2. Left nav: `채널 관리` (Channel Mgmt) → `방송 관리` (Broadcast Mgmt) → `방송 목록` (Broadcast List)
+3. Click `PC 송출` (PC Broadcast) on the row for today's show
+4. Fill broadcast info (title, thumbnail, scheduled start time)
+5. Set `송출 종류` (broadcast type) to **`라이브`** (Live). Use **`녹화`** (Recording) only for private rehearsal
+6. Click `저장` (Save) — the server URL + stream key appear in the third section of the form
+7. Copy both → paste into the Brivva destination card (Server URL + Stream Key)
+8. Click "Save credentials" in Brivva so next session pre-fills
+
+### Timing (critical — plan the call slot around this)
+
+- Live keys issue **1 hour before scheduled start time**. Cannot fetch earlier.
+- Rehearsal keys issue **5 hours before scheduled start time**.
+- Keys are **one-shot per broadcast** — a new broadcast → new keys. Don't reuse across sessions.
+- Grip terminates the broadcast after **15 minutes of network interruption** — if Fargate reconnects after that window it won't resume.
+
+### When Grip answers the Seller API request
+
+Wire the real endpoint into `workers/src/features/grip/seller-api.ts`
+(see the TODO block there). Once live, Grip destinations auto-provision
+on session-create, and this manual flow becomes the fallback path rather
+than the primary one.
