@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+import { SummaryModal } from "./summary-modal";
 
 const POLL_INTERVAL_MS = 5_000;
 const TICK_INTERVAL_MS = 30_000;
@@ -27,6 +28,7 @@ export default function SessionPage() {
   const [loading, setLoading] = useState(true);
   const [ending, setEnding] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [showSummary, setShowSummary] = useState(false);
 
   const loadSession = useCallback(async () => {
     if (!id) return;
@@ -63,6 +65,7 @@ export default function SessionPage() {
     try {
       await api.deleteSession(id);
       await loadSession();
+      setShowSummary(true);
     } catch (e) {
       console.error("Failed to end session:", e);
     } finally {
@@ -323,6 +326,10 @@ export default function SessionPage() {
           </button>
         </section>
       </main>
+
+      {showSummary && id && (
+        <SummaryModal sessionId={id} onClose={() => setShowSummary(false)} />
+      )}
     </div>
   );
 }
