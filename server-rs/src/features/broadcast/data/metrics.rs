@@ -2,7 +2,7 @@
 //!
 //! The counter struct itself (`SessionMetrics`) lives in `domain/metrics.rs`
 //! since it is pure state. This module owns the tokio task that snapshots
-//! the counters and POSTs to Workers — a `data/` concern because it needs
+//! the counters and PATCHes to Workers — a `data/` concern because it needs
 //! the HTTP client.
 
 use std::sync::Arc;
@@ -18,9 +18,9 @@ pub use crate::features::broadcast::domain::metrics::MetricsPayload;
 const METRICS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Background reporter. Ticks every `METRICS_INTERVAL`, snapshots the
-/// counters, and POSTs to Workers. When the endpoint is missing (today) or
-/// WorkersApi.base_url is empty (local/test), logs the payload instead of
-/// propagating the error. Stops when `stop_flag` is set.
+/// counters, and PATCHes to Workers. When `WorkersApi.base_url` is empty
+/// (local/test) or a tick errors, logs the payload instead of propagating.
+/// Stops when `stop_flag` is set.
 ///
 /// Crash isolation: the task catches all per-tick errors itself so a flaky
 /// network never brings down the pipeline.
@@ -91,7 +91,7 @@ mod tests {
         Router,
         extract::{Path, State},
         http::StatusCode,
-        routing::post,
+        routing::patch,
     };
     use std::sync::atomic::AtomicU32;
     use tokio::task::JoinHandle;
@@ -109,7 +109,7 @@ mod tests {
             state.1
         }
         let app = Router::new()
-            .route("/internal/sessions/{id}/metrics", post(handler))
+            .route("/internal/sessions/{id}/metrics", patch(handler))
             .with_state((counter, status));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

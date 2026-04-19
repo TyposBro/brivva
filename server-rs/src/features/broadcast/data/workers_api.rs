@@ -55,11 +55,10 @@ impl WorkersApi {
             .map_err(|e| format!("workers session decode: {e}"))
     }
 
-    /// POST billing metrics to Workers. The endpoint is not in the current
-    /// OpenAPI export, so we call it optimistically and rely on the generic
-    /// Serialize-bound to keep this module decoupled from the payload type.
-    /// On non-2xx (including 404 while the endpoint doesn't yet exist) we
-    /// return Err, and the caller logs rather than escalating.
+    /// PATCH billing metrics to Workers. Matches `app.patch(...)` in
+    /// workers/src/orchestration/app.ts with merge-semantics — omitted
+    /// fields leave prior values alone; per-lang output seconds shallow-merge.
+    /// On non-2xx we return Err, and the caller logs rather than escalating.
     pub async fn report_session_metrics<T: serde::Serialize + ?Sized>(
         &self,
         session_id: &str,
@@ -71,7 +70,7 @@ impl WorkersApi {
         let url = format!("{}/internal/sessions/{}/metrics", self.base_url, session_id);
         let resp = self
             .client
-            .post(&url)
+            .patch(&url)
             .header("X-Internal-Secret", &self.internal_secret)
             .json(payload)
             .send()
@@ -123,7 +122,7 @@ mod tests {
         Json, Router,
         extract::{Path, State},
         http::StatusCode,
-        routing::{get, patch, post},
+        routing::{get, patch},
     };
     use serde_json::{Value, json};
     use std::sync::Arc as StdArc;
@@ -305,7 +304,7 @@ mod tests {
         async fn not_found() -> StatusCode {
             StatusCode::NOT_FOUND
         }
-        let app = Router::new().route("/internal/sessions/{id}/metrics", post(not_found));
+        let app = Router::new().route("/internal/sessions/{id}/metrics", patch(not_found));
         let (base, handle) = spawn_mock(app).await;
 
         let api = WorkersApi::new(&base, "sec");
@@ -322,7 +321,7 @@ mod tests {
         async fn ok() -> StatusCode {
             StatusCode::OK
         }
-        let app = Router::new().route("/internal/sessions/{id}/metrics", post(ok));
+        let app = Router::new().route("/internal/sessions/{id}/metrics", patch(ok));
         let (base, handle) = spawn_mock(app).await;
 
         let api = WorkersApi::new(&base, "sec");

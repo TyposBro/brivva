@@ -790,7 +790,7 @@ mod tests {
         m.push_tts("ja", vec![0u8; 88_200]);
         let snap = metrics.snapshot();
         assert!(
-            snap.output_minutes_by_lang.contains_key("ja"),
+            snap.output_seconds_by_lang.contains_key("ja"),
             "metrics should record the lang even without a matching stream"
         );
     }

@@ -52,26 +52,30 @@ impl SessionMetrics {
         entry.value().fetch_add(ms, Ordering::Relaxed);
     }
 
+    pub fn bytes_out_total(&self) -> u64 {
+        self.bytes_out_total.load(Ordering::Relaxed)
+    }
+
     pub fn snapshot(&self) -> MetricsPayload {
         let source_seconds = self.session_start.elapsed().as_secs_f64();
-        let mut output_minutes_by_lang = std::collections::BTreeMap::new();
+        let mut output_seconds_by_lang = std::collections::BTreeMap::new();
         for entry in self.output_ms_by_lang.iter() {
             let ms = entry.value().load(Ordering::Relaxed) as f64;
-            output_minutes_by_lang.insert(entry.key().clone(), ms / 60_000.0);
+            output_seconds_by_lang.insert(entry.key().clone(), ms / 1_000.0);
         }
         MetricsPayload {
-            source_minutes: source_seconds / 60.0,
-            output_minutes_by_lang,
-            bytes_out_total: self.bytes_out_total.load(Ordering::Relaxed),
+            source_seconds,
+            output_seconds_by_lang,
         }
     }
 }
 
+/// Wire payload to Workers `/internal/sessions/:id/metrics`. Field names +
+/// units match `InternalSessionMetricsUpdateSchema` in `contracts/src/http.ts`.
 #[derive(Debug, Serialize)]
 pub struct MetricsPayload {
-    pub source_minutes: f64,
-    pub output_minutes_by_lang: std::collections::BTreeMap<String, f64>,
-    pub bytes_out_total: u64,
+    pub source_seconds: f64,
+    pub output_seconds_by_lang: std::collections::BTreeMap<String, f64>,
 }
 
 #[cfg(test)]
@@ -79,17 +83,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn record_tts_pcm_converts_bytes_to_milliseconds_of_44_1k_mono_audio() {
+    fn record_tts_pcm_converts_bytes_to_seconds_of_44_1k_mono_audio() {
         let m = SessionMetrics::new();
-        // 88_200 bytes = 1 second of s16le 44.1 kHz mono = 1000 ms.
+        // 88_200 bytes = 1 second of s16le 44.1 kHz mono.
         m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
         let snap = m.snapshot();
-        let ja_min = snap
-            .output_minutes_by_lang
+        let ja_sec = snap
+            .output_seconds_by_lang
             .get("ja")
             .copied()
             .unwrap_or(0.0);
-        assert!((ja_min - 1.0 / 60.0).abs() < 1e-6);
+        assert!((ja_sec - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -97,7 +101,7 @@ mod tests {
         let m = SessionMetrics::new();
         m.record_bytes_out(100);
         m.record_bytes_out(250);
-        assert_eq!(m.snapshot().bytes_out_total, 350);
+        assert_eq!(m.bytes_out_total(), 350);
     }
 
     #[test]
@@ -106,21 +110,21 @@ mod tests {
         // 10 bytes is ~0.11 ms — integer division floors to 0 and the
         // record becomes a no-op rather than inflating the minute count.
         m.record_tts_pcm("ja", 10);
-        assert!(!m.snapshot().output_minutes_by_lang.contains_key("ja"));
+        assert!(!m.snapshot().output_seconds_by_lang.contains_key("ja"));
     }
 
     #[test]
     fn record_bytes_out_with_zero_is_a_noop() {
         let m = SessionMetrics::new();
         m.record_bytes_out(0);
-        assert_eq!(m.snapshot().bytes_out_total, 0);
+        assert_eq!(m.bytes_out_total(), 0);
     }
 
     #[test]
     fn record_tts_pcm_with_zero_bytes_is_a_noop() {
         let m = SessionMetrics::new();
         m.record_tts_pcm("ja", 0);
-        assert!(!m.snapshot().output_minutes_by_lang.contains_key("ja"));
+        assert!(!m.snapshot().output_seconds_by_lang.contains_key("ja"));
     }
 
     #[test]
@@ -129,8 +133,8 @@ mod tests {
         m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND * 2);
         m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
         let snap = m.snapshot();
-        let minutes = snap.output_minutes_by_lang["ja"];
-        assert!((minutes - 3.0 / 60.0).abs() < 1e-6);
+        let seconds = snap.output_seconds_by_lang["ja"];
+        assert!((seconds - 3.0).abs() < 1e-6);
     }
 
     #[test]
@@ -139,29 +143,27 @@ mod tests {
         m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
         m.record_tts_pcm("ko", PCM_BYTES_PER_SECOND * 2);
         let snap = m.snapshot();
-        assert!(snap.output_minutes_by_lang.contains_key("ja"));
-        assert!(snap.output_minutes_by_lang.contains_key("ko"));
-        assert!(snap.output_minutes_by_lang["ko"] > snap.output_minutes_by_lang["ja"]);
+        assert!(snap.output_seconds_by_lang.contains_key("ja"));
+        assert!(snap.output_seconds_by_lang.contains_key("ko"));
+        assert!(snap.output_seconds_by_lang["ko"] > snap.output_seconds_by_lang["ja"]);
     }
 
     #[test]
-    fn metrics_payload_serializes_with_expected_field_names() {
+    fn metrics_payload_serializes_with_contract_field_names() {
         let m = SessionMetrics::new();
-        m.record_bytes_out(42);
         m.record_tts_pcm("ja", PCM_BYTES_PER_SECOND);
         let json = serde_json::to_string(&m.snapshot()).unwrap();
-        assert!(json.contains("\"source_minutes\""));
-        assert!(json.contains("\"output_minutes_by_lang\""));
-        assert!(json.contains("\"bytes_out_total\":42"));
+        assert!(json.contains("\"source_seconds\""));
+        assert!(json.contains("\"output_seconds_by_lang\""));
         assert!(json.contains("\"ja\""));
     }
 
     #[test]
-    fn snapshot_source_minutes_is_non_negative_and_monotonic() {
+    fn snapshot_source_seconds_is_non_negative_and_monotonic() {
         let m = SessionMetrics::new();
-        let first = m.snapshot().source_minutes;
+        let first = m.snapshot().source_seconds;
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let second = m.snapshot().source_minutes;
+        let second = m.snapshot().source_seconds;
         assert!(first >= 0.0);
         assert!(second >= first);
     }
