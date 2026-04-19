@@ -4,33 +4,62 @@
 
 ---
 
-## 0. TESTING — Cover What Matters
+## 0. TESTING — Three Tiers, All Mandatory
 
-Tests exist to catch regressions in critical paths. Write them for domain logic, auth, payments, data transformations, and complex algorithms. Test before or after — coverage of critical paths matters, not the order.
+Every feature ships with tests at **all three tiers** before it merges. No feature lands with only unit tests. No feature lands without at least one e2e scenario. Coverage gaps block merge.
 
-### 0.1 What to Test
+### 0.1 The Three Tiers
 
-| Priority | What | Example |
-|----------|------|---------|
-| **Must test** | Domain logic, use cases, business rules | `classify_emotion()`, `compute_tts_deadline()` |
-| **Must test** | Auth flows, token handling | Sign-in, refresh, session management |
-| **Must test** | Data transformations, mappers, pure functions | `pcm_to_wav()`, `strip_context_prefix()`, `toTranscriptEntry()` |
-| **Must test** | Payment/subscription logic | Tier checks, entitlements, trial grants |
-| **Should test** | Repository implementations | Against test DB or mocks |
-| **Should test** | Complex async coordination | Pipeline orchestration, reconnection logic |
-| **Nice to have** | UI components, handlers | Smoke tests for critical flows |
+| Tier | Scope | Where it lives | Example |
+|------|-------|----------------|---------|
+| **Unit** | One function / class / pure logic path. No I/O, no framework. | Co-located: `tts.rs` → `#[cfg(test)]`; `api-client.ts` → `api-client.test.ts` next to it. | `build_tts_request_body()` emits `language_code` for cross-lang clones. |
+| **Integration** | One module crossing a real boundary: DB, HTTP server, child process, WS handshake, file system. Mocks only at the outermost external edge. | `server-rs/tests/*.rs`, `workers/tests/*.test.ts`, feature-level `tests/` directory. | POST `/auth/grip` persists to D1 and `GET /api/credentials` returns it. |
+| **Full e2e** | End-to-end user scenario through the real UI + real workers + real server-rs. Only external SaaS (ElevenLabs, Soniox, Grip, YouTube) is mocked. | `frontend/e2e/*.e2e.ts` (Playwright), `tests/e2e/` for cross-stack flows. | Sign in → onboard → record voice → create session → go live → end, all from a browser. |
 
-### 0.2 Test Quality
+### 0.2 What MUST Be Tested At Each Tier
+
+Every non-trivial change is expected to touch at least the unit tier. Changes to cross-cutting flows (session lifecycle, auth, billing, streaming pipeline) MUST add both integration and e2e coverage.
+
+| Priority | What | Tiers Required |
+|----------|------|----------------|
+| **Must** | Domain logic, pure functions, mappers, transformations | Unit |
+| **Must** | Auth flows, JWT signing/verification, OAuth callback | Unit + Integration |
+| **Must** | Session lifecycle: create → preflight → live → end | Unit + Integration + e2e |
+| **Must** | Payment/subscription logic, billing tiers, Stripe webhooks | Unit + Integration |
+| **Must** | RTMP pipeline: ffmpeg spawn, stderr drain, bitrate caps, restart policy | Unit + Integration |
+| **Must** | Voice clone upsert + source_lang invariants | Unit + Integration + e2e |
+| **Must** | Destination credentials: paste flow, OAuth flow, per-platform quirks | Unit + Integration |
+| **Must** | Kill-switches (`BRIVVA_FALLBACK_TO_DEFAULT_VOICE`, `BRIVVA_FORCE_RTMP_NOT_RTMPS`) | Unit + Integration |
+| **Should** | Repository implementations | Integration |
+| **Should** | UI components with branching state (validation banners, mismatch prompts) | Unit (RTL) |
+
+### 0.3 Test Quality
 
 - **One logical assertion per test.** Arrange → Act → Assert.
-- **Test names describe behavior:** `should_reject_when_insufficient_funds`, not `test3`.
-- **No test interdependency.** Any test, any order.
-- **Co-locate tests with source.** `budget.rs` → `#[cfg(test)] mod tests` in same file. `speaking.service.ts` → `speaking.service.test.ts` next to it.
-- **Integration tests** in a `tests/` or `__tests__/` directory at the feature root.
+- **Test names describe behavior:** `rejects_session_when_voice_source_lang_differs`, not `test3`.
+- **No interdependency.** Any test, any order, parallel-safe.
+- **Co-locate unit tests with source.** `budget.rs` → `#[cfg(test)] mod tests` in same file. `stream-defaults.ts` → `stream-defaults.test.ts` next to it.
+- **Integration tests** live in `tests/` at the feature root (`workers/tests/`, `server-rs/tests/`).
+- **e2e tests** live in `frontend/e2e/` (Playwright, runs the real workers + server-rs stack via `scripts/dev-stack.sh`). Cross-stack system tests may live in top-level `tests/e2e/`.
+- **Test data**: prefer real fixtures over mocks. Mock only the outermost external SaaS.
+- **Flaky test = broken test.** Fix or delete within 24h — never retry-loop.
 
-### 0.3 Commit Strategy
+### 0.4 Pre-Merge Gate
+
+A change is not ready for review until:
+
+1. `cargo test` passes in `server-rs/` (unit + integration).
+2. `bun run test` passes in `workers/` and `frontend/` (unit + integration).
+3. `bun run e2e` (Playwright) passes for any flow the change touches.
+4. New tests are present at each required tier for the change (see §0.2).
+5. `scripts/dev-stack.sh` smoke-test passes locally against the branch.
+
+CI runs all of the above. Merge is blocked on any failure.
+
+### 0.5 Commit Strategy
 
 - Commit logical units. Descriptive messages in imperative mood.
+- **Tests land in the same commit as the code they cover.** Never ship code now and "tests later."
 - No secrets, keys, or credentials. No generated files in version control.
 
 ---
