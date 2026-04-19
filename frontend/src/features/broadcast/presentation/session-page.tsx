@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -7,9 +7,16 @@ import {
   Copy,
   Square,
   Loader2,
+  Activity,
+  DollarSign,
+  Clock,
 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+
+const POLL_INTERVAL_MS = 5_000;
+const TICK_INTERVAL_MS = 30_000;
+const COST_PER_OUTPUT_MINUTE_USD = 0.10;
 
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
@@ -19,6 +26,7 @@ export default function SessionPage() {
   const [streams, setStreams] = useState<api.StreamInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [ending, setEnding] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const loadSession = useCallback(async () => {
     if (!id) return;
@@ -34,8 +42,20 @@ export default function SessionPage() {
   }, [id]);
 
   useEffect(() => {
-    loadSession();
+    void loadSession();
   }, [loadSession]);
+
+  // Poll session state + tick the live-minutes clock so the cost estimate
+  // and minutes counter stay current without requiring a manual refresh.
+  useEffect(() => {
+    if (session?.status !== "live") return;
+    const poll = setInterval(() => void loadSession(), POLL_INTERVAL_MS);
+    const tick = setInterval(() => setNow(Date.now()), TICK_INTERVAL_MS);
+    return () => {
+      clearInterval(poll);
+      clearInterval(tick);
+    };
+  }, [session?.status, loadSession]);
 
   const handleEnd = async () => {
     if (!id || ending) return;
@@ -92,6 +112,8 @@ export default function SessionPage() {
   })();
 
   const isLive = session.status === "live";
+
+  const observability = computeObservability({ session, streams, isLive, nowMs: now });
 
   return (
     <div className="min-h-screen bg-background">
@@ -150,6 +172,12 @@ export default function SessionPage() {
           </div>
         </section>
 
+        {/* Observability */}
+        <ObservabilityPanel
+          observability={observability}
+          targetStreamCount={streams.filter((s) => s.lang !== session.source_lang).length}
+        />
+
         {/* Stream Cards */}
         <section>
           <h3 className="font-headline font-bold text-xl tracking-tight text-on-surface mb-4">
@@ -188,6 +216,17 @@ export default function SessionPage() {
                 {s.error && (
                   <p className="text-error text-xs font-label">{s.error}</p>
                 )}
+
+                {/* Bytes pushed — TODO(server-rs agent): expose
+                    GET /metrics/streams/:id with bytes_in/bytes_out so we can
+                    render real counters here instead of the dash. */}
+                <div className="flex items-center gap-2 text-on-surface-variant text-[11px] font-label">
+                  <Activity className="w-3 h-3" />
+                  <span>Bytes pushed:</span>
+                  <span className="font-mono text-on-surface">
+                    {observability.streamBytes[s.id] ?? "—"}
+                  </span>
+                </div>
 
                 {/* URLs */}
                 <div className="space-y-1.5">
@@ -284,6 +323,98 @@ export default function SessionPage() {
           </button>
         </section>
       </main>
+    </div>
+  );
+}
+
+interface Observability {
+  liveMinutes: number;
+  estimatedCostUsd: number;
+  streamBytes: Record<string, string>;
+  isApproximated: boolean;
+}
+
+interface ComputeArgs {
+  session: api.Session;
+  streams: api.StreamInfo[];
+  isLive: boolean;
+  nowMs: number;
+}
+
+function computeObservability({ session, streams, isLive, nowMs }: ComputeArgs): Observability {
+  // PRAGMATIC: session.created_at is the closest signal we have to a stream
+  // start. There is no started_at column on the session row yet — once
+  // server-rs surfaces real per-stream start timestamps via /metrics/streams,
+  // swap this proxy for the authoritative value.
+  const startMs = (session.created_at ?? 0) * 1000;
+  const elapsedMs = isLive && startMs > 0 ? Math.max(0, nowMs - startMs) : 0;
+  const liveMinutes = Math.floor(elapsedMs / 60_000);
+
+  const targetStreams = streams.filter((s) => s.lang !== session.source_lang);
+  const estimatedCostUsd = liveMinutes * targetStreams.length * COST_PER_OUTPUT_MINUTE_USD;
+
+  // TODO(server-rs agent): expose GET /metrics/streams that returns
+  // bytes_in/bytes_out per stream id. Until then we render "—" for every row.
+  const streamBytes: Record<string, string> = {};
+
+  return { liveMinutes, estimatedCostUsd, streamBytes, isApproximated: true };
+}
+
+function ObservabilityPanel({
+  observability,
+  targetStreamCount,
+}: {
+  observability: Observability;
+  targetStreamCount: number;
+}) {
+  const { liveMinutes, estimatedCostUsd, isApproximated } = observability;
+  return (
+    <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <Stat
+        icon={<Clock className="w-4 h-4" />}
+        label="Live minutes"
+        value={`${liveMinutes}m`}
+        hint={isApproximated ? "from session start" : undefined}
+      />
+      <Stat
+        icon={<DollarSign className="w-4 h-4" />}
+        label="Estimated cost"
+        value={`$${estimatedCostUsd.toFixed(2)}`}
+        hint={`${targetStreamCount} target × $${COST_PER_OUTPUT_MINUTE_USD.toFixed(2)}/min`}
+      />
+      <Stat
+        icon={<Activity className="w-4 h-4" />}
+        label="Per-stream bytes"
+        value="—"
+        hint="awaiting server-rs metrics"
+      />
+    </section>
+  );
+}
+
+function Stat({
+  icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="bg-surface-container-low rounded-xl p-4 space-y-1.5">
+      <div className="flex items-center gap-2 text-on-surface-variant text-xs font-label uppercase tracking-widest">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <p className="text-on-surface font-headline font-bold text-2xl tabular-nums">
+        {value}
+      </p>
+      {hint && (
+        <p className="text-on-surface-variant/60 text-[11px] font-label">{hint}</p>
+      )}
     </div>
   );
 }
