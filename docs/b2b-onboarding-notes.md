@@ -88,6 +88,23 @@ destination card. Walk new B2B hosts through this the day of broadcast.
 - Connect-to-reservation window: **15 minutes before scheduled start time through end time**. Push outside that window and Grip won't bind the stream to the reserved broadcast slot.
 - Grip terminates the broadcast after **15 minutes of network interruption** — if Fargate reconnects after that window it won't resume.
 
+### Grip runs on AWS IVS
+
+Confirmed 2026-04-19 from a test broadcast: server URL resolves to
+`rtmps://<channel-id>.global-contribute.live-video.net:443/app` and
+stream keys carry the `sk_ap-northeast-2_` prefix. Region is Seoul.
+
+Implications:
+
+- **Every broadcast has a unique subdomain**. We cannot hardcode a
+  default RTMP URL — host must paste both server URL and stream key
+  from the Grip broadcast-detail modal. `platforms.ts` reflects this
+  (`defaultRtmp: ""` for Grip).
+- IVS accepts RTMPS on :443. Brivva already pushes RTMPS, no change.
+- The `password` field on the Grip form shows `IVS_NOT_REQUIRED` — leave
+  blank in Brivva. The `name` field is a duplicate of the stream key
+  and can be ignored.
+
 ### Grip encoder constraints (Brivva ffmpeg must respect)
 
 Per the PC 송출 form:
@@ -100,6 +117,13 @@ Per the PC 송출 form:
 Brivva's server-rs ffmpeg per-language output must match these. If the
 existing pipeline emits 16:9 landscape or >3 Mbps, add a Grip-specific
 ffmpeg profile before the first real b2b show. Check before May 10.
+
+### Stream-key hygiene
+
+Stream keys are bearer secrets — anyone with server URL + key can
+push video to the broadcast. Do not paste keys into chat, screenshots,
+or shared notes. If a key leaks, delete the broadcast in Grip admin
+(trash: 휴지통) and create a new one — a new broadcast rotates the key.
 
 ### Name / password fields on the form
 
