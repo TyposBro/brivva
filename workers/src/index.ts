@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import { swaggerUI } from "@hono/swagger-ui";
 import {
   AddStreamRequestSchema,
   AuthTokenRequestSchema,
@@ -17,6 +18,7 @@ import {
 import { signJwt } from "./auth";
 import * as db from "./db";
 import * as el from "./elevenlabs";
+import { buildOpenApiDocument } from "./openapi";
 import { toUserInfo, type Env } from "./types";
 import * as yt from "./youtube";
 
@@ -59,6 +61,8 @@ app.use(
 
 app.get("/", (c) => c.text("Brivva API (Workers + D1)"));
 app.get("/health", (c) => c.json({ ok: true }));
+app.get("/openapi.json", (c) => c.json(buildOpenApiDocument()));
+app.get("/docs", swaggerUI({ url: "/openapi.json" }));
 
 // ── Internal auth for server→worker calls ─────────────────
 // Fargate uses this on token-refresh writes (Phase 3 — currently unused).

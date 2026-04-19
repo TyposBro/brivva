@@ -63,6 +63,28 @@ describe("GET /health (happy)", () => {
   });
 });
 
+describe("OpenAPI docs", () => {
+  it("GET /openapi.json returns spec with auth and session paths", async () => {
+    const res = await call("/openapi.json");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      openapi: string;
+      paths: Record<string, unknown>;
+    };
+    expect(body.openapi).toBe("3.0.0");
+    expect(body.paths["/auth/token"]).toBeTruthy();
+    expect(body.paths["/api/sessions"]).toBeTruthy();
+  });
+
+  it("GET /docs returns swagger html", async () => {
+    const res = await call("/docs");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("SwaggerUIBundle");
+    expect(html).toContain("/openapi.json");
+  });
+});
+
 describe("GET /api/user", () => {
   it("400 when user_id is missing (sad)", async () => {
     const res = await call("/api/user");
