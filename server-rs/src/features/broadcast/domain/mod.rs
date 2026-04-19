@@ -49,15 +49,49 @@ impl Lang {
         }
     }
 
-    /// Default voice ID for this language — curated female voice from the
-    /// user's ElevenLabs library, not a premade default.
-    /// All support 32 languages via eleven_flash_v2_5.
-    pub fn voice_id(&self) -> &'static str {
+    /// Curated female default voice for this language from the user's
+    /// ElevenLabs library. All support 32 languages via eleven_flash_v2_5.
+    pub fn voice_id_female(&self) -> &'static str {
         match self {
             Lang::En => "4CrZuIW9am7gYAxgo2Af",
             Lang::Ja => "xwDy9oDEtzWzFo6FqAI9",
             Lang::Zh => "9lHjugDhwqoxA5MhX0az",
             Lang::Ko => "zgDzx5jLLCqEp6Fl7Kl7", // Jessica-ko
+        }
+    }
+
+    /// Male counterpart for the female default. Same 32-lang model support.
+    pub fn voice_id_male(&self) -> &'static str {
+        match self {
+            Lang::En => "JdwJ7jL68CWmQZuo7KgG",
+            Lang::Ja => "LIisRj2veIKEBdr6KZ5y",
+            Lang::Zh => "brChkoggsUHF1stW6omH",
+            Lang::Ko => "m3gJBS8OofDJfycyA2Ip", // Eric-ko
+        }
+    }
+
+    /// Back-compat alias for the historical single-default getter. Callers
+    /// that don't yet know about voice presets keep the pre-split behaviour
+    /// (female default) until they're migrated.
+    pub fn voice_id(&self) -> &'static str {
+        self.voice_id_female()
+    }
+}
+
+/// Which library default to use when the session hasn't picked a cloned voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoicePreset {
+    Cloned,
+    Female,
+    Male,
+}
+
+impl VoicePreset {
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "cloned" => Self::Cloned,
+            "male" => Self::Male,
+            _ => Self::Female,
         }
     }
 }
@@ -126,6 +160,9 @@ pub struct LiveSession {
     /// Workers `Voice` schema does not carry an `enrollment_lang` field yet;
     /// the plumbing is wired so switching to populated is a one-line change.
     pub selected_voice_enrollment_lang: Option<Lang>,
+    /// Host-picked voice preset for this session. Populated from the Workers
+    /// session bundle at bootstrap; defaults to female when absent.
+    pub voice_preset: VoicePreset,
     /// Session ID from Workers (links to D1 session + streams)
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
@@ -153,6 +190,7 @@ impl LiveSession {
             host_tx: None,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
             session_id,
             rtmp_manager: None,
             rtmp_langs: Vec::new(),

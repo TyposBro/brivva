@@ -225,6 +225,7 @@ mod tests {
                     "target_langs": "[]",
                     "status": "created",
                     "live_session_id": null,
+                    "voice_preset": "female",
                     "created_at": 0
                 },
                 "streams": [],
@@ -403,6 +404,7 @@ mod tests {
                 "target_langs": "[\"ja\"]",
                 "status": "created",
                 "live_session_id": null,
+                "voice_preset": "female",
                 "created_at": 123
             },
             "streams": [],
@@ -427,6 +429,7 @@ mod tests {
                 "target_langs": "[\"ja\"]",
                 "status": "live",
                 "live_session_id": "LIVE01",
+                "voice_preset": "cloned",
                 "created_at": 123
             },
             "streams": [{

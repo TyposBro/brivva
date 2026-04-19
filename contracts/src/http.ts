@@ -47,6 +47,8 @@ export const VoiceSchema = z.object({
   created_at: z.number().int(),
 });
 
+export const VoicePresetSchema = z.enum(["cloned", "female", "male"]);
+
 export const SessionSchema = z.object({
   id: z.string().min(1),
   user_id: z.string().min(1),
@@ -56,7 +58,16 @@ export const SessionSchema = z.object({
   target_langs: z.string().min(1),
   status: z.string().min(1),
   live_session_id: z.string().nullable(),
+  voice_preset: VoicePresetSchema.default("female"),
   created_at: z.number().int(),
+});
+
+export const UpdateSessionVoicePresetSchema = z.object({
+  voice_preset: VoicePresetSchema,
+});
+
+export const UpdateSessionVoicePresetResponseSchema = z.object({
+  session: SessionSchema,
 });
 
 export const StreamSchema = z.object({

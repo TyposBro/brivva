@@ -316,6 +316,7 @@
           "target_langs",
           "status",
           "live_session_id",
+          "voice_preset",
           "created_at"
         ],
         "properties": {
@@ -344,6 +345,14 @@
           "live_session_id": {
             "type": "string",
             "nullable": true
+          },
+          "voice_preset": {
+            "type": "string",
+            "enum": [
+              "cloned",
+              "female",
+              "male"
+            ]
           },
           "created_at": {
             "type": "integer"
@@ -884,6 +893,33 @@
             "additionalProperties": {
               "type": "number"
             }
+          }
+        }
+      },
+      "UpdateSessionVoicePresetRequest": {
+        "type": "object",
+        "required": [
+          "voice_preset"
+        ],
+        "properties": {
+          "voice_preset": {
+            "type": "string",
+            "enum": [
+              "cloned",
+              "female",
+              "male"
+            ]
+          }
+        }
+      },
+      "UpdateSessionVoicePresetResponse": {
+        "type": "object",
+        "required": [
+          "session"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
           }
         }
       },
@@ -1470,6 +1506,64 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CloneSessionVoiceRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/voice-preset": {
+      "patch": {
+        "summary": "Update session voice preset",
+        "responses": {
+          "200": {
+            "description": "Updated session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateSessionVoicePresetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Session id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSessionVoicePresetRequest"
               }
             }
           }

@@ -223,6 +223,7 @@ const schemas = {
       "target_langs",
       "status",
       "live_session_id",
+      "voice_preset",
       "created_at",
     ],
     properties: {
@@ -234,6 +235,7 @@ const schemas = {
       target_langs: { type: "string" },
       status: { type: "string" },
       live_session_id: { type: "string", nullable: true },
+      voice_preset: { type: "string", enum: ["cloned", "female", "male"] },
       created_at: { type: "integer" },
     },
   },
@@ -514,6 +516,18 @@ const schemas = {
       },
     },
   },
+  UpdateSessionVoicePresetRequest: {
+    type: "object",
+    required: ["voice_preset"],
+    properties: {
+      voice_preset: { type: "string", enum: ["cloned", "female", "male"] },
+    },
+  },
+  UpdateSessionVoicePresetResponse: {
+    type: "object",
+    required: ["session"],
+    properties: { session: ref("Session") },
+  },
   InternalSessionBundle: {
     type: "object",
     required: ["session", "streams", "voice"],
@@ -660,6 +674,16 @@ function sessionPaths() {
       }, {
         parameters: [pathParam("id", "Session id")],
         requestBody: jsonBody(ref("CloneSessionVoiceRequest")),
+      }),
+    },
+    "/api/sessions/{id}/voice-preset": {
+      patch: getOperation("Update session voice preset", {
+        200: jsonResponse(ref("UpdateSessionVoicePresetResponse"), "Updated session"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+        404: jsonResponse(ref("ErrorResponse"), "Session not found"),
+      }, {
+        parameters: [pathParam("id", "Session id")],
+        requestBody: jsonBody(ref("UpdateSessionVoicePresetRequest")),
       }),
     },
     "/api/sessions/{id}/streams": {

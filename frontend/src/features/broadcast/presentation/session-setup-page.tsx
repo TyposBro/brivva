@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Loader2, Mic } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+import type { VoicePreset } from "../data/api-client";
 import { SignInGate } from "../../../shared/auth/sign-in-gate";
 import { useAuth } from "../../../shared/auth/use-auth";
 import { useVoiceRecorder } from "../../../shared/audio/voice-recorder";
+import { VoicePresetPicker } from "./voice-preset-picker";
 import { VoiceSetupCard } from "./voice-setup-card";
 
 const MIN_SEC = 30;
@@ -28,7 +30,12 @@ function SetupInner() {
   const [streams, setStreams] = useState<api.StreamInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [cloning, setCloning] = useState(false);
-  const [voiceCloned, setVoiceCloned] = useState(false);
+  // Track whether the user has finished the voice step at least once. Seeded
+  // from the session — if voice_preset != 'cloned' we treat "skip" as done.
+  const [voiceReady, setVoiceReady] = useState(false);
+  const [voicePreset, setVoicePreset] = useState<VoicePreset>("female");
+  const [presetSaving, setPresetSaving] = useState(false);
+  const [recordMode, setRecordMode] = useState(false);
   const [error, setError] = useState("");
 
   const reload = useCallback(async () => {
@@ -37,7 +44,11 @@ function SetupInner() {
       const data = await api.getSession(id);
       setSession(data.session);
       setStreams(data.streams);
-      if (data.session?.voice_id) setVoiceCloned(true);
+      if (data.session) {
+        const preset = (data.session.voice_preset ?? "female") as VoicePreset;
+        setVoicePreset(preset);
+        if (data.session.voice_id || preset !== "cloned") setVoiceReady(true);
+      }
     } catch (e) {
       console.error("Failed to load session:", e);
     } finally {
@@ -56,7 +67,8 @@ function SetupInner() {
       setError("");
       try {
         await api.cloneSessionVoice(id, { user_id: userId, audio_base64: b64 });
-        setVoiceCloned(true);
+        setVoiceReady(true);
+        setRecordMode(false);
         await reload();
       } catch (e) {
         setError(e instanceof Error ? e.message : "Voice clone failed");
@@ -86,7 +98,29 @@ function SetupInner() {
     if (b64 !== null) void uploadSample(b64);
   }, [recorder, uploadSample]);
 
-  const handleSkip = useCallback(() => setVoiceCloned(true), []);
+  const handleSkip = useCallback(() => {
+    setVoicePreset("female");
+    setVoiceReady(true);
+    setRecordMode(false);
+  }, []);
+
+  const handlePresetChange = useCallback(
+    async (preset: VoicePreset) => {
+      if (!id || preset === voicePreset) return;
+      setPresetSaving(true);
+      setError("");
+      try {
+        const res = await api.updateSessionVoicePreset(id, preset);
+        setSession(res.session);
+        setVoicePreset(preset);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to update voice preset");
+      } finally {
+        setPresetSaving(false);
+      }
+    },
+    [id, voicePreset],
+  );
 
   const goLive = () => {
     if (!id) return;
@@ -165,32 +199,12 @@ function SetupInner() {
           </div>
         )}
 
-        {voiceCloned ? (
-          <section className="bg-surface-container-low rounded-xl p-8 max-w-lg mx-auto space-y-4 text-center">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-success/15 text-success">
-              <Mic className="w-5 h-5" />
-            </div>
-            <h3 className="font-headline font-bold text-xl text-on-surface">
-              Voice ready
-            </h3>
-            <p className="text-on-surface-variant text-sm font-label">
-              {session.voice_id
-                ? "Cloned voice on file. Re-record from this page if you want to refresh it."
-                : "Using the default voice for each target language."}
-            </p>
-            <button
-              className="bg-surface-container-high hover:bg-surface-bright text-on-surface-variant py-2 px-4 rounded-lg font-label text-sm"
-              onClick={() => setVoiceCloned(false)}
-            >
-              Re-record sample
-            </button>
-          </section>
-        ) : cloning ? (
+        {cloning ? (
           <div className="flex items-center justify-center gap-3 text-on-surface-variant font-label py-12">
             <Loader2 className="w-5 h-5 animate-spin text-primary" />
             Cloning your voice…
           </div>
-        ) : (
+        ) : recordMode || !session.voice_id ? (
           <VoiceSetupCard
             elapsedSec={recorder.elapsedSec}
             isRecording={recorder.isRecording}
@@ -200,16 +214,23 @@ function SetupInner() {
             onStop={handleStop}
             onSkip={handleSkip}
           />
+        ) : (
+          <VoicePresetPicker
+            value={voicePreset}
+            onChange={(p) => void handlePresetChange(p)}
+            hasClone={Boolean(session.voice_id)}
+            onReRecord={() => setRecordMode(true)}
+          />
         )}
 
         <button
           className={cn(
             "w-full py-4 rounded-xl font-headline font-extrabold text-lg uppercase tracking-tight transition-all flex items-center justify-center gap-2",
-            voiceCloned
+            voiceReady && !presetSaving
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed",
           )}
-          disabled={!voiceCloned}
+          disabled={!voiceReady || presetSaving}
           onClick={goLive}
         >
           Go Live

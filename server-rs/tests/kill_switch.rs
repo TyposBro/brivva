@@ -14,7 +14,7 @@
 
 use server_rs::features::broadcast::data::pipeline::tts::{ResolveVoiceArgs, resolve_voice};
 use server_rs::features::broadcast::data::session_ws::maybe_downgrade_rtmps;
-use server_rs::features::broadcast::domain::Lang;
+use server_rs::features::broadcast::domain::{Lang, VoicePreset};
 use server_rs::orchestration::config::AppConfig;
 use std::sync::{Mutex, OnceLock};
 
@@ -44,10 +44,11 @@ fn fallback_to_default_voice_kill_switch_forces_default_voice_id() {
         selected_voice_id: Some("EL-clone-123"),
         enrollment_lang: Some(&Lang::Ko),
         target_lang: &Lang::En,
+        voice_preset: VoicePreset::Cloned,
         force_default_voice: cfg.force_default_voice,
     });
     assert!(!resolved.is_cloned, "kill-switch must force default voice");
-    assert_eq!(resolved.voice_id, Lang::En.voice_id().to_string());
+    assert_eq!(resolved.voice_id, Lang::En.voice_id_female().to_string());
 
     clear_kill_switches();
 }
@@ -63,6 +64,7 @@ fn without_kill_switch_cloned_voice_is_kept_when_enrollment_matches_target() {
         selected_voice_id: Some("EL-clone-123"),
         enrollment_lang: Some(&Lang::En),
         target_lang: &Lang::En,
+        voice_preset: VoicePreset::Cloned,
         force_default_voice: cfg.force_default_voice,
     });
     assert!(resolved.is_cloned);
@@ -79,11 +81,12 @@ fn cloned_voice_falls_back_when_enrollment_language_differs_from_target() {
         selected_voice_id: Some("EL-clone-123"),
         enrollment_lang: Some(&Lang::Ko),
         target_lang: &Lang::En,
+        voice_preset: VoicePreset::Cloned,
         force_default_voice: false,
     });
     assert!(!resolved.is_cloned, "cross-lingual clone must fall back");
     assert!(resolved.is_cloned_fallback_due_to_enrollment);
-    assert_eq!(resolved.voice_id, Lang::En.voice_id().to_string());
+    assert_eq!(resolved.voice_id, Lang::En.voice_id_female().to_string());
 }
 
 #[test]

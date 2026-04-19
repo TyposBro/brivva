@@ -10,6 +10,7 @@ import {
   PlatformCredentialSchema,
   StatusResponseSchema,
   StreamSchema,
+  UpdateSessionVoicePresetResponseSchema,
   UserInfoSchema,
   VoiceSchema,
   type AuthTokenResponse,
@@ -160,6 +161,21 @@ export function cloneSessionVoice(
       body,
     }),
     CloneSessionVoiceResponseSchema,
+  );
+}
+
+export type VoicePreset = "cloned" | "female" | "male";
+
+export function updateSessionVoicePreset(
+  sessionId: string,
+  voice_preset: VoicePreset,
+): Promise<{ session: Session }> {
+  return parseResult(
+    client().PATCH("/api/sessions/{id}/voice-preset", {
+      params: { path: { id: sessionId } },
+      body: { voice_preset },
+    }),
+    UpdateSessionVoicePresetResponseSchema,
   );
 }
 

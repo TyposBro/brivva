@@ -215,16 +215,21 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         target_lang,
         handle,
     } = args;
-    let (selected_voice_id, selected_voice_enrollment_lang) = handle
+    let (selected_voice_id, selected_voice_enrollment_lang, voice_preset) = handle
         .sessions
         .get(&handle.id)
         .map(|session| {
             (
                 session.selected_voice_id.clone(),
                 session.selected_voice_enrollment_lang.clone(),
+                session.voice_preset,
             )
         })
-        .unwrap_or((None, None));
+        .unwrap_or((
+            None,
+            None,
+            crate::features::broadcast::domain::VoicePreset::Female,
+        ));
     let rtmp_manager = handle
         .sessions
         .get(&handle.id)
@@ -254,6 +259,7 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         handle: handle.clone(),
         selected_voice_id,
         selected_voice_enrollment_lang,
+        voice_preset,
     })
     .await;
 }

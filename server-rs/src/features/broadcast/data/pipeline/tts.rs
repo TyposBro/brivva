@@ -1,4 +1,4 @@
-use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg, VoicePreset};
 use futures_util::StreamExt;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,7 @@ pub struct ResolveVoiceArgs<'a> {
     pub selected_voice_id: Option<&'a str>,
     pub enrollment_lang: Option<&'a Lang>,
     pub target_lang: &'a Lang,
+    pub voice_preset: VoicePreset,
     pub force_default_voice: bool,
 }
 
@@ -26,34 +27,50 @@ pub struct ResolvedVoice {
 /// Pure voice-selection decision. Exposed for kill-switch tests.
 ///
 /// Order of precedence:
-/// 1. `force_default_voice` kill-switch wins over everything else.
-/// 2. Clone with mismatched `enrollment_lang` falls back to the default
-///    voice to avoid the April 2026 Indian-accent regression.
-/// 3. Supplied `selected_voice_id` is used as a cloned voice.
-/// 4. Otherwise the target language's default library voice.
+/// 1. `force_default_voice` kill-switch wins over everything else and always
+///    yields the female library default.
+/// 2. `voice_preset == Female|Male` uses the matching library default.
+/// 3. `voice_preset == Cloned` with mismatched `enrollment_lang` falls back
+///    to the female default (April 2026 Indian-accent regression).
+/// 4. `voice_preset == Cloned` with a supplied `selected_voice_id` uses it.
+/// 5. Otherwise the female library default.
 pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
-    if args.force_default_voice || args.selected_voice_id.is_none() {
-        return ResolvedVoice {
-            voice_id: args.target_lang.voice_id().to_string(),
-            is_cloned: false,
-            is_cloned_fallback_due_to_enrollment: false,
-        };
+    if args.force_default_voice {
+        return default_voice(args.target_lang, VoicePreset::Female);
     }
-    if let Some(enroll) = args.enrollment_lang
-        && enroll != args.target_lang
-    {
-        return ResolvedVoice {
-            voice_id: args.target_lang.voice_id().to_string(),
-            is_cloned: false,
-            is_cloned_fallback_due_to_enrollment: true,
-        };
+    match args.voice_preset {
+        VoicePreset::Female => default_voice(args.target_lang, VoicePreset::Female),
+        VoicePreset::Male => default_voice(args.target_lang, VoicePreset::Male),
+        VoicePreset::Cloned => {
+            let Some(clone_id) = args.selected_voice_id else {
+                return default_voice(args.target_lang, VoicePreset::Female);
+            };
+            if let Some(enroll) = args.enrollment_lang
+                && enroll != args.target_lang
+            {
+                return ResolvedVoice {
+                    voice_id: args.target_lang.voice_id_female().to_string(),
+                    is_cloned: false,
+                    is_cloned_fallback_due_to_enrollment: true,
+                };
+            }
+            ResolvedVoice {
+                voice_id: clone_id.to_string(),
+                is_cloned: true,
+                is_cloned_fallback_due_to_enrollment: false,
+            }
+        }
     }
+}
+
+fn default_voice(target_lang: &Lang, preset: VoicePreset) -> ResolvedVoice {
+    let voice_id = match preset {
+        VoicePreset::Male => target_lang.voice_id_male(),
+        _ => target_lang.voice_id_female(),
+    };
     ResolvedVoice {
-        voice_id: args
-            .selected_voice_id
-            .map(str::to_string)
-            .unwrap_or_else(|| args.target_lang.voice_id().to_string()),
-        is_cloned: true,
+        voice_id: voice_id.to_string(),
+        is_cloned: false,
         is_cloned_fallback_due_to_enrollment: false,
     }
 }
@@ -72,6 +89,8 @@ pub struct TtsRequest {
     /// back to the default voice to avoid the April 2026 Indian-accent
     /// regression (cross-lingual inference on a cloned v2 voice).
     pub selected_voice_enrollment_lang: Option<Lang>,
+    /// Host-selected voice preset for this session.
+    pub voice_preset: VoicePreset,
 }
 
 pub async fn broadcast_translated_tts(req: TtsRequest) {
@@ -94,6 +113,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         selected_voice_id: req.selected_voice_id.as_deref(),
         enrollment_lang: req.selected_voice_enrollment_lang.as_ref(),
         target_lang: &req.target_lang,
+        voice_preset: req.voice_preset,
         force_default_voice,
     });
     if let Some(enroll) = req.selected_voice_enrollment_lang.as_ref()
@@ -309,16 +329,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_voice_returns_default_when_selected_voice_absent() {
+    fn resolve_voice_returns_female_default_when_preset_cloned_but_voice_absent() {
         let resolved = resolve_voice(ResolveVoiceArgs {
             selected_voice_id: None,
             enrollment_lang: None,
             target_lang: &Lang::Ja,
+            voice_preset: VoicePreset::Cloned,
             force_default_voice: false,
         });
         assert!(!resolved.is_cloned);
         assert!(!resolved.is_cloned_fallback_due_to_enrollment);
-        assert_eq!(resolved.voice_id, Lang::Ja.voice_id());
+        assert_eq!(resolved.voice_id, Lang::Ja.voice_id_female());
     }
 
     #[test]
@@ -327,6 +348,7 @@ mod tests {
             selected_voice_id: Some("clone"),
             enrollment_lang: None,
             target_lang: &Lang::Ja,
+            voice_preset: VoicePreset::Cloned,
             force_default_voice: false,
         });
         assert!(resolved.is_cloned);
@@ -339,10 +361,37 @@ mod tests {
             selected_voice_id: Some("clone"),
             enrollment_lang: Some(&Lang::En),
             target_lang: &Lang::En,
+            voice_preset: VoicePreset::Cloned,
             force_default_voice: true,
         });
         assert!(!resolved.is_cloned);
-        assert_eq!(resolved.voice_id, Lang::En.voice_id());
+        assert_eq!(resolved.voice_id, Lang::En.voice_id_female());
+    }
+
+    #[test]
+    fn resolve_voice_male_preset_returns_male_default() {
+        let resolved = resolve_voice(ResolveVoiceArgs {
+            selected_voice_id: Some("clone_that_should_be_ignored"),
+            enrollment_lang: None,
+            target_lang: &Lang::Ko,
+            voice_preset: VoicePreset::Male,
+            force_default_voice: false,
+        });
+        assert!(!resolved.is_cloned);
+        assert_eq!(resolved.voice_id, Lang::Ko.voice_id_male());
+    }
+
+    #[test]
+    fn resolve_voice_female_preset_ignores_selected_clone_id() {
+        let resolved = resolve_voice(ResolveVoiceArgs {
+            selected_voice_id: Some("clone_ignored"),
+            enrollment_lang: None,
+            target_lang: &Lang::Zh,
+            voice_preset: VoicePreset::Female,
+            force_default_voice: false,
+        });
+        assert!(!resolved.is_cloned);
+        assert_eq!(resolved.voice_id, Lang::Zh.voice_id_female());
     }
 
     #[test]
@@ -375,6 +424,7 @@ mod tests {
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
         })
         .await;
     }
@@ -398,6 +448,7 @@ mod tests {
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
         })
         .await;
     }
@@ -442,6 +493,7 @@ mod tests {
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
         })
         .await;
 
@@ -490,6 +542,7 @@ mod tests {
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
         })
         .await;
 
@@ -547,6 +600,7 @@ mod tests {
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
         })
         .await;
 

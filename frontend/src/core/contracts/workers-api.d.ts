@@ -606,6 +606,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{id}/voice-preset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update session voice preset */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Session id */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateSessionVoicePresetRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated session */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UpdateSessionVoicePresetResponse"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Session not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
     "/api/sessions/{id}/streams": {
         parameters: {
             query?: never;
@@ -1676,6 +1737,8 @@ export interface components {
             target_langs: string;
             status: string;
             live_session_id: string | null;
+            /** @enum {string} */
+            voice_preset: "cloned" | "female" | "male";
             created_at: number;
         };
         PlatformCredential: {
@@ -1820,6 +1883,13 @@ export interface components {
             output_seconds_by_lang?: {
                 [key: string]: number;
             };
+        };
+        UpdateSessionVoicePresetRequest: {
+            /** @enum {string} */
+            voice_preset: "cloned" | "female" | "male";
+        };
+        UpdateSessionVoicePresetResponse: {
+            session: components["schemas"]["Session"];
         };
         InternalSessionBundle: {
             session: components["schemas"]["Session"];

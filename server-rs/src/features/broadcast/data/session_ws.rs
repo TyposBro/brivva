@@ -325,6 +325,8 @@ async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
         // populate `live_session.selected_voice_enrollment_lang` here with
         // `Lang::from_str(&v.enrollment_lang.unwrap_or_default())`.
     }
+    live_session.voice_preset =
+        crate::features::broadcast::domain::VoicePreset::from_wire(&bundle.session.voice_preset);
 
     let metrics = SessionMetrics::new();
     live_session.metrics = Some(metrics.clone());
@@ -809,6 +811,7 @@ mod tests {
             target_langs: "[\"ja\"]".into(),
             status: "setup".into(),
             live_session_id: None,
+            voice_preset: "female".into(),
             created_at: 0,
         }
     }

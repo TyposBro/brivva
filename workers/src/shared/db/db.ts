@@ -191,6 +191,10 @@ export type CreateSession = {
 };
 
 export async function createSession(db: D1Database, args: CreateSession): Promise<Session> {
+  // Default new sessions with an attached clone to voice_preset='cloned' so
+  // returning users don't have to re-pick each time. No clone → 'female'
+  // (matches the historical Lang::voice_id() default the schema migration
+  // pinned).
   const row: Session = {
     id: uuid(),
     user_id: args.userId,
@@ -200,6 +204,7 @@ export async function createSession(db: D1Database, args: CreateSession): Promis
     target_langs: args.targetLangs,
     status: "setup",
     live_session_id: null,
+    voice_preset: args.voiceId ? "cloned" : "female",
     created_at: now(),
   };
   await wrap(db).insert(schema.sessions).values(row).run();
@@ -251,6 +256,18 @@ export async function updateSessionVoiceId(
   await wrap(db)
     .update(schema.sessions)
     .set({ voice_id: voiceId })
+    .where(eq(schema.sessions.id, id))
+    .run();
+}
+
+export async function updateSessionVoicePreset(
+  db: D1Database,
+  id: string,
+  preset: "cloned" | "female" | "male",
+): Promise<void> {
+  await wrap(db)
+    .update(schema.sessions)
+    .set({ voice_preset: preset })
     .where(eq(schema.sessions.id, id))
     .run();
 }

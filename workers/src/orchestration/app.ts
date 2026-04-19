@@ -17,6 +17,7 @@ import {
   SessionIdParamsSchema,
   SessionStreamParamsSchema,
   TikTokAuthRequestSchema,
+  UpdateSessionVoicePresetSchema,
   UserQuerySchema,
 } from "@brivva/contracts/http";
 import {
@@ -459,7 +460,31 @@ app.post("/api/sessions/:id/voice", async (c) => {
     sourceLang,
   });
   await db.updateSessionVoiceId(c.env.DB, params.id, voice.id);
+  await db.updateSessionVoicePreset(c.env.DB, params.id, "cloned");
   return c.json({ voice });
+});
+
+app.patch("/api/sessions/:id/voice-preset", async (c) => {
+  const params = parseWithSchema(c, SessionIdParamsSchema, {
+    id: c.req.param("id"),
+  });
+  if (params instanceof Response) return params;
+  const body = parseWithSchema(c, UpdateSessionVoicePresetSchema, await c.req.json());
+  if (body instanceof Response) return body;
+
+  const session = await db.getSession(c.env.DB, params.id);
+  if (!session) return c.json({ error: "not found" }, 404);
+
+  // 'cloned' requires the session already point at a voice row. Reject
+  // otherwise — we don't want to silently pick a default when the host
+  // thought they were using their clone.
+  if (body.voice_preset === "cloned" && !session.voice_id) {
+    return c.json({ error: "no cloned voice attached to session" }, 400);
+  }
+
+  await db.updateSessionVoicePreset(c.env.DB, params.id, body.voice_preset);
+  const updated = await db.getSession(c.env.DB, params.id);
+  return c.json({ session: updated });
 });
 
 app.delete("/api/sessions/:id", async (c) => {
