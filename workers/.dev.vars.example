@@ -1,0 +1,59 @@
+# .dev.vars — local-only overrides for `wrangler dev`.
+#
+# Copy to .dev.vars (which is gitignored) and fill in the secret values.
+# `wrangler dev` merges this file on top of [vars] in wrangler.toml, so the
+# prod URLs shipped in wrangler.toml get swapped for localhost ones when the
+# dev server boots.
+#
+# ── Setup ────────────────────────────────────────────────────────────────
+#
+# 1. cp .dev.vars.example .dev.vars
+# 2. Fill in the SECRET values below (top half are pre-filled URLs, safe to
+#    ship as-is; bottom half are real secrets — grab from 1Password / the
+#    `wrangler secret list` you ran in prod).
+# 3. In Google Cloud Console → Credentials → your OAuth 2.0 Client ID, add
+#    these two URIs to "Authorized redirect URIs" (Authorized JavaScript
+#    origins stays empty — Brivva uses server-side auth code flow, not GSI):
+#      http://localhost:8787/auth/google/callback
+#      http://localhost:8787/auth/youtube/callback
+# 4. Run `./scripts/dev-all.sh` from repo root — full local stack.
+#
+# DO NOT commit the filled-in .dev.vars. It is gitignored for a reason.
+
+# ── Public URLs — override wrangler.toml [vars] for local dev ────────────
+
+# Where the FE runs in dev (Vite default).
+FRONTEND_URL=http://localhost:5173
+
+# Workers runs on :8787 in dev; callbacks come back here.
+OAUTH_REDIRECT_URI=http://localhost:8787/auth/youtube/callback
+GOOGLE_SIGNIN_REDIRECT_URI=http://localhost:8787/auth/google/callback
+
+# ── Secrets — fill these in, never commit ────────────────────────────────
+
+# ElevenLabs API key for voice clone + TTS. Same key as prod is fine for
+# dev; the library voices + user clones live in one ElevenLabs account.
+ELEVENLABS_API_KEY=
+
+# Google OAuth 2.0 client — same client as prod; just the redirect_uri
+# registered in Google Console differs.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# HS256 secret used to sign FE → server-rs bearer JWTs. Any random ≥32-char
+# string works for dev. DO NOT reuse the prod value — use a dev-only secret
+# so a dev-env leak can't be replayed against prod.
+JWT_SECRET=dev-only-change-me-min-32-chars-please
+
+# Shared secret between Workers and server-rs for internal PATCH calls
+# (session metrics, status updates). Same-host comms locally → any value
+# works; just has to match server-rs's env.
+INTERNAL_SECRET=dev-only-internal-secret
+
+# Grip Cloud Seller API — discovered 2026-04-19. Optional for most dev
+# work; only needed if you're exercising the Grip destination path.
+GRIP_ACCESS_KEY=
+GRIP_SECRET_KEY=
+
+# Stripe webhook signing secret — optional until billing ships.
+STRIPE_WEBHOOK_SECRET=
