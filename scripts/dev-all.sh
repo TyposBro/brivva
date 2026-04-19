@@ -162,8 +162,31 @@ tail -F -q \
   "${LOG_DIR}/frontend.log" 2>/dev/null &
 TAIL_PID=$!
 
-# Wait on any of the four children exiting.
-wait -n "$SERVER_PID" "$WORKERS_PID" "$FRONTEND_PID" "$TAIL_PID" 2>/dev/null || true
+# Block until Ctrl-C. Poll every second so a dead child is noticed within 1s
+# (we print a warning + keep going so the other two can still be inspected).
+# bash 3.2 has no `wait -n`, so we poll kill -0 instead.
+server_alive=1
+workers_alive=1
+frontend_alive=1
+while true; do
+  if [ $server_alive -eq 1 ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    warn "server-rs died (tail .dev-logs/server-rs.log)"
+    server_alive=0
+  fi
+  if [ $workers_alive -eq 1 ] && ! kill -0 "$WORKERS_PID" 2>/dev/null; then
+    warn "workers died (tail .dev-logs/workers.log)"
+    workers_alive=0
+  fi
+  if [ $frontend_alive -eq 1 ] && ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+    warn "frontend died (tail .dev-logs/frontend.log)"
+    frontend_alive=0
+  fi
+  # If all three died, nothing to keep running for — let cleanup close out.
+  if [ $server_alive -eq 0 ] && [ $workers_alive -eq 0 ] && [ $frontend_alive -eq 0 ]; then
+    fail "all services exited; tearing down"
+    break
+  fi
+  sleep 1
+done
 
-# If we fall through here, one of the children died — let cleanup handle it.
 exit 0
