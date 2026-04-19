@@ -1,31 +1,37 @@
-use crate::features::broadcast::domain::{Lang, LiveSessions, ServerMsg};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg};
 use futures_util::StreamExt;
 use std::time::{Duration, Instant};
 
 use super::to_ws;
 
-pub async fn broadcast_translated_tts(
-    text: &str,
-    utterance_id: u64,
-    lang: &Lang,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    selected_voice_id: Option<&str>,
-) {
+/// All inputs to the TTS broadcast path bundled so the public entry point
+/// stays within the §3.3 arg budget.
+pub struct TtsRequest {
+    pub text: String,
+    pub utterance_id: u64,
+    pub target_lang: Lang,
+    pub handle: LiveSessionHandle,
+    pub selected_voice_id: Option<String>,
+}
+
+pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
     let tts_deadline = Duration::from_secs(5);
 
-    let Some((api_key, base_url)) = live_sessions
-        .get(live_session_id)
-        .map(|s| (s.pipeline_config.elevenlabs_api_key.clone(), s.pipeline_config.elevenlabs_base_url.clone()))
-    else {
+    let Some((api_key, base_url)) = req.handle.sessions.get(&req.handle.id).map(|s| {
+        (
+            s.pipeline_config.elevenlabs_api_key.clone(),
+            s.pipeline_config.elevenlabs_base_url.clone(),
+        )
+    }) else {
         return;
     };
 
-    let is_cloned = selected_voice_id.is_some();
-    let voice_id = selected_voice_id
-        .map(str::to_string)
-        .unwrap_or_else(|| lang.voice_id().to_string());
+    let is_cloned = req.selected_voice_id.is_some();
+    let voice_id = req
+        .selected_voice_id
+        .clone()
+        .unwrap_or_else(|| req.target_lang.voice_id().to_string());
     let model_id = if is_cloned {
         "eleven_multilingual_v2"
     } else {
@@ -36,13 +42,61 @@ pub async fn broadcast_translated_tts(
         base_url, &voice_id
     );
 
+    let audio_buffer = match fetch_tts_audio(FetchTtsArgs {
+        url: &url,
+        api_key: &api_key,
+        text: &req.text,
+        model_id,
+        lang: &req.target_lang,
+        deadline: tts_deadline,
+    })
+    .await
+    {
+        Some(buf) => buf,
+        None => {
+            eprintln!(
+                "[TTS] no audio for utterance {} lang={}",
+                req.utterance_id, req.target_lang
+            );
+            return;
+        }
+    };
+
+    let tts_ms = tts_start.elapsed().as_millis() as u64;
+    push_tts_into_rtmp(&req.target_lang, &req.handle, &audio_buffer).await;
+    notify_host_tts_complete(NotifyCompleteArgs {
+        lang: &req.target_lang,
+        utterance_id: req.utterance_id,
+        tts_ms,
+        handle: &req.handle,
+    });
+}
+
+struct FetchTtsArgs<'a> {
+    url: &'a str,
+    api_key: &'a str,
+    text: &'a str,
+    model_id: &'a str,
+    lang: &'a Lang,
+    deadline: Duration,
+}
+
+async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
+    let FetchTtsArgs {
+        url,
+        api_key,
+        text,
+        model_id,
+        lang,
+        deadline,
+    } = args;
     let client = reqwest::Client::new();
     let body = serde_json::json!({ "text": text, "model_id": model_id });
-    let tts_result = tokio::time::timeout(tts_deadline, async {
+    let tts_result = tokio::time::timeout(deadline, async {
         let mut audio_buffer = Vec::new();
         let response = client
-            .post(&url)
-            .header("xi-api-key", &api_key)
+            .post(url)
+            .header("xi-api-key", api_key)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -69,31 +123,20 @@ pub async fn broadcast_translated_tts(
     })
     .await;
 
-    let audio_buffer = match tts_result {
-        Ok(buffer) if !buffer.is_empty() => buffer,
-        Ok(_) => return,
+    match tts_result {
+        Ok(buffer) if !buffer.is_empty() => Some(buffer),
+        Ok(_) => None,
         Err(_) => {
-            eprintln!(
-                "[TTS] TIMEOUT utterance {} lang={} — dropped to silence (>{:?})",
-                utterance_id, lang, tts_deadline
-            );
-            return;
+            eprintln!("[TTS] TIMEOUT lang={} (>{:?})", lang, deadline);
+            None
         }
-    };
-
-    let tts_ms = tts_start.elapsed().as_millis() as u64;
-    push_tts_into_rtmp(lang, live_sessions, live_session_id, &audio_buffer).await;
-    notify_host_tts_complete(lang, utterance_id, tts_ms, live_sessions, live_session_id);
+    }
 }
 
-async fn push_tts_into_rtmp(
-    lang: &Lang,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    audio_buffer: &[u8],
-) {
-    let rtmp_manager = live_sessions
-        .get(live_session_id)
+async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffer: &[u8]) {
+    let rtmp_manager = handle
+        .sessions
+        .get(&handle.id)
         .and_then(|session| session.rtmp_manager.clone());
     let Some(manager) = rtmp_manager else {
         return;
@@ -108,21 +151,24 @@ async fn push_tts_into_rtmp(
     }
 }
 
-fn notify_host_tts_complete(
-    lang: &Lang,
+struct NotifyCompleteArgs<'a> {
+    lang: &'a Lang,
     utterance_id: u64,
     tts_ms: u64,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-) {
-    let Some(live_session) = live_sessions.get(live_session_id) else {
+    handle: &'a LiveSessionHandle,
+}
+
+fn notify_host_tts_complete(args: NotifyCompleteArgs<'_>) {
+    let Some(live_session) = args.handle.sessions.get(&args.handle.id) else {
         return;
     };
 
     live_session.send_to_host(to_ws(&ServerMsg::TtsEnd {
-        utterance_id,
-        target_lang: lang.to_string(),
-        tts_ms,
+        utterance_id: args.utterance_id,
+        target_lang: args.lang.to_string(),
+        tts_ms: args.tts_ms,
     }));
-    live_session.send_to_host(to_ws(&ServerMsg::VideoEnd { utterance_id }));
+    live_session.send_to_host(to_ws(&ServerMsg::VideoEnd {
+        utterance_id: args.utterance_id,
+    }));
 }

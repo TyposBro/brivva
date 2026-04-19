@@ -1,4 +1,4 @@
-use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, PipelineConfig};
 use futures_util::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -6,24 +6,31 @@ use tokio::sync::mpsc;
 use super::soniox::SonioxMode;
 use super::stt_response::spawn_response_processor;
 use super::stt_transport::{
-    STT_RECONNECT_DELAY, STT_RECONNECT_MAX, connect_soniox, send_soniox_config,
-    spawn_audio_forwarder,
+    ConfigSendArgs, ConnectArgs, STT_RECONNECT_DELAY, STT_RECONNECT_MAX, connect_soniox,
+    send_soniox_config, spawn_audio_forwarder,
 };
 
+/// Everything an STT pipeline needs at construction: where it lives (handle),
+/// what language routing it should apply (source + targets), and the upstream
+/// credentials it will talk to. Passed by value into tokio tasks.
+#[derive(Clone)]
+pub struct PipelineSession {
+    pub handle: LiveSessionHandle,
+    pub source_lang: Lang,
+    pub target_langs: Vec<Lang>,
+    pub config: Arc<PipelineConfig>,
+}
+
 pub async fn start_stt_pipelines(
-    live_session_id: String,
-    live_sessions: LiveSessions,
-    source_lang: Lang,
-    target_langs: Vec<Lang>,
-    mut audio_rx: mpsc::Receiver<Vec<u8>>,
-    config: Arc<PipelineConfig>,
+    session: PipelineSession,
+    audio_rx: mpsc::Receiver<Vec<u8>>,
 ) {
-    if config.soniox_api_key.is_empty() {
+    if session.config.soniox_api_key.is_empty() {
         eprintln!("[STT] SONIOX_API_KEY not set — STT pipeline disabled");
         return;
     }
 
-    let targets = dedupe_target_langs(source_lang.clone(), target_langs);
+    let targets = dedupe_target_langs(session.source_lang.clone(), session.target_langs.clone());
     let (source_tx, source_rx) = mpsc::channel::<Vec<u8>>(64);
     let mut target_senders = Vec::new();
     let mut target_receivers = Vec::new();
@@ -34,6 +41,16 @@ pub async fn start_stt_pipelines(
         target_receivers.push((lang.clone(), rx));
     }
 
+    spawn_fan_out(audio_rx, source_tx, target_senders);
+    spawn_source_session(&session, source_rx);
+    spawn_translate_sessions(&session, target_receivers);
+}
+
+fn spawn_fan_out(
+    mut audio_rx: mpsc::Receiver<Vec<u8>>,
+    source_tx: mpsc::Sender<Vec<u8>>,
+    target_senders: Vec<mpsc::Sender<Vec<u8>>>,
+) {
     tokio::spawn(async move {
         while let Some(chunk) = audio_rx.recv().await {
             let _ = source_tx.try_send(chunk.clone());
@@ -42,21 +59,6 @@ pub async fn start_stt_pipelines(
             }
         }
     });
-
-    spawn_source_session(
-        &live_session_id,
-        &live_sessions,
-        source_lang.clone(),
-        source_rx,
-        config.clone(),
-    );
-    spawn_translate_sessions(
-        &live_session_id,
-        &live_sessions,
-        source_lang,
-        target_receivers,
-        config,
-    );
 }
 
 fn dedupe_target_langs(source_lang: Lang, target_langs: Vec<Lang>) -> Vec<Lang> {
@@ -67,61 +69,36 @@ fn dedupe_target_langs(source_lang: Lang, target_langs: Vec<Lang>) -> Vec<Lang> 
         .collect()
 }
 
-fn spawn_source_session(
-    live_session_id: &str,
-    live_sessions: &LiveSessions,
-    source_lang: Lang,
-    audio_rx: mpsc::Receiver<Vec<u8>>,
-    config: Arc<PipelineConfig>,
-) {
-    let live_session_id = live_session_id.to_string();
-    let live_sessions = live_sessions.clone();
+fn spawn_source_session(session: &PipelineSession, audio_rx: mpsc::Receiver<Vec<u8>>) {
+    let session = session.clone();
+    let mode = SonioxMode::Source {
+        lang: session.source_lang.clone(),
+    };
     tokio::spawn(async move {
-        run_soniox_session(
-            live_session_id,
-            live_sessions,
-            SonioxMode::Source { lang: source_lang },
-            audio_rx,
-            config,
-        )
-        .await;
+        run_soniox_session(session, mode, audio_rx).await;
     });
 }
 
 fn spawn_translate_sessions(
-    live_session_id: &str,
-    live_sessions: &LiveSessions,
-    source_lang: Lang,
+    session: &PipelineSession,
     target_receivers: Vec<(Lang, mpsc::Receiver<Vec<u8>>)>,
-    config: Arc<PipelineConfig>,
 ) {
     for (target_lang, target_rx) in target_receivers {
-        let live_session_id = live_session_id.to_string();
-        let live_sessions = live_sessions.clone();
-        let source_lang = source_lang.clone();
-        let config = config.clone();
+        let session = session.clone();
+        let mode = SonioxMode::Translate {
+            source_lang: session.source_lang.clone(),
+            target_lang,
+        };
         tokio::spawn(async move {
-            run_soniox_session(
-                live_session_id,
-                live_sessions,
-                SonioxMode::Translate {
-                    source_lang,
-                    target_lang,
-                },
-                target_rx,
-                config,
-            )
-            .await;
+            run_soniox_session(session, mode, target_rx).await;
         });
     }
 }
 
 async fn run_soniox_session(
-    live_session_id: String,
-    live_sessions: LiveSessions,
+    session: PipelineSession,
     mode: SonioxMode,
     audio_rx: mpsc::Receiver<Vec<u8>>,
-    config: Arc<PipelineConfig>,
 ) {
     let tag = mode.tag();
     let audio_rx = Arc::new(tokio::sync::Mutex::new(audio_rx));
@@ -129,26 +106,25 @@ async fn run_soniox_session(
     let mut reconnect_count = 0;
 
     loop {
-        let Some(ws_stream) = connect_soniox(
-            &live_session_id,
-            &live_sessions,
-            &tag,
+        let Some(ws_stream) = connect_soniox(ConnectArgs {
+            handle: &session.handle,
+            tag: &tag,
             reconnect_count,
-            &config.soniox_ws_url,
-        )
+            ws_url: &session.config.soniox_ws_url,
+        })
         .await
         else {
             return;
         };
 
         let (mut stt_sink, stt_stream) = ws_stream.split();
-        if send_soniox_config(
-            &mode,
-            &tag,
-            &mut stt_sink,
-            &mut reconnect_count,
-            &config.soniox_api_key,
-        )
+        if send_soniox_config(ConfigSendArgs {
+            mode: &mode,
+            tag: &tag,
+            stt_sink: &mut stt_sink,
+            reconnect_count: &mut reconnect_count,
+            api_key: &session.config.soniox_api_key,
+        })
         .await
         .is_err()
         {
@@ -159,14 +135,13 @@ async fn run_soniox_session(
         }
 
         let send_task = spawn_audio_forwarder(audio_rx.clone(), stt_sink);
-        let recv_task = spawn_response_processor(
-            &live_session_id,
-            &live_sessions,
-            mode.clone(),
-            tag.clone(),
+        let recv_task = spawn_response_processor(super::stt_response::ProcessorArgs {
+            handle: session.handle.clone(),
+            mode: mode.clone(),
+            tag: tag.clone(),
             utterance_counter,
             stt_stream,
-        );
+        });
 
         let disconnected_unexpectedly = tokio::select! {
             _ = send_task => false,
@@ -180,7 +155,7 @@ async fn run_soniox_session(
             },
         };
 
-        if !disconnected_unexpectedly || !live_sessions.contains_key(&live_session_id) {
+        if !disconnected_unexpectedly || !session.handle.sessions.contains_key(&session.handle.id) {
             break;
         }
 

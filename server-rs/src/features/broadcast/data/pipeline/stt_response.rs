@@ -1,22 +1,30 @@
-use crate::features::broadcast::domain::{Lang, LiveSessions, ServerMsg};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg};
 use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite;
 
 use super::soniox::{SONIOX_END_TOKEN, SonioxMode, SonioxResponse};
 use super::stt_transport::SonioxStream;
 use super::to_ws;
-use super::tts::broadcast_translated_tts;
+use super::tts::{TtsRequest, broadcast_translated_tts};
+
+pub(super) struct ProcessorArgs {
+    pub handle: LiveSessionHandle,
+    pub mode: SonioxMode,
+    pub tag: String,
+    pub utterance_counter: u64,
+    pub stt_stream: SonioxStream,
+}
 
 pub(super) fn spawn_response_processor(
-    live_session_id: &str,
-    live_sessions: &LiveSessions,
-    mode: SonioxMode,
-    tag: String,
-    utterance_counter: u64,
-    mut stt_stream: SonioxStream,
+    args: ProcessorArgs,
 ) -> tokio::task::JoinHandle<(u64, bool)> {
-    let live_session_id = live_session_id.to_string();
-    let live_sessions = live_sessions.clone();
+    let ProcessorArgs {
+        handle,
+        mode,
+        tag,
+        utterance_counter,
+        mut stt_stream,
+    } = args;
     tokio::spawn(async move {
         let mut final_text = String::new();
         let mut utterance_counter = utterance_counter;
@@ -28,27 +36,25 @@ pub(super) fn spawn_response_processor(
             if response.error_code.is_some() {
                 return (utterance_counter, true);
             }
-            if !live_sessions.contains_key(&live_session_id) {
+            if !handle.sessions.contains_key(&handle.id) {
                 return (utterance_counter, false);
             }
 
             let (interim_tail, endpoint_hit) = accumulate_tokens(&mode, &response, &mut final_text);
-            emit_interim_if_needed(
-                &mode,
-                &live_sessions,
-                &live_session_id,
-                &final_text,
-                &interim_tail,
-            );
+            emit_interim_if_needed(InterimArgs {
+                mode: &mode,
+                handle: &handle,
+                final_text: &final_text,
+                interim_tail: &interim_tail,
+            });
 
             if endpoint_hit {
-                utterance_counter = finalize_utterance_if_needed(
-                    &mode,
+                utterance_counter = finalize_utterance_if_needed(FinalizeArgs {
+                    mode: &mode,
                     utterance_counter,
-                    &live_sessions,
-                    &live_session_id,
-                    &mut final_text,
-                )
+                    handle: &handle,
+                    final_text: &mut final_text,
+                })
                 .await;
             }
         }
@@ -127,36 +133,42 @@ fn accumulate_tokens(
     (interim_tail, endpoint_hit)
 }
 
-fn emit_interim_if_needed(
-    mode: &SonioxMode,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    final_text: &str,
-    interim_tail: &str,
-) {
-    if !matches!(mode, SonioxMode::Source { .. }) {
+struct InterimArgs<'a> {
+    mode: &'a SonioxMode,
+    handle: &'a LiveSessionHandle,
+    final_text: &'a str,
+    interim_tail: &'a str,
+}
+
+fn emit_interim_if_needed(args: InterimArgs<'_>) {
+    if !matches!(args.mode, SonioxMode::Source { .. }) {
         return;
     }
-
-    let interim = format!("{}{}", final_text, interim_tail);
+    let interim = format!("{}{}", args.final_text, args.interim_tail);
     if interim.is_empty() {
         return;
     }
-
-    if let Some(live_session) = live_sessions.get(live_session_id) {
+    if let Some(live_session) = args.handle.sessions.get(&args.handle.id) {
         live_session.send_to_host(to_ws(&ServerMsg::Interim {
             transcript: interim,
         }));
     }
 }
 
-async fn finalize_utterance_if_needed(
-    mode: &SonioxMode,
+struct FinalizeArgs<'a> {
+    mode: &'a SonioxMode,
     utterance_counter: u64,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    final_text: &mut String,
-) -> u64 {
+    handle: &'a LiveSessionHandle,
+    final_text: &'a mut String,
+}
+
+async fn finalize_utterance_if_needed(args: FinalizeArgs<'_>) -> u64 {
+    let FinalizeArgs {
+        mode,
+        utterance_counter,
+        handle,
+        final_text,
+    } = args;
     if final_text.trim().is_empty() {
         final_text.clear();
         return utterance_counter;
@@ -165,20 +177,14 @@ async fn finalize_utterance_if_needed(
     let next_utterance_id = utterance_counter + 1;
     let committed = std::mem::take(final_text);
     match mode {
-        SonioxMode::Source { .. } => emit_final_source(
-            &committed,
-            next_utterance_id,
-            live_sessions,
-            live_session_id,
-        ),
+        SonioxMode::Source { .. } => emit_final_source(&committed, next_utterance_id, handle),
         SonioxMode::Translate { target_lang, .. } => {
-            emit_translation(
-                &committed,
-                next_utterance_id,
+            emit_translation(EmitTranslationArgs {
+                committed: &committed,
+                utterance_id: next_utterance_id,
                 target_lang,
-                live_sessions,
-                live_session_id,
-            )
+                handle,
+            })
             .await;
         }
     }
@@ -186,13 +192,8 @@ async fn finalize_utterance_if_needed(
     next_utterance_id
 }
 
-fn emit_final_source(
-    committed: &str,
-    utterance_id: u64,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-) {
-    if let Some(live_session) = live_sessions.get(live_session_id) {
+fn emit_final_source(committed: &str, utterance_id: u64, handle: &LiveSessionHandle) {
+    if let Some(live_session) = handle.sessions.get(&handle.id) {
         live_session.send_to_host(to_ws(&ServerMsg::Final {
             transcript: committed.to_string(),
             utterance_id,
@@ -200,21 +201,30 @@ fn emit_final_source(
     }
 }
 
-async fn emit_translation(
-    committed: &str,
+struct EmitTranslationArgs<'a> {
+    committed: &'a str,
     utterance_id: u64,
-    target_lang: &Lang,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-) {
-    let selected_voice_id = live_sessions
-        .get(live_session_id)
+    target_lang: &'a Lang,
+    handle: &'a LiveSessionHandle,
+}
+
+async fn emit_translation(args: EmitTranslationArgs<'_>) {
+    let EmitTranslationArgs {
+        committed,
+        utterance_id,
+        target_lang,
+        handle,
+    } = args;
+    let selected_voice_id = handle
+        .sessions
+        .get(&handle.id)
         .and_then(|session| session.selected_voice_id.clone());
-    let rtmp_manager = live_sessions
-        .get(live_session_id)
+    let rtmp_manager = handle
+        .sessions
+        .get(&handle.id)
         .and_then(|session| session.rtmp_manager.clone());
 
-    if let Some(live_session) = live_sessions.get(live_session_id) {
+    if let Some(live_session) = handle.sessions.get(&handle.id) {
         live_session.send_to_host(to_ws(&ServerMsg::Translation {
             text: committed.to_string(),
             utterance_id,
@@ -231,14 +241,13 @@ async fn emit_translation(
         });
     }
 
-    broadcast_translated_tts(
-        committed,
+    broadcast_translated_tts(TtsRequest {
+        text: committed.to_string(),
         utterance_id,
-        target_lang,
-        live_sessions,
-        live_session_id,
-        selected_voice_id.as_deref(),
-    )
+        target_lang: target_lang.clone(),
+        handle: handle.clone(),
+        selected_voice_id,
+    })
     .await;
 }
 

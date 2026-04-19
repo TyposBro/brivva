@@ -83,6 +83,21 @@ pub struct PipelineConfig {
     pub elevenlabs_base_url: String,
 }
 
+/// Handle to a single live session — the pair every pipeline function needs
+/// to look the session up. Carried by value so downstream tasks can move it
+/// into `tokio::spawn` without additional cloning at the call site.
+#[derive(Clone)]
+pub struct LiveSessionHandle {
+    pub id: String,
+    pub sessions: LiveSessions,
+}
+
+impl LiveSessionHandle {
+    pub fn new(id: String, sessions: LiveSessions) -> Self {
+        Self { id, sessions }
+    }
+}
+
 // ── Live Session Runtime ──────────────────────────────────
 
 pub struct LiveSession {

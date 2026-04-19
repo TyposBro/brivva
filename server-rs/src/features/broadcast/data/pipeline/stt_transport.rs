@@ -1,4 +1,4 @@
-use crate::features::broadcast::domain::LiveSessions;
+use crate::features::broadcast::domain::LiveSessionHandle;
 use futures_util::SinkExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,13 +18,20 @@ pub(super) type SonioxWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub(super) type SonioxSink = futures_util::stream::SplitSink<SonioxWs, Message>;
 pub(super) type SonioxStream = futures_util::stream::SplitStream<SonioxWs>;
 
-pub(super) async fn connect_soniox(
-    live_session_id: &str,
-    live_sessions: &LiveSessions,
-    tag: &str,
-    reconnect_count: u32,
-    soniox_ws_url: &str,
-) -> Option<SonioxWs> {
+pub(super) struct ConnectArgs<'a> {
+    pub handle: &'a LiveSessionHandle,
+    pub tag: &'a str,
+    pub reconnect_count: u32,
+    pub ws_url: &'a str,
+}
+
+pub(super) async fn connect_soniox(args: ConnectArgs<'_>) -> Option<SonioxWs> {
+    let ConnectArgs {
+        handle,
+        tag,
+        reconnect_count,
+        ws_url,
+    } = args;
     let max_attempts = if reconnect_count == 0 {
         10
     } else {
@@ -32,12 +39,12 @@ pub(super) async fn connect_soniox(
     };
 
     for attempt in 1..=max_attempts {
-        if !live_sessions.contains_key(live_session_id) {
+        if !handle.sessions.contains_key(&handle.id) {
             eprintln!("[STT {}] live session gone, stopping", tag);
             return None;
         }
 
-        match tokio_tungstenite::connect_async(soniox_ws_url).await {
+        match tokio_tungstenite::connect_async(ws_url).await {
             Ok((stream, _)) => return Some(stream),
             Err(error) => {
                 eprintln!(
@@ -58,14 +65,23 @@ pub(super) async fn connect_soniox(
     None
 }
 
-pub(super) async fn send_soniox_config(
-    mode: &SonioxMode,
-    tag: &str,
-    stt_sink: &mut SonioxSink,
-    reconnect_count: &mut u32,
-    soniox_api_key: &str,
-) -> Result<(), ()> {
-    let config = mode.build_config(soniox_api_key);
+pub(super) struct ConfigSendArgs<'a> {
+    pub mode: &'a SonioxMode,
+    pub tag: &'a str,
+    pub stt_sink: &'a mut SonioxSink,
+    pub reconnect_count: &'a mut u32,
+    pub api_key: &'a str,
+}
+
+pub(super) async fn send_soniox_config(args: ConfigSendArgs<'_>) -> Result<(), ()> {
+    let ConfigSendArgs {
+        mode,
+        tag,
+        stt_sink,
+        reconnect_count,
+        api_key,
+    } = args;
+    let config = mode.build_config(api_key);
     let config_json = serde_json::to_string(&config).map_err(|error| {
         eprintln!("[STT {}] config serialize error: {}", tag, error);
     })?;

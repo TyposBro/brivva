@@ -119,15 +119,15 @@ async fn handle_host(mut socket: HostSocket) {
     let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));
 
     if let Some(ref sid) = socket.session_id {
-        let outcome = bootstrap_session(
-            &workers_api,
+        let outcome = bootstrap_session(BootstrapArgs {
+            workers_api: &workers_api,
             sid,
-            &socket.user_id,
-            &socket.source_lang,
-            &mut live_session,
-            &live_session_id,
-            ffmpeg_monitor_stop.clone(),
-        )
+            user_id: &socket.user_id,
+            source_lang: &socket.source_lang,
+            live_session: &mut live_session,
+            live_session_id: &live_session_id,
+            ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
+        })
         .await;
         if matches!(outcome, BootstrapOutcome::Abort) {
             return;
@@ -148,13 +148,13 @@ async fn handle_host(mut socket: HostSocket) {
     while let Some(Ok(msg)) = socket.receiver.next().await {
         match msg {
             Message::Binary(data) => {
-                handle_binary(
-                    data.to_vec(),
-                    &live_sessions,
-                    &live_session_id,
-                    &socket.source_lang,
-                    &mut audio_tx,
-                );
+                handle_binary(BinaryArgs {
+                    data: data.to_vec(),
+                    live_sessions: &live_sessions,
+                    live_session_id: &live_session_id,
+                    source_lang: &socket.source_lang,
+                    audio_tx: &mut audio_tx,
+                });
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
@@ -167,12 +167,12 @@ async fn handle_host(mut socket: HostSocket) {
         }
     }
 
-    teardown_session(
-        &live_sessions,
-        &live_session_id,
-        &workers_api,
+    teardown_session(TeardownArgs {
+        live_sessions: &live_sessions,
+        live_session_id: &live_session_id,
+        workers_api: &workers_api,
         ffmpeg_monitor_stop,
-    )
+    })
     .await;
     send_task.abort();
     tracing::info!(live_session_id = %live_session_id, "live session closed");
@@ -192,15 +192,27 @@ enum BootstrapOutcome {
     Abort,
 }
 
-async fn bootstrap_session(
-    workers_api: &Arc<WorkersApi>,
-    sid: &str,
-    user_id: &str,
-    source_lang: &Lang,
-    live_session: &mut LiveSession,
-    live_session_id: &str,
+struct BootstrapArgs<'a> {
+    workers_api: &'a Arc<WorkersApi>,
+    sid: &'a str,
+    user_id: &'a str,
+    source_lang: &'a Lang,
+    live_session: &'a mut LiveSession,
+    live_session_id: &'a str,
     ffmpeg_monitor_stop: Arc<AtomicBool>,
-) -> BootstrapOutcome {
+}
+
+async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
+    let BootstrapArgs {
+        workers_api,
+        sid,
+        user_id,
+        source_lang,
+        live_session,
+        live_session_id,
+        ffmpeg_monitor_stop,
+    } = args;
+
     let bundle = match workers_api.fetch_session_bundle(sid).await {
         Ok(b) => b,
         Err(e) => {
@@ -223,18 +235,33 @@ async fn bootstrap_session(
         live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
     }
 
-    start_rtmp_streams(&bundle, source_lang, live_session, sid, ffmpeg_monitor_stop);
+    start_rtmp_streams(RtmpStartArgs {
+        bundle: &bundle,
+        source_lang,
+        live_session,
+        sid,
+        ffmpeg_monitor_stop,
+    });
     spawn_live_status_update(workers_api.clone(), sid.to_string(), live_session_id.to_string());
     BootstrapOutcome::Continue
 }
 
-fn start_rtmp_streams(
-    bundle: &SessionBundle,
-    source_lang: &Lang,
-    live_session: &mut LiveSession,
-    sid: &str,
+struct RtmpStartArgs<'a> {
+    bundle: &'a SessionBundle,
+    source_lang: &'a Lang,
+    live_session: &'a mut LiveSession,
+    sid: &'a str,
     ffmpeg_monitor_stop: Arc<AtomicBool>,
-) {
+}
+
+fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
+    let RtmpStartArgs {
+        bundle,
+        source_lang,
+        live_session,
+        sid,
+        ffmpeg_monitor_stop,
+    } = args;
     if bundle.streams.is_empty() {
         return;
     }
@@ -302,13 +329,22 @@ fn spawn_live_status_update(
     });
 }
 
-fn handle_binary(
+struct BinaryArgs<'a> {
     data: Vec<u8>,
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    source_lang: &Lang,
-    audio_tx: &mut Option<mpsc::Sender<Vec<u8>>>,
-) {
+    live_sessions: &'a LiveSessions,
+    live_session_id: &'a str,
+    source_lang: &'a Lang,
+    audio_tx: &'a mut Option<mpsc::Sender<Vec<u8>>>,
+}
+
+fn handle_binary(args: BinaryArgs<'_>) {
+    let BinaryArgs {
+        data,
+        live_sessions,
+        live_session_id,
+        source_lang,
+        audio_tx,
+    } = args;
     if audio_tx.is_none() {
         *audio_tx = Some(spawn_stt_pipeline(live_sessions, live_session_id, source_lang));
     }
@@ -335,19 +371,17 @@ fn spawn_stt_pipeline(
         .get(live_session_id)
         .map(|r| (r.rtmp_langs.clone(), r.pipeline_config.clone()))
         .unwrap_or_else(|| (Vec::new(), Arc::new(PipelineConfig::default())));
-    let pipeline_live_sessions = live_sessions.clone();
-    let pipeline_live_session_id = live_session_id.to_string();
-    let source_lang = source_lang.clone();
+    let session = pipeline::PipelineSession {
+        handle: crate::features::broadcast::domain::LiveSessionHandle::new(
+            live_session_id.to_string(),
+            live_sessions.clone(),
+        ),
+        source_lang: source_lang.clone(),
+        target_langs,
+        config: pipeline_cfg,
+    };
     tokio::spawn(async move {
-        pipeline::start_stt_pipelines(
-            pipeline_live_session_id,
-            pipeline_live_sessions,
-            source_lang,
-            target_langs,
-            rx,
-            pipeline_cfg,
-        )
-        .await;
+        pipeline::start_stt_pipelines(session, rx).await;
     });
     tracing::info!(
         live_session_id = %live_session_id,
@@ -381,12 +415,20 @@ async fn push_face_frame(live_sessions: &LiveSessions, live_session_id: &str, da
     locked.push_video_frame(&jpeg_bytes);
 }
 
-async fn teardown_session(
-    live_sessions: &LiveSessions,
-    live_session_id: &str,
-    workers_api: &Arc<WorkersApi>,
+struct TeardownArgs<'a> {
+    live_sessions: &'a LiveSessions,
+    live_session_id: &'a str,
+    workers_api: &'a Arc<WorkersApi>,
     ffmpeg_monitor_stop: Arc<AtomicBool>,
-) {
+}
+
+async fn teardown_session(args: TeardownArgs<'_>) {
+    let TeardownArgs {
+        live_sessions,
+        live_session_id,
+        workers_api,
+        ffmpeg_monitor_stop,
+    } = args;
     ffmpeg_monitor_stop.store(true, Ordering::Release);
     let Some((_, live_session)) = live_sessions.remove(live_session_id) else {
         return;

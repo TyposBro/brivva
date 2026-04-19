@@ -440,7 +440,15 @@ impl RtmpManager {
         let v_sid = args.stream_id.clone();
         let video_handle = thread::Builder::new()
             .name(format!("video-drain-{}", args.stream_id))
-            .spawn(move || video_drain_loop(v_sid, v_buf, stdin, delay, v_stop))
+            .spawn(move || {
+                video_drain_loop(VideoDrainCtx {
+                    stream_id: v_sid,
+                    video_buf: v_buf,
+                    stdin,
+                    delay,
+                    stop: v_stop,
+                })
+            })
             .map_err(|e| format!("Video thread spawn failed: {}", e))?;
 
         // Audio drain
@@ -571,13 +579,22 @@ pub fn spawn_health_monitor(
 // past `delay`, keep the latest one, then write it (or repeat the previous
 // frame if nothing is ready yet).
 
-fn video_drain_loop(
+struct VideoDrainCtx {
     stream_id: String,
     video_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    mut stdin: std::process::ChildStdin,
+    stdin: std::process::ChildStdin,
     delay: Duration,
     stop: Arc<AtomicBool>,
-) {
+}
+
+fn video_drain_loop(ctx: VideoDrainCtx) {
+    let VideoDrainCtx {
+        stream_id,
+        video_buf,
+        mut stdin,
+        delay,
+        stop,
+    } = ctx;
     let mut last_frame: Option<Vec<u8>> = None;
     let mut tick_count: u64 = 0;
     let mut next_tick = Instant::now() + FRAME_INTERVAL;
@@ -684,9 +701,19 @@ fn audio_drain_loop(ctx: AudioDrainCtx) {
         let actual = wait_for_tick(&mut next_tick);
         tick_count += 1;
 
-        drain_aged_host_audio(&host_buf, &mut ready_host, actual, delay);
+        drain_aged_host_audio(DrainHostArgs {
+            host_buf: &host_buf,
+            ready_host: &mut ready_host,
+            now: actual,
+            delay,
+        });
         let host_chunk = take_tick_sample(&mut ready_host);
-        let output = build_tick_output(host_chunk, is_source, host_gain, &tts_queue);
+        let output = build_tick_output(TickOutputArgs {
+            host_chunk,
+            is_source,
+            host_gain,
+            tts_queue: &tts_queue,
+        });
 
         let bytes = if output.is_empty() { &silence_chunk } else { &output };
         if fifo.write_all(bytes).is_err() {
@@ -726,17 +753,19 @@ fn wait_for_tick(next_tick: &mut Instant) -> Instant {
     actual
 }
 
-fn drain_aged_host_audio(
-    host_buf: &StdMutex<VecDeque<TimedChunk>>,
-    ready_host: &mut Vec<u8>,
+struct DrainHostArgs<'a> {
+    host_buf: &'a StdMutex<VecDeque<TimedChunk>>,
+    ready_host: &'a mut Vec<u8>,
     now: Instant,
     delay: Duration,
-) {
-    let mut buf = host_buf.lock().unwrap();
+}
+
+fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
+    let mut buf = args.host_buf.lock().unwrap();
     while let Some((ts, _)) = buf.front() {
-        if *ts + delay <= now {
+        if *ts + args.delay <= args.now {
             let (_, pcm) = buf.pop_front().unwrap();
-            ready_host.extend_from_slice(&pcm);
+            args.ready_host.extend_from_slice(&pcm);
         } else {
             break;
         }
@@ -752,12 +781,20 @@ fn take_tick_sample(ready_host: &mut Vec<u8>) -> Vec<u8> {
     chunk
 }
 
-fn build_tick_output(
+struct TickOutputArgs<'a> {
     host_chunk: Vec<u8>,
     is_source: bool,
     host_gain: f32,
-    tts_queue: &StdMutex<VecDeque<u8>>,
-) -> Vec<u8> {
+    tts_queue: &'a StdMutex<VecDeque<u8>>,
+}
+
+fn build_tick_output(args: TickOutputArgs<'_>) -> Vec<u8> {
+    let TickOutputArgs {
+        host_chunk,
+        is_source,
+        host_gain,
+        tts_queue,
+    } = args;
     if is_source {
         // Source streams never queue TTS — skip the mix entirely.
         if (host_gain - 1.0).abs() < f32::EPSILON {
