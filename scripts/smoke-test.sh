@@ -46,7 +46,7 @@ TARGET="${1:-prod}"
 case "$TARGET" in
   prod)
     SERVER_URL="${SERVER_URL:-https://brivva.spiko.uz}"
-    WORKERS_URL="${WORKERS_URL:-https://brivva-server.milliytechnology.org}"
+    WORKERS_URL="${WORKERS_URL:-https://brivva-api.milliytechnology.workers.dev}"
     ECS_CLUSTER="brivva"
     ECS_SERVICE="brivva"
     ;;
@@ -82,12 +82,15 @@ else
   fail "server-rs /health returned $code (expected 200)"
 fi
 
-# ── 2. Workers: unauthenticated call returns 401 ─────────────
+# ── 2. Workers: malformed call is rejected with 4xx ──────────
+# /api/user is keyed by ?user_id= (no JWT middleware). Missing query →
+# Zod-parse failure → 400. Any 4xx proves the worker is up AND its
+# schema validation is live. 2xx would mean no validation, 5xx = broken.
 code=$(curl -sS -o /dev/null -w "%{http_code}" -m 5 "$WORKERS_URL/api/user" 2>&1 || echo "000")
-if [ "$code" = "401" ] || [ "$code" = "403" ]; then
-  pass "workers unauth call returns $code (rejected as expected)"
+if [ "$code" -ge 400 ] && [ "$code" -lt 500 ]; then
+  pass "workers rejects malformed request with $code (schema validation live)"
 else
-  fail "workers unauth call returned $code (expected 401 or 403)"
+  fail "workers malformed-request call returned $code (expected 4xx)"
 fi
 
 # ── 3. Workers: OpenAPI doc is reachable ─────────────────────

@@ -10,6 +10,10 @@ coverage/
 # Rust
 target/
 
+# Dev loop script output
+.test-logs/
+.dev-logs/
+
 # Terraform
 **/.terraform/
 *.tfstate

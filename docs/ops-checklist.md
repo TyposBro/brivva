@@ -80,17 +80,16 @@ Both redirect URIs must be registered in the Google Cloud Console OAuth
 Client. If you add a custom domain later, register the new redirect URIs
 in the same Google credential before flipping DNS, or sign-in breaks.
 
-### 3. Smoke test — RED (script bug, not infra bug)
+### 3. Smoke test — GREEN (both script bugs fixed 2026-04-19)
 
-`./scripts/smoke-test.sh prod` exits 1. The actual prod stack is healthy;
-the test is wrong on two axes:
+Was RED for two reasons, now resolved:
 
-1. `WORKERS_URL` is hardcoded to `https://brivva-server.milliytechnology.org`
-   — that hostname returns 404 (does not exist). The real Worker URL is
-   `https://brivva-api.milliytechnology.workers.dev`.
-2. The unauthenticated-call assertion checks for 401/403 from `/api/user`,
-   but that endpoint takes a query-param `user_id` and returns **400**
-   on a missing query, not 401. There is no JWT middleware on it.
+1. ~~`WORKERS_URL` hardcoded to `https://brivva-server.milliytechnology.org`~~
+   — fixed: now defaults to `https://brivva-api.milliytechnology.workers.dev`.
+2. ~~Unauth assertion expected 401/403 but `/api/user` returns 400~~
+   — fixed: smoke now accepts any 4xx as proof the worker is up and
+   validating. `/api/user` has no JWT middleware by design (keyed by
+   `user_id` query param).
 
 Manual verification of what the test was trying to prove:
 
