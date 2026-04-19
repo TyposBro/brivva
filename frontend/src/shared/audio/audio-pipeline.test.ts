@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { AudioPipeline } from "./AudioPipeline";
+import { AudioPipeline } from "./audio-pipeline";
 
 type ProcessorStub = {
   onaudioprocess: ((e: { inputBuffer: { getChannelData: (ch: number) => Float32Array } }) => void) | null;
