@@ -263,8 +263,15 @@ resource "aws_ecs_service" "app" {
     assign_public_ip = true
   }
 
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  # ECS auto-rolls back failed task-def revisions per docs/runbook.md. Set
+  # manually in prod before this block existed; capturing here to match.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   # deploy.sh runs `update-service --force-new-deployment` to roll new image.
   # Ignore runtime drift so `terraform apply` doesn't fight CI deploys.
