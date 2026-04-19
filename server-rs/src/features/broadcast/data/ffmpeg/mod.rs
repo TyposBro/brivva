@@ -662,14 +662,9 @@ fn audio_drain_loop(ctx: AudioDrainCtx) {
         stop,
     } = ctx;
 
-    let mut fifo = match std::fs::OpenOptions::new().write(true).open(&fifo_path) {
-        Ok(f) => f,
-        Err(e) => {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
-            }
-            return;
-        }
+    let mut fifo = match open_audio_fifo(&fifo_path, &stream_id, &stop) {
+        Some(f) => f,
+        None => return,
     };
 
     let silence_chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
@@ -685,67 +680,16 @@ fn audio_drain_loop(ctx: AudioDrainCtx) {
         host_gain
     );
 
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-
-        let now = Instant::now();
-        if next_tick > now {
-            thread::sleep(next_tick - now);
-        }
-        let actual = Instant::now();
-        next_tick += AUDIO_TICK;
+    while !stop.load(Ordering::Acquire) {
+        let actual = wait_for_tick(&mut next_tick);
         tick_count += 1;
 
-        // Ingest any host chunks whose delay has elapsed.
-        {
-            let mut buf = host_buf.lock().unwrap();
-            while let Some((ts, _)) = buf.front() {
-                if *ts + delay <= actual {
-                    let (_, pcm) = buf.pop_front().unwrap();
-                    ready_host.extend_from_slice(&pcm);
-                } else {
-                    break;
-                }
-            }
-        }
+        drain_aged_host_audio(&host_buf, &mut ready_host, actual, delay);
+        let host_chunk = take_tick_sample(&mut ready_host);
+        let output = build_tick_output(host_chunk, is_source, host_gain, &tts_queue);
 
-        // Take this tick's host PCM, pad with silence if short.
-        let host_take = AUDIO_BYTES_PER_TICK.min(ready_host.len());
-        let mut host_chunk: Vec<u8> = ready_host.drain(..host_take).collect();
-        if host_chunk.len() < AUDIO_BYTES_PER_TICK {
-            host_chunk.resize(AUDIO_BYTES_PER_TICK, 0);
-        }
-
-        let output = if is_source {
-            // Source streams never queue TTS — skip the mix entirely.
-            // host_gain usually 1.0 here; if a user picked something lower
-            // the stream will simply sound quieter, which is fine.
-            if (host_gain - 1.0).abs() < f32::EPSILON {
-                host_chunk
-            } else {
-                apply_gain(&host_chunk, host_gain)
-            }
-        } else {
-            let tts_chunk: Vec<u8> = {
-                let mut q = tts_queue.lock().unwrap();
-                let n = AUDIO_BYTES_PER_TICK.min(q.len());
-                q.drain(..n).collect()
-            };
-            let mut tts_padded = tts_chunk;
-            if tts_padded.len() < AUDIO_BYTES_PER_TICK {
-                tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
-            }
-            mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0)
-        };
-
-        let write_result = if output.is_empty() {
-            fifo.write_all(&silence_chunk)
-        } else {
-            fifo.write_all(&output)
-        };
-        if write_result.is_err() {
+        let bytes = if output.is_empty() { &silence_chunk } else { &output };
+        if fifo.write_all(bytes).is_err() {
             if !stop.load(Ordering::Acquire) {
                 eprintln!("[AUDIO:{}] write error, exiting", stream_id);
             }
@@ -758,5 +702,79 @@ fn audio_drain_loop(ctx: AudioDrainCtx) {
         "[AUDIO:{}] drain exited after {} ticks",
         stream_id, tick_count
     );
+}
+
+fn open_audio_fifo(path: &str, stream_id: &str, stop: &AtomicBool) -> Option<std::fs::File> {
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            if !stop.load(Ordering::Acquire) {
+                eprintln!("[AUDIO:{}] failed to open FIFO: {}", stream_id, e);
+            }
+            None
+        }
+    }
+}
+
+fn wait_for_tick(next_tick: &mut Instant) -> Instant {
+    let now = Instant::now();
+    if *next_tick > now {
+        thread::sleep(*next_tick - now);
+    }
+    let actual = Instant::now();
+    *next_tick += AUDIO_TICK;
+    actual
+}
+
+fn drain_aged_host_audio(
+    host_buf: &StdMutex<VecDeque<TimedChunk>>,
+    ready_host: &mut Vec<u8>,
+    now: Instant,
+    delay: Duration,
+) {
+    let mut buf = host_buf.lock().unwrap();
+    while let Some((ts, _)) = buf.front() {
+        if *ts + delay <= now {
+            let (_, pcm) = buf.pop_front().unwrap();
+            ready_host.extend_from_slice(&pcm);
+        } else {
+            break;
+        }
+    }
+}
+
+fn take_tick_sample(ready_host: &mut Vec<u8>) -> Vec<u8> {
+    let take = AUDIO_BYTES_PER_TICK.min(ready_host.len());
+    let mut chunk: Vec<u8> = ready_host.drain(..take).collect();
+    if chunk.len() < AUDIO_BYTES_PER_TICK {
+        chunk.resize(AUDIO_BYTES_PER_TICK, 0);
+    }
+    chunk
+}
+
+fn build_tick_output(
+    host_chunk: Vec<u8>,
+    is_source: bool,
+    host_gain: f32,
+    tts_queue: &StdMutex<VecDeque<u8>>,
+) -> Vec<u8> {
+    if is_source {
+        // Source streams never queue TTS — skip the mix entirely.
+        if (host_gain - 1.0).abs() < f32::EPSILON {
+            host_chunk
+        } else {
+            apply_gain(&host_chunk, host_gain)
+        }
+    } else {
+        let mut tts_padded: Vec<u8> = {
+            let mut q = tts_queue.lock().unwrap();
+            let n = AUDIO_BYTES_PER_TICK.min(q.len());
+            q.drain(..n).collect()
+        };
+        if tts_padded.len() < AUDIO_BYTES_PER_TICK {
+            tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
+        }
+        mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0)
+    }
 }
 

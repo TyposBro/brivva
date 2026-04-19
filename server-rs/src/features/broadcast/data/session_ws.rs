@@ -14,9 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::core::contracts::workers::SessionBundle;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::data::{auth, pipeline};
-use crate::features::broadcast::domain::{Lang, LiveSession, PipelineConfig, SessionQuery};
+use crate::features::broadcast::domain::{Lang, LiveSession, LiveSessions, PipelineConfig, SessionQuery};
 use crate::orchestration::state::AppState;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
@@ -29,38 +30,41 @@ pub async fn session_ws_handler(
 }
 
 async fn handle_host_socket(socket: WebSocket, state: AppState, query: SessionQuery) {
-    // Auth gate — host must present a valid Workers-signed JWT.
-    let token = match query.token.as_deref() {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            tracing::warn!("ws host upgrade rejected: missing token");
-            return;
-        }
+    let Some(claims) = authenticate(&state, &query) else {
+        return;
     };
-    let claims = match auth::verify(token, &state.config.jwt_secret) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "ws host upgrade rejected: jwt verify failed");
-            return;
-        }
-    };
-
     let source_lang = query
         .source_lang
         .as_deref()
         .and_then(Lang::from_str)
         .unwrap_or(Lang::En);
-
     let (sender, receiver) = socket.split();
-    handle_host(
+    handle_host(HostSocket {
         sender,
         receiver,
         state,
-        claims.sub,
+        user_id: claims.sub,
         source_lang,
-        query.session_id,
-    )
+        session_id: query.session_id,
+    })
     .await;
+}
+
+fn authenticate(state: &AppState, query: &SessionQuery) -> Option<auth::Claims> {
+    let token = match query.token.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            tracing::warn!("ws host upgrade rejected: missing token");
+            return None;
+        }
+    };
+    match auth::verify(token, &state.config.jwt_secret) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "ws host upgrade rejected: jwt verify failed");
+            None
+        }
+    }
 }
 
 fn generate_live_session_id() -> String {
@@ -85,131 +89,48 @@ fn next_available_live_session_id(live_sessions: &dashmap::DashMap<String, LiveS
 
 // ── Host Flow ─────────────────────────────────────────────
 
-async fn handle_host(
-    mut sender: SplitSink<WebSocket, Message>,
-    mut receiver: SplitStream<WebSocket>,
+struct HostSocket {
+    sender: SplitSink<WebSocket, Message>,
+    receiver: SplitStream<WebSocket>,
     state: AppState,
     user_id: String,
     source_lang: Lang,
     session_id: Option<String>,
-) {
-    let live_sessions = state.live_sessions.clone();
+}
+
+async fn handle_host(mut socket: HostSocket) {
+    let live_sessions = socket.state.live_sessions.clone();
     let live_session_id = next_available_live_session_id(&live_sessions);
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
-
-    let pipeline_config = Arc::new(PipelineConfig {
-        soniox_api_key: state.config.soniox_api_key.clone(),
-        soniox_ws_url: state.config.soniox_ws_url.clone(),
-        elevenlabs_api_key: state.config.elevenlabs_api_key.clone(),
-        elevenlabs_base_url: state.config.elevenlabs_base_url.clone(),
-    });
     let workers_api = Arc::new(WorkersApi::new(
-        &state.config.workers_api_url,
-        &state.config.internal_secret,
+        &socket.state.config.workers_api_url,
+        &socket.state.config.internal_secret,
     ));
 
     let mut live_session = LiveSession::new(
         live_session_id.clone(),
-        source_lang.clone(),
-        session_id.clone(),
-        pipeline_config,
+        socket.source_lang.clone(),
+        socket.session_id.clone(),
+        pipeline_config_from(&socket.state),
     );
     live_session.host_tx = Some(host_tx);
 
     let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));
 
-    // Session context lives in Workers/D1. Fetch the bundle + start FFmpeg per stream.
-    if let Some(ref sid) = session_id {
-        match workers_api.fetch_session_bundle(sid).await {
-            Ok(bundle) => {
-                if bundle.session.user_id != user_id {
-                    tracing::warn!(
-                        session_id = %sid,
-                        owner_user_id = %bundle.session.user_id,
-                        jwt_user_id = %user_id,
-                        "ws host upgrade rejected: session owner mismatch"
-                    );
-                    return;
-                }
-
-                if let Some(v) = bundle.voice {
-                    live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
-                }
-
-                if !bundle.streams.is_empty() {
-                    let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
-                    let mut rtmp_langs = Vec::new();
-                    for s in &bundle.streams {
-                        let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key)
-                        else {
-                            continue;
-                        };
-                        let full_url = if stream_key.is_empty() {
-                            rtmp_url.clone()
-                        } else {
-                            format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
-                        };
-                        let is_source = Lang::from_str(&s.lang).is_some_and(|l| l == source_lang);
-                        if let Err(e) = manager.start_stream(
-                            &s.id,
-                            &s.lang,
-                            &full_url,
-                            s.delay_ms,
-                            is_source,
-                            s.host_gain.clamp(0.0, 1.0),
-                        ) {
-                            tracing::error!(
-                                stream_id = %s.id,
-                                lang = %s.lang,
-                                error = %e,
-                                "rtmp stream start failed"
-                            );
-                        } else if let Some(lang) = Lang::from_str(&s.lang) {
-                            rtmp_langs.push(lang);
-                        }
-                    }
-                    let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
-                    live_session.rtmp_manager = Some(shared_mgr.clone());
-                    live_session.rtmp_langs = rtmp_langs;
-                    tracing::info!(
-                        session_id = %sid,
-                        stream_count = bundle.streams.len(),
-                        langs = ?live_session.rtmp_langs,
-                        "ffmpeg rtmp streams started"
-                    );
-                    let _health_monitor =
-                        crate::features::broadcast::data::ffmpeg::spawn_health_monitor(
-                            shared_mgr,
-                            ffmpeg_monitor_stop.clone(),
-                        );
-                }
-
-                // Best-effort status update — don't block WS on the write.
-                let sid_clone = sid.clone();
-                let live_session_id_clone = live_session_id.clone();
-                let workers_for_update = workers_api.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = workers_for_update
-                        .update_session_status(
-                            &sid_clone,
-                            "live",
-                            Some(&live_session_id_clone),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %sid_clone,
-                            error = %e,
-                            "workers status=live update failed"
-                        );
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::error!(session_id = %sid, error = %e, "session bundle fetch failed");
-                return;
-            }
+    if let Some(ref sid) = socket.session_id {
+        let outcome = bootstrap_session(
+            &workers_api,
+            sid,
+            &socket.user_id,
+            &socket.source_lang,
+            &mut live_session,
+            &live_session_id,
+            ffmpeg_monitor_stop.clone(),
+        )
+        .await;
+        if matches!(outcome, BootstrapOutcome::Abort) {
+            return;
         }
     }
 
@@ -217,112 +138,275 @@ async fn handle_host(
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = host_rx.recv().await {
-            if sender.send(msg).await.is_err() {
+            if socket.sender.send(msg).await.is_err() {
                 break;
             }
         }
     });
 
     let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
-
-    while let Some(Ok(msg)) = receiver.next().await {
+    while let Some(Ok(msg)) = socket.receiver.next().await {
         match msg {
             Message::Binary(data) => {
-                if audio_tx.is_none() {
-                    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
-                    audio_tx = Some(tx);
-                    let pipeline_live_sessions = live_sessions.clone();
-                    let pipeline_live_session_id = live_session_id.clone();
-                    let source_lang = source_lang.clone();
-                    let (target_langs, pipeline_cfg) = live_sessions
-                        .get(&live_session_id)
-                        .map(|r| (r.rtmp_langs.clone(), r.pipeline_config.clone()))
-                        .unwrap_or_else(|| (Vec::new(), Arc::new(Default::default())));
-                    tokio::spawn(async move {
-                        pipeline::start_stt_pipelines(
-                            pipeline_live_session_id,
-                            pipeline_live_sessions,
-                            source_lang,
-                            target_langs,
-                            rx,
-                            pipeline_cfg,
-                        )
-                        .await;
-                    });
-                    tracing::info!(
-                        live_session_id = %live_session_id,
-                        "first host audio received, STT pipelines spawned"
-                    );
-                }
-                if let Some(ref tx) = audio_tx {
-                    let _ = tx.try_send(data.to_vec());
-                }
-                // Also feed the per-stream RTMP mixer so delayed host audio
-                // is available to underlay the translated TTS.
-                let rtmp_mgr = live_sessions
-                    .get(&live_session_id)
-                    .and_then(|r| r.rtmp_manager.clone());
-                if let Some(mgr) = rtmp_mgr {
-                    let bytes = data.to_vec();
-                    tokio::spawn(async move {
-                        mgr.lock().await.push_host_audio(&bytes);
-                    });
-                }
+                handle_binary(
+                    data.to_vec(),
+                    &live_sessions,
+                    &live_session_id,
+                    &socket.source_lang,
+                    &mut audio_tx,
+                );
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
                     break;
                 }
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    // Face video: push directly to FFmpeg. No preview, no guest broadcast.
-                    if let Some("face:frame") = json.get("type").and_then(|v| v.as_str())
-                        && let Some(data) = json.get("data").and_then(|v| v.as_str())
-                    {
-                        let rtmp_mgr = live_sessions
-                            .get(&live_session_id)
-                            .and_then(|r| r.rtmp_manager.clone());
-                        if let Some(mgr) = rtmp_mgr {
-                            use base64::Engine;
-                            if let Ok(jpeg_bytes) =
-                                base64::engine::general_purpose::STANDARD.decode(data)
-                            {
-                                let locked = mgr.lock().await;
-                                locked.push_video_frame(&jpeg_bytes);
-                            }
-                        }
-                    }
-                }
+                handle_text(&text, &live_sessions, &live_session_id).await;
             }
             Message::Close(_) => break,
             _ => {}
         }
     }
 
-    ffmpeg_monitor_stop.store(true, Ordering::Release);
-
-    if let Some((_, live_session)) = live_sessions.remove(&live_session_id) {
-        if let Some(manager) = live_session.rtmp_manager {
-            let mut mgr = manager.lock().await;
-            mgr.stop_all().await;
-        }
-
-        if let Some(sid) = live_session.session_id {
-            let workers_for_end = workers_api.clone();
-            tokio::spawn(async move {
-                if let Err(e) = workers_for_end.update_session_status(&sid, "ended", None).await {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %e,
-                        "workers status=ended update failed"
-                    );
-                }
-            });
-        }
-    }
-
+    teardown_session(
+        &live_sessions,
+        &live_session_id,
+        &workers_api,
+        ffmpeg_monitor_stop,
+    )
+    .await;
     send_task.abort();
     tracing::info!(live_session_id = %live_session_id, "live session closed");
+}
+
+fn pipeline_config_from(state: &AppState) -> Arc<PipelineConfig> {
+    Arc::new(PipelineConfig {
+        soniox_api_key: state.config.soniox_api_key.clone(),
+        soniox_ws_url: state.config.soniox_ws_url.clone(),
+        elevenlabs_api_key: state.config.elevenlabs_api_key.clone(),
+        elevenlabs_base_url: state.config.elevenlabs_base_url.clone(),
+    })
+}
+
+enum BootstrapOutcome {
+    Continue,
+    Abort,
+}
+
+async fn bootstrap_session(
+    workers_api: &Arc<WorkersApi>,
+    sid: &str,
+    user_id: &str,
+    source_lang: &Lang,
+    live_session: &mut LiveSession,
+    live_session_id: &str,
+    ffmpeg_monitor_stop: Arc<AtomicBool>,
+) -> BootstrapOutcome {
+    let bundle = match workers_api.fetch_session_bundle(sid).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(session_id = %sid, error = %e, "session bundle fetch failed");
+            return BootstrapOutcome::Abort;
+        }
+    };
+
+    if bundle.session.user_id != user_id {
+        tracing::warn!(
+            session_id = %sid,
+            owner_user_id = %bundle.session.user_id,
+            jwt_user_id = %user_id,
+            "ws host upgrade rejected: session owner mismatch"
+        );
+        return BootstrapOutcome::Abort;
+    }
+
+    if let Some(v) = bundle.voice.clone() {
+        live_session.selected_voice_id = Some(v.elevenlabs_voice_id);
+    }
+
+    start_rtmp_streams(&bundle, source_lang, live_session, sid, ffmpeg_monitor_stop);
+    spawn_live_status_update(workers_api.clone(), sid.to_string(), live_session_id.to_string());
+    BootstrapOutcome::Continue
+}
+
+fn start_rtmp_streams(
+    bundle: &SessionBundle,
+    source_lang: &Lang,
+    live_session: &mut LiveSession,
+    sid: &str,
+    ffmpeg_monitor_stop: Arc<AtomicBool>,
+) {
+    if bundle.streams.is_empty() {
+        return;
+    }
+    let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
+    let mut rtmp_langs = Vec::new();
+    for s in &bundle.streams {
+        let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
+            continue;
+        };
+        let full_url = if stream_key.is_empty() {
+            rtmp_url.clone()
+        } else {
+            format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
+        };
+        let is_source = Lang::from_str(&s.lang).is_some_and(|l| &l == source_lang);
+        if let Err(e) = manager.start_stream(
+            &s.id,
+            &s.lang,
+            &full_url,
+            s.delay_ms,
+            is_source,
+            s.host_gain.clamp(0.0, 1.0),
+        ) {
+            tracing::error!(
+                stream_id = %s.id,
+                lang = %s.lang,
+                error = %e,
+                "rtmp stream start failed"
+            );
+        } else if let Some(lang) = Lang::from_str(&s.lang) {
+            rtmp_langs.push(lang);
+        }
+    }
+    let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
+    live_session.rtmp_manager = Some(shared_mgr.clone());
+    live_session.rtmp_langs = rtmp_langs;
+    tracing::info!(
+        session_id = %sid,
+        stream_count = bundle.streams.len(),
+        langs = ?live_session.rtmp_langs,
+        "ffmpeg rtmp streams started"
+    );
+    let _health_monitor = crate::features::broadcast::data::ffmpeg::spawn_health_monitor(
+        shared_mgr,
+        ffmpeg_monitor_stop,
+    );
+}
+
+fn spawn_live_status_update(
+    workers_api: Arc<WorkersApi>,
+    sid: String,
+    live_session_id: String,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = workers_api
+            .update_session_status(&sid, "live", Some(&live_session_id))
+            .await
+        {
+            tracing::warn!(
+                session_id = %sid,
+                error = %e,
+                "workers status=live update failed"
+            );
+        }
+    });
+}
+
+fn handle_binary(
+    data: Vec<u8>,
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+    source_lang: &Lang,
+    audio_tx: &mut Option<mpsc::Sender<Vec<u8>>>,
+) {
+    if audio_tx.is_none() {
+        *audio_tx = Some(spawn_stt_pipeline(live_sessions, live_session_id, source_lang));
+    }
+    if let Some(tx) = audio_tx.as_ref() {
+        let _ = tx.try_send(data.clone());
+    }
+    let rtmp_mgr = live_sessions
+        .get(live_session_id)
+        .and_then(|r| r.rtmp_manager.clone());
+    if let Some(mgr) = rtmp_mgr {
+        tokio::spawn(async move {
+            mgr.lock().await.push_host_audio(&data);
+        });
+    }
+}
+
+fn spawn_stt_pipeline(
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+    source_lang: &Lang,
+) -> mpsc::Sender<Vec<u8>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+    let (target_langs, pipeline_cfg) = live_sessions
+        .get(live_session_id)
+        .map(|r| (r.rtmp_langs.clone(), r.pipeline_config.clone()))
+        .unwrap_or_else(|| (Vec::new(), Arc::new(PipelineConfig::default())));
+    let pipeline_live_sessions = live_sessions.clone();
+    let pipeline_live_session_id = live_session_id.to_string();
+    let source_lang = source_lang.clone();
+    tokio::spawn(async move {
+        pipeline::start_stt_pipelines(
+            pipeline_live_session_id,
+            pipeline_live_sessions,
+            source_lang,
+            target_langs,
+            rx,
+            pipeline_cfg,
+        )
+        .await;
+    });
+    tracing::info!(
+        live_session_id = %live_session_id,
+        "first host audio received, STT pipelines spawned"
+    );
+    tx
+}
+
+async fn handle_text(text: &str, live_sessions: &LiveSessions, live_session_id: &str) {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    // Face video: push directly to FFmpeg. No preview, no guest broadcast.
+    if let Some("face:frame") = json.get("type").and_then(|v| v.as_str())
+        && let Some(data) = json.get("data").and_then(|v| v.as_str())
+    {
+        push_face_frame(live_sessions, live_session_id, data).await;
+    }
+}
+
+async fn push_face_frame(live_sessions: &LiveSessions, live_session_id: &str, data: &str) {
+    let rtmp_mgr = live_sessions
+        .get(live_session_id)
+        .and_then(|r| r.rtmp_manager.clone());
+    let Some(mgr) = rtmp_mgr else { return };
+    use base64::Engine;
+    let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return;
+    };
+    let locked = mgr.lock().await;
+    locked.push_video_frame(&jpeg_bytes);
+}
+
+async fn teardown_session(
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+    workers_api: &Arc<WorkersApi>,
+    ffmpeg_monitor_stop: Arc<AtomicBool>,
+) {
+    ffmpeg_monitor_stop.store(true, Ordering::Release);
+    let Some((_, live_session)) = live_sessions.remove(live_session_id) else {
+        return;
+    };
+    if let Some(manager) = live_session.rtmp_manager {
+        let mut mgr = manager.lock().await;
+        mgr.stop_all().await;
+    }
+    if let Some(sid) = live_session.session_id {
+        let workers_for_end = workers_api.clone();
+        tokio::spawn(async move {
+            if let Err(e) = workers_for_end.update_session_status(&sid, "ended", None).await {
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "workers status=ended update failed"
+                );
+            }
+        });
+    }
 }
 
 #[cfg(test)]
