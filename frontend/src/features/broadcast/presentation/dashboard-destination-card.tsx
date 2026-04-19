@@ -5,12 +5,14 @@ import {
   ExternalLink,
   Globe,
   Monitor,
+  Sliders,
   Tv,
   X,
   Youtube,
 } from "lucide-react";
 import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
+import { isStreamDefault } from "../../../core/config/stream-defaults";
 
 export type Destination = {
   uid: string;
@@ -232,6 +234,15 @@ export function DestinationCard(props: {
     const p = api.PLATFORMS.find((x) => x.id === dest.platform);
     return !!(p && !p.auto && !savedCreds[dest.platform]);
   });
+  // Pre-expand timing sliders only when the user has already overridden a
+  // default — otherwise the curated stream-default is correct and we hide it
+  // behind an "Advanced" toggle to keep the card compact.
+  const [advancedOpen, setAdvancedOpen] = useState(() =>
+    !isStreamDefault(sourceLang, dest.lang, {
+      delay_ms: dest.delay_ms,
+      host_gain: dest.host_gain,
+    }),
+  );
   const platform = api.PLATFORMS.find((p) => p.id === dest.platform);
   if (!platform) return null;
   const needsConfig = !platform.auto;
@@ -244,7 +255,23 @@ export function DestinationCard(props: {
         savedCreds={savedCreds} expanded={expanded} setExpanded={setExpanded}
         onUpdate={onUpdate} onRemove={onRemove}
       />
-      <TimingSliders dest={dest} sourceLang={sourceLang} onUpdate={onUpdate} />
+
+      <button
+        className="w-full flex items-center gap-2 px-4 py-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors text-[11px] font-label uppercase tracking-widest"
+        onClick={() => setAdvancedOpen((v) => !v)}
+      >
+        <Sliders className="w-3 h-3" />
+        Advanced
+        {advancedOpen ? (
+          <ChevronDown className="w-3 h-3 ml-auto" />
+        ) : (
+          <ChevronRight className="w-3 h-3 ml-auto" />
+        )}
+      </button>
+
+      {advancedOpen && (
+        <TimingSliders dest={dest} sourceLang={sourceLang} onUpdate={onUpdate} />
+      )}
       {needsConfig && expanded && (
         <ConfigPanel dest={dest} platform={platform} hasSavedCreds={hasSavedCreds} onUpdate={onUpdate} />
       )}

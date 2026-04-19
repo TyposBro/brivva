@@ -5,6 +5,7 @@ import DashboardPage from "../features/broadcast/presentation/dashboard-page";
 import SessionPage from "../features/broadcast/presentation/session-page";
 import SessionSetupPage from "../features/broadcast/presentation/session-setup-page";
 import SessionLivePage from "../features/broadcast/presentation/session-live-page";
+import OnboardingPage from "../features/broadcast/presentation/onboarding-page";
 import PrivacyPage from "../features/public/presentation/privacy-page";
 import TermsPage from "../features/public/presentation/terms-page";
 
@@ -14,6 +15,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/host" element={<HostPage />} />
+        <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/session/:id" element={<SessionPage />} />
         <Route path="/session/:id/setup" element={<SessionSetupPage />} />

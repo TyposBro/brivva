@@ -1,8 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Mic,
-  Trash2,
   Plus,
   Radio,
   X,
@@ -16,17 +14,16 @@ import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
 import { SignInGate } from "../../../shared/auth/sign-in-gate";
 import { useAuth } from "../../../shared/auth/use-auth";
+import { streamDefault } from "../../../core/config/stream-defaults";
+import { readDefaultTargetLang } from "../../../core/config/default-target-lang";
+import { fetchOnboardingState } from "../data/onboarding-api";
 import {
   DestinationCard,
   PlatformIcon,
   type Destination,
 } from "./dashboard-destination-card";
-
-// ── Types ──────────────────────────────────────────────
-
-const DEFAULT_DELAY_MS = 2000;
-const DEFAULT_HOST_GAIN_TARGET = 0.2;
-const DEFAULT_HOST_GAIN_SOURCE = 1.0;
+import { YourVoiceSection } from "./your-voice-section";
+import { QuoteModal } from "./quote-modal";
 
 // ── Region grouping for the picker ─────────────────────
 
@@ -46,6 +43,12 @@ export default function DashboardPage() {
       <DashboardInner />
     </SignInGate>
   );
+}
+
+function pickFallbackLang(sourceLang: string): string {
+  const stored = readDefaultTargetLang();
+  if (stored && stored !== sourceLang) return stored;
+  return sourceLang === "en" ? "ja" : "en";
 }
 
 function DashboardInner() {
@@ -71,6 +74,7 @@ function DashboardInner() {
   const [error, setError] = useState("");
   const [privacyStatus, setPrivacyStatus] = useState("unlisted");
   const [magicPaste, setMagicPaste] = useState("");
+  const [quoteSessionId, setQuoteSessionId] = useState<string | null>(null);
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -103,6 +107,28 @@ function DashboardInner() {
     loadData();
   }, [loadData]);
 
+  // Bounce users into the onboarding wizard until Workers reports
+  // onboarding_completed_at. The fetch lives here (not in a global gate) so
+  // the redirect happens after the SignInGate has resolved.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await fetchOnboardingState(userId);
+        if (cancelled) return;
+        if (state.onboardingCompletedAt === null) {
+          navigate("/onboarding", { replace: true });
+        }
+      } catch {
+        // Workers may not have shipped onboarding_completed_at yet — let the
+        // dashboard render normally so the demo path keeps working.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, userId]);
+
   // Close picker on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -123,8 +149,9 @@ function DashboardInner() {
     if (!platform) return;
 
     const autoLang = api.PLATFORM_LANG[platformId];
-    const lang = autoLang ?? (sourceLang === "en" ? "ja" : "en");
+    const lang = autoLang ?? pickFallbackLang(sourceLang);
     const cred = savedCreds[platformId];
+    const tuned = streamDefault(sourceLang, lang);
 
     setDestinations((prev) => [
       ...prev,
@@ -134,11 +161,8 @@ function DashboardInner() {
         lang,
         rtmp_url: cred?.rtmp_url ?? platform.defaultRtmp ?? "",
         stream_key: cred?.stream_key ?? "",
-        delay_ms: DEFAULT_DELAY_MS,
-        host_gain:
-          lang === sourceLang
-            ? DEFAULT_HOST_GAIN_SOURCE
-            : DEFAULT_HOST_GAIN_TARGET,
+        delay_ms: tuned.delay_ms,
+        host_gain: tuned.host_gain,
       },
     ]);
     setPickerOpen(false);
@@ -160,7 +184,8 @@ function DashboardInner() {
     const detected = api.detectPlatform(value);
     if (detected) {
       const autoLang = api.PLATFORM_LANG[detected.platform];
-      const destLang = autoLang ?? "en";
+      const destLang = autoLang ?? pickFallbackLang(sourceLang);
+      const tuned = streamDefault(sourceLang, destLang);
       setDestinations((prev) => [
         ...prev,
         {
@@ -169,11 +194,8 @@ function DashboardInner() {
           lang: destLang,
           rtmp_url: detected.rtmpUrl,
           stream_key: detected.streamKey,
-          delay_ms: DEFAULT_DELAY_MS,
-          host_gain:
-            destLang === sourceLang
-              ? DEFAULT_HOST_GAIN_SOURCE
-              : DEFAULT_HOST_GAIN_TARGET,
+          delay_ms: tuned.delay_ms,
+          host_gain: tuned.host_gain,
         },
       ]);
       setMagicPaste("");
@@ -253,17 +275,15 @@ function DashboardInner() {
       });
 
       if (result.errors?.length) setError(result.errors.join("; "));
-      navigate(`/session/${result.session.id}/setup`);
+      // Open the pre-stream quote modal before sending the host into the
+      // setup flow. They confirm or cancel; cancel leaves the freshly
+      // created session in place so they can resume from /dashboard later.
+      setQuoteSessionId(result.session.id);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to create session");
+    } finally {
       setCreating(false);
     }
-  };
-
-  const handleDeleteVoice = async (voiceId: string) => {
-    await api.deleteVoice(voiceId);
-    setVoices((prev) => prev.filter((v) => v.id !== voiceId));
-    if (selectedVoice === voiceId) setSelectedVoice("");
   };
 
   // ── Render ─────────────────────────────────────────
@@ -346,46 +366,16 @@ function DashboardInner() {
               )}
             </div>
 
-            {/* Voices */}
-            <div>
-              <span className="text-on-surface-variant text-xs font-label block mb-2">
-                Saved Voices
-              </span>
-              {voices.length === 0 ? (
-                <p className="text-on-surface-variant/60 text-xs">
-                  No saved voices. Record one when broadcasting.
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {voices.map((v) => (
-                    <div
-                      key={v.id}
-                      className={cn(
-                        "flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm",
-                        selectedVoice === v.id
-                          ? "bg-primary-container/20"
-                          : "bg-surface-container-high hover:bg-surface-bright"
-                      )}
-                      onClick={() => setSelectedVoice(v.id)}
-                    >
-                      <Mic className="w-3.5 h-3.5 text-primary" />
-                      <span className="text-on-surface font-label flex-1 truncate">
-                        {v.name}
-                      </span>
-                      <button
-                        className="text-on-surface-variant hover:text-error transition-colors p-0.5"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteVoice(v.id);
-                        }}
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Voice — one clone per user, Workers upserts on POST /api/voices. */}
+            <YourVoiceSection
+              userId={userId}
+              voice={voices[0] ?? null}
+              defaultName={user?.youtube_channel_name ?? "My voice"}
+              onChange={(next) => {
+                setVoices([next]);
+                setSelectedVoice(next.id);
+              }}
+            />
           </div>
         )}
 
@@ -641,6 +631,18 @@ function DashboardInner() {
           </div>
         )}
       </main>
+
+      {quoteSessionId && (
+        <QuoteModal
+          sessionId={quoteSessionId}
+          onCancel={() => setQuoteSessionId(null)}
+          onConfirm={() => {
+            const id = quoteSessionId;
+            setQuoteSessionId(null);
+            navigate(`/session/${id}/setup`);
+          }}
+        />
+      )}
     </div>
   );
 }
