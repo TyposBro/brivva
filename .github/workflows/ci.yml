@@ -53,7 +53,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: server-rs
+          # Workspace root is at repo root (Cargo.toml members=["server-rs"]);
+          # Cargo.lock + target/ live there, not under server-rs/.
+          workspaces: .
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod' }}
 
       - name: layer audit (CLAUDE.md §1.2 dependency rule)
         run: scripts/check-layers.sh
