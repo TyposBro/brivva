@@ -1,5 +1,0 @@
-rtmp:
-  readTimeout: 30s
-
-paths:
-  all_others:
