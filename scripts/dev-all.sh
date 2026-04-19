@@ -84,24 +84,31 @@ for port in "$SERVER_PORT" "$WORKERS_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
-# ── Shared secrets: source workers/.dev.vars so server-rs picks them up ─
+# ── Shared secrets: bridge .env.local + .dev.vars to server-rs env ──
+#
+# Two files on disk, different historical audiences:
+#   - `.env.local` (repo root) — server-rs historical home. Has SONIOX_API_KEY,
+#     STT/TTS/TRANSLATE keys, TUNNEL_*, and duplicates of JWT/INTERNAL.
+#   - `workers/.dev.vars` — Workers canonical source for wrangler dev.
+#
 # Workers signs JWTs with JWT_SECRET and talks to server-rs via INTERNAL_SECRET.
-# server-rs has to read the SAME values or WS/internal POSTs fail. Rather than
-# duplicate secrets across files, source .dev.vars here and export. SONIOX
-# lives in the repo-root .env (server-rs-specific historical path).
+# server-rs has to read the SAME values or WS handshakes + internal POSTs fail.
+#
+# Source order matters: `.env.local` first (seeds server-rs-only keys),
+# then `.dev.vars` LAST so any overlap (JWT_SECRET, INTERNAL_SECRET,
+# ELEVENLABS_API_KEY) takes the Workers-authoritative value. That way
+# even if the two files drift, the cross-service signing stays aligned.
 if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
   fail "workers/.dev.vars is missing — copy from .dev.vars.example + fill in secrets"
   exit 2
 fi
-# shellcheck disable=SC2046,SC2002
 set -a   # export every var sourced
-# Silence POSIX-mode failures on comment-only or blank lines.
+if [ -f "${REPO_ROOT}/.env.local" ]; then
+  # shellcheck source=/dev/null
+  . "${REPO_ROOT}/.env.local"
+fi
 # shellcheck source=/dev/null
 . "${REPO_ROOT}/workers/.dev.vars"
-if [ -f "${REPO_ROOT}/.env" ]; then
-  # shellcheck source=/dev/null
-  . "${REPO_ROOT}/.env"
-fi
 set +a
 export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
 
