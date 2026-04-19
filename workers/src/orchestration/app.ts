@@ -16,12 +16,12 @@ import {
 } from "@brivva/contracts/http";
 import { YoutubeCallbackQuerySchema } from "@brivva/contracts/oauth";
 
-import { signJwt } from "./auth";
-import * as db from "./db";
-import * as el from "./elevenlabs";
+import { signJwt } from "../shared/auth/jwt";
+import * as db from "../shared/db/db";
+import * as el from "../features/voices/elevenlabs-client";
 import { buildOpenApiDocument } from "./openapi";
-import { toUserInfo, type Env } from "./types";
-import * as yt from "./youtube";
+import { toUserInfo, type Env } from "../core/types";
+import * as yt from "../features/youtube/google-oauth-client";
 
 const app = new Hono<{ Bindings: Env }>();
 

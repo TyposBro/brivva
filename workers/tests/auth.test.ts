@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { SignJWT } from "jose";
 
-import { signJwt, verifyJwt } from "../src/auth";
+import { signJwt, verifyJwt } from "../src/shared/auth/jwt";
 
 const SECRET = "unit-test-hs256-secret-at-least-32-chars";
 

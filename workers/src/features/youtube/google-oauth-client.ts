@@ -1,7 +1,7 @@
 // Google OAuth for YouTube Live Streaming + Data API.
 // Ported from server-rs/src/youtube.rs. Keeps scope + redirect URI aligned.
 
-import type { Env } from "./types";
+import type { Env } from "../../core/types";
 
 const SCOPES =
   "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.readonly";

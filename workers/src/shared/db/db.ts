@@ -7,14 +7,14 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import * as schema from "./schema";
+import * as schema from "../../core/schema";
 import type {
   PlatformCredential,
   Session,
   StreamRecord,
   User,
   Voice,
-} from "./schema";
+} from "../../core/schema";
 
 const now = () => Math.floor(Date.now() / 1000);
 const uuid = () => crypto.randomUUID();

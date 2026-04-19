@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 
-import * as db from "../src/db";
+import * as db from "../src/shared/db/db";
 
 // D1 migrations applied + tables wiped by tests/setup.ts before each test.
 

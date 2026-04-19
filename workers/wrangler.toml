@@ -1,5 +1,5 @@
 name = "brivva-api"
-main = "src/index.ts"
+main = "src/orchestration/app.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 

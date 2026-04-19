@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:test";
 
-import app from "../src/index";
-import { verifyJwt } from "../src/auth";
+import app from "../src/orchestration/app";
+import { verifyJwt } from "../src/shared/auth/jwt";
 
 async function seedUser(id: string): Promise<void> {
   await env.DB.prepare(
