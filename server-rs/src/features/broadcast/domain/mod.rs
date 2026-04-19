@@ -49,14 +49,15 @@ impl Lang {
         }
     }
 
-    /// ElevenLabs default voice ID for this language
-    /// All premade voices support 32 languages via eleven_flash_v2_5
+    /// Default voice ID for this language — curated female voice from the
+    /// user's ElevenLabs library, not a premade default.
+    /// All support 32 languages via eleven_flash_v2_5.
     pub fn voice_id(&self) -> &'static str {
         match self {
-            Lang::En => "EXAVITQu4vr4xnSDxMaL", // Sarah
-            Lang::Ja => "pFZP5JQG7iQjIQuC4Bku", // Lily
-            Lang::Zh => "Xb7hH8MSUJpSbSDYk0k2", // Alice
-            Lang::Ko => "cgSgspJ2msm6clMCkdW9", // Jessica
+            Lang::En => "4CrZuIW9am7gYAxgo2Af",
+            Lang::Ja => "xwDy9oDEtzWzFo6FqAI9",
+            Lang::Zh => "9lHjugDhwqoxA5MhX0az",
+            Lang::Ko => "zgDzx5jLLCqEp6Fl7Kl7", // Jessica-ko
         }
     }
 }
@@ -278,6 +279,11 @@ mod tests {
 
     #[test]
     fn lang_voice_id_returns_distinct_default_per_language() {
+        assert_eq!(Lang::En.voice_id(), "4CrZuIW9am7gYAxgo2Af");
+        assert_eq!(Lang::Ja.voice_id(), "xwDy9oDEtzWzFo6FqAI9");
+        assert_eq!(Lang::Zh.voice_id(), "9lHjugDhwqoxA5MhX0az");
+        assert_eq!(Lang::Ko.voice_id(), "zgDzx5jLLCqEp6Fl7Kl7");
+
         let ids = [
             Lang::En.voice_id(),
             Lang::Ja.voice_id(),
