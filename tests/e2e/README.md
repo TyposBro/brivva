@@ -12,17 +12,20 @@ pipeline alive?**
    - three Bun stubs for **workers**, **soniox**, **elevenlabs**
 2. Driver (`driver.ts`) mints an HS256 JWT, opens a WS to `/api/session`,
    streams ~40s of 440Hz PCM + a JPEG every 2s.
-3. After the WS closes, driver runs `ffprobe` on the mediamtx RTMP output
+3. Driver also fails if it never sees `translation` + `tts_end` for the
+   Japanese target stream.
+4. After the WS closes, driver runs `ffprobe` on the translated RTMP output
    and fails if audio or video tracks are missing.
 
-Not a functional test — does not assert translation quality, caption content,
-or latency. Assertion is binary: pipeline ships bytes or it doesn't.
+Still not full E2E — does not assert translation quality, caption text burn-in,
+ducking mix ratios, or latency. But it now proves the translated TTS path is
+alive, not just host passthrough bytes.
 
 ## Stubs
 
 | Stub | Why | What it returns |
 |---|---|---|
-| `workers.ts` | server-rs fetches session context at WS upgrade via `WORKERS_API_URL` | one English stream pointing at local mediamtx |
+| `workers.ts` | server-rs fetches session context at WS upgrade via `WORKERS_API_URL` | one Japanese target stream + one cloned-voice id |
 | `soniox.ts` | avoid $$ per run + offline CI | fake translation tokens every 5s |
 | `elevenlabs.ts` | same | 2s silent MP3 |
 
@@ -36,7 +39,7 @@ cd tests/e2e
 docker compose -f compose.e2e.yml up --build -d
 SERVER_URL=http://localhost:3000 \
 WS_URL=ws://localhost:3000/api/session \
-RTMP_URL=rtmp://localhost:1935/live/smoke \
+RTMP_URL=rtmp://localhost:1935/live/smoke-ja \
 JWT_SECRET=smoke-jwt-secret \
 bun run smoke
 docker compose -f compose.e2e.yml down -v
@@ -45,7 +48,7 @@ docker compose -f compose.e2e.yml down -v
 While the stack is up you can peek at the output manually:
 
 ```bash
-ffplay rtmp://localhost:1935/live/smoke
+ffplay rtmp://localhost:1935/live/smoke-ja
 ```
 
 ## CI

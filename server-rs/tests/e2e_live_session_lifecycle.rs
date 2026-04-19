@@ -1,3 +1,7 @@
+#![allow(clippy::await_holding_lock)]
+// Tests intentionally hold a process-wide std::sync::Mutex guard while async
+// code mutates global env vars. This serializes env-dependent app boot.
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -308,7 +312,7 @@ async fn happy_path_session_lifecycle_updates_workers_and_cleans_live_session() 
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     );
-    assert_eq!(workers_url.starts_with("http://"), true);
+    assert!(workers_url.starts_with("http://"));
 
     app_server.abort();
     workers_server.abort();

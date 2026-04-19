@@ -160,6 +160,46 @@ pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
 }
 
+type CrashedStreamSnapshot = (String, String, String, u64, bool, f32, u32, StreamBuffers);
+
+struct RestartStreamArgs {
+    id: String,
+    lang: String,
+    rtmp_url: String,
+    delay_ms: u64,
+    is_source: bool,
+    host_gain: f32,
+    prev_count: u32,
+    buffers: StreamBuffers,
+}
+
+struct StreamSpawnArgs {
+    stream_id: String,
+    lang: String,
+    rtmp_url: String,
+    delay_ms: u64,
+    is_source: bool,
+    host_gain: f32,
+    existing_buffers: Option<StreamBuffers>,
+}
+
+struct AudioDrainCtx {
+    stream_id: String,
+    host_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
+    tts_queue: Arc<StdMutex<VecDeque<u8>>>,
+    fifo_path: String,
+    delay: Duration,
+    is_source: bool,
+    host_gain: f32,
+    stop: Arc<AtomicBool>,
+}
+
+impl Default for RtmpManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RtmpManager {
     pub fn new() -> Self {
         Self {
@@ -181,9 +221,15 @@ impl RtmpManager {
         is_source: bool,
         host_gain: f32,
     ) -> Result<(), String> {
-        self.spawn_stream_inner(
-            stream_id, lang, rtmp_url, delay_ms, is_source, host_gain, None,
-        )?;
+        self.spawn_stream_inner(StreamSpawnArgs {
+            stream_id: stream_id.to_string(),
+            lang: lang.to_string(),
+            rtmp_url: rtmp_url.to_string(),
+            delay_ms,
+            is_source,
+            host_gain,
+            existing_buffers: None,
+        })?;
         tracing::info!(
             stream_id = %stream_id,
             lang = %lang,
@@ -249,10 +295,11 @@ impl RtmpManager {
     /// Source streams have no caption track — this is a no-op for them.
     pub fn push_caption(&self, lang: &str, text: String) {
         for stream in self.streams.values() {
-            if stream.lang == lang && !stream.is_source {
-                if let Some(cap) = &stream.caption {
-                    cap.push(&text);
-                }
+            if stream.lang == lang
+                && !stream.is_source
+                && let Some(cap) = &stream.caption
+            {
+                cap.push(&text);
             }
         }
     }
@@ -260,7 +307,7 @@ impl RtmpManager {
     /// Scan for crashed FFmpeg processes and surface the restart context.
     pub(crate) fn detect_crashed(
         &mut self,
-    ) -> Vec<(String, String, String, u64, bool, f32, u32, StreamBuffers)> {
+    ) -> Vec<CrashedStreamSnapshot> {
         let mut to_restart = Vec::new();
 
         for (id, stream) in &mut self.streams {
@@ -330,58 +377,39 @@ impl RtmpManager {
 
     /// Restart a stream after a crash, reusing its buffers so queued host
     /// media + TTS survive the FFmpeg restart.
-    pub(crate) fn restart_stream(
-        &mut self,
-        id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        delay_ms: u64,
-        is_source: bool,
-        host_gain: f32,
-        prev_count: u32,
-        buffers: StreamBuffers,
-    ) {
-        match self.spawn_stream_inner(
-            id,
-            lang,
-            rtmp_url,
-            delay_ms,
-            is_source,
-            host_gain,
-            Some(buffers),
-        ) {
+    fn restart_stream(&mut self, args: RestartStreamArgs) {
+        match self.spawn_stream_inner(StreamSpawnArgs {
+            stream_id: args.id.clone(),
+            lang: args.lang.clone(),
+            rtmp_url: args.rtmp_url.clone(),
+            delay_ms: args.delay_ms,
+            is_source: args.is_source,
+            host_gain: args.host_gain,
+            existing_buffers: Some(args.buffers),
+        }) {
             Ok(()) => {
-                if let Some(stream) = self.streams.get_mut(id) {
-                    stream.restart_count = prev_count + 1;
+                if let Some(stream) = self.streams.get_mut(&args.id) {
+                    stream.restart_count = args.prev_count + 1;
                 }
                 tracing::info!(
-                    stream_id = %id,
-                    lang = %lang,
-                    attempt = prev_count + 1,
+                    stream_id = %args.id,
+                    lang = %args.lang,
+                    attempt = args.prev_count + 1,
                     max_attempts = MAX_FFMPEG_RESTARTS,
                     "ffmpeg rtmp restarted"
                 );
             }
             Err(e) => tracing::error!(
-                stream_id = %id,
-                lang = %lang,
+                stream_id = %args.id,
+                lang = %args.lang,
                 error = %e,
                 "ffmpeg rtmp restart failed"
             ),
         }
     }
 
-    fn spawn_stream_inner(
-        &mut self,
-        stream_id: &str,
-        lang: &str,
-        rtmp_url: &str,
-        delay_ms: u64,
-        is_source: bool,
-        host_gain: f32,
-        existing_buffers: Option<StreamBuffers>,
-    ) -> Result<(), String> {
-        let audio_fifo = format!("/tmp/brivva_audio_{}", stream_id);
+    fn spawn_stream_inner(&mut self, args: StreamSpawnArgs) -> Result<(), String> {
+        let audio_fifo = format!("/tmp/brivva_audio_{}", args.stream_id);
 
         let _ = std::fs::remove_file(&audio_fifo);
         std::process::Command::new("mkfifo")
@@ -391,14 +419,14 @@ impl RtmpManager {
 
         // Target streams get a burn-in caption textfile + drawtext filter.
         // Source streams skip both (no translation to display).
-        let caption = if is_source {
+        let caption = if args.is_source {
             None
         } else {
-            Some(CaptionState::spawn(stream_id))
+            Some(CaptionState::spawn(&args.stream_id))
         };
 
         // Compose FFmpeg args. Only target streams apply the drawtext filter.
-        let mut args: Vec<String> = vec![
+        let mut ffmpeg_args: Vec<String> = vec![
             "-y".into(),
             "-loglevel".into(),
             "warning".into(),
@@ -425,9 +453,9 @@ impl RtmpManager {
                 "drawtext=textfile={}:reload=1:fontcolor=white:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=10:x=(w-text_w)/2:y=h-120",
                 escaped
             );
-            args.extend_from_slice(&["-vf".into(), drawtext]);
+            ffmpeg_args.extend_from_slice(&["-vf".into(), drawtext]);
         }
-        args.extend_from_slice(&[
+        ffmpeg_args.extend_from_slice(&[
             "-c:v".into(),
             "libx264".into(),
             "-preset".into(),
@@ -456,11 +484,11 @@ impl RtmpManager {
             "1:a".into(),
             "-f".into(),
             "flv".into(),
-            rtmp_url.into(),
+            args.rtmp_url.clone(),
         ]);
 
         let mut child = std::process::Command::new("ffmpeg")
-            .args(&args)
+            .args(&ffmpeg_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -468,46 +496,47 @@ impl RtmpManager {
             .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
 
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
-        let buffers = existing_buffers.unwrap_or_else(StreamBuffers::new);
+        let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let delay = Duration::from_millis(delay_ms);
+        let delay = Duration::from_millis(args.delay_ms);
 
         // Video drain
         let v_buf = buffers.video.clone();
         let v_stop = stop_flag.clone();
-        let v_sid = stream_id.to_string();
+        let v_sid = args.stream_id.clone();
         let video_handle = thread::Builder::new()
-            .name(format!("video-drain-{}", stream_id))
+            .name(format!("video-drain-{}", args.stream_id))
             .spawn(move || video_drain_loop(v_sid, v_buf, stdin, delay, v_stop))
             .map_err(|e| format!("Video thread spawn failed: {}", e))?;
 
         // Audio drain
-        let a_buf = buffers.audio.clone();
-        let a_tts = buffers.tts.clone();
-        let a_stop = stop_flag.clone();
-        let a_sid = stream_id.to_string();
-        let a_fifo = audio_fifo.clone();
+        let audio_ctx = AudioDrainCtx {
+            stream_id: args.stream_id.clone(),
+            host_buf: buffers.audio.clone(),
+            tts_queue: buffers.tts.clone(),
+            fifo_path: audio_fifo.clone(),
+            delay,
+            is_source: args.is_source,
+            host_gain: args.host_gain,
+            stop: stop_flag.clone(),
+        };
         let audio_handle = thread::Builder::new()
-            .name(format!("audio-drain-{}", stream_id))
-            .spawn(move || {
-                audio_drain_loop(
-                    a_sid, a_buf, a_tts, a_fifo, delay, is_source, host_gain, a_stop,
-                )
-            })
+            .name(format!("audio-drain-{}", args.stream_id))
+            .spawn(move || audio_drain_loop(audio_ctx))
             .map_err(|e| format!("Audio thread spawn failed: {}", e))?;
 
         self.streams.insert(
-            stream_id.to_string(),
+            args.stream_id.clone(),
             RtmpStream {
                 child,
                 video_handle: Some(video_handle),
                 audio_handle: Some(audio_handle),
                 audio_fifo,
-                lang: lang.to_string(),
-                rtmp_url: rtmp_url.to_string(),
+                lang: args.lang,
+                rtmp_url: args.rtmp_url,
                 delay,
-                is_source,
-                host_gain,
+                is_source: args.is_source,
+                host_gain: args.host_gain,
                 buffers,
                 caption,
                 stop_flag,
@@ -591,9 +620,16 @@ pub fn spawn_health_monitor(
                     break;
                 }
                 let mut mgr = manager.lock().await;
-                mgr.restart_stream(
-                    &id, &lang, &rtmp_url, delay_ms, is_source, host_gain, prev_count, buffers,
-                );
+                mgr.restart_stream(RestartStreamArgs {
+                    id,
+                    lang,
+                    rtmp_url,
+                    delay_ms,
+                    is_source,
+                    host_gain,
+                    prev_count,
+                    buffers,
+                });
             }
         }
     })
@@ -658,13 +694,11 @@ fn video_drain_loop(
             None => last_frame.clone(),
         };
 
-        if let Some(f) = to_write {
-            if stdin.write_all(&f).is_err() {
-                if !stop.load(Ordering::Acquire) {
-                    eprintln!("[VIDEO:{}] write error, exiting", stream_id);
-                }
-                break;
+        if let Some(f) = to_write && stdin.write_all(&f).is_err() {
+            if !stop.load(Ordering::Acquire) {
+                eprintln!("[VIDEO:{}] write error, exiting", stream_id);
             }
+            break;
         }
         // else: startup, no frames yet — skip writing this tick.
     }
@@ -686,16 +720,18 @@ fn video_drain_loop(
 //    host passthrough.
 // 4. Write to the FFmpeg FIFO.
 
-fn audio_drain_loop(
-    stream_id: String,
-    host_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    tts_queue: Arc<StdMutex<VecDeque<u8>>>,
-    fifo_path: String,
-    delay: Duration,
-    is_source: bool,
-    host_gain: f32,
-    stop: Arc<AtomicBool>,
-) {
+fn audio_drain_loop(ctx: AudioDrainCtx) {
+    let AudioDrainCtx {
+        stream_id,
+        host_buf,
+        tts_queue,
+        fifo_path,
+        delay,
+        is_source,
+        host_gain,
+        stop,
+    } = ctx;
+
     let mut fifo = match std::fs::OpenOptions::new().write(true).open(&fifo_path) {
         Ok(f) => f,
         Err(e) => {
@@ -825,44 +861,6 @@ fn mix_pcm_s16le(a: &[u8], a_gain: f32, b: &[u8], b_gain: f32) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pcm(samples: &[i16]) -> Vec<u8> {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    }
-
-    fn decode_samples(bytes: &[u8]) -> Vec<i16> {
-        bytes
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect()
-    }
-
-    #[test]
-    fn sanitize_caption_strips_control_chars_and_truncates() {
-        let text = format!("hi\x00there\n{}", "a".repeat(250));
-        let out = sanitize_caption(&text);
-
-        assert!(!out.contains('\x00'));
-        assert!(out.contains('\n'));
-        assert_eq!(out.chars().count(), 200);
-    }
-
-    #[test]
-    fn apply_gain_scales_samples_and_ignores_trailing_odd_byte() {
-        let scaled = apply_gain(&[0x10, 0x27, 0xF0, 0xD8, 0xAA], 0.5);
-        assert_eq!(decode_samples(&scaled), vec![5000, -5000]);
-    }
-
-    #[test]
-    fn mix_pcm_s16le_clips_on_overflow() {
-        let mixed = mix_pcm_s16le(&pcm(&[30_000, -30_000]), 1.0, &pcm(&[10_000, -10_000]), 1.0);
-        assert_eq!(decode_samples(&mixed), vec![32_767, -32_768]);
-    }
-}
-
 // ── Startup cleanup ────────────────────────────────────────
 
 pub fn kill_orphan_ffmpeg() {
@@ -899,11 +897,11 @@ pub fn kill_orphan_ffmpeg() {
     let mut stale_files = 0;
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_") {
-                    let _ = std::fs::remove_file(entry.path());
-                    stale_files += 1;
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && (name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_"))
+            {
+                let _ = std::fs::remove_file(entry.path());
+                stale_files += 1;
             }
         }
     }
@@ -942,4 +940,42 @@ pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Empty PCM output".to_string());
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    fn decode_samples(bytes: &[u8]) -> Vec<i16> {
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn sanitize_caption_strips_control_chars_and_truncates() {
+        let text = format!("hi\x00there\n{}", "a".repeat(250));
+        let out = sanitize_caption(&text);
+
+        assert!(!out.contains('\x00'));
+        assert!(out.contains('\n'));
+        assert_eq!(out.chars().count(), 200);
+    }
+
+    #[test]
+    fn apply_gain_scales_samples_and_ignores_trailing_odd_byte() {
+        let scaled = apply_gain(&[0x10, 0x27, 0xF0, 0xD8, 0xAA], 0.5);
+        assert_eq!(decode_samples(&scaled), vec![5000, -5000]);
+    }
+
+    #[test]
+    fn mix_pcm_s16le_clips_on_overflow() {
+        let mixed = mix_pcm_s16le(&pcm(&[30_000, -30_000]), 1.0, &pcm(&[10_000, -10_000]), 1.0);
+        assert_eq!(decode_samples(&mixed), vec![32_767, -32_768]);
+    }
 }

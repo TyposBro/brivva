@@ -3,7 +3,8 @@
 //   PATCH /internal/sessions/:id → status update, return 200
 //
 // Fixture: one session "SMOKE001" for user "smoke-user", one English
-// RTMP stream pointing at the local mediamtx. Matches JWT `sub` in driver.
+// host + one Japanese translated RTMP stream pointing at the local mediamtx.
+// Matches JWT `sub` in driver and exercises TTS instead of source passthrough.
 
 const PORT = Number(process.env.PORT ?? 8787);
 const MEDIAMTX_RTMP = process.env.MEDIAMTX_RTMP ?? "rtmp://rtmp:1935/live";
@@ -12,28 +13,34 @@ const bundle = {
   session: {
     id: "SMOKE001",
     user_id: "smoke-user",
-    voice_id: null,
+    voice_id: "voice-row-1",
     title: "smoke",
     source_lang: "en",
-    target_langs: "en",
+    target_langs: "[\"ja\"]",
     status: "created",
     live_session_id: null,
     created_at: Math.floor(Date.now() / 1000),
   },
   streams: [
     {
-      id: "smoke-stream-en",
+      id: "smoke-stream-ja",
       session_id: "SMOKE001",
-      lang: "en",
+      lang: "ja",
       platform: "local-test",
       rtmp_url: MEDIAMTX_RTMP,
-      stream_key: "smoke",
+      stream_key: "smoke-ja",
       status: "pending",
       delay_ms: 2000,
-      host_gain: 1.0,
+      host_gain: 0.2,
     },
   ],
-  voice: null,
+  voice: {
+    id: "voice-row-1",
+    user_id: "smoke-user",
+    elevenlabs_voice_id: "smoke-eleven-voice",
+    name: "Smoke Voice",
+    created_at: Math.floor(Date.now() / 1000),
+  },
 };
 
 Bun.serve({
@@ -48,7 +55,7 @@ Bun.serve({
       if (req.method === "PATCH") {
         const body = await req.text();
         console.log("[workers-stub] status PATCH:", body);
-        return Response.json({ ok: true });
+        return Response.json({ status: "ok" });
       }
     }
     return new Response("not found", { status: 404 });

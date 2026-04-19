@@ -32,6 +32,9 @@ impl std::fmt::Display for Lang {
 }
 
 impl Lang {
+    // PRAGMATIC: callers want `Option<Self>` today; implementing `FromStr`
+    // would force a `Result` shape through several hot call sites for no gain.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "en" => Some(Lang::En),

@@ -258,26 +258,23 @@ async fn handle_host(
                     break;
                 }
 
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&*text) {
-                    match json.get("type").and_then(|v| v.as_str()) {
-                        // Face video: push directly to FFmpeg. No preview, no guest broadcast.
-                        Some("face:frame") => {
-                            if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
-                                let rtmp_mgr = live_sessions
-                                    .get(&live_session_id)
-                                    .and_then(|r| r.rtmp_manager.clone());
-                                if let Some(mgr) = rtmp_mgr {
-                                    use base64::Engine;
-                                    if let Ok(jpeg_bytes) =
-                                        base64::engine::general_purpose::STANDARD.decode(data)
-                                    {
-                                        let locked = mgr.lock().await;
-                                        locked.push_video_frame(&jpeg_bytes);
-                                    }
-                                }
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    // Face video: push directly to FFmpeg. No preview, no guest broadcast.
+                    if let Some("face:frame") = json.get("type").and_then(|v| v.as_str())
+                        && let Some(data) = json.get("data").and_then(|v| v.as_str())
+                    {
+                        let rtmp_mgr = live_sessions
+                            .get(&live_session_id)
+                            .and_then(|r| r.rtmp_manager.clone());
+                        if let Some(mgr) = rtmp_mgr {
+                            use base64::Engine;
+                            if let Ok(jpeg_bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(data)
+                            {
+                                let locked = mgr.lock().await;
+                                locked.push_video_frame(&jpeg_bytes);
                             }
                         }
-                        _ => {}
                     }
                 }
             }

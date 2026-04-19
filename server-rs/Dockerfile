@@ -8,8 +8,8 @@
 # Result: source-only edits rebuild in ~30s vs ~8min. Deps layer invalidates
 # only when Cargo.lock or Cargo.toml change.
 
-FROM --platform=$BUILDPLATFORM rust:1.85-slim AS chef
-RUN cargo install cargo-chef --locked --version 0.1.68
+FROM --platform=$BUILDPLATFORM rust:1.88-slim AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 # ── planner: extract dep recipe without building ─────────────

@@ -28,7 +28,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.1"
+          bun-version: latest
 
       - name: build + start stack
         working-directory: tests/e2e
@@ -41,7 +41,7 @@ jobs:
         env:
           SERVER_URL: http://localhost:3000
           WS_URL: ws://localhost:3000/api/session
-          RTMP_URL: rtmp://localhost:1935/live/smoke
+          RTMP_URL: rtmp://localhost:1935/live/smoke-ja
           JWT_SECRET: smoke-jwt-secret
           SESSION_ID: SMOKE001
           USER_ID: smoke-user

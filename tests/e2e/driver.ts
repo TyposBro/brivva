@@ -7,7 +7,8 @@
 //   3. open WS to /api/session?session_id=SMOKE001
 //   4. for ~40s: push 20ms PCM sine frames + a JPEG every 2s
 //   5. close WS
-//   6. ffprobe rtmp://localhost:1935/live/smoke → assert audio+video tracks
+//   6. assert WS emitted translation + tts_end at least once
+//   7. ffprobe translated RTMP output → assert audio+video tracks
 //
 // Fails hard on any missing track. Intended for nightly CI + post-deploy.
 
@@ -16,7 +17,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:3000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:3000/api/session";
-const RTMP_URL = process.env.RTMP_URL ?? "rtmp://localhost:1935/live/smoke";
+const RTMP_URL = process.env.RTMP_URL ?? "rtmp://localhost:1935/live/smoke-ja";
 const JWT_SECRET = process.env.JWT_SECRET ?? "smoke-jwt-secret";
 const SESSION_ID = process.env.SESSION_ID ?? "SMOKE001";
 const USER_ID = process.env.USER_ID ?? "smoke-user";
@@ -107,12 +108,14 @@ async function waitForHealth(url: string, timeoutMs = 60_000): Promise<void> {
 }
 
 // ── WS stream ────────────────────────────────────────────
-async function streamAudioVideo(wsUrl: string): Promise<void> {
+async function streamAudioVideo(wsUrl: string): Promise<{ sawTranslation: boolean; sawTtsEnd: boolean }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
 
     let phase = 0;
+    let sawTranslation = false;
+    let sawTtsEnd = false;
     let audioTimer: ReturnType<typeof setInterval> | null = null;
     let jpegTimer: ReturnType<typeof setInterval> | null = null;
     let stopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -145,15 +148,26 @@ async function streamAudioVideo(wsUrl: string): Promise<void> {
       stopTimer = setTimeout(() => {
         console.log("[driver] stream window elapsed, sending host:end");
         try {
-          ws.send("host:end");
+          ws.send(JSON.stringify({ type: "host:end" }));
         } catch { /* ignore */ }
         setTimeout(() => ws.close(), 500);
       }, STREAM_DURATION_MS);
     });
 
+    ws.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") return;
+      try {
+        const msg = JSON.parse(event.data) as { type?: string; targetLang?: string };
+        if (msg.type === "translation" && msg.targetLang === "ja") sawTranslation = true;
+        if (msg.type === "tts_end" && msg.targetLang === "ja") sawTtsEnd = true;
+      } catch {
+        // ignore non-json frames
+      }
+    });
+
     ws.addEventListener("close", () => {
       cleanup();
-      resolve();
+      resolve({ sawTranslation, sawTtsEnd });
     });
 
     ws.addEventListener("error", (err) => {
@@ -194,7 +208,13 @@ async function main() {
   const wsUrl = `${WS_URL}?token=${encodeURIComponent(token)}&source_lang=en&session_id=${SESSION_ID}`;
 
   console.log("[driver] connecting", wsUrl.slice(0, wsUrl.indexOf("?") + 1) + "…");
-  await streamAudioVideo(wsUrl);
+  const wsSignals = await streamAudioVideo(wsUrl);
+  if (!wsSignals.sawTranslation) {
+    throw new Error("smoke FAIL — no translation event observed for ja");
+  }
+  if (!wsSignals.sawTtsEnd) {
+    throw new Error("smoke FAIL — no tts_end event observed for ja");
+  }
 
   console.log(`[driver] WS closed. Waiting ${SETTLE_MS}ms for RTMP to settle …`);
   await new Promise((r) => setTimeout(r, SETTLE_MS));

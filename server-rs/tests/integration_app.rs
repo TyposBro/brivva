@@ -1,3 +1,7 @@
+#![allow(clippy::await_holding_lock)]
+// Tests intentionally hold a process-wide std::sync::Mutex guard while async
+// code mutates global env vars. This serializes env-dependent app boot.
+
 use futures_util::SinkExt;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
