@@ -1052,6 +1052,47 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
   });
 });
 
+describe("POST /api/voices — source_lang plumbing", () => {
+  it("forwards source_lang to ElevenLabs labels + persists on row (happy)", async () => {
+    let seenLabels: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (/api\.elevenlabs\.io\/v1\/voices\/add/.test(url)) {
+          const form = init?.body as FormData;
+          seenLabels = (form.get("labels") as string | null) ?? null;
+          return new Response(JSON.stringify({ voice_id: "el-ko-1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unstubbed fetch: ${url}`);
+      }),
+    );
+
+    const res = await call("/api/voices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-lang-v",
+        name: "Ko voice",
+        audio_base64: VALID_WAV_B64,
+        source_lang: "ko",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { source_lang: string | null };
+    expect(body.source_lang).toBe("ko");
+    expect(seenLabels).toBe(JSON.stringify({ language: "ko" }));
+  });
+});
+
 describe("POST /api/voices rejects short samples (sad)", () => {
   it("400 when audio_base64 is a <30s WAV", async () => {
     const res = await call("/api/voices", {

@@ -19,6 +19,17 @@ type Step = (typeof STEPS)[number];
 const VOICE_MIN_SEC = 30;
 const VOICE_MAX_SEC = 180;
 
+type SourceLang = "ko" | "en" | "ja" | "zh";
+const SOURCE_LANGS: readonly SourceLang[] = ["ko", "en", "ja", "zh"];
+
+function detectBrowserSourceLang(): SourceLang {
+  const tag = (typeof navigator !== "undefined" && navigator.language) || "";
+  const prefix = tag.toLowerCase().split("-")[0];
+  return (SOURCE_LANGS as readonly string[]).includes(prefix)
+    ? (prefix as SourceLang)
+    : "ko";
+}
+
 export default function OnboardingPage() {
   return (
     <SignInGate>
@@ -34,6 +45,7 @@ function Inner() {
   const [step, setStep] = useState<Step>("platform");
   const [user, setUser] = useState<broadcastApi.UserInfo | null>(null);
   const [voice, setVoice] = useState<broadcastApi.Voice | null>(null);
+  const [sourceLang, setSourceLang] = useState<SourceLang>(detectBrowserSourceLang);
   const [defaultLang, setDefaultLang] = useState("en");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -128,6 +140,8 @@ function Inner() {
             userId={userId}
             voice={voice}
             defaultName={user?.youtube_channel_name ?? "My voice"}
+            sourceLang={sourceLang}
+            onSourceLangChange={setSourceLang}
             onChange={setVoice}
             onContinue={goNext}
           />
@@ -223,11 +237,21 @@ interface VoiceStepProps {
   userId: string;
   voice: broadcastApi.Voice | null;
   defaultName: string;
+  sourceLang: SourceLang;
+  onSourceLangChange: (lang: SourceLang) => void;
   onChange: (v: broadcastApi.Voice) => void;
   onContinue: () => void;
 }
 
-function VoiceStep({ userId, voice, defaultName, onChange, onContinue }: VoiceStepProps) {
+function VoiceStep({
+  userId,
+  voice,
+  defaultName,
+  sourceLang,
+  onSourceLangChange,
+  onChange,
+  onContinue,
+}: VoiceStepProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
 
@@ -240,6 +264,7 @@ function VoiceStep({ userId, voice, defaultName, onChange, onContinue }: VoiceSt
           user_id: userId,
           name: voice?.name ?? defaultName,
           audio_base64: b64,
+          source_lang: sourceLang,
         });
         onChange(next);
       } catch (e) {
@@ -248,7 +273,7 @@ function VoiceStep({ userId, voice, defaultName, onChange, onContinue }: VoiceSt
         setUploading(false);
       }
     },
-    [defaultName, onChange, userId, voice?.name],
+    [defaultName, onChange, sourceLang, userId, voice?.name],
   );
 
   const recorder = useVoiceRecorder({
@@ -280,6 +305,41 @@ function VoiceStep({ userId, voice, defaultName, onChange, onContinue }: VoiceSt
           Record at least {VOICE_MIN_SEC} seconds. Workers stores one clone
           per user — you can re-record any time from the dashboard.
         </p>
+      </div>
+
+      <div>
+        <label
+          htmlFor="source-lang"
+          className="block font-label text-sm text-on-surface mb-2"
+        >
+          What language will you speak on stream?
+        </label>
+        <div id="source-lang" role="radiogroup" className="grid grid-cols-2 gap-2">
+          {SOURCE_LANGS.map((code) => {
+            const meta = broadcastApi.LANGS.find((l) => l.code === code)!;
+            const selected = sourceLang === code;
+            return (
+              <button
+                key={code}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={voice !== null || uploading}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2.5 rounded-lg font-label text-sm transition-colors text-left disabled:opacity-50",
+                  selected
+                    ? "bg-primary-container text-on-primary-container"
+                    : "bg-surface-container-low hover:bg-surface-container-high text-on-surface",
+                )}
+                onClick={() => onSourceLangChange(code)}
+              >
+                <span className="text-lg">{meta.flag}</span>
+                <span className="flex-1">{meta.label}</span>
+                {selected && <Check className="w-4 h-4" />}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {error && (

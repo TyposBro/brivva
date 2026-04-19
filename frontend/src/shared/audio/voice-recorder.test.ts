@@ -135,6 +135,33 @@ describe("useVoiceRecorder", () => {
     expect(result.current.isRecording).toBe(false);
   });
 
+  it("stop encodes samples as a RIFF/WAVE container (regression)", async () => {
+    const { result } = renderHook(() =>
+      useVoiceRecorder({ minSec: 30, maxSec: 180 }),
+    );
+    await act(async () => {
+      await result.current.start();
+    });
+    act(() => {
+      const sample = new Float32Array([0.5, -0.5, 1.0, -1.0]);
+      recorderState.processors[0].onaudioprocess!({
+        inputBuffer: { getChannelData: () => sample },
+      });
+    });
+    let stopped: string | null = null;
+    act(() => {
+      stopped = result.current.stop();
+    });
+    expect(stopped).not.toBeNull();
+    const bytes = Uint8Array.from(atob(stopped!), (c) => c.charCodeAt(0));
+    const tag = (off: number) =>
+      String.fromCharCode(bytes[off]!, bytes[off + 1]!, bytes[off + 2]!, bytes[off + 3]!);
+    expect(tag(0)).toBe("RIFF");
+    expect(tag(8)).toBe("WAVE");
+    expect(tag(12)).toBe("fmt ");
+    expect(tag(36)).toBe("data");
+  });
+
   it("stop returns null when never started (sad)", () => {
     const { result } = renderHook(() =>
       useVoiceRecorder({ minSec: 30, maxSec: 180 }),

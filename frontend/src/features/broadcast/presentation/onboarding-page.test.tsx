@@ -28,14 +28,23 @@ vi.mock("../data/api-client", async () => {
   };
 });
 
+interface RecorderOptions {
+  minSec: number;
+  maxSec: number;
+  onAutoStop?: (b64: string) => void;
+}
 const recorder = {
   start: vi.fn(),
   stop: vi.fn(),
   elapsedSec: 0,
   isRecording: false,
 };
+let lastRecorderOptions: RecorderOptions | null = null;
 vi.mock("../../../shared/audio/voice-recorder", () => ({
-  useVoiceRecorder: vi.fn(() => recorder),
+  useVoiceRecorder: vi.fn((opts: RecorderOptions) => {
+    lastRecorderOptions = opts;
+    return recorder;
+  }),
 }));
 
 import { signIn, _resetForTesting } from "../../../shared/auth/auth-store";
@@ -89,6 +98,7 @@ describe("OnboardingPage", () => {
     recorder.isRecording = false;
     recorder.start.mockReset();
     recorder.stop.mockReset();
+    lastRecorderOptions = null;
   });
 
   it("redirects to /dashboard when onboarding already completed (happy)", async () => {
@@ -123,6 +133,66 @@ describe("OnboardingPage", () => {
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
     );
+  });
+
+  it("voice step: source-lang defaults from navigator.language and rides createVoice payload", async () => {
+    Object.defineProperty(globalThis.navigator, "language", {
+      configurable: true,
+      value: "ja-JP",
+    });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: null });
+    getUser.mockResolvedValue(fullUser());
+    createVoice.mockResolvedValue({
+      id: "v1",
+      user_id: "u1",
+      elevenlabs_voice_id: "el-1",
+      name: "My voice",
+      source_lang: "ko",
+      created_at: 1,
+    });
+
+    renderPage();
+    await screen.findByRole("heading", { name: /Connect a streaming platform/i });
+    await userEvent.click(screen.getByRole("button", { name: /Skip for now/i }));
+    await screen.findByRole("heading", { name: /Clone your voice/i });
+
+    // Default selection follows navigator.language prefix (ja).
+    const japanese = screen.getByRole("radio", { name: /Japanese/i });
+    expect(japanese).toHaveAttribute("aria-checked", "true");
+
+    // User switches to Korean before recording.
+    await userEvent.click(screen.getByRole("radio", { name: /Korean/i }));
+
+    // Fire the recorder's auto-stop callback directly — exercises the upload
+    // path without a real MediaStream.
+    await waitFor(() => expect(lastRecorderOptions).not.toBeNull());
+    lastRecorderOptions!.onAutoStop!("BASE64WAVDATA");
+
+    await waitFor(() => expect(createVoice).toHaveBeenCalled());
+    expect(createVoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: "u1",
+        audio_base64: "BASE64WAVDATA",
+        source_lang: "ko",
+      }),
+    );
+  });
+
+  it("voice step: navigator.language outside ko/en/ja/zh falls back to ko", async () => {
+    Object.defineProperty(globalThis.navigator, "language", {
+      configurable: true,
+      value: "uz-UZ",
+    });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: null });
+    getUser.mockResolvedValue(fullUser());
+
+    renderPage();
+    await screen.findByRole("heading", { name: /Connect a streaming platform/i });
+    await userEvent.click(screen.getByRole("button", { name: /Skip for now/i }));
+    await screen.findByRole("heading", { name: /Clone your voice/i });
+
+    const korean = screen.getByRole("radio", { name: /Korean/i });
+    expect(korean).toHaveAttribute("aria-checked", "true");
   });
 
   it("sad: completeOnboarding failure surfaces error banner", async () => {

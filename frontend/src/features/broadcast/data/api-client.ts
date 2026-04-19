@@ -198,6 +198,7 @@ export function createVoice(body: {
   user_id: string;
   name: string;
   audio_base64: string;
+  source_lang?: "ko" | "en" | "ja" | "zh";
 }): Promise<Voice> {
   return parseResult(client().POST("/api/voices", { body }), VoiceSchema);
 }

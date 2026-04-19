@@ -17,7 +17,7 @@ interface ActiveRecorder {
   processor: ScriptProcessorNode;
 }
 
-function mergePcmChunks(chunks: Int16Array[]): Uint8Array {
+function mergePcmChunks(chunks: Int16Array[]): Int16Array {
   const totalLen = chunks.reduce((s, c) => s + c.length, 0);
   const merged = new Int16Array(totalLen);
   let offset = 0;
@@ -25,7 +25,37 @@ function mergePcmChunks(chunks: Int16Array[]): Uint8Array {
     merged.set(chunk, offset);
     offset += chunk.length;
   }
-  return new Uint8Array(merged.buffer);
+  return merged;
+}
+
+// Wrap raw PCM samples in a minimal RIFF/WAVE container so the workers'
+// validateVoiceSample probe (and ElevenLabs) can parse the upload. Without
+// this header the bytes are rejected as "not a RIFF/WAVE container".
+function encodeWav(samples: Int16Array, sampleRate: number): Uint8Array {
+  const channels = 1;
+  const bitsPerSample = 16;
+  const bytesPerSample = bitsPerSample / 8;
+  const dataSize = samples.length * bytesPerSample;
+  const buf = new Uint8Array(44 + dataSize);
+  const view = new DataView(buf.buffer);
+  const ascii = (s: string, offset: number) => {
+    for (let i = 0; i < s.length; i++) buf[offset + i] = s.charCodeAt(i);
+  };
+  ascii("RIFF", 0);
+  view.setUint32(4, 36 + dataSize, true);
+  ascii("WAVE", 8);
+  ascii("fmt ", 12);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, bitsPerSample, true);
+  ascii("data", 36);
+  view.setUint32(40, dataSize, true);
+  new Int16Array(buf.buffer, 44, samples.length).set(samples);
+  return buf;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -69,9 +99,9 @@ export function useVoiceRecorder({ minSec, maxSec, onAutoStop }: VoiceRecorderOp
     rec.source.disconnect();
     rec.ctx.close();
     recorderRef.current = null;
-    const bytes = mergePcmChunks(pcmRef.current);
+    const samples = mergePcmChunks(pcmRef.current);
     pcmRef.current = [];
-    return bytesToBase64(bytes);
+    return bytesToBase64(encodeWav(samples, VOICE_SAMPLE_RATE));
   }, [stopTick]);
 
   const start = useCallback(async () => {
