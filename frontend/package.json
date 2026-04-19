@@ -14,6 +14,7 @@
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test",
     "typecheck": "tsc --noEmit",
+    "check:layers": "bun scripts/check-layers.ts",
     "deploy": "VITE_WORKER_URL=https://brivva-server.milliytechnology.org tsc && VITE_WORKER_URL=https://brivva-server.milliytechnology.org vite build && npx wrangler pages deploy dist --project-name=brivva --branch=main --commit-dirty=true"
   },
   "dependencies": {
