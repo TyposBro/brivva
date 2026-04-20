@@ -55,6 +55,50 @@ Recovery validation:
 - Stream appears in platform dashboard with live viewers.
 - ffprobe reports audio + video tracks on the RTMP output.
 
+### 2b. FFmpeg publishes to Grip/IVS but stream silently drops after 3 frames
+
+Symptom: `ffmpeg rtmp stream started` in logs, then stderr goes quiet,
+video drain exits with `write error` after a few seconds, audio drain
+exits within ~1 second. Idle-detector SIGKILLs the child ~25s later.
+Grip broadcast sits at `송출 대기중` forever. **No RTMP error in stderr.**
+Repro-able with a plain ffmpeg CLI push to the same IVS URL.
+
+Root cause: **ffmpeg's native RTMP implementation is incompatible with
+AWS IVS ingest** (Grip runs on IVS). IVS accepts TCP+TLS+RTMP handshake
++ publish command, but never sends `onStatus NetStream.Publish.Start`
+because the AMF metadata ffmpeg-native sends doesn't satisfy IVS's
+client fingerprinting. The socket stays open for a few seconds then
+IVS closes it server-side. ffmpeg doesn't surface this as an error.
+
+**Only fix that works: ffmpeg built with `--enable-librtmp`** (the
+library OBS uses). Verified 2026-04-20 — librtmp backend pushed 600
+frames in 20s cleanly, broadcast flipped to `방송중`. Native backend
+truncates at frame 3 every time, regardless of encoder preset, profile,
+or stream key freshness.
+
+Triage (30 seconds):
+1. `ffmpeg -version | grep -o "enable-librtmp"` — must print the flag. If empty, that's the bug.
+2. Debian bookworm's `apt-get install ffmpeg` does **not** include librtmp. macOS `brew install ffmpeg` core formula also doesn't.
+3. Confirm with a ffmpeg CLI push using testsrc + sine to the same IVS URL — if it fails at 3 frames with librtmp missing, the fix is the same fix for server-rs.
+
+Fix (local dev, macOS):
+```
+brew uninstall --ignore-dependencies ffmpeg
+brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-openssl --with-rtmpdump --build-from-source
+```
+
+Fix (prod, Fargate): `server-rs/Dockerfile` must compile ffmpeg from
+source with `--enable-librtmp --enable-openssl`. Runtime image needs
+`librtmp1` + the source-built binary. Integration test should guard:
+`ffmpeg -version | grep -q enable-librtmp` at container build time.
+
+Non-fixes (tried, none work):
+- Changing encoder preset (veryfast, ultrafast), profile (main, constrained baseline)
+- Changing bitrate caps, keyframe interval, GOP size
+- Rotating the stream key (keys are persistent per IVS channel anyway)
+- Adjusting 예정일시 (scheduling window) — broadcast still rejects
+- Explicit `-rtmp_tcurl`, `-rtmp_live live`, `-rtmp_flashver`
+
 ### 3. WebSocket drop — browser ↔ Fargate connection lost
 
 Symptom: dashboard shows "disconnected", session state frozen, no audio

@@ -155,6 +155,21 @@ Per Grip's PDF guide, **authentication is optional** ("인증 기능은 사용�
 않아도 무관"). Brivva only needs server URL + stream key — leave name /
 password blank in Grip and on our side.
 
+### ffmpeg must be built with librtmp — do not skip this
+
+AWS IVS (Grip's backend) silently rejects pushes from ffmpeg's native
+RTMP implementation. Symptom: broadcast sits at `송출 대기중`, ffmpeg
+reports no error, drains exit with `write error` after ~1-5s, idle
+detector kills the child 25s later. Verified 2026-04-20.
+
+**Required**: ffmpeg built with `--enable-librtmp`. See
+`docs/runbook.md §2b` for the full write-up + triage + fix commands.
+
+This is a platform invariant — any change to how server-rs invokes
+ffmpeg (image base swap, local dev environment change, CI sandbox)
+must preserve librtmp in the binary. CI should grep `ffmpeg -version`
+for `enable-librtmp` as a build-time guard.
+
 ### When Grip answers the Seller API request
 
 Wire the real endpoint into `workers/src/features/grip/seller-api.ts`
