@@ -67,9 +67,15 @@ RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
 # The first prod ffmpeg-base image shipped without drawtext (2026-04-20
 # incident) because harfbuzz wasn't in the build deps. drawtext is
 # non-negotiable for Brivva's subtitle burn-in path, so assert the
-# filter is actually present in the binary.
-RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -qE '\\bdrawtext\\b' \
-    || (echo "CRITICAL: drawtext filter missing from ffmpeg binary — libharfbuzz likely not detected at configure time"; exit 1)
+# filter is actually present in the binary. On failure, print the
+# drawtext-related filter list so the real shape is grep-able in the
+# CI log instead of just reporting "check failed".
+RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q drawtext \
+    || { \
+         echo "CRITICAL: drawtext filter missing — filter list below"; \
+         /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -i draw || echo "(no 'draw' matches at all)"; \
+         exit 1; \
+       }
 
 # Final image is minimal: just the ffmpeg + ffprobe binaries. The server-rs
 # runtime stage copies these out; the runtime-side .so deps (librtmp1,
