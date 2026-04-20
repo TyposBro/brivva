@@ -27,18 +27,18 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
             source_lang,
         ));
     }
-    if let Some(tx) = audio_tx.as_ref() {
-        if let Err(error) = tx.try_send(data.clone()) {
-            // STT pipeline is behind or gone. Debug-level so a stuck
-            // pipeline producing identical dropped-frame logs per audio
-            // tick is greppable without drowning healthy sessions.
-            tracing::debug!(
-                session_id = %live_session_id,
-                bytes = data.len(),
-                error = %error,
-                "dropped host audio chunk into stt pipeline channel"
-            );
-        }
+    if let Some(tx) = audio_tx.as_ref()
+        && let Err(error) = tx.try_send(data.clone())
+    {
+        // STT pipeline is behind or gone. Debug-level so a stuck
+        // pipeline producing identical dropped-frame logs per audio
+        // tick is greppable without drowning healthy sessions.
+        tracing::debug!(
+            session_id = %live_session_id,
+            bytes = data.len(),
+            error = %error,
+            "dropped host audio chunk into stt pipeline channel"
+        );
     }
     let rtmp_mgr = live_sessions
         .get(live_session_id)
