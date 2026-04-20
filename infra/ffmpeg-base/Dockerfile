@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential yasm nasm pkg-config curl xz-utils ca-certificates \
         libx264-dev libx265-dev libmp3lame-dev libopus-dev \
         librtmp-dev libssl-dev \
-        libfreetype-dev libfontconfig-dev libass-dev \
+        libfreetype-dev libfontconfig-dev libass-dev libharfbuzz-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
@@ -53,6 +53,7 @@ RUN ./configure \
         --enable-libfreetype \
         --enable-libfontconfig \
         --enable-libass \
+        --enable-libharfbuzz \
         --disable-doc \
         --disable-debug \
     && make -j"$(nproc)" \
@@ -60,6 +61,15 @@ RUN ./configure \
 
 RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
     || (echo "CRITICAL: ffmpeg built without --enable-librtmp — IVS pushes will silently fail (docs/runbook.md §2b)"; exit 1)
+
+# FFmpeg 6.1+ silently omits the `drawtext` filter when libharfbuzz is
+# not detected at configure time, even if --enable-libfreetype succeeds.
+# The first prod ffmpeg-base image shipped without drawtext (2026-04-20
+# incident) because harfbuzz wasn't in the build deps. drawtext is
+# non-negotiable for Brivva's subtitle burn-in path, so assert the
+# filter is actually present in the binary.
+RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -qE '\\bdrawtext\\b' \
+    || (echo "CRITICAL: drawtext filter missing from ffmpeg binary — libharfbuzz likely not detected at configure time"; exit 1)
 
 # Final image is minimal: just the ffmpeg + ffprobe binaries. The server-rs
 # runtime stage copies these out; the runtime-side .so deps (librtmp1,

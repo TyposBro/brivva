@@ -80,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype6 \
         libfontconfig1 \
         libass9 \
+        libharfbuzz0b \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
@@ -90,6 +91,13 @@ COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 # replaced/corrupted between stages. Logs at image start (cheap).
 RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
     || (echo "CRITICAL: runtime ffmpeg lacks librtmp"; exit 1)
+
+# drawtext filter is required for subtitle burn-in on every
+# translation target. FFmpeg 6.1+ silently omits drawtext unless
+# libharfbuzz is linked. This check catches a broken ffmpeg-base
+# rebuild (2026-04-20 incident) before it reaches a live session.
+RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -qE '\\bdrawtext\\b' \
+    || (echo "CRITICAL: runtime ffmpeg lacks drawtext filter — subtitle burn-in will crash every stream"; exit 1)
 
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/server-rs /usr/local/bin/server-rs
 
