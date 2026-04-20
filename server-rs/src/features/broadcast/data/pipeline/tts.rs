@@ -96,6 +96,15 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             )
         })
     else {
+        // §0.5.4: session torn down before the TTS dispatch started —
+        // operators need this grep target to distinguish "TTS never
+        // fired" from "TTS fired but ElevenLabs errored".
+        tracing::warn!(
+            live_session_id = %req.handle.id,
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            "tts dispatch aborted: live session removed before ElevenLabs call"
+        );
         return;
     };
 
@@ -148,9 +157,16 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     {
         Some(buf) => buf,
         None => {
-            eprintln!(
-                "[TTS] no audio for utterance {} lang={}",
-                req.utterance_id, req.target_lang
+            // §0.5.4: fetch_tts_audio already logged the specific reason
+            // (HTTP error / timeout / empty body). This warn is the
+            // one-line "dispatch produced no audio" summary so operators
+            // can grep a single phrase and count how many utterances
+            // silently dropped.
+            tracing::warn!(
+                live_session_id = %req.handle.id,
+                utterance_id = req.utterance_id,
+                target_lang = %req.target_lang,
+                "tts dispatch produced no audio — utterance dropped"
             );
             return;
         }
@@ -254,14 +270,31 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
                     match chunk_result {
                         Ok(chunk) => audio_buffer.extend_from_slice(&chunk),
                         Err(error) => {
-                            eprintln!("TTS stream error for {}: {}", lang, error);
+                            tracing::warn!(
+                                target_lang = %lang,
+                                error = %error,
+                                "tts elevenlabs stream chunk error — aborting audio read"
+                            );
                             break;
                         }
                     }
                 }
             }
-            Ok(resp) => eprintln!("TTS error: {} - {:?}", resp.status(), resp.text().await),
-            Err(error) => eprintln!("TTS request error for {}: {}", lang, error),
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    target_lang = %lang,
+                    status = %status,
+                    body_preview = %body.chars().take(200).collect::<String>(),
+                    "tts elevenlabs non-2xx response"
+                );
+            }
+            Err(error) => tracing::warn!(
+                target_lang = %lang,
+                error = %error,
+                "tts elevenlabs request error"
+            ),
         }
 
         audio_buffer
@@ -272,7 +305,11 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
         Ok(buffer) if !buffer.is_empty() => Some(buffer),
         Ok(_) => None,
         Err(_) => {
-            eprintln!("[TTS] TIMEOUT lang={} (>{:?})", lang, deadline);
+            tracing::warn!(
+                target_lang = %lang,
+                deadline_ms = deadline.as_millis() as u64,
+                "tts elevenlabs request timed out"
+            );
             None
         }
     }
@@ -284,6 +321,15 @@ async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffe
         .get(&handle.id)
         .and_then(|session| session.rtmp_manager.clone());
     let Some(manager) = rtmp_manager else {
+        // §0.5.4: session carries no rtmp_manager (session bundle had no
+        // streams, or manager was cleared during teardown). TTS was
+        // produced but will land nowhere — operators need to see this.
+        tracing::warn!(
+            live_session_id = %handle.id,
+            target_lang = %lang,
+            audio_bytes = audio_buffer.len(),
+            "tts audio produced but session has no rtmp_manager — dropping"
+        );
         return;
     };
 
@@ -297,7 +343,12 @@ async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffe
             let manager = manager.lock().await;
             manager.push_tts(&lang.to_string(), pcm);
         }
-        Err(error) => eprintln!("[RTMP] MP3→PCM decode failed: {}", error),
+        Err(error) => tracing::warn!(
+            live_session_id = %handle.id,
+            target_lang = %lang,
+            error = %error,
+            "tts mp3→pcm decode failed — audio dropped"
+        ),
     }
 }
 
@@ -310,6 +361,15 @@ struct NotifyCompleteArgs<'a> {
 
 fn notify_host_tts_complete(args: NotifyCompleteArgs<'_>) {
     let Some(live_session) = args.handle.sessions.get(&args.handle.id) else {
+        // §0.5.4: session torn down between TTS completion and the
+        // notify step. The host won't see TtsEnd/VideoEnd — log so a
+        // dangling caption on the FE is explainable.
+        tracing::info!(
+            live_session_id = %args.handle.id,
+            utterance_id = args.utterance_id,
+            target_lang = %args.lang,
+            "tts complete but live session gone — host notify skipped"
+        );
         return;
     };
 

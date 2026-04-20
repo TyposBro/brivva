@@ -97,7 +97,17 @@ export const streams = sqliteTable(
     host_gain: real("host_gain").notNull().default(0.2),
     created_at: integer("created_at").notNull(),
   },
-  (t) => [index("streams_session_id_idx").on(t.session_id)],
+  (t) => [
+    index("streams_session_id_idx").on(t.session_id),
+    // One destination per (session, lang, platform). See migration 0010 —
+    // concurrent add-stream POSTs must dedup, not double-insert, because
+    // Fargate spawns one ffmpeg per streams row.
+    uniqueIndex("streams_session_lang_platform_unique").on(
+      t.session_id,
+      t.lang,
+      t.platform,
+    ),
+  ],
 );
 
 export const platform_credentials = sqliteTable(

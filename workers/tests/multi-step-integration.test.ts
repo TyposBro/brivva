@@ -217,4 +217,137 @@ describe("§0.5.3 multi-step integration — full user journey", () => {
     const res = await patchMetrics("session-does-not-exist", 10, { ja: 10 });
     expect(res.status).toBe(404);
   });
+
+  // ── §0.5.3 follow-up: full lifecycle + concurrent-mutation dedup ──
+  //
+  // The tests above chain mutations (multi-step happy path) and cover the
+  // server-rs reporter's 404 signal. The two below close the remaining
+  // gaps flagged in the April 2026 triad:
+  //   - background-loop behavior around soft-end → 2nd 404 = self-cancel.
+  //   - concurrent mutations racing on the streams table. Without
+  //     migration 0010's unique index, two simultaneous
+  //     POST /api/sessions/:id/streams calls with the same (lang,
+  //     platform) double-inserted and Fargate spawned two ffmpeg
+  //     processes for one destination. The dedup test is the
+  //     regression guard.
+
+  it("full lifecycle: POST → mutate mid-live → metrics → soft-end → second-404 self-cancel signal", async () => {
+    const sessionId = await createSession("u-lifecycle-1", ["ja"]);
+    await addStream(sessionId, "ja", "tiktok");
+
+    // Mid-live mutation — add a second destination. Current behavior
+    // delivers this through the existing add-stream endpoint (there is no
+    // PATCH /api/sessions/:id that mutates target_langs separately). The
+    // session row's target_langs stays as-posted at create time; streams
+    // carry the full runtime destination list.
+    await patchLive(sessionId, "ROOM_LC_1");
+    await addStream(sessionId, "ko", "youtube");
+
+    {
+      const mid = await getInternal(sessionId);
+      expect(mid.streams.length).toBe(2);
+      expect(mid.streams.map((s) => s.lang).sort()).toEqual(["ja", "ko"]);
+    }
+
+    // First metrics tick lands cleanly (session is live).
+    const tick1 = await patchMetrics(sessionId, 60, { ja: 58, ko: 30 });
+    expect(tick1.status).toBe(200);
+
+    // Soft-end — the row stays; status flips.
+    const del = await call(`/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    // Tick #2 and #3 AFTER DELETE. Soft-end means Workers still accepts
+    // metrics with 200 (row present, just status=ended). The
+    // server-rs reporter's self-cancel fires on MAX_CONSECUTIVE_NOT_FOUND
+    // consecutive 404s — which never happens on soft-end. That's the
+    // correct shape: the reporter stops only when the row is truly gone
+    // (never-created id), not when it just ended. Both 200s here prove
+    // the merge-semantics stay consistent for post-end residual ticks.
+    const tick2 = await patchMetrics(sessionId, 120, { ja: 115, ko: 70 });
+    expect(tick2.status).toBe(200);
+    const tick3 = await patchMetrics(sessionId, 125, { ja: 120, ko: 75 });
+    expect(tick3.status).toBe(200);
+
+    // NOW simulate the server-rs reporter's NotFound self-cancel path:
+    // two 404s in a row from a never-existed session id trip
+    // MAX_CONSECUTIVE_NOT_FOUND=2. Workers' side of that contract is that
+    // missing-row PATCHes always 404, regardless of the streaming state.
+    const missing1 = await patchMetrics("never-existed-lc", 10, { ja: 10 });
+    const missing2 = await patchMetrics("never-existed-lc", 10, { ja: 10 });
+    expect(missing1.status).toBe(404);
+    expect(missing2.status).toBe(404);
+
+    // Final snapshot after the soft-end + residual ticks. The last metrics
+    // PATCH is what the summary modal reads, so the DB state must reflect
+    // it even though the session ended mid-series.
+    const afterEnd = await getInternal(sessionId);
+    expect(afterEnd.session.status).toBe("ended");
+    expect(afterEnd.streams.length).toBe(2);
+    const usage = await getUsage(sessionId);
+    expect(usage.source_minutes).toBeCloseTo(2.08, 2); // 125 / 60
+    expect(usage.output_minutes_by_lang.ja).toBeCloseTo(2, 2); // 120 / 60
+    expect(usage.output_minutes_by_lang.ko).toBeCloseTo(1.25, 2); // 75 / 60
+  });
+
+  it("concurrent add-stream for the same (lang, platform) dedups to one row", async () => {
+    const sessionId = await createSession("u-concurrent", ["ja"]);
+
+    // Race two identical add-stream POSTs. Without migration 0010 both
+    // would insert and Fargate would later spawn two ffmpeg processes
+    // for the same YouTube destination. With the unique index + ON
+    // CONFLICT DO NOTHING the second write no-ops and both callers
+    // receive the canonical row.
+    const [a, b] = await Promise.all([
+      call(`/api/sessions/${sessionId}/streams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lang: "ja",
+          platform: "youtube",
+          rtmp_url: "rtmp://a.rtmp.youtube.com/live2/",
+          stream_key: "key-A",
+        }),
+      }),
+      call(`/api/sessions/${sessionId}/streams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lang: "ja",
+          platform: "youtube",
+          rtmp_url: "rtmp://a.rtmp.youtube.com/live2/",
+          stream_key: "key-B",
+        }),
+      }),
+    ]);
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+
+    const aBody = (await a.json()) as { id: string };
+    const bBody = (await b.json()) as { id: string };
+    // Both callers must observe the same row id — one insert won, the
+    // other resolved to the existing row.
+    expect(aBody.id).toBe(bBody.id);
+
+    const final = await getInternal(sessionId);
+    const ytRows = final.streams.filter(
+      (s) => s.lang === "ja" && s.platform === "youtube",
+    );
+    expect(ytRows).toHaveLength(1);
+    expect(ytRows[0]?.id).toBe(aBody.id);
+  });
+
+  it("adding a DIFFERENT (lang, platform) to the same session is NOT deduped", async () => {
+    // Guard against an over-eager unique index: only (session, lang,
+    // platform) is constrained — the same session can host a ja+youtube
+    // AND a ja+twitch stream, or a ja+youtube AND a ko+youtube stream.
+    const sessionId = await createSession("u-distinct", ["ja"]);
+    await addStream(sessionId, "ja", "youtube");
+    await addStream(sessionId, "ja", "twitch");
+    await addStream(sessionId, "ko", "youtube");
+
+    const final = await getInternal(sessionId);
+    expect(final.streams).toHaveLength(3);
+  });
 });

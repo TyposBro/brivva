@@ -338,8 +338,22 @@ export async function createStreamManual(
     host_gain: args.hostGain,
     created_at: now(),
   };
-  await wrap(db).insert(schema.streams).values(row).run();
-  return row;
+  const d = wrap(db);
+  // Concurrent POST /api/sessions/:id/streams with the same
+  // (session_id, lang, platform) must NOT double-insert. Migration 0010
+  // adds the unique index that enforces it; the handler uses ON CONFLICT
+  // DO NOTHING and re-selects so both callers see the canonical row. The
+  // "winner" is whichever insert hit D1 first.
+  await d.insert(schema.streams).values(row).onConflictDoNothing().run();
+  const existing = await d.query.streams.findFirst({
+    where: and(
+      eq(schema.streams.session_id, args.sessionId),
+      eq(schema.streams.lang, args.lang),
+      eq(schema.streams.platform, args.platform),
+    ),
+  });
+  if (!existing) throw new Error("createStreamManual: row missing after insert");
+  return existing;
 }
 
 export type UpdateStreamPlatform = {

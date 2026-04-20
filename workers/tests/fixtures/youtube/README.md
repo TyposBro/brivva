@@ -29,16 +29,18 @@ Required captures:
 
 ## Capture steps
 
-Use a test Google account, not the prod brand channel. `curl` against
-YouTube Data API v3 with scope `https://www.googleapis.com/auth/youtube`.
+Automated via `scripts/capture-youtube-fixtures.sh`:
 
 ```bash
-curl -X POST "https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet,contentDetails,status" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"snippet":{"title":"capture","scheduledStartTime":"2026-05-01T00:00:00Z"},"status":{"privacyStatus":"unlisted"}}' \
-  | tee broadcast_insert_happy.json
+export YT_ACCESS_TOKEN=ya29.XXXX   # test Google account, scope youtube
+bash scripts/capture-youtube-fixtures.sh
 ```
+
+The script runs `liveBroadcasts.insert` + `liveStreams.insert` +
+`liveBroadcasts/bind` against YouTube Data API v3 and writes the real
+response bodies into this directory, overwriting the current hand-crafted
+fixtures. After success, update the Status column in the table above
+from `HAND_CRAFTED_PENDING_REAL_CAPTURE` → `CAPTURED` and commit.
 
 ## Validation rules
 

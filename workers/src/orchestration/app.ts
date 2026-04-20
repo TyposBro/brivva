@@ -424,7 +424,14 @@ app.post("/api/sessions", async (c) => {
         } catch (e) {
           // Roll back like the YouTube failure branch. Surface the Grip API
           // status back to the caller so the FE can either retry or prompt
-          // the user for paste-creds (Task B fallback).
+          // the user for paste-creds (Task B fallback). §0.5.4: log the
+          // underlying error BEFORE rollback so a post-incident grep for
+          // "grip seller" or the caller's session_id surfaces the real
+          // cause (the return-to-caller JSON is lossy).
+          console.warn(
+            `[sessions] grip seller api provision failed — rolling back session ${session.id}`,
+            { error: String(e), productId: p.productId },
+          );
           for (const id of insertedIds) {
             await db.deleteStreamRow(c.env.DB, id);
           }
@@ -493,6 +500,12 @@ app.post("/api/sessions", async (c) => {
         // Roll back the session + all previously inserted stream rows so the
         // FE never sees a half-baked session with orphan streams. Surface the
         // error to the caller — the dashboard renders the message inline.
+        // §0.5.4: log the underlying error so a post-incident grep for
+        // "youtube broadcast" or the session_id surfaces the real cause.
+        console.warn(
+          `[sessions] youtube broadcast create failed — rolling back session ${session.id}`,
+          { error: String(e) },
+        );
         for (const id of insertedIds) {
           await db.deleteStreamRow(c.env.DB, id);
         }
@@ -526,6 +539,12 @@ app.post("/api/sessions", async (c) => {
   } catch (e) {
     // Defensive — we already return early on the YouTube failure branch, so
     // this catches e.g. D1 transient errors during manual inserts.
+    // §0.5.4: log so a post-incident grep for "session create rollback"
+    // surfaces the underlying cause; re-throwing alone loses context.
+    console.warn(
+      `[sessions] defensive rollback after session-create exception — session ${session.id}`,
+      { error: String(e) },
+    );
     for (const id of insertedIds) {
       await db.deleteStreamRow(c.env.DB, id);
     }
@@ -881,6 +900,10 @@ app.get("/auth/youtube/callback", async (c) => {
     // Pass JWT via URL fragment (not readable by servers/logs).
     return c.redirect(`${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(state)}#token=${jwt}`);
   } catch (e) {
+    // §0.5.4: OAuth callback errors otherwise only surface as a 500 JSON
+    // body to the FE; log so a post-incident grep catches token-exchange
+    // failures, channel-info 403s, etc.
+    console.warn("[auth] youtube callback exception", { error: String(e) });
     return c.json({ error: String(e) }, 500);
   }
 });
@@ -924,6 +947,9 @@ app.get("/auth/google/callback", async (c) => {
       `${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(user.id)}#token=${jwt}`,
     );
   } catch (e) {
+    // §0.5.4: same rationale as /auth/youtube/callback — surface the
+    // underlying cause so sign-in failures are grep-auditable.
+    console.warn("[auth] google sign-in callback exception", { error: String(e) });
     return c.json({ error: String(e) }, 500);
   }
 });
