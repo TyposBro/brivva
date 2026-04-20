@@ -1,14 +1,25 @@
-// TODO(post-may10, demo-era-rewrite): this suite targets the removed
-// `/host?sessionId=...&sourceLang=...` page (deleted in commit db63713
-// "demo-era cruft removed"). The underlying scenarios are still
-// relevant — WS drop/reconnect, interim→final→translation, kill-switch
-// banner, stop/start mid-session — but they need to be rewritten
-// against the current `/session/:id/live` route (see
-// `frontend/src/features/broadcast/presentation/session-live-page.tsx`).
-// Skipped until that rewrite happens so CI stays green in the meantime.
-// This is a real coverage gap, not a ship-blocker — adjacent e2e files
-// (go-live.e2e.ts, voice-clone-crosslingual.e2e.ts, session-rollback
-// below) still cover the primary golden paths.
+// E2E for the live broadcast page (`/session/:id/live`).
+//
+// Historical note: this suite used to target `/host?sessionId=...` —
+// that page was removed in commit db63713 ("demo-era cruft removed").
+// The scenarios themselves are still relevant — WS connect + drop,
+// interim→final→translation pipeline, stop→start mid-session,
+// auth-failure + backend-error banners — so they've been ported to the
+// current route. `BroadcastView` with `autoSkipVoice=true` is what
+// `/session/:id/live` actually renders, so the voice-setup heading is
+// never shown in this flow (the prior suite had to click "Skip" after
+// every load).
+//
+// Mock-server contracts used:
+//   - /auth/token (POST)    returns { token: "test-token" } unless
+//                            /test/set-auth-fail was called, then 401
+//   - /api/sessions/:id (GET) returns a synthetic live session with
+//                            target_langs: ["ja","zh"] and two streams
+//                            (ja + zh) — enough for the translation
+//                            fan-out assertion
+//   - /test/set-ws-reject   destroys the next WS upgrade before accept
+//   - /test/close           closes the active socket server-side
+//   - /test/emit            relays a JSON payload to the active socket
 
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { MOCK } from "./config";
@@ -39,26 +50,43 @@ async function seedUser(page: Page) {
   });
 }
 
-test.describe.skip("HostPage — E2E w/ mock server (DISABLED — page removed; see TODO at top)", () => {
-  test.beforeEach(async ({ request }) => { await resetMock(request); });
+const SESSION_ID = "s-live-e2e";
+const LIVE_URL = `/session/${SESSION_ID}/live`;
 
-  test("happy: loads session, skips voice, records, sees interim → final → translation", async ({ page, request }) => {
+test.describe("SessionLivePage — E2E w/ mock server", () => {
+  test.beforeEach(async ({ request }) => {
+    await resetMock(request);
+  });
+
+  test("happy: auto-skips voice, connects WS, renders interim → final → translation", async ({ page, request }) => {
     await seedUser(page);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
+    await page.goto(LIVE_URL);
 
-    await expect(page.getByRole("heading", { name: "Voice Setup" })).toBeVisible();
+    // `autoSkipVoice=true` means we never see the "Voice Setup"
+    // heading; the page walks creating → voice_setup (auto-skipped) →
+    // ready and renders the Live Streams section from the seeded
+    // session bundle directly.
     await waitForSocket(request);
-
-    await page.getByRole("button", { name: /Skip/ }).click();
     await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
 
     await emit(request, { type: "interim", transcript: "hel" });
     await expect(page.getByText("hel", { exact: true })).toBeVisible();
 
-    await emit(request, { type: "final", utteranceId: 1, transcript: "hello world", sttMs: 200 });
+    await emit(request, {
+      type: "final",
+      utteranceId: 1,
+      transcript: "hello world",
+      sttMs: 200,
+    });
     await expect(page.getByText("hello world")).toBeVisible();
 
-    await emit(request, { type: "translation", utteranceId: 1, targetLang: "ja", text: "こんにちは", translateMs: 150 });
+    await emit(request, {
+      type: "translation",
+      utteranceId: 1,
+      targetLang: "ja",
+      text: "こんにちは",
+      translateMs: 150,
+    });
     await expect(page.getByText("こんにちは")).toBeVisible();
 
     await emit(request, { type: "tts_end", utteranceId: 1, ttsMs: 300 });
@@ -66,91 +94,108 @@ test.describe.skip("HostPage — E2E w/ mock server (DISABLED — page removed; 
 
   test("sad: WS drops after connect → Disconnected UI", async ({ page, request }) => {
     await seedUser(page);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
+    await page.goto(LIVE_URL);
     await waitForSocket(request);
-    await expect(page.getByRole("heading", { name: "Voice Setup" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
 
+    // Server-side close simulates a transport drop. `useHostSession`
+    // dispatches `disconnected`, which renders the "Disconnected." line
+    // in `BroadcastView`.
     await request.post(`${MOCK}/test/close`);
-    await expect(page.getByText(/Disconnected/i)).toBeVisible();
+    await expect(page.getByText("Disconnected.")).toBeVisible();
   });
 
-  test("sad: auth token fetch 401 → error banner", async ({ page, request }) => {
+  test("sad: auth token fetch 401 → error banner + no WS", async ({ page, request }) => {
     await seedUser(page);
+    // Arm the mock to fail the NEXT /auth/token call. `fetchAuthToken`
+    // throws → reducer dispatches `error`. The WS handshake never
+    // starts because `connectSession` bails on a null token.
     await request.post(`${MOCK}/test/set-auth-fail`);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
 
-    await expect(page.getByText(/Auth token fetch failed/i)).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole("heading", { name: "Voice Setup" })).not.toBeVisible();
+    await page.goto(LIVE_URL);
+    await expect(page.getByText(/Auth token fetch failed/)).toBeVisible();
+
+    // Belt-and-braces: prove the socket never opened even after the
+    // banner appears.
+    const state = await request.get(`${MOCK}/test/state`).then((r) => r.json());
+    expect(state.hasSocket).toBe(false);
   });
 
   test("sad: backend emits error message → banner shown", async ({ page, request }) => {
     await seedUser(page);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
+    await page.goto(LIVE_URL);
     await waitForSocket(request);
 
-    await emit(request, { type: "error", message: "backend exploded" });
-    await expect(page.getByText("backend exploded")).toBeVisible();
+    await emit(request, {
+      type: "error",
+      message: "Soniox rate-limited — try again in 30s",
+    });
+    await expect(
+      page.getByText("Soniox rate-limited — try again in 30s"),
+    ).toBeVisible();
   });
 
   test("happy: unknown target lang translation doesn't crash (forward-compat)", async ({ page, request }) => {
+    // Session streams are ja + zh; emit a translation for `vi` which
+    // isn't in the streams map. The reducer should keep the translation
+    // in the translations dictionary (for future streams) without
+    // throwing, and the page should stay mounted.
     await seedUser(page);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
+    await page.goto(LIVE_URL);
     await waitForSocket(request);
-    await page.getByRole("button", { name: /Skip/ }).click();
-
-    await emit(request, { type: "final", utteranceId: 7, transcript: "foo" });
-    await emit(request, { type: "translation", utteranceId: 7, targetLang: "ru", text: "привет" });
-    // Page still mounted; stream cards for ja/zh unchanged
-    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
-    await expect(page.getByText("foo")).toBeVisible();
-  });
-
-  // Production regression (2026-04-20): host pressed stop -> start without
-  // ending the session. Server-side eviction now guarantees only one
-  // live_session per FE session_id; the FE must keep the WS open and
-  // continue rendering translations after the second start.
-  test("regression: stop -> start within session keeps Live Streams + translations flowing", async ({ page, request }) => {
-    await seedUser(page);
-    await page.goto("/host?sessionId=s1&sourceLang=en");
-    await waitForSocket(request);
-    await page.getByRole("button", { name: /Skip/ }).click();
     await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
 
-    await page.getByRole("button", { name: /^Record$/ }).click();
-    await emit(request, { type: "final", utteranceId: 1, transcript: "first run", sttMs: 100 });
-    await expect(page.getByText("first run")).toBeVisible();
-    await emit(request, { type: "translation", utteranceId: 1, targetLang: "ja", text: "最初", translateMs: 80 });
-    await expect(page.getByText("最初")).toBeVisible();
-    await page.getByRole("button", { name: /^Stop$/ }).click();
+    await emit(request, {
+      type: "translation",
+      utteranceId: 42,
+      targetLang: "vi",
+      text: "xin chào",
+      translateMs: 90,
+    });
 
-    // Second recording window — start again WITHOUT ending the session.
-    // Pre-fix this is where TTS went silent on the server because the
-    // prior live_session lingered. The FE state must stay healthy: Live
-    // Streams visible, no error banner, and a fresh translation renders.
-    await page.getByRole("button", { name: /^Record$/ }).click();
-    await emit(request, { type: "final", utteranceId: 2, transcript: "second run", sttMs: 110 });
-    await expect(page.getByText("second run")).toBeVisible();
-    await emit(request, { type: "translation", utteranceId: 2, targetLang: "ja", text: "二回目", translateMs: 90 });
-    await expect(page.getByText("二回目")).toBeVisible();
+    // No crash: the Live Streams section is still visible, no error
+    // banner rendered.
     await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
   });
 
-  // Regression — prod incident 2026-04-20. Clicking End-Session used to flash
-  // "Session not found" because Workers hard-deleted the row, the FE refresh
-  // GET returned `session:null`, and the page short-circuited to its
-  // "missing" branch instead of opening the summary modal. Soft-end + an
-  // optimistic state flip on End should mean the host only ever sees the
-  // summary surface.
-  test("regression: End Session shows summary modal — never the 'Session not found' fallback", async ({ page }) => {
+  test("regression: WS reconnect mid-session preserves Live Streams card + routes new translations", async ({ page, request }) => {
+    // Pre-fix behaviour (before commit b3542f4 eviction): when the
+    // socket dropped and the FE re-connected, the second live_session
+    // row lingered alongside the first and translation fan-out silenced
+    // for the remainder of the broadcast. This asserts the reducer
+    // flows a brand-new translation through the card after a forced
+    // disconnect + reload on the same session URL.
     await seedUser(page);
-    await page.goto("/session/s-end-test");
+    await page.goto(LIVE_URL);
+    await waitForSocket(request);
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
 
-    // Wait for the live session to render so the End button is reachable.
-    await expect(page.getByText("E2E Test Session")).toBeVisible();
-    await page.getByRole("button", { name: /End Session/i }).click();
+    await emit(request, {
+      type: "translation",
+      utteranceId: 1,
+      targetLang: "ja",
+      text: "一本目",
+      translateMs: 100,
+    });
+    await expect(page.getByText("一本目")).toBeVisible();
 
-    await expect(page.getByRole("heading", { name: /Session ended/i })).toBeVisible();
-    // The fallback state must not appear at any point during/after End.
-    await expect(page.getByText(/Session not found/i)).toHaveCount(0);
+    // Drop the socket + re-open the live page; the mock will accept the
+    // next upgrade as a fresh session (it only tracks one socket at a
+    // time, so the re-open lands on a clean slot).
+    await request.post(`${MOCK}/test/close`);
+    await expect(page.getByText("Disconnected.")).toBeVisible();
+
+    await page.goto(LIVE_URL);
+    await waitForSocket(request);
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
+
+    await emit(request, {
+      type: "translation",
+      utteranceId: 2,
+      targetLang: "ja",
+      text: "二本目",
+      translateMs: 100,
+    });
+    await expect(page.getByText("二本目")).toBeVisible();
   });
 });

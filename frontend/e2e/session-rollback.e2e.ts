@@ -1,9 +1,18 @@
-// TODO(post-may10, demo-era-rewrite): this scenario was wired against
-// the deleted `/host?sessionId=...&sourceLang=...` page (commit db63713).
-// The WS-drop → kill-switch → summary-fallback path is still worth
-// covering end-to-end, but it needs to be reauthored against
-// `/session/:id/live` (see session-live-page.tsx). Skipped until then —
-// go-live.e2e.ts covers the happy summary-modal path today.
+// Scenario 3 — session end + rollback.
+//
+// Originally targeted `/host?sessionId=...`; that page was removed in
+// commit db63713 and the scenario is now wired against the current
+// `/session/:id/live` route. Covers the 2am-incident graceful path:
+//   1. Broadcast is live.
+//   2. Server-rs kill-switch fires (voice clone broken) → error banner
+//      renders in-place without tearing down the pipeline.
+//   3. WS drops → "Disconnected." state visible.
+//   4. Host navigates back to `/session/:id` + clicks End Session.
+//   5. Summary endpoint is arranged to fail → SessionPage renders the
+//      graceful-fallback message instead of a white screen.
+//
+// This exercises every observability + recovery surface `BroadcastView`
+// is supposed to expose to the 2am operator (rollback.sh docs §2c).
 
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import { MOCK } from "./config";
@@ -29,7 +38,11 @@ async function signIn(page: Page) {
   });
 }
 
-test.describe.skip("Scenario 3 — session end + rollback (DISABLED — /host page removed; see TODO at top)", () => {
+const SESSION_ID = "s-rollback";
+const LIVE_URL = `/session/${SESSION_ID}/live`;
+const POST_URL = `/session/${SESSION_ID}`;
+
+test.describe("Scenario 3 — session end + rollback", () => {
   test.beforeEach(async ({ request }) => {
     await resetMock(request);
     await request.post(`${MOCK}/test/seed-user`, {
@@ -44,27 +57,31 @@ test.describe.skip("Scenario 3 — session end + rollback (DISABLED — /host pa
   test("WS drop → disconnect banner → kill-switch error → graceful end with summary fallback", async ({ page, request }) => {
     await signIn(page);
 
-    await page.goto("/host?sessionId=s-rollback&sourceLang=en");
+    await page.goto(LIVE_URL);
     await waitForSocket(request);
 
-    // Skip voice → ready state.
-    await expect(page.getByRole("heading", { name: /Voice Setup/i })).toBeVisible();
-    await page.getByRole("button", { name: /Skip/i }).click();
+    // `autoSkipVoice=true` means the live page lands on the "ready"
+    // state immediately once the WS handshake completes. Assert the
+    // Live Streams section is the thing in view (not a Voice Setup
+    // heading — that UI is only shown on the /setup route now).
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
 
-    // Trigger backend kill-switch event — UI shows error banner from
-    // server-rs ("falling back to default voice"). This proves the
-    // graceful-degradation indicator renders.
+    // Trigger backend kill-switch event — UI shows the broadcast-scoped
+    // error banner. This proves the graceful-degradation indicator
+    // renders without tearing down the pipeline (the WS stays up).
     await request.post(`${MOCK}/test/fire-kill-switch`);
     await expect(page.getByText(/falling back to default voice/i)).toBeVisible();
 
-    // Now drop the WebSocket. UI must transition to the "Disconnected" state.
+    // Now drop the WebSocket. `useHostSession` transitions to
+    // `disconnected`; BroadcastView shows the "Disconnected." line.
     await request.post(`${MOCK}/test/close`);
-    await expect(page.getByText(/Disconnected/i)).toBeVisible();
+    await expect(page.getByText("Disconnected.")).toBeVisible();
 
-    // Navigate to /session/:id, end cleanly, summary endpoint fails →
-    // modal still renders with the graceful "summary unavailable" message.
+    // Navigate to the post-live session page. Arm the summary endpoint
+    // to 500 so the SessionPage hits its graceful-fallback path instead
+    // of the happy-summary-modal path.
     await request.post(`${MOCK}/test/set-summary-fail`);
-    await page.goto("/session/s-rollback");
+    await page.goto(POST_URL);
     await page.getByRole("button", { name: /End Session/i }).click();
 
     await expect(page.getByRole("heading", { name: /Session ended/i })).toBeVisible();
