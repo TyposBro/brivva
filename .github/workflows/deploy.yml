@@ -83,7 +83,7 @@ jobs:
       ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
       ECR_REPO: brivva/server-rs
       FFMPEG_BASE_REPO: brivva/ffmpeg-base
-      FFMPEG_VERSION: "6.1.2"
+      FFMPEG_VERSION: "7.1.1"
       ECS_CLUSTER: brivva
       ECS_SERVICE: brivva
       ECS_CONTAINER: server-rs

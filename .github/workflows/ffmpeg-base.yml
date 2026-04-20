@@ -10,7 +10,7 @@ name: ffmpeg-base
 #   - manual via workflow_dispatch
 #
 # The image is content-addressed by the FFMPEG_VERSION input (default
-# 6.1.2) plus the `-librtmp` suffix. Never overwrite a version tag in
+# 7.1.1) plus the `-librtmp` suffix. Never overwrite a version tag in
 # place — bump FFMPEG_VERSION when the underlying ffmpeg changes so
 # every downstream server-rs image pins a known binary.
 
@@ -20,7 +20,7 @@ on:
       ffmpeg_version:
         description: "ffmpeg source version to build (must match upstream release tarball)"
         required: false
-        default: "6.1.2"
+        default: "7.1.1"
   push:
     branches: [prod, main]
     paths:
@@ -41,7 +41,7 @@ jobs:
     env:
       ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
       ECR_REPO: brivva/ffmpeg-base
-      FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version || '6.1.2' }}
+      FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version || '7.1.1' }}
     steps:
       - uses: actions/checkout@v4
 

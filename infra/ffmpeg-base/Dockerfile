@@ -27,7 +27,7 @@
 
 FROM debian:bookworm-slim AS build
 
-ARG FFMPEG_VERSION=6.1.2
+ARG FFMPEG_VERSION=7.1.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential yasm nasm pkg-config curl xz-utils ca-certificates \
