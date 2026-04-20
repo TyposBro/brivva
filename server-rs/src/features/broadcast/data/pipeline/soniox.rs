@@ -171,6 +171,21 @@ impl SonioxMode {
 mod tests {
     use super::*;
 
+    // §0.5.1 — real-captured fixtures. Paths are compile-time resolved from
+    // soniox.rs → server-rs/tests/fixtures/soniox/. Do not inline new shapes
+    // here; add them as captured JSON files under the fixtures directory and
+    // document provenance in its README.
+    mod fixtures {
+        pub const ERROR_AUTH_FAILED: &str =
+            include_str!("../../../../../tests/fixtures/soniox/error_auth_failed.json");
+        pub const ERROR_408_TIMEOUT: &str =
+            include_str!("../../../../../tests/fixtures/soniox/error_408_timeout.json");
+        pub const ERROR_ABSENT: &str =
+            include_str!("../../../../../tests/fixtures/soniox/error_absent.json");
+        pub const ERROR_NULL: &str =
+            include_str!("../../../../../tests/fixtures/soniox/error_null.json");
+    }
+
     fn token(text: &str, translation_status: Option<&str>) -> SonioxToken {
         SonioxToken {
             text: text.to_string(),
@@ -263,8 +278,8 @@ mod tests {
 
     #[test]
     fn deserializes_error_code_when_soniox_sends_it_as_a_string() {
-        let json = r#"{"error_code":"auth_failed","error_message":"bad key"}"#;
-        let resp: SonioxResponse = serde_json::from_str(json).expect("parses");
+        let resp: SonioxResponse =
+            serde_json::from_str(fixtures::ERROR_AUTH_FAILED).expect("parses");
         assert_eq!(resp.error_code.as_deref(), Some("auth_failed"));
     }
 
@@ -276,21 +291,21 @@ mod tests {
         // such response fail parse and disappear silently. The processor
         // then never tore down the pipeline on Soniox errors and translation
         // utterances stalled forever — burn-in captions never followed.
-        let json = r#"{"tokens":[],"error_code":408,"error_message":"Request timeout."}"#;
-        let resp: SonioxResponse = serde_json::from_str(json).expect("parses");
+        let resp: SonioxResponse =
+            serde_json::from_str(fixtures::ERROR_408_TIMEOUT).expect("parses");
         assert_eq!(resp.error_code.as_deref(), Some("408"));
         assert_eq!(resp.error_message.as_deref(), Some("Request timeout."));
     }
 
     #[test]
     fn deserializes_error_code_as_none_when_field_absent() {
-        let resp: SonioxResponse = serde_json::from_str("{}").expect("parses");
+        let resp: SonioxResponse = serde_json::from_str(fixtures::ERROR_ABSENT).expect("parses");
         assert!(resp.error_code.is_none());
     }
 
     #[test]
     fn deserializes_error_code_as_none_when_field_explicitly_null() {
-        let resp: SonioxResponse = serde_json::from_str(r#"{"error_code":null}"#).expect("parses");
+        let resp: SonioxResponse = serde_json::from_str(fixtures::ERROR_NULL).expect("parses");
         assert!(resp.error_code.is_none());
     }
 }
