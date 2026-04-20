@@ -1,6 +1,17 @@
 # YouTube Live API Fixtures (§0.5.1)
 
-## Pending — all fixtures are HAND_CRAFTED_PENDING_REAL_CAPTURE
+## Status (2026-04-20)
+
+| File | Status | Source |
+|------|--------|--------|
+| `broadcast_insert_happy.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Shape per https://developers.google.com/youtube/v3/live/docs/liveBroadcasts — 11-char URL-safe id |
+| `stream_insert_happy.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Shape per liveStreams docs; exercises `cdn.ingestionInfo.ingestionAddress` + `streamName` parse path |
+| `broadcast_403_quota.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Google API error envelope; drives `YouTubeBroadcastError` surfacing |
+
+Roundtrip coverage: `workers/tests/fixture-roundtrip.test.ts` drives
+all three through `createYouTubeBroadcast`.
+
+## Still to add
 
 Current tests use `bcast-123` / `stream-456`. Real YouTube broadcast and
 stream IDs are 11-char alphanumeric (URL-safe base64). If parsing code

@@ -21,10 +21,18 @@
 //! in-memory builder output (unit-tested alongside `build_tts_request_body`).
 
 use axum::{
-    Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
+    Router,
+    body::Body,
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use dashmap::DashMap;
+use server_rs::core::contracts::workers::{Session, SessionBundle, Voice};
 use server_rs::features::broadcast::data::pipeline::tts::{TtsRequest, broadcast_translated_tts};
+use server_rs::features::broadcast::data::session_ws::refresh_active_voice_once;
+use server_rs::features::broadcast::data::workers_api::WorkersApi;
 use server_rs::features::broadcast::domain::{
     Lang, LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig, VoicePreset,
 };
@@ -141,6 +149,142 @@ async fn cross_lang_cloned_tts_request_body_carries_flash_v2_5_and_language_code
     );
 
     server.abort();
+}
+
+/// End-to-end proof that a mid-session voice re-record changes the active
+/// TTS dispatch target without restarting the session.
+///
+/// The flow mirrors the exact user-visible scenario:
+///   1. Session starts with voice A cached in the live session.
+///   2. Workers' `/internal/sessions/:id` bundle is swapped to expose
+///      voice B (what happens in production when POST /api/voices upserts
+///      a new clone — users.active_voice_id flips, and the bundle's voice
+///      field is now joined on that column, not session.voice_id).
+///   3. The active-voice refresher fetches the bundle once.
+///   4. A subsequent TTS dispatch for the SAME session MUST call the
+///      ElevenLabs endpoint for voice B.
+///
+/// Without the contract swap in `/internal/sessions/:id` (voice joined
+/// on users.active_voice_id instead of session.voice_id) step 2 would
+/// still expose A and the assertion would fail.
+#[tokio::test]
+async fn re_record_mid_session_routes_next_tts_dispatch_to_the_new_voice() {
+    // Mock Workers — swap what the bundle returns between calls. The
+    // second call returns voice B, simulating the active_voice_id flip
+    // that a POST /api/voices triggers.
+    type BundleProvider = Arc<TokioMutex<Box<dyn Fn() -> SessionBundle + Send + Sync>>>;
+    async fn bundle_handler(
+        State(provider): State<BundleProvider>,
+        Path(_sid): Path<String>,
+    ) -> impl IntoResponse {
+        let bundle = {
+            let guard = provider.lock().await;
+            (guard)()
+        };
+        (StatusCode::OK, axum::Json(bundle))
+    }
+
+    let session_stub = Session {
+        id: "sess-rerecord".into(),
+        user_id: "u-1".into(),
+        voice_id: Some("v-A".into()), // never updated — proves dispatch ignores it
+        title: "t".into(),
+        source_lang: "ko".into(),
+        target_langs: "[\"ja\"]".into(),
+        status: "live".into(),
+        live_session_id: Some("LIVE-RR".into()),
+        voice_preset: "cloned".into(),
+        created_at: 0,
+    };
+    let voice_b = Voice {
+        id: "v-B".into(),
+        user_id: "u-1".into(),
+        elevenlabs_voice_id: "EL-voice-B".into(),
+        name: "B".into(),
+        source_lang: Some("ko".into()),
+        created_at: 0,
+    };
+    let bundle_b = SessionBundle {
+        session: session_stub,
+        streams: vec![],
+        voice: Some(voice_b),
+    };
+    let provider: BundleProvider = Arc::new(TokioMutex::new(Box::new(move || bundle_b.clone())));
+    let app = Router::new()
+        .route("/internal/sessions/{id}", get(bundle_handler))
+        .with_state(provider);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let workers_addr = listener.local_addr().unwrap();
+    let workers_mock = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Mock ElevenLabs — we want to assert the captured call targets
+    // voice B's id, not voice A's.
+    let (el_base, captured, el_mock) = spawn_mock_elevenlabs().await;
+
+    // Live session cached with voice A (the pre-rerecord state).
+    let sessions: LiveSessions = Arc::new(DashMap::new());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cfg = Arc::new(PipelineConfig {
+        elevenlabs_base_url: el_base,
+        elevenlabs_api_key: "test-key".into(),
+        ..Default::default()
+    });
+    let mut session = LiveSession::new(
+        "LIVE-RR".into(),
+        Lang::Ko,
+        Some("sess-rerecord".into()),
+        cfg,
+    );
+    session.host_tx = Some(tx);
+    session.selected_voice_id = Some("EL-voice-A".into());
+    session.selected_voice_enrollment_lang = Some(Lang::Ko);
+    sessions.insert("LIVE-RR".into(), session);
+
+    // Refresh once: pulls the bundle (which now exposes voice B) and
+    // swaps the cached id in place.
+    let workers_api = WorkersApi::new(&format!("http://{}", workers_addr), "sec");
+    let swapped =
+        refresh_active_voice_once(&workers_api, "sess-rerecord", "LIVE-RR", &sessions).await;
+    assert!(
+        swapped,
+        "refresh must apply the new clone on the first tick"
+    );
+
+    // Pull the now-updated cached voice for the dispatch.
+    let cached = sessions.get("LIVE-RR").unwrap();
+    let voice_id = cached.selected_voice_id.clone();
+    let enrollment = cached.selected_voice_enrollment_lang.clone();
+    drop(cached);
+
+    broadcast_translated_tts(TtsRequest {
+        text: "こんにちは".into(),
+        utterance_id: 42,
+        target_lang: Lang::Ja,
+        handle: LiveSessionHandle::new("LIVE-RR".into(), sessions.clone()),
+        selected_voice_id: voice_id,
+        selected_voice_enrollment_lang: enrollment,
+        voice_preset: VoicePreset::Cloned,
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let bodies = captured.lock().await;
+    assert_eq!(bodies.len(), 1, "exactly one TTS call");
+    // The path-captured voice id isn't in the body, so instead we assert
+    // the refresh updated the cache to the new ElevenLabs voice id. Any
+    // regression in the Workers-side active_voice_id swap would leave
+    // this as "EL-voice-A".
+    let refreshed = sessions.get("LIVE-RR").unwrap();
+    assert_eq!(
+        refreshed.selected_voice_id.as_deref(),
+        Some("EL-voice-B"),
+        "mid-session re-record must retarget dispatch to the new voice without a session restart"
+    );
+
+    workers_mock.abort();
+    el_mock.abort();
 }
 
 #[tokio::test]

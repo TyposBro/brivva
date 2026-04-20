@@ -166,9 +166,13 @@ function DashboardInner() {
         if (state.onboardingCompletedAt === null) {
           navigate("/onboarding", { replace: true });
         }
-      } catch {
+      } catch (error) {
         // Workers may not have shipped onboarding_completed_at yet — let the
         // dashboard render normally so the demo path keeps working.
+        console.warn(
+          "dashboard: failed to fetch onboarding state — staying on dashboard",
+          { userId, error: (error as Error).message },
+        );
       }
     })();
     return () => {

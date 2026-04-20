@@ -251,7 +251,11 @@ function parseTargetLangs(serialized: string): string[] {
   try {
     const parsed = JSON.parse(serialized);
     return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
-  } catch {
+  } catch (error) {
+    console.warn(
+      "session-setup: failed to parse session.target_langs — destination dropdowns will show empty",
+      { rawLen: serialized.length, error: (error as Error).message },
+    );
     return [];
   }
 }

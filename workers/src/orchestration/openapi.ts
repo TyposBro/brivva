@@ -466,6 +466,15 @@ const schemas = {
       per_output_minute_usd: { type: "number" },
     },
   },
+  SessionQuoteBreakdownItem: {
+    type: "object",
+    required: ["lang", "minutes", "cost_usd"],
+    properties: {
+      lang: { type: "string" },
+      minutes: { type: "number" },
+      cost_usd: { type: "number" },
+    },
+  },
   SessionQuoteResponse: {
     type: "object",
     required: [
@@ -474,6 +483,7 @@ const schemas = {
       "output_minutes",
       "per_output_minute_usd",
       "estimated_cost_usd",
+      "breakdown",
     ],
     properties: {
       session_id: { type: "string" },
@@ -481,6 +491,10 @@ const schemas = {
       output_minutes: { type: "number" },
       per_output_minute_usd: { type: "number" },
       estimated_cost_usd: { type: "number" },
+      breakdown: {
+        type: "array",
+        items: ref("SessionQuoteBreakdownItem"),
+      },
     },
   },
   SessionSummaryResponse: {
@@ -489,21 +503,29 @@ const schemas = {
       "session_id",
       "status",
       "is_final",
+      "billing_tier",
       "source_minutes",
-      "output_minutes_by_lang",
-      "estimated_cost_usd",
+      "total_minutes",
+      "output_by_lang",
+      "total_cost_usd",
+      "rate_usd",
+      "billed_to",
       "updated_at",
     ],
     properties: {
       session_id: { type: "string" },
       status: { type: "string" },
       is_final: { type: "boolean" },
+      billing_tier: { type: "string", enum: ["self_serve", "b2b"] },
       source_minutes: { type: "number" },
-      output_minutes_by_lang: {
+      total_minutes: { type: "number" },
+      output_by_lang: {
         type: "object",
         additionalProperties: { type: "number" },
       },
-      estimated_cost_usd: { type: "number" },
+      total_cost_usd: { type: "number", nullable: true },
+      rate_usd: { type: "number", nullable: true },
+      billed_to: { type: "string", nullable: true },
       updated_at: { type: "integer", nullable: true },
     },
   },

@@ -43,6 +43,16 @@ export async function getOrCreateUser(
   return row;
 }
 
+export async function getUserById(
+  db: D1Database,
+  id: string,
+): Promise<User | null> {
+  const row = await wrap(db).query.users.findFirst({
+    where: eq(schema.users.id, id),
+  });
+  return row ?? null;
+}
+
 export type UpdateYouTubeTokens = {
   userId: string;
   accessToken: string;

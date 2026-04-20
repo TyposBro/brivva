@@ -1,0 +1,31 @@
+{
+  "id": "evt_1P3aBC2eZvKYlo2CxZabCDef",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1714521600,
+  "data": {
+    "object": {
+      "id": "cs_test_a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ",
+      "object": "checkout.session",
+      "customer": "cus_PabCdEfGhIjKlM",
+      "customer_email": "gitae@example.com",
+      "mode": "subscription",
+      "payment_status": "paid",
+      "status": "complete",
+      "subscription": "sub_1P3aBC2eZvKYlo2CAbCdEfGh",
+      "amount_total": 9000,
+      "currency": "usd",
+      "livemode": false,
+      "metadata": {
+        "brivva_user_id": "u_01HZYXT9M7K8JCFG3B5D4E6QZR"
+      }
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "checkout.session.completed"
+}

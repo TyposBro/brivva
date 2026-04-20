@@ -1,12 +1,19 @@
 # ElevenLabs Fixtures (§0.5.1)
 
-## Pending — all fixtures are HAND_CRAFTED_PENDING_REAL_CAPTURE
+## Status (2026-04-20)
 
-- `voice_clone_happy.json` — POST /v1/voices/add response
-- `voice_clone_402_quota.json` — quota-exceeded error body
-- `tts_stream_headers.json` — TTS stream response headers (for format
-  validation)
-- `voice_delete_happy.json` — DELETE /v1/voices/:id response
+| File | Status | Source |
+|------|--------|--------|
+| `voice_clone_happy.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Shape per https://docs.elevenlabs.io/api-reference/voices/add — 20-char alphanumeric voice_id |
+| `voice_clone_402_quota.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | `{ detail: { status, message } }` — replace with live-captured body when a test key hits the cap |
+| `voice_delete_happy.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | `{ status: "ok" }` per docs |
+
+Roundtrip coverage: `workers/tests/fixture-roundtrip.test.ts` drives
+each fixture through `cloneVoice` / `deleteRemoteVoice`.
+
+## Still to add
+
+- `tts_stream_headers.json` — TTS stream response headers (for format validation)
 
 ## Capture steps
 

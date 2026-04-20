@@ -279,21 +279,37 @@ export const SessionQuoteQuerySchema = z.object({
   expected_minutes: z.number().positive(),
 });
 
+export const SessionQuoteBreakdownItemSchema = z.object({
+  lang: z.string().min(1),
+  minutes: z.number(),
+  cost_usd: z.number(),
+});
+
 export const SessionQuoteResponseSchema = z.object({
   session_id: z.string().min(1),
   expected_minutes: z.number().positive(),
   output_minutes: z.number(),
   per_output_minute_usd: z.number(),
   estimated_cost_usd: z.number(),
+  breakdown: z.array(SessionQuoteBreakdownItemSchema),
 });
 
+// Post-stream rollup. Two tier-dependent variants share the same keys:
+//   self_serve → total_cost_usd + rate_usd populated, billed_to omitted.
+//   b2b        → billed_to populated, total_cost_usd + rate_usd omitted.
+// output_by_lang is the single source of truth for per-lang minutes;
+// total_minutes is the sum across langs, pre-computed for the FE renderer.
 export const SessionSummaryResponseSchema = z.object({
   session_id: z.string().min(1),
   status: z.string().min(1),
   is_final: z.boolean(),
+  billing_tier: z.enum(["self_serve", "b2b"]),
   source_minutes: z.number(),
-  output_minutes_by_lang: z.record(z.string(), z.number()),
-  estimated_cost_usd: z.number(),
+  total_minutes: z.number(),
+  output_by_lang: z.record(z.string(), z.number()),
+  total_cost_usd: z.number().nullable(),
+  rate_usd: z.number().nullable(),
+  billed_to: z.string().nullable(),
   updated_at: z.number().int().nullable(),
 });
 
@@ -342,5 +358,6 @@ export type InternalSessionBundle = z.infer<typeof InternalSessionBundleSchema>;
 export type InternalSessionStatusUpdate = z.infer<typeof InternalSessionStatusUpdateSchema>;
 export type CompleteOnboardingRequest = z.infer<typeof CompleteOnboardingRequestSchema>;
 export type BillingRateResponse = z.infer<typeof BillingRateResponseSchema>;
+export type SessionQuoteBreakdownItem = z.infer<typeof SessionQuoteBreakdownItemSchema>;
 export type SessionQuoteResponse = z.infer<typeof SessionQuoteResponseSchema>;
 export type SessionSummaryResponse = z.infer<typeof SessionSummaryResponseSchema>;

@@ -58,21 +58,28 @@ export async function fetchSessionQuote(
   };
 }
 
-const SummaryBreakdownItemSchema = z.object({
-  lang: z.string(),
-  minutes: z.number(),
-  cost_usd: z.number(),
-});
-
+// Post-stream summary: tier-gated. Self-serve renders $-cost; B2B renders
+// "Billed to …" and never exposes a dollar figure. Per-lang minutes come
+// through output_by_lang — we flatten to a breakdown array for the FE
+// renderer but billable cost per row is only populated on self-serve.
 const SummaryResponseSchema = z.object({
+  billing_tier: z.enum(["self_serve", "b2b"]),
+  source_minutes: z.number(),
   total_minutes: z.number(),
-  total_cost_usd: z.number(),
-  breakdown: z.array(SummaryBreakdownItemSchema).optional(),
+  output_by_lang: z.record(z.string(), z.number()),
+  total_cost_usd: z.number().nullable(),
+  rate_usd: z.number().nullable(),
+  billed_to: z.string().nullable(),
 });
 
 export interface SummaryResponse {
+  billingTier: "self_serve" | "b2b";
+  sourceMinutes: number;
   totalMinutes: number;
-  totalCostUsd: number;
+  // null on B2B — modal must render "Billed to …" instead of a price.
+  totalCostUsd: number | null;
+  rateUsd: number | null;
+  billedTo: string | null;
   breakdown: QuoteBreakdownItem[];
 }
 
@@ -81,14 +88,21 @@ export async function fetchSessionSummary(sessionId: string): Promise<SummaryRes
   const res = await fetch(url, { credentials: "omit" });
   if (!res.ok) throw new Error(`fetchSessionSummary: ${res.status}`);
   const parsed = SummaryResponseSchema.parse(await res.json());
+  const rate = parsed.rate_usd;
+  const breakdown: QuoteBreakdownItem[] = Object.entries(parsed.output_by_lang).map(
+    ([lang, minutes]) => ({
+      lang,
+      minutes,
+      costUsd: typeof rate === "number" ? Math.round(minutes * rate * 100) / 100 : 0,
+    }),
+  );
   return {
+    billingTier: parsed.billing_tier,
+    sourceMinutes: parsed.source_minutes,
     totalMinutes: parsed.total_minutes,
     totalCostUsd: parsed.total_cost_usd,
-    breakdown:
-      parsed.breakdown?.map((b) => ({
-        lang: b.lang,
-        minutes: b.minutes,
-        costUsd: b.cost_usd,
-      })) ?? [],
+    rateUsd: parsed.rate_usd,
+    billedTo: parsed.billed_to,
+    breakdown,
   };
 }

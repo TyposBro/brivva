@@ -4,8 +4,9 @@ use std::sync::atomic::AtomicBool;
 use crate::core::contracts::workers::SessionBundle;
 use crate::features::broadcast::data::metrics::spawn_metrics_reporter;
 use crate::features::broadcast::data::workers_api::WorkersApi;
-use crate::features::broadcast::domain::{Lang, LiveSession, SessionMetrics};
+use crate::features::broadcast::domain::{Lang, LiveSession, LiveSessions, SessionMetrics};
 
+use super::active_voice_refresh::spawn_active_voice_refresh;
 use super::rtmp::{RtmpStartArgs, start_rtmp_streams};
 
 pub(super) enum BootstrapOutcome {
@@ -27,6 +28,7 @@ pub(super) struct BootstrapArgs<'a> {
     pub live_session: &'a mut LiveSession,
     pub live_session_id: &'a str,
     pub ffmpeg_monitor_stop: Arc<AtomicBool>,
+    pub live_sessions: LiveSessions,
 }
 
 pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
@@ -38,6 +40,7 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
         live_session,
         live_session_id,
         ffmpeg_monitor_stop,
+        live_sessions,
     } = args;
 
     let bundle = match workers_api.fetch_session_bundle(sid).await {
@@ -111,6 +114,17 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
         workers_api.clone(),
         Some(sid.to_string()),
         live_session_id.to_string(),
+        ffmpeg_monitor_stop.clone(),
+    );
+    // Watch for mid-session voice upserts. Workers computes the bundle's
+    // voice field from users.active_voice_id; this loop re-reads it and
+    // swaps live_session.selected_voice_id so the next TTS dispatch picks
+    // up the new clone without a session restart.
+    let _voice_refresher = spawn_active_voice_refresh(
+        workers_api.clone(),
+        sid.to_string(),
+        live_session_id.to_string(),
+        live_sessions,
         ffmpeg_monitor_stop,
     );
     BootstrapOutcome::Continue

@@ -1,6 +1,21 @@
 # Grip Seller API Fixtures (§0.5.1)
 
-## Blocked on vendor — all fixtures are HAND_CRAFTED_PENDING_REAL_CAPTURE
+## Status (2026-04-20) — all fixtures HAND_CRAFTED, blocked on vendor spec
+
+| File | Status | Shape source |
+|------|--------|--------------|
+| `provision_stream_happy.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Matches current stub parser in `src/features/grip/seller-api.ts` (`id` + `ingest.url` + `ingest.stream_key`). Will change when Grip ships spec. |
+| `provision_stream_401_invalid_auth.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Korean error message shape observed on Seller Center UI; spec-accurate body pending. |
+
+Roundtrip coverage: `workers/tests/fixture-roundtrip.test.ts` drives
+both through `provisionBroadcast`. Test file has a clear
+`HAND_CRAFTED_PENDING_REAL_CAPTURE` tag so the invariant-regeneration
+requirement survives code search.
+
+When Grip support (`seller_support@gripcorp.co` / `cloud.bd@gripcorp.co`)
+delivers the spec: regenerate both fixtures from live capture, update
+`seller-api.ts` parser to the real shape, keep the roundtrip test
+passing.
 
 Grip Seller API (AccessKey + SecretKey) was discovered 2026-04-19. API spec
 request is pending with `seller_support@gripcorp.co`. Until Grip provides

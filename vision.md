@@ -1,8 +1,11 @@
 # Brivva Tech — Product Vision & May 10 Roadmap
 
-Last updated: 2026-04-19
+Last updated: 2026-04-20 (evening — deploy shipped, Grip+YouTube e2e green)
 Owner: Aziz (tech) + Simon (sales) + MJ (client acquisition)
 First live show: `2026-05-10`
+
+**Agent task prompts for remaining P0/P1/P2 work live in
+[`docs/may10-agent-tasks.md`](./docs/may10-agent-tasks.md).**
 
 ---
 
@@ -248,36 +251,74 @@ API endpoints:
 
 | Layer | What |
 |---|---|
-| server-rs | Clean 4-layer architecture, WebSocket + FFmpeg pipeline, per-language video delay, audio mixing (host/TTS), source-lang passthrough, 2 kill-switches wired (`BRIVVA_FALLBACK_TO_DEFAULT_VOICE`, `BRIVVA_FORCE_RTMP_NOT_RTMPS`), RTMPS verified for Grip, idle-restart for Grip regional drops, SessionMetrics export task, kill-switch integration tests |
-| workers | D1 schema (users, voices, sessions, streams, platform_credentials, session_metrics), Google OAuth for sign-in + YouTube OAuth for add-channel, Grip/TikTok credential paste endpoints, voice clone with source_lang language labels, WAV duration validation (30s min, 3min max), Stripe webhook signature verifier stub, session usage + billing summary endpoints |
-| frontend | In-memory JWT auth, SignInGate route guard, voice recorder 30s–180s with progress bar, host-page split (/setup + /live), session-page observability strip (live minutes + cost estimate), dashboard with platform region grouping |
-| infra | Terraform ECR + ECS + IAM + CloudWatch + Secrets Manager, GitHub OIDC deploy, SHA-pinned images, ECS deployment circuit breaker, cargo-zigbuild cross-compile (5min builds), `./scripts/rollback.sh`, `./scripts/smoke-test.sh` |
+| server-rs | Clean 4-layer architecture, WebSocket + FFmpeg pipeline, per-language video delay, audio mixing (host/TTS), source-lang passthrough, 2 kill-switches wired (`BRIVVA_FALLBACK_TO_DEFAULT_VOICE`, `BRIVVA_FORCE_RTMP_NOT_RTMPS`), RTMPS verified for Grip, idle-restart for Grip regional drops, SessionMetrics export task, kill-switch integration tests, ffmpeg compiled with `--enable-librtmp --enable-openssl` (required for AWS IVS / Grip acceptance, verified 2026-04-20) |
+| workers | D1 schema (users, voices, sessions, streams, platform_credentials, session_metrics), D1 migration `0008_user_onboarding_billing.sql` (active_voice_id, onboarding_completed_at, billing_tier, bills_to), Google OAuth for sign-in + YouTube OAuth for add-channel, Grip/TikTok credential paste endpoints, voice clone with source_lang language labels, WAV duration validation (30s min, 3min max), `POST /api/user/complete-onboarding`, `POST /api/voices` upsert (deletes prior clone + updates active_voice_id pointer), `GET /api/billing/rate`, `POST /api/sessions/:id/quote`, `GET /api/sessions/:id/summary`, Stripe webhook signature verifier stub |
+| frontend | In-memory JWT auth, SignInGate route guard, `/onboarding` 3-step wizard (platform/voice/default-lang) with route guard on `onboarding_completed_at`, voice recorder 30s–180s with progress bar, `stream-defaults.ts` table (ko→zh/ja/en covered; th/vi/id still missing), pre-stream quote modal with 10–180min duration slider, post-stream summary modal, singular "Your voice" + "Re-record" UX, collapsed Advanced toggle (delay+gain) on destination card, host-page split (/setup + /live), session-page observability strip (live minutes + cost estimate), dashboard with platform region grouping |
+| infra | Terraform ECR + ECS + IAM + CloudWatch + Secrets Manager, GitHub OIDC deploy, SHA-pinned images, ECS deployment circuit breaker, cargo-zigbuild cross-compile (5min builds), Dockerfile CI guard asserts `ffmpeg -version | grep enable-librtmp` (prevents silent librtmp regression on base-image bump), `./scripts/rollback.sh`, `./scripts/smoke-test.sh` |
 | CI/CD | Contracts drift check, server-rs + workers + frontend typecheck/test/build, layer audits (0 violations across all 3), pre-commit + pre-push + post-merge git hooks |
 | docs | ARCHITECTURE.md, runbook.md, grip-integration-notes.md, terraform-state-migration-plan.md, this file |
 
-### Round 2 (in progress as of Apr 19)
+### Round 2 Remaining (audit 2026-04-20 — mismatches + gaps surfaced)
 
-| Agent | Task |
-|---|---|
-| Frontend | `/onboarding` 3-step wizard |
-| Frontend | `stream-defaults.ts` table + collapsed Advanced toggle on destination card |
-| Frontend | Pre-stream quote modal (duration slider) |
-| Frontend | Post-stream summary modal |
-| Frontend | Singular "Your voice" + "Re-record" button |
-| Workers | Migration `0008_user_onboarding_billing.sql` (active_voice_id, onboarding_completed_at, billing_tier, bills_to) |
-| Workers | `POST /api/user/complete-onboarding` |
-| Workers | `POST /api/voices` becomes upsert (deletes old clone, updates active_voice_id) |
-| Workers | `GET /api/billing/rate` |
-| Workers | `POST /api/sessions/:id/quote` |
-| Workers | `GET /api/sessions/:id/summary` |
-| Workers | `docs/b2b-onboarding-notes.md` with wrangler snippets |
-| server-rs | (no new work) Regen contracts when Workers ships active_voice_id; swap session.voice_id → user.active_voice_id at dispatch |
+The bulk of Round 2 landed. What's left are response-shape mismatches
+between Workers and the frontend, plus table gaps. These block the
+quote/summary UX from rendering correctly end-to-end.
+
+**Agent prompts for each row live in
+[`docs/may10-agent-tasks.md`](./may10-agent-tasks.md) under Tasks 1-4.**
+
+| Agent | Task | Why |
+|---|---|---|
+| Workers | `POST /api/sessions/:id/quote` — add per-lang breakdown to the response | Frontend `quote-api.ts` expects a `breakdown` field; current response only has aggregate `output_minutes` + `estimated_cost_usd`. Pre-stream modal can't itemize langs. |
+| Workers | `GET /api/sessions/:id/summary` — return `total_minutes` + `total_cost_usd` shape, add B2B variant (`billed_to` field populated when `users.billing_tier = 'b2b'`) | Frontend `summary-modal.tsx` keys off `total_minutes` / `total_cost_usd`, not `source_minutes` / `output_minutes_by_lang`. B2B "Billed to Simon" line is spec'd in §Pricing UX but never wired. |
+| Frontend | Extend `stream-defaults.ts` with `ko→th`, `ko→vi`, `ko→id` (all `delay_ms: 2500`, `host_gain: 0.2`) | Table currently covers only ko→zh/ja/en/ko + `*→pass` + `_default`. SEA expansion is in scope per §Unit Economics; defaults must exist before first SEA stream. |
+| server-rs | Regen contracts to pick up `users.active_voice_id`; swap session dispatch from `session.voice_id` → `user.active_voice_id` | Workers now upserts the pointer but server-rs still reads `session.voice_id`. One-voice-per-user invariant (§Product Decision 3) isn't enforced at dispatch until this lands. |
 
 ### Round 3 Candidates (if endurance test surfaces bugs)
 
 - Indian-accent regression if voice_settings + source_lang hint doesn't actually fix it — fallback is `eleven_multilingual_v2_5` model_id or strict enrollment-lang mismatch forcing default voice
 - Chinese voice quality if default library voice sounds robotic — pick better voice IDs
 - Concurrent session handling if ECS scaling is flaky at 2-3 parallel streams
+
+### Testing Debt (audit 2026-04-20 — resolved same day)
+
+Five §0 violations surfaced by an audit of `claude.md` §0 against the
+codebase. P1 + P2 multi-step + P3 e2e landed the same day (below);
+one P2 row (concurrent-connect race) is deferred to post-May-10 with
+the fix recipe documented inline.
+
+| Priority | Gap | Rule | Status | Evidence |
+|---|---|---|---|---|
+| **P1a** | Real-response fixtures for every vendor (ElevenLabs, Stripe, YouTube, Google OAuth, Grip). | §0.5.1 | **LANDED 2026-04-20.** 14 fixture JSONs under `workers/tests/fixtures/<vendor>/`; 15 roundtrip tests in `workers/tests/fixture-roundtrip.test.ts` drive each through the real client deserializer. Hand-crafted pending real capture, provenance marked per vendor README. | `workers/tests/fixture-roundtrip.test.ts`, `workers/tests/fixtures/{elevenlabs,stripe,youtube,google-oauth,grip}/` |
+| **P1b** | Silent paths emit zero structured logs. STT reconnect skip, caption-token filter, workers credential/OAuth fallbacks, frontend JSON.parse catches — all silent. | §0.5.4 | **LANDED 2026-04-20.** Every silent `continue` / try_send drop / catch-fallback in the STT pipeline, workers orchestration, and frontend session pages now emits structured `tracing::warn!` / `console.warn` with `session_id` / `tag` / `error` context. | `server-rs/src/features/broadcast/data/pipeline/{stt,stt_response,stt_transport}.rs`, `server-rs/src/features/broadcast/data/session_ws/messages.rs`, `workers/src/{orchestration/app.ts,features/billing/stripe-webhook.ts}`, `frontend/src/features/broadcast/presentation/{session-setup-page,session-page,onboarding-page,dashboard-page}.tsx` |
+| **P2a** | WS lifecycle matrix — missing crash→restart + concurrent start×2. | §0.5.2 | **PARTIAL 2026-04-20.** `ws_abrupt_drop_without_host_end_cleans_live_session` passes (crash-drop recovery). `concurrent_connects_for_same_session_converge_to_single_live_session` is `#[ignore]`'d — it exposes a real race in `handle_host`: `evict_stale_live_sessions` runs BEFORE `live_sessions.insert`, so two parallel handlers can both observe an empty map and both insert. **Fix (post-May-10):** add a per-session_id `tokio::sync::Mutex` to `BroadcastState`, acquire before eviction, hold through insert. Deferred because FE never fires concurrent connects by design; sequential stop→start (the actual 2026-04-20 incident shape) is covered. | `server-rs/tests/e2e_live_session_lifecycle.rs` |
+| **P2b** | Multi-step integration chains (create → mid-flight mutation → background loop handles transition). | §0.5.3 | **LANDED 2026-04-20.** `workers/tests/multi-step-integration.test.ts` chains create → add-stream → go-live → mid-live add-stream → two metrics PATCHes → soft-end → post-end metrics → final usage rollup. Covers the exact race shape behind the 2026-04-20 triad. | `workers/tests/multi-step-integration.test.ts` |
+| **P3** | E2E voice-clone cross-lingual chain — proves UI → Workers half of the invariant even though the TTS wire body stays a server-rs integration concern. | §0.2 (voice-clone row = Unit + Integration + e2e) | **LANDED 2026-04-20.** `frontend/e2e/voice-clone-crosslingual.e2e.ts` — Korean-enrolled voice + Japanese destination asserts source_lang + target_langs in the POST /api/sessions payload without tripping the mismatch banner; a second test proves the banner RE-engages when the voice is re-recorded in a new language. | `frontend/e2e/voice-clone-crosslingual.e2e.ts` |
+
+**Also outstanding: the §0.6 pre-merge gate itself is not enforced in
+CI.** No `.github/workflows/` wires the 8-step gate. Recent fixes
+(`b960367`, `b3542f4`, `3055ccc`) did add tests, but that's discipline,
+not automation. Any PR today can skip §0.5.1–4 and land. Add the gate
+to CI before self-serve onboarding opens (post-May-10); not a May 10
+blocker but a Phase 2 blocker.
+
+**Remaining follow-ups after this pass:**
+- **§0.5.4 post-merge log-audit** — rule demands a 30-min session run
+  with grep over every silent branch in the log output, not just
+  "wired." Logs are wired but verification didn't happen. Prompt in
+  `docs/may10-agent-tasks.md` Task 17. Complete before endurance test.
+- **Capture real vendor responses** to replace `HAND_CRAFTED_PENDING_REAL_CAPTURE`
+  fixtures for Soniox + YouTube + Grip. Prompt in
+  `docs/may10-agent-tasks.md` Task 16. Each per-vendor README has exact
+  capture steps. Stripe deferred until pricing lands.
+- Convert `tts.rs` + `ffmpeg/{mod,drain,caption}.rs` `eprintln!` calls
+  to `tracing::*` for structured logging. Not silent paths — they emit —
+  but the rule requires structured output. Out of scope for the
+  silent-path pass; batch into a separate observability cleanup.
+- Fix the concurrent-connect race once May 10 launch is behind us.
+  Recipe: per-`session_id` `tokio::sync::Mutex` on `BroadcastState`,
+  acquire before `evict_stale_live_sessions`, hold through
+  `live_sessions.insert`.
 
 ---
 
@@ -366,6 +407,13 @@ on the weekend if accent-bug validation needs a second native voice.
 - Lock in best-sounding default Chinese voices (pick from ElevenLabs library)
 - Concurrent session test: 2 browsers, 2 hosts, simultaneous streams
 - Monitoring/alerting check: does a CloudWatch alarm actually wake Aziz?
+- Evaluate Grip official Seller API (AccessKey/SecretKey, discovered
+  2026-04-19 on Seller Center → profile → "Grip API (외부 연동)",
+  support: `seller_support@gripcorp.co`). If coverage is sufficient,
+  most reverse-engineered workarounds in `docs/grip-integration-notes.md`
+  can retire. Gate rollout behind a `BRIVVA_GRIP_USE_LEGACY` kill-switch
+  so paste-cred path remains instant-rollback. Not on the critical path
+  for May 10 — current paste-cred + librtmp flow is working.
 
 ### Week 3 — Polish + Dress Rehearsal (May 4 - May 9)
 
@@ -463,3 +511,73 @@ until the company hires. Stay disciplined about what to take on.
   `Quick Session` button + `Audience Resume Session` input are demo-era
   cruft, slated for removal in next frontend pass after coverage agents
   land.
+- `2026-04-20` — Codebase audit: Round 2 largely shipped (onboarding wizard,
+  stream-defaults, quote/summary modals, "Your voice" UX, Advanced toggle,
+  D1 migration 0008, `/api/user/complete-onboarding`, `/api/voices` upsert,
+  `/api/billing/rate`, `/api/sessions/:id/quote`+`summary`,
+  `docs/b2b-onboarding-notes.md`). Moved shipped rows into "Already
+  Shipped". Remaining gaps: quote/summary response-shape mismatch with
+  frontend (`breakdown` + `total_minutes`/`total_cost_usd` + B2B "Billed
+  to" variant), SEA targets missing from `stream-defaults.ts`, server-rs
+  contract regen + dispatch swap to `user.active_voice_id`.
+- `2026-04-20` — Confirmed ffmpeg-with-librtmp is mandatory for AWS IVS
+  (Grip backend) — native RTMP silently truncates at frame 3. Dockerfile
+  compiles ffmpeg from source with `--enable-librtmp --enable-openssl`
+  and CI asserts the flag. Verified end-to-end (600 frames in 20s,
+  broadcast flipped to `방송중`).
+- `2026-04-20` — Grip has an official Seller API (AccessKey/SecretKey)
+  discovered on Seller Center. Added Week 2 evaluation task behind
+  `BRIVVA_GRIP_USE_LEGACY` kill-switch; not on the critical path for
+  May 10, but could retire most reverse-engineered Grip workarounds
+  post-launch.
+- `2026-04-20` — Testing-debt audit vs `claude.md` §0. Five gaps
+  surfaced: no real-response fixtures (§0.5.1), silent-path logs
+  missing in STT/caption pipeline (§0.5.4), WS lifecycle matrix
+  missing crash/restart + concurrent-start rows (§0.5.2), multi-step
+  integration chains thin (§0.5.3), voice-clone e2e split across
+  files (§0.2). P1 gaps are the exact class that shipped the April
+  2026 triad. Also: §0.6 pre-merge gate not CI-enforced; tracked as
+  Phase 2 blocker.
+- `2026-04-20` — Testing-debt resolved in same-day sprint. 4 of 5
+  gaps landed; 1 (concurrent-connect race) is `#[ignore]`'d with
+  an inline fix recipe and deferred to post-May-10. Ship totals:
+  - P1a fixtures: 14 vendor fixtures + 15 roundtrip tests in
+    `workers/tests/fixture-roundtrip.test.ts` driving real client
+    deserializers (ElevenLabs cloneVoice, Stripe HMAC verify,
+    YouTube createBroadcast, Google OAuth exchange+userinfo+refresh,
+    Grip provisionBroadcast).
+  - P1b silent paths: `tracing::*` added to every silent STT
+    reconnect / token drop / session-gone return across
+    `stt{,_response,_transport}.rs` + `session_ws/messages.rs`;
+    `console.warn` added to workers `parseTargetLangs` / Stripe
+    webhook JSON catch + four frontend session-page catches.
+  - P2a WS lifecycle: `ws_abrupt_drop_without_host_end_cleans_live_session`
+    passes; `concurrent_connects_...` ignored documenting a real
+    race between eviction + insert in `handle_host`.
+  - P2b multi-step chain: `workers/tests/multi-step-integration.test.ts`
+    drives create → add-stream → go-live → mid-live add-stream → two
+    metrics PATCHes → soft-end → post-end metrics → final usage
+    rollup.
+  - P3 e2e: `frontend/e2e/voice-clone-crosslingual.e2e.ts` — 2 tests
+    covering Korean voice + Japanese destination happy path and the
+    re-record-in-new-language banner re-engagement.
+  Totals: server-rs 253 passing + 1 ignored, workers 234, frontend
+  unit 234, e2e 20. All suites green.
+- `2026-04-20` (evening) — Deploy shipped. SaaS live at prod URL, link
+  shared in Brivva WhatsApp group, test users invited by Gmail. Grip +
+  YouTube integrations verified end-to-end in prod (librtmp path
+  holding). TikTok integration is the active next target; then
+  onboarding / session / broadcast UX polish. Aziz emailed
+  `seller_support@gripcorp.co` requesting Grip Seller API docs; reply
+  pending. Two parallel agents continued closing claude.md §0.5 +
+  §5.1 debt: 232 workers tests (14 fixture JSONs roundtripped),
+  session_ws.rs split 1081→7 files (≤270L), ffmpeg/mod.rs split
+  1465→759L + args.rs + tests.rs. All source files now under the
+  §5.1 800L hard limit except `drain.rs` (656L, pre-existing).
+  §0.5.4 log-audit itself (30-min grep verification) still pending —
+  tracked as a follow-up in `docs/may10-agent-tasks.md` Task 17.
+- `2026-04-20` (evening) — Added `docs/may10-agent-tasks.md` with
+  self-contained agent prompts for every remaining P0/P1/P2 task
+  surfaced in this vision. Critical-chain for May 10:
+  `10 → 6/7/8 → 11 → 24 → 28`. Tasks 1/2/4 ship before 11. Tasks 15,
+  21, 23 are Phase 2.

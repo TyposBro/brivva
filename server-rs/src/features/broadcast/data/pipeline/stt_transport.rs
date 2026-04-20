@@ -40,16 +40,25 @@ pub(super) async fn connect_soniox(args: ConnectArgs<'_>) -> Option<SonioxWs> {
 
     for attempt in 1..=max_attempts {
         if !handle.sessions.contains_key(&handle.id) {
-            eprintln!("[STT {}] live session gone, stopping", tag);
+            tracing::info!(
+                session_id = %handle.id,
+                tag = %tag,
+                attempt,
+                "stt live session gone, stopping connect loop"
+            );
             return None;
         }
 
         match tokio_tungstenite::connect_async(ws_url).await {
             Ok((stream, _)) => return Some(stream),
             Err(error) => {
-                eprintln!(
-                    "[STT {}] connect attempt {}/{} failed: {}",
-                    tag, attempt, max_attempts, error
+                tracing::warn!(
+                    session_id = %handle.id,
+                    tag = %tag,
+                    attempt,
+                    max_attempts,
+                    error = %error,
+                    "stt connect attempt failed"
                 );
                 let delay = if reconnect_count == 0 {
                     Duration::from_secs(3)
@@ -61,7 +70,12 @@ pub(super) async fn connect_soniox(args: ConnectArgs<'_>) -> Option<SonioxWs> {
         }
     }
 
-    eprintln!("[STT {}] giving up after {} attempts", tag, max_attempts);
+    tracing::error!(
+        session_id = %handle.id,
+        tag = %tag,
+        max_attempts,
+        "stt giving up connect loop after exhausting attempts"
+    );
     None
 }
 
@@ -83,14 +97,14 @@ pub(super) async fn send_soniox_config(args: ConfigSendArgs<'_>) -> Result<(), (
     } = args;
     let config = mode.build_config(api_key);
     let config_json = serde_json::to_string(&config).map_err(|error| {
-        eprintln!("[STT {}] config serialize error: {}", tag, error);
+        tracing::error!(tag = %tag, error = %error, "stt config serialize error");
     })?;
 
     stt_sink
         .send(tungstenite::Message::Text(config_json.into()))
         .await
         .map_err(|error| {
-            eprintln!("[STT {}] config send failed: {}", tag, error);
+            tracing::warn!(tag = %tag, error = %error, "stt config send failed");
             *reconnect_count += 1;
         })
 }

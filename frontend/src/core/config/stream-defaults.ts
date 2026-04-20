@@ -26,6 +26,9 @@ const TABLE: Record<string, Record<string, StreamDefault>> = {
     zh: { delay_ms: 3000, host_gain: 0.2 },
     ja: { delay_ms: 3000, host_gain: 0.2 },
     en: { delay_ms: 3000, host_gain: 0.2 },
+    th: { delay_ms: 2500, host_gain: 0.2 },
+    vi: { delay_ms: 2500, host_gain: 0.2 },
+    id: { delay_ms: 2500, host_gain: 0.2 },
   },
   en: {
     ja: { delay_ms: 2500, host_gain: 0.2 },

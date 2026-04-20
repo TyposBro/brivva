@@ -84,9 +84,15 @@ export async function verifyStripeSignature(
   try {
     const parsedEvent = JSON.parse(payload) as { type?: string };
     eventType = parsedEvent.type ?? null;
-  } catch {
+  } catch (error) {
     // A valid signature on an invalid JSON body shouldn't happen, but if it
-    // does we still let the caller return 200 — Stripe will retry.
+    // does we still let the caller return 200 — Stripe will retry. Log so
+    // an operator can see it when it does happen instead of wondering why
+    // the webhook handler never routed to an event-type branch.
+    console.warn(
+      "stripe-webhook: signature valid but payload is not JSON — returning ok with null eventType so Stripe will retry",
+      { payloadLen: payload.length, error: (error as Error).message },
+    );
   }
   return { ok: true, eventType };
 }

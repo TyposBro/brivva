@@ -96,22 +96,59 @@ describe("fetchSessionSummary", () => {
     vi.unstubAllGlobals();
   });
 
-  it("happy: maps snake_case payload into camelCase", async () => {
+  it("happy (self_serve): maps tier + output_by_lang into a cost-enriched breakdown", async () => {
     fetchMock.mockReturnValue(
       ok({
+        billing_tier: "self_serve",
+        source_minutes: 63,
         total_minutes: 63,
+        output_by_lang: { zh: 63 },
         total_cost_usd: 189,
-        breakdown: [{ lang: "zh", minutes: 63, cost_usd: 94.5 }],
+        rate_usd: 3,
+        billed_to: null,
       }),
     );
     const r = await fetchSessionSummary("s1");
+    expect(r.billingTier).toBe("self_serve");
     expect(r.totalMinutes).toBe(63);
     expect(r.totalCostUsd).toBe(189);
-    expect(r.breakdown).toEqual([{ lang: "zh", minutes: 63, costUsd: 94.5 }]);
+    expect(r.rateUsd).toBe(3);
+    expect(r.billedTo).toBeNull();
+    expect(r.breakdown).toEqual([{ lang: "zh", minutes: 63, costUsd: 189 }]);
   });
 
-  it("works without breakdown (edge)", async () => {
-    fetchMock.mockReturnValue(ok({ total_minutes: 0, total_cost_usd: 0 }));
+  it("happy (b2b): billed_to present, cost + rate null, breakdown rows carry 0 cost", async () => {
+    fetchMock.mockReturnValue(
+      ok({
+        billing_tier: "b2b",
+        source_minutes: 10,
+        total_minutes: 10,
+        output_by_lang: { ja: 10 },
+        total_cost_usd: null,
+        rate_usd: null,
+        billed_to: "Simon",
+      }),
+    );
+    const r = await fetchSessionSummary("s1");
+    expect(r.billingTier).toBe("b2b");
+    expect(r.totalCostUsd).toBeNull();
+    expect(r.rateUsd).toBeNull();
+    expect(r.billedTo).toBe("Simon");
+    expect(r.breakdown).toEqual([{ lang: "ja", minutes: 10, costUsd: 0 }]);
+  });
+
+  it("empty output_by_lang → empty breakdown (edge)", async () => {
+    fetchMock.mockReturnValue(
+      ok({
+        billing_tier: "self_serve",
+        source_minutes: 0,
+        total_minutes: 0,
+        output_by_lang: {},
+        total_cost_usd: 0,
+        rate_usd: 1.5,
+        billed_to: null,
+      }),
+    );
     const r = await fetchSessionSummary("s1");
     expect(r.breakdown).toEqual([]);
   });

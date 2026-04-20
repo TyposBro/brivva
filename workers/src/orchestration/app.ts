@@ -687,8 +687,19 @@ function estimateCost(outputByLang: Record<string, number>): number {
 function parseTargetLangs(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
-  } catch {
+    if (!Array.isArray(parsed)) {
+      console.warn(
+        "parseTargetLangs: stored target_langs is not a JSON array — treating as empty",
+        { rawLen: raw.length, kind: typeof parsed },
+      );
+      return [];
+    }
+    return parsed.filter((v) => typeof v === "string");
+  } catch (error) {
+    console.warn(
+      "parseTargetLangs: JSON.parse failed on stored target_langs — treating as empty; quote + summary will report zero langs",
+      { rawLen: raw.length, error: (error as Error).message },
+    );
     return [];
   }
 }
@@ -715,8 +726,20 @@ app.get("/api/sessions/:id/quote", async (c) => {
   const session = await db.getSession(c.env.DB, params.id);
   if (!session) return c.json({ error: "not found" }, 404);
 
-  const langCount = parseTargetLangs(session.target_langs).length;
-  const outputMinutes = Math.round(expectedMinutes * langCount * 100) / 100;
+  const targetLangs = parseTargetLangs(session.target_langs);
+  // Passthrough (wire code "pass" or target==source) produces no TTS minutes
+  // and therefore no billable output — keep it out of the breakdown so the
+  // FE line-items match the aggregate.
+  const billableLangs = targetLangs.filter(
+    (lang) => lang !== "pass" && lang !== session.source_lang,
+  );
+  const perMinuteCost = Math.round(expectedMinutes * PER_OUTPUT_MINUTE_USD * 100) / 100;
+  const breakdown = billableLangs.map((lang) => ({
+    lang,
+    minutes: expectedMinutes,
+    cost_usd: Number.isFinite(perMinuteCost) ? perMinuteCost : 0,
+  }));
+  const outputMinutes = Math.round(expectedMinutes * billableLangs.length * 100) / 100;
   const rawCost = outputMinutes * PER_OUTPUT_MINUTE_USD;
   // Defensive: if anything upstream returns NaN/Infinity we still respond
   // with a number — the FE renderer must never see null for this field.
@@ -730,6 +753,7 @@ app.get("/api/sessions/:id/quote", async (c) => {
     output_minutes: outputMinutes,
     per_output_minute_usd: PER_OUTPUT_MINUTE_USD,
     estimated_cost_usd: estimatedCostUsd,
+    breakdown,
   });
 });
 
@@ -745,23 +769,43 @@ app.get("/api/sessions/:id/summary", async (c) => {
   const session = await db.getSession(c.env.DB, params.id);
   if (!session) return c.json({ error: "not found" }, 404);
 
+  const owner = await db.getUserById(c.env.DB, session.user_id);
+
   const metrics = await db.getSessionMetrics(c.env.DB, params.id);
   const outputByLangSeconds: Record<string, number> = metrics
     ? (JSON.parse(metrics.output_seconds_json) as Record<string, number>)
     : {};
-  const outputByLangMinutes: Record<string, number> = {};
+  const outputByLang: Record<string, number> = {};
   for (const [k, v] of Object.entries(outputByLangSeconds)) {
-    outputByLangMinutes[k] = minutesFromSeconds(v);
+    outputByLang[k] = minutesFromSeconds(v);
   }
+  const totalMinutes =
+    Math.round(
+      Object.values(outputByLang).reduce((a, b) => a + b, 0) * 100,
+    ) / 100;
 
   const liveStatuses = new Set(["setup", "live"]);
+  // Tier resolves from the session owner. Pre-migration rows default to
+  // 'self_serve' via schema; an owner row may be missing in tests that seed
+  // only sessions, so fall through safely.
+  const billingTier: "self_serve" | "b2b" =
+    owner?.billing_tier === "b2b" ? "b2b" : "self_serve";
+  const isB2B = billingTier === "b2b";
+
   return c.json({
     session_id: params.id,
     status: session.status,
     is_final: !liveStatuses.has(session.status),
+    billing_tier: billingTier,
     source_minutes: minutesFromSeconds(metrics?.source_seconds ?? 0),
-    output_minutes_by_lang: outputByLangMinutes,
-    estimated_cost_usd: estimateCost(outputByLangMinutes),
+    total_minutes: totalMinutes,
+    output_by_lang: outputByLang,
+    // B2B invoices are reconciled off-platform — omit the self-serve price
+    // so the FE can't accidentally render a dollar figure to an invoiced
+    // customer.
+    total_cost_usd: isB2B ? null : estimateCost(outputByLang),
+    rate_usd: isB2B ? null : PER_OUTPUT_MINUTE_USD,
+    billed_to: isB2B ? owner?.bills_to ?? null : null,
     updated_at: metrics?.updated_at ?? null,
   });
 });
@@ -1032,7 +1076,15 @@ app.get("/internal/sessions/:id", async (c) => {
   const session = await db.getSession(c.env.DB, id);
   if (!session) return c.json({ error: "not found" }, 404);
   const streams = await db.listStreams(c.env.DB, id);
-  const voice = session.voice_id ? await db.getVoice(c.env.DB, session.voice_id) : null;
+  // Voice join moved from session.voice_id → users.active_voice_id. Rationale:
+  // the one-voice-per-user invariant means re-record must refresh dispatch
+  // mid-session without creating a new session row, and the session row's
+  // voice_id can lag the actual active voice after an upsert. Reading the
+  // owner's active_voice_id keeps Fargate dispatch in sync with POST
+  // /api/voices upserts on every bundle fetch.
+  const owner = await db.getUserById(c.env.DB, session.user_id);
+  const activeVoiceId = owner?.active_voice_id ?? null;
+  const voice = activeVoiceId ? await db.getVoice(c.env.DB, activeVoiceId) : null;
   return c.json({ session, streams, voice });
 });
 

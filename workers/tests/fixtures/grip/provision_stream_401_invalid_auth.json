@@ -1,0 +1,5 @@
+{
+  "code": "UNAUTHORIZED",
+  "message": "AccessKey 또는 SecretKey가 유효하지 않습니다.",
+  "data": null
+}

@@ -23,7 +23,10 @@ pub struct PipelineSession {
 
 pub async fn start_stt_pipelines(session: PipelineSession, audio_rx: mpsc::Receiver<Vec<u8>>) {
     if session.config.soniox_api_key.is_empty() {
-        eprintln!("[STT] SONIOX_API_KEY not set — STT pipeline disabled");
+        tracing::warn!(
+            session_id = %session.handle.id,
+            "SONIOX_API_KEY not set — STT pipeline disabled; captions + translations will not fire"
+        );
         return;
     }
 
@@ -50,9 +53,27 @@ fn spawn_fan_out(
 ) {
     tokio::spawn(async move {
         while let Some(chunk) = audio_rx.recv().await {
-            let _ = source_tx.try_send(chunk.clone());
-            for tx in &target_senders {
-                let _ = tx.try_send(chunk.clone());
+            if let Err(error) = source_tx.try_send(chunk.clone()) {
+                // Channel full or closed = source STT task is behind or
+                // gone. Silent drops here look identical to "STT never
+                // ran" in post-incident logs; emit at debug so a 30-min
+                // session with dropped frames is greppable when needed
+                // without spamming healthy sessions.
+                tracing::debug!(
+                    chunk_bytes = chunk.len(),
+                    error = %error,
+                    "stt fan-out dropped chunk to source task"
+                );
+            }
+            for (idx, tx) in target_senders.iter().enumerate() {
+                if let Err(error) = tx.try_send(chunk.clone()) {
+                    tracing::debug!(
+                        target_idx = idx,
+                        chunk_bytes = chunk.len(),
+                        error = %error,
+                        "stt fan-out dropped chunk to target task"
+                    );
+                }
             }
         }
     });
@@ -126,8 +147,20 @@ async fn run_soniox_session(
         .is_err()
         {
             if reconnect_count > STT_RECONNECT_MAX {
+                tracing::error!(
+                    session_id = %session.handle.id,
+                    tag = %tag,
+                    reconnect_count,
+                    "stt config-send failed; exceeded max reconnects, giving up"
+                );
                 break;
             }
+            tracing::warn!(
+                session_id = %session.handle.id,
+                tag = %tag,
+                reconnect_count,
+                "stt config-send failed; looping to reconnect"
+            );
             continue;
         }
 
@@ -152,15 +185,39 @@ async fn run_soniox_session(
             },
         };
 
-        if !disconnected_unexpectedly || !session.handle.sessions.contains_key(&session.handle.id) {
+        if !disconnected_unexpectedly {
+            tracing::info!(
+                session_id = %session.handle.id,
+                tag = %tag,
+                "stt session ended cleanly"
+            );
+            break;
+        }
+        if !session.handle.sessions.contains_key(&session.handle.id) {
+            tracing::info!(
+                session_id = %session.handle.id,
+                tag = %tag,
+                "stt session handle removed — exiting reconnect loop"
+            );
             break;
         }
 
         reconnect_count += 1;
         if reconnect_count > STT_RECONNECT_MAX {
-            eprintln!("[STT {}] exceeded max reconnects", tag);
+            tracing::error!(
+                session_id = %session.handle.id,
+                tag = %tag,
+                reconnect_count,
+                "stt exceeded max reconnects after unexpected disconnect"
+            );
             break;
         }
+        tracing::warn!(
+            session_id = %session.handle.id,
+            tag = %tag,
+            reconnect_count,
+            "stt disconnected unexpectedly; sleeping before reconnect"
+        );
         tokio::time::sleep(STT_RECONNECT_DELAY).await;
     }
 }

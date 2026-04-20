@@ -124,7 +124,11 @@ export default function SessionPage() {
   const targetLangs: string[] = (() => {
     try {
       return JSON.parse(session.target_langs);
-    } catch {
+    } catch (error) {
+      console.warn(
+        "session-page: failed to parse session.target_langs — summary will render with empty lang list",
+        { sessionId: session.id, error: (error as Error).message },
+      );
       return [];
     }
   })();

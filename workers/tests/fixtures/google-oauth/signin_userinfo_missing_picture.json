@@ -1,0 +1,9 @@
+{
+  "sub": "112233445566778899001",
+  "name": "No Picture User",
+  "given_name": "No",
+  "family_name": "Picture",
+  "email": "nopic@example.com",
+  "email_verified": true,
+  "locale": "en"
+}

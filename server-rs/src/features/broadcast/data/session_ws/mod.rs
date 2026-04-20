@@ -18,6 +18,7 @@ use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::domain::{Lang, LiveSession, PipelineConfig, SessionQuery};
 
+mod active_voice_refresh;
 mod bootstrap;
 mod eviction;
 mod ids;
@@ -25,6 +26,7 @@ mod messages;
 mod rtmp;
 mod teardown;
 
+pub use active_voice_refresh::refresh_active_voice_once;
 pub use bootstrap::{StreamPreflight, preflight_streams};
 pub use rtmp::{PASS_LANG_CODE, StreamPipelineFlags, maybe_downgrade_rtmps, resolve_stream_flags};
 
@@ -142,6 +144,7 @@ async fn handle_host(mut socket: HostSocket) {
             live_session: &mut live_session,
             live_session_id: &live_session_id,
             ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
+            live_sessions: live_sessions.clone(),
         })
         .await;
         match outcome {

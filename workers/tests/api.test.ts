@@ -1041,6 +1041,87 @@ describe("/internal/* authentication", () => {
     expect(res.status).toBe(404);
   });
 
+  it("GET /internal/sessions/:id joins voice from user.active_voice_id, NOT session.voice_id (happy)", async () => {
+    // One-voice-per-user invariant: the session's voice_id at creation
+    // time may lag the user's current active voice after a re-record.
+    // The bundle must track active_voice_id so Fargate dispatch picks up
+    // the new voice without restarting the session.
+    const ts = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-voice-swap", ts).run();
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind("v-A", "u-voice-swap", "EL-voice-A", "Voice A", "ko", ts)
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind("v-B", "u-voice-swap", "EL-voice-B", "Voice B", "ko", ts)
+      .run();
+    // Session was created when Voice A was active; session.voice_id = A.
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-A", "u-voice-swap")
+      .run();
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-voice-swap",
+        title: "Voice Swap",
+        source_lang: "ko",
+        target_langs: ["ja"],
+        voice_id: "v-A",
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    // Mid-session re-record: flip user.active_voice_id to B while the
+    // session row's own voice_id still points at A. Production equivalent:
+    // POST /api/voices upserts; the session row is left untouched.
+    await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
+      .bind("v-B", "u-voice-swap")
+      .run();
+
+    const res = await call(`/internal/sessions/${session.id}`, {
+      headers: { "X-Internal-Secret": env.INTERNAL_SECRET },
+    });
+    expect(res.status).toBe(200);
+    const bundle = (await res.json()) as {
+      session: { voice_id: string | null };
+      voice: { id: string; elevenlabs_voice_id: string } | null;
+    };
+    // Session row pointer is unchanged…
+    expect(bundle.session.voice_id).toBe("v-A");
+    // …but the joined voice now reflects the current active clone (B).
+    expect(bundle.voice?.id).toBe("v-B");
+    expect(bundle.voice?.elevenlabs_voice_id).toBe("EL-voice-B");
+  });
+
+  it("GET /internal/sessions/:id returns voice=null when the owner has no active clone (edge)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO users (id, created_at) VALUES (?, ?)",
+    ).bind("u-no-voice", Math.floor(Date.now() / 1000)).run();
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-no-voice",
+        title: "No voice",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+    const res = await call(`/internal/sessions/${session.id}`, {
+      headers: { "X-Internal-Secret": env.INTERNAL_SECRET },
+    });
+    expect(res.status).toBe(200);
+    const bundle = (await res.json()) as { voice: unknown };
+    expect(bundle.voice).toBeNull();
+  });
+
   it("PATCH /internal/sessions/:id updates the session status (happy)", async () => {
     await seedUser("u-int");
     const createRes = await call("/api/sessions", {
@@ -2519,10 +2600,72 @@ describe("GET /api/sessions/:id/quote", () => {
       output_minutes: number;
       estimated_cost_usd: number;
       per_output_minute_usd: number;
+      breakdown: { lang: string; minutes: number; cost_usd: number }[];
     };
     expect(body.output_minutes).toBe(60); // 20 minutes × 3 targets
     expect(body.estimated_cost_usd).toBe(90); // 60 × 1.5
     expect(body.per_output_minute_usd).toBe(1.5);
+    expect(body.breakdown).toHaveLength(3);
+    expect(body.breakdown.map((b) => b.lang).sort()).toEqual(["en", "ja", "zh"]);
+    for (const item of body.breakdown) {
+      expect(item.minutes).toBe(20);
+      expect(item.cost_usd).toBe(30); // 20 × 1.5
+    }
+  });
+
+  it("breakdown excludes passthrough langs (lang='pass' and source==target)", async () => {
+    // Session: source=ko, targets include a "pass" wire-code destination and
+    // a literal "ko" (source match). Neither should appear in breakdown or
+    // contribute to the aggregate — FE pre-stream modal relies on this so
+    // line-items sum to the total.
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-pass",
+        title: "Pass",
+        source_lang: "ko",
+        target_langs: ["zh", "ja", "pass", "ko"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      output_minutes: number;
+      estimated_cost_usd: number;
+      breakdown: { lang: string; minutes: number; cost_usd: number }[];
+    };
+    expect(body.breakdown).toHaveLength(2);
+    expect(body.breakdown.map((b) => b.lang).sort()).toEqual(["ja", "zh"]);
+    expect(body.output_minutes).toBe(60); // 30 × 2 billable
+    expect(body.estimated_cost_usd).toBe(90);
+  });
+
+  it("breakdown is an empty array when every target is a passthrough (edge)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-all-pass",
+        title: "AllPass",
+        source_lang: "ko",
+        target_langs: ["ko", "pass"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      output_minutes: number;
+      estimated_cost_usd: number;
+      breakdown: unknown[];
+    };
+    expect(body.breakdown).toEqual([]);
+    expect(body.output_minutes).toBe(0);
+    expect(body.estimated_cost_usd).toBe(0);
   });
 
   it("user with an active voice clone receives a finite quote (happy)", async () => {
@@ -2705,13 +2848,23 @@ describe("GET /api/sessions/:id/summary", () => {
     const body = (await res.json()) as {
       status: string;
       is_final: boolean;
+      billing_tier: string;
       source_minutes: number;
-      estimated_cost_usd: number;
+      total_minutes: number;
+      output_by_lang: Record<string, number>;
+      total_cost_usd: number | null;
+      rate_usd: number | null;
+      billed_to: string | null;
     };
     expect(body.status).toBe("setup");
     expect(body.is_final).toBe(false);
+    expect(body.billing_tier).toBe("self_serve");
     expect(body.source_minutes).toBe(0);
-    expect(body.estimated_cost_usd).toBe(0);
+    expect(body.total_minutes).toBe(0);
+    expect(body.output_by_lang).toEqual({});
+    expect(body.total_cost_usd).toBe(0);
+    expect(body.rate_usd).toBe(1.5);
+    expect(body.billed_to).toBeNull();
   });
 
   it("is_final=true once status leaves setup/live; uses 1.5 rate (happy)", async () => {
@@ -2751,15 +2904,75 @@ describe("GET /api/sessions/:id/summary", () => {
     const body = (await res.json()) as {
       status: string;
       is_final: boolean;
+      billing_tier: string;
       source_minutes: number;
-      output_minutes_by_lang: Record<string, number>;
-      estimated_cost_usd: number;
+      total_minutes: number;
+      output_by_lang: Record<string, number>;
+      total_cost_usd: number | null;
+      rate_usd: number | null;
     };
     expect(body.status).toBe("ended");
     expect(body.is_final).toBe(true);
+    expect(body.billing_tier).toBe("self_serve");
     expect(body.source_minutes).toBe(2); // 120s → 2min
-    expect(body.output_minutes_by_lang.ja).toBe(2);
-    expect(body.estimated_cost_usd).toBe(3); // 2 × 1.5
+    expect(body.total_minutes).toBe(2);
+    expect(body.output_by_lang.ja).toBe(2);
+    expect(body.total_cost_usd).toBe(3); // 2 × 1.5
+    expect(body.rate_usd).toBe(1.5);
+  });
+
+  it("b2b session returns billed_to and omits the dollar figure (happy)", async () => {
+    // Session owner flagged billing_tier='b2b' + bills_to='Simon'. Modal
+    // renders "Billed to Simon" and never sees a numeric cost — the
+    // handler must therefore null both total_cost_usd and rate_usd so the
+    // FE can't accidentally format a price for an invoiced customer.
+    const ts = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      "INSERT INTO users (id, billing_tier, bills_to, created_at) VALUES (?, ?, ?, ?)",
+    )
+      .bind("u-b2b-sum", "b2b", "Simon @ Brivva Tech", ts)
+      .run();
+
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-b2b-sum",
+        title: "B2B",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    await call(`/internal/sessions/${session.id}/metrics`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        source_seconds: 600,
+        output_seconds_by_lang: { ja: 600 },
+      }),
+    });
+
+    const res = await call(`/api/sessions/${session.id}/summary`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      billing_tier: string;
+      total_minutes: number;
+      output_by_lang: Record<string, number>;
+      total_cost_usd: number | null;
+      rate_usd: number | null;
+      billed_to: string | null;
+    };
+    expect(body.billing_tier).toBe("b2b");
+    expect(body.total_minutes).toBe(10);
+    expect(body.output_by_lang.ja).toBe(10);
+    expect(body.total_cost_usd).toBeNull();
+    expect(body.rate_usd).toBeNull();
+    expect(body.billed_to).toBe("Simon @ Brivva Tech");
   });
 
   it("404 when session does not exist (sad)", async () => {

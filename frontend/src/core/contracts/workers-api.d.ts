@@ -1852,22 +1852,33 @@ export interface components {
         BillingRateResponse: {
             per_output_minute_usd: number;
         };
+        SessionQuoteBreakdownItem: {
+            lang: string;
+            minutes: number;
+            cost_usd: number;
+        };
         SessionQuoteResponse: {
             session_id: string;
             expected_minutes: number;
             output_minutes: number;
             per_output_minute_usd: number;
             estimated_cost_usd: number;
+            breakdown: components["schemas"]["SessionQuoteBreakdownItem"][];
         };
         SessionSummaryResponse: {
             session_id: string;
             status: string;
             is_final: boolean;
+            /** @enum {string} */
+            billing_tier: "self_serve" | "b2b";
             source_minutes: number;
-            output_minutes_by_lang: {
+            total_minutes: number;
+            output_by_lang: {
                 [key: string]: number;
             };
-            estimated_cost_usd: number;
+            total_cost_usd: number | null;
+            rate_usd: number | null;
+            billed_to: string | null;
             updated_at: number | null;
         };
         InternalSessionMetricsUpdate: {

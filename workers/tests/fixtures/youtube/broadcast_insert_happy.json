@@ -1,0 +1,36 @@
+{
+  "kind": "youtube#liveBroadcast",
+  "etag": "etag_B7xYzA1b2C3d4E5f6G7h8I9jK0",
+  "id": "aB_c-DEfGhI",
+  "snippet": {
+    "publishedAt": "2026-05-10T12:00:00.000Z",
+    "channelId": "UCabcdefghijklmnopqrstuv",
+    "title": "Brivva Live — Gitae",
+    "description": "",
+    "scheduledStartTime": "2026-05-10T12:05:00.000Z",
+    "isDefaultBroadcast": false,
+    "liveChatId": "KicKGFVDYWJjZGVmZ2hpamtsbW5vcHFyc3R1dhILYUJfYy1ERUZHSGk"
+  },
+  "status": {
+    "lifeCycleStatus": "created",
+    "privacyStatus": "unlisted",
+    "recordingStatus": "notRecording",
+    "madeForKids": false,
+    "selfDeclaredMadeForKids": false
+  },
+  "contentDetails": {
+    "monitorStream": {
+      "enableMonitorStream": true,
+      "broadcastStreamDelayMs": 0,
+      "embedHtml": "<iframe width=\"425\" height=\"344\" src=\"//www.youtube.com/embed/aB_c-DEfGhI?autoplay=1&livemonitor=1\" frameborder=\"0\" allowfullscreen></iframe>"
+    },
+    "enableAutoStart": true,
+    "enableAutoStop": true,
+    "enableClosedCaptions": false,
+    "enableContentEncryption": false,
+    "enableDvr": true,
+    "enableEmbed": true,
+    "recordFromStart": true,
+    "startWithSlate": false
+  }
+}

@@ -77,6 +77,25 @@ describe("QuoteModal", () => {
     expect(screen.queryByText(/"expected":\s*"number"/)).toBeNull();
   });
 
+  it("renders one row per billable target lang (3-lang breakdown)", async () => {
+    fetchSessionQuote.mockResolvedValue({
+      estimatedCostUsd: 90,
+      expectedMinutes: 20,
+      breakdown: [
+        { lang: "en", minutes: 20, costUsd: 30 },
+        { lang: "ja", minutes: 20, costUsd: 30 },
+        { lang: "zh", minutes: 20, costUsd: 30 },
+      ],
+    });
+    render(<QuoteModal sessionId="s1" onConfirm={vi.fn()} onCancel={vi.fn()} />);
+
+    await waitFor(() => expect(fetchSessionQuote).toHaveBeenCalled());
+    // All three per-lang rows must render alongside the aggregate $90.00.
+    const perLangLines = await screen.findAllByText(/20m · \$30\.00/);
+    expect(perLangLines).toHaveLength(3);
+    expect(screen.getAllByText(/\$90\.00/).length).toBeGreaterThan(0);
+  });
+
   it("Cancel button + close icon both invoke onCancel", async () => {
     fetchSessionQuote.mockResolvedValue({
       estimatedCostUsd: 1,

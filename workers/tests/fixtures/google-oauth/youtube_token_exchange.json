@@ -1,0 +1,7 @@
+{
+  "access_token": "ya29.FAKE_ACCESS_TOKEN_FOR_TESTS",
+  "expires_in": 3599,
+  "refresh_token": "1//0FAKE_REFRESH_TOKEN_FOR_TESTS",
+  "scope": "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.readonly",
+  "token_type": "Bearer"
+}

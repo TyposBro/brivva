@@ -1,0 +1,24 @@
+{
+  "id": "evt_1P5dEF2eZvKYlo2CfailABC",
+  "object": "event",
+  "api_version": "2024-06-20",
+  "created": 1714608000,
+  "data": {
+    "object": {
+      "id": "in_1P5dEF2eZvKYlo2CabCdEfGh",
+      "object": "invoice",
+      "customer": "cus_PabCdEfGhIjKlM",
+      "subscription": "sub_1P3aBC2eZvKYlo2CAbCdEfGh",
+      "status": "open",
+      "attempt_count": 1,
+      "amount_due": 9000,
+      "currency": "usd",
+      "livemode": false,
+      "next_payment_attempt": 1714694400,
+      "last_finalization_error": null
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "type": "invoice.payment_failed"
+}

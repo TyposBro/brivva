@@ -19,6 +19,12 @@ describe("streamDefault", () => {
   it("unknown pair falls back to baseline 2000/20% (sad)", () => {
     expect(streamDefault("uk", "ru")).toEqual({ delay_ms: 2000, host_gain: 0.2 });
   });
+
+  it("ko→SEA (th/vi/id) uses curated 2500/20% — not the 2000 baseline (happy)", () => {
+    expect(streamDefault("ko", "th")).toEqual({ delay_ms: 2500, host_gain: 0.2 });
+    expect(streamDefault("ko", "vi")).toEqual({ delay_ms: 2500, host_gain: 0.2 });
+    expect(streamDefault("ko", "id")).toEqual({ delay_ms: 2500, host_gain: 0.2 });
+  });
 });
 
 describe("isStreamDefault", () => {

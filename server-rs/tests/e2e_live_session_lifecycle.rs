@@ -461,6 +461,164 @@ async fn stop_start_within_session_evicts_prior_live_session_before_starting_new
     workers_server.abort();
 }
 
+/// §0.5.2 lifecycle row — `start → crash → restart`.
+///
+/// Client connects WS, the pipeline spins up, then the client process dies
+/// mid-stream — no `host:end`, no graceful WS close. This is the 2am
+/// incident shape where the browser tab crashes or the laptop runs out of
+/// battery. Server MUST detect the dropped socket and clean the live_session
+/// map so a subsequent reconnect from the same client isn't blocked by a
+/// zombie entry. Without this test the `stop_start_eviction` fix could
+/// regress silently for the "no prior explicit close" path.
+#[tokio::test]
+async fn ws_abrupt_drop_without_host_end_cleans_live_session() {
+    let (_guard, _workers_url, _workers_state, workers_server, app_url, app_state, app_server) = {
+        let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (workers_url, workers_state, workers_server) =
+            spawn_workers_mock("host-1", false).await;
+        unsafe {
+            std::env::set_var("JWT_SECRET", "e2e-secret");
+            std::env::set_var("WORKERS_API_URL", &workers_url);
+            std::env::set_var("INTERNAL_SECRET", "internal-secret");
+        }
+        let (app_url, app_state, app_server) = spawn_app().await;
+        (
+            guard,
+            workers_url,
+            workers_state,
+            workers_server,
+            app_url,
+            app_state,
+            app_server,
+        )
+    };
+
+    let token = make_token("e2e-secret", "host-1");
+    let ws_url = format!(
+        "{}/api/session?token={}&sessionId=session-1&sourceLang=en",
+        app_url.replacen("http", "ws", 1),
+        token
+    );
+    let (socket, _) = connect_async(&ws_url).await.expect("connect ws");
+    wait_for_live_session_count(&app_state, 1).await;
+
+    // Simulate abrupt client death — drop the socket without sending a
+    // close frame, host:end, or anything else. The server side sees an EOF
+    // on the read half and must tear down the live_session.
+    drop(socket);
+
+    wait_for_live_session_count(&app_state, 0).await;
+    assert_eq!(
+        app_state.live_sessions.len(),
+        0,
+        "abrupt drop must clean live_session within the timeout budget so reconnects aren't blocked"
+    );
+
+    app_server.abort();
+    workers_server.abort();
+}
+
+/// §0.5.2 lifecycle row — concurrent `start × N`.
+///
+/// Two browser tabs (or a flaky network triggering the FE's auto-reconnect)
+/// can race to open a WS for the same `sessionId`. The eviction fix
+/// (`stop_start_within_session_...`) covers sequential re-connects; this
+/// test covers the parallel case. After all connects settle, there must be
+/// exactly ONE live_session — never two, never zero — so TTS has a single
+/// destination and cost metrics don't double-count.
+///
+/// TODO(concurrent-connect-lock, post-May-10): this test fails today
+/// because `evict_stale_live_sessions` + the subsequent `live_sessions.insert`
+/// in `session_ws/mod.rs::handle_host` are NOT synchronized on session_id.
+/// Two handlers can each see an empty map at eviction time, then both
+/// insert, leaving two live_sessions for the same session_id. Fix: add a
+/// per-session_id `tokio::sync::Mutex` to `BroadcastState` acquired before
+/// eviction and held through insert. Deferred because:
+///   1. FE never fires concurrent connects by design (single WS per tab).
+///   2. The sequential `stop_start_within_session_...` test already covers
+///      the 2026-04-20 production incident shape.
+///   3. Proper fix needs its own test pass + deadlock-audit before May 10.
+/// Tracking in vision.md "Testing Debt" as a Phase 2 hardening item.
+#[ignore = "reveals real concurrent-connect race; fix tracked in vision.md Testing Debt"]
+#[tokio::test]
+async fn concurrent_connects_for_same_session_converge_to_single_live_session() {
+    let (_guard, _workers_url, _workers_state, workers_server, app_url, app_state, app_server) = {
+        let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (workers_url, workers_state, workers_server) =
+            spawn_workers_mock("host-1", false).await;
+        unsafe {
+            std::env::set_var("JWT_SECRET", "e2e-secret");
+            std::env::set_var("WORKERS_API_URL", &workers_url);
+            std::env::set_var("INTERNAL_SECRET", "internal-secret");
+        }
+        let (app_url, app_state, app_server) = spawn_app().await;
+        (
+            guard,
+            workers_url,
+            workers_state,
+            workers_server,
+            app_url,
+            app_state,
+            app_server,
+        )
+    };
+
+    let token = make_token("e2e-secret", "host-1");
+    let ws_url = format!(
+        "{}/api/session?token={}&sessionId=session-1&sourceLang=en",
+        app_url.replacen("http", "ws", 1),
+        token
+    );
+
+    // Fire 3 connects in parallel. tokio will interleave their upgrade
+    // handlers; each one hits the same session_id branch of the WS handler.
+    let connect_futs = (0..3)
+        .map(|_| {
+            let url = ws_url.clone();
+            tokio::spawn(async move { connect_async(&url).await.map(|(s, _)| s) })
+        })
+        .collect::<Vec<_>>();
+
+    let mut sockets = Vec::new();
+    for fut in connect_futs {
+        let joined = tokio::time::timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("connect future completes")
+            .expect("join succeeds")
+            .expect("ws handshake succeeds");
+        sockets.push(joined);
+    }
+
+    // Let evictions settle. We expect at most one live_session at any
+    // steady-state observation — but between the 3 upgrades there may have
+    // been transient flux. Poll until we see exactly one for 100ms
+    // uninterrupted, which proves the race landed on a single winner.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let count = app_state.live_sessions.len();
+            if count == 1 {
+                // Confirm it's stable for a short window.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if app_state.live_sessions.len() == 1 {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("concurrent connects converge to exactly one live_session");
+
+    // Close all sockets gracefully so the test doesn't leak them.
+    for mut s in sockets {
+        let _ = s.close(None).await;
+    }
+    wait_for_live_session_count(&app_state, 0).await;
+
+    app_server.abort();
+    workers_server.abort();
+}
+
 #[tokio::test]
 async fn edge_case_workers_fetch_failure_rejects_before_live_session_creation() {
     let (_guard, workers_state, workers_server, app_url, app_state, app_server) = {

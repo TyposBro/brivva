@@ -114,8 +114,12 @@ describe("SessionPage", () => {
     getSession.mockResolvedValue({ session: makeSession(), streams: [] });
     deleteSession.mockResolvedValue({ status: "ok" });
     fetchSessionSummary.mockResolvedValue({
+      billingTier: "self_serve",
+      sourceMinutes: 12,
       totalMinutes: 12,
       totalCostUsd: 18,
+      rateUsd: 1.5,
+      billedTo: null,
       breakdown: [],
     });
     render(
@@ -148,8 +152,12 @@ describe("SessionPage", () => {
     getSession.mockResolvedValueOnce({ session: makeSession(), streams: [] });
     deleteSession.mockResolvedValue({ status: "ended" });
     fetchSessionSummary.mockResolvedValue({
+      billingTier: "self_serve",
+      sourceMinutes: 5,
       totalMinutes: 5,
       totalCostUsd: 7.5,
+      rateUsd: 1.5,
+      billedTo: null,
       breakdown: [],
     });
     // Simulate the prod failure mode — the refresh GET right after delete

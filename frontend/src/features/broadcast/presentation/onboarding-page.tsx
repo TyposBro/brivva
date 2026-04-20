@@ -60,9 +60,13 @@ function Inner() {
           navigate("/dashboard", { replace: true });
           return;
         }
-      } catch {
+      } catch (error) {
         // Workers may not have shipped onboarding_completed_at yet — treat
         // as "not completed" and let the user run the wizard.
+        console.warn(
+          "onboarding: failed to fetch onboarding state — falling back to wizard",
+          { userId, error: (error as Error).message },
+        );
       } finally {
         if (!cancelled) setHydrated(true);
       }

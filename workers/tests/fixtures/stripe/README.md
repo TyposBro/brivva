@@ -1,6 +1,17 @@
 # Stripe Fixtures (§0.5.1)
 
-## Pending — all fixtures are HAND_CRAFTED_PENDING_REAL_CAPTURE
+## Status (2026-04-20)
+
+| File | Status | Source |
+|------|--------|--------|
+| `checkout_session_completed.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Shape per Stripe API 2024-06-20; validated against `verifyStripeSignature` in roundtrip test |
+| `invoice_payment_failed.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Shape per Stripe dunning docs; validates `attempt_count` + `next_payment_attempt` for future retry loop |
+
+Roundtrip coverage: `workers/tests/fixture-roundtrip.test.ts` signs
+each fixture body with HMAC-SHA256 and drives it through
+`verifyStripeSignature`.
+
+## Still pending (billing = Phase 2 post-May-10)
 
 Webhook signature verification is tested without real event payloads. That
 leaves tier updates, customer metadata, and nested subscription shape

@@ -31,12 +31,27 @@ pub(super) fn spawn_response_processor(
 
         while let Some(message) = read_soniox_message(&tag, &mut stt_stream).await {
             let Some(response) = parse_soniox_response(&tag, &message) else {
+                tracing::debug!(
+                    session_id = %handle.id,
+                    tag = %tag,
+                    "stt response unparseable — skipping frame (parse_soniox_response already logged detail)"
+                );
                 continue;
             };
             if response.error_code.is_some() {
+                tracing::warn!(
+                    session_id = %handle.id,
+                    tag = %tag,
+                    "stt soniox returned error_code — exiting response processor as disconnected"
+                );
                 return (utterance_counter, true);
             }
             if !handle.sessions.contains_key(&handle.id) {
+                tracing::info!(
+                    session_id = %handle.id,
+                    tag = %tag,
+                    "stt session removed mid-response — exiting response processor"
+                );
                 return (utterance_counter, false);
             }
 
@@ -68,7 +83,7 @@ async fn read_soniox_message(tag: &str, stt_stream: &mut SonioxStream) -> Option
     let message = match message {
         Ok(message) => message,
         Err(error) => {
-            eprintln!("[STT {}] WebSocket read error: {}", tag, error);
+            tracing::warn!(tag = %tag, error = %error, "stt websocket read error");
             return None;
         }
     };
@@ -76,7 +91,7 @@ async fn read_soniox_message(tag: &str, stt_stream: &mut SonioxStream) -> Option
     match message {
         tungstenite::Message::Text(text) => Some(text.to_string()),
         tungstenite::Message::Close(_) => {
-            eprintln!("[STT {}] Soniox closed the connection", tag);
+            tracing::info!(tag = %tag, "stt soniox closed the connection");
             None
         }
         _ => Some(String::new()),
@@ -91,17 +106,22 @@ fn parse_soniox_response(tag: &str, text: &str) -> Option<SonioxResponse> {
     match serde_json::from_str::<SonioxResponse>(text) {
         Ok(response) => {
             if let Some(code) = &response.error_code {
-                eprintln!(
-                    "[STT {}] Soniox error {}: {}",
-                    tag,
-                    code,
-                    response.error_message.clone().unwrap_or_default()
+                tracing::warn!(
+                    tag = %tag,
+                    error_code = %code,
+                    error_message = response.error_message.as_deref().unwrap_or(""),
+                    "stt soniox returned error_code in response"
                 );
             }
             Some(response)
         }
         Err(error) => {
-            eprintln!("[STT {}] parse error: {} — raw: {}", tag, error, text);
+            tracing::warn!(
+                tag = %tag,
+                error = %error,
+                raw_len = text.len(),
+                "stt response parse error — dropping frame"
+            );
             None
         }
     }

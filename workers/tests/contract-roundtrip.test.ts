@@ -26,6 +26,7 @@ import {
   CreateSessionResponseSchema,
   ListCredentialsResponseSchema,
   SessionQuoteResponseSchema,
+  SessionSummaryResponseSchema,
   UserInfoSchema,
   VoiceSchema,
 } from "@brivva/contracts/http";
@@ -401,6 +402,62 @@ describe("contract-roundtrip GET /api/sessions/:id/quote", () => {
       SessionQuoteResponseSchema,
       await res.json(),
       "GET /api/sessions/:id/quote (edge)",
+    );
+  });
+});
+
+// ── 7. GET /api/sessions/:id/summary — SessionSummaryResponseSchema
+
+describe("contract-roundtrip GET /api/sessions/:id/summary", () => {
+  it("self_serve session response matches SessionSummaryResponseSchema (happy)", async () => {
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "rt-sum-self",
+        title: "Self-serve summary",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/summary`);
+    expect(res.status).toBe(200);
+    assertMatches(
+      SessionSummaryResponseSchema,
+      await res.json(),
+      "GET /api/sessions/:id/summary (self_serve)",
+    );
+  });
+
+  it("b2b session response matches SessionSummaryResponseSchema (edge)", async () => {
+    // billing_tier + bills_to populated: total_cost_usd/rate_usd must be
+    // null, billed_to must be a string. Contract parse catches any drift.
+    const ts = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      "INSERT INTO users (id, billing_tier, bills_to, created_at) VALUES (?, ?, ?, ?)",
+    )
+      .bind("rt-sum-b2b", "b2b", "Brivva Tech Studio", ts)
+      .run();
+    const createRes = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "rt-sum-b2b",
+        title: "B2B summary",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await createRes.json()) as { session: { id: string } };
+
+    const res = await call(`/api/sessions/${session.id}/summary`);
+    expect(res.status).toBe(200);
+    assertMatches(
+      SessionSummaryResponseSchema,
+      await res.json(),
+      "GET /api/sessions/:id/summary (b2b)",
     );
   });
 });

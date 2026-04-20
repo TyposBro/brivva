@@ -69,11 +69,19 @@ export function SummaryModal({ sessionId, onClose }: Props) {
                 </div>
                 <div>
                   <span className="text-on-surface-variant text-[10px] font-label uppercase tracking-widest block">
-                    Total cost
+                    {summary.billingTier === "b2b" ? "Billed to" : "Total cost"}
                   </span>
-                  <span className="text-on-surface font-headline font-bold text-2xl tabular-nums">
-                    ${summary.totalCostUsd.toFixed(2)}
-                  </span>
+                  {summary.billingTier === "b2b" ? (
+                    <span className="text-on-surface font-headline font-bold text-lg">
+                      {summary.billedTo ?? "—"}
+                    </span>
+                  ) : (
+                    <span className="text-on-surface font-headline font-bold text-2xl tabular-nums">
+                      {summary.totalCostUsd !== null
+                        ? `$${summary.totalCostUsd.toFixed(2)}`
+                        : "—"}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -88,7 +96,9 @@ export function SummaryModal({ sessionId, onClose }: Props) {
                         {api.langFlag(b.lang)} {api.langLabel(b.lang)}
                       </span>
                       <span className="ml-auto tabular-nums">
-                        {b.minutes}m · ${b.costUsd.toFixed(2)}
+                        {summary.billingTier === "b2b"
+                          ? `${b.minutes}m`
+                          : `${b.minutes}m · $${b.costUsd.toFixed(2)}`}
                       </span>
                     </div>
                   ))}

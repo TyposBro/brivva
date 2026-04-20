@@ -4,14 +4,23 @@ Covers both the sign-in flow (openid scope) and the YouTube OAuth flow
 (youtube scope). They share the token endpoint but differ in scopes and
 userinfo call patterns.
 
-## Pending — all fixtures are HAND_CRAFTED_PENDING_REAL_CAPTURE
+## Status (2026-04-20)
 
-- `signin_token_exchange.json` — POST /oauth2/v4/token with openid scope
-- `signin_userinfo.json` — GET /oauth2/v3/userinfo response
-- `signin_userinfo_missing_picture.json` — user without profile photo
-- `youtube_token_exchange.json` — same endpoint, youtube scope
-- `youtube_refresh_happy.json` — refresh_token flow
-- `invalid_grant.json` — revoked refresh_token 400 response
+| File | Status | Source |
+|------|--------|--------|
+| `signin_token_exchange.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | ya29.* access_token + JWT id_token + 3599 expires_in per Google docs |
+| `signin_userinfo.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Real shape including locale + email_verified |
+| `signin_userinfo_missing_picture.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | Variant: user without profile photo — exercises `picture: null` normalization |
+| `youtube_token_exchange.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | refresh_token with 1// prefix; space-separated scope |
+| `invalid_grant.json` | HAND_CRAFTED_PENDING_REAL_CAPTURE | 400 error envelope from revoked refresh_token |
+
+Roundtrip coverage: `workers/tests/fixture-roundtrip.test.ts` drives
+each through `exchangeCode` (sign-in + youtube) / `fetchUserInfo` /
+`refreshAccessToken`.
+
+## Still to add
+
+- `youtube_refresh_happy.json` — refresh_token flow (youtube scope)
 - `invalid_client.json` — wrong client_id/secret pairing
 
 ## Capture steps

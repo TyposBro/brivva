@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "status": "voice_limit_reached",
+    "message": "You have reached the maximum number of custom voices allowed on your current subscription plan. Please upgrade to create more voices."
+  }
+}

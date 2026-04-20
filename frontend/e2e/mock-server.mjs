@@ -313,9 +313,13 @@ const server = createServer(async (req, res) => {
       return json(res, 500, { error: "summary unavailable" });
     }
     return json(res, 200, {
+      billing_tier: "self_serve",
+      source_minutes: 12,
       total_minutes: 12,
+      output_by_lang: { ja: 12 },
       total_cost_usd: 18,
-      breakdown: [{ lang: "ja", minutes: 12, cost_usd: 18 }],
+      rate_usd: 1.5,
+      billed_to: null,
     });
   }
   if (url.pathname.match(/^\/api\/sessions\/[^/]+\/voice$/) && req.method === "POST") {

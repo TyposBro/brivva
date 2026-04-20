@@ -19,8 +19,21 @@ for supplying the complete `rtmp_url` with port and `stream_key` separately;
 ## FFmpeg flags
 
 FFmpeg's `rtmps` protocol is `rtmp` over TLS — same muxer (`-f flv`), same
-publish path. No additional build features are required on top of the
-standard Debian `ffmpeg` package used in the Fargate image.
+publish path.
+
+**CRITICAL** (verified 2026-04-20): FFmpeg MUST be compiled with
+`--enable-librtmp --enable-openssl`. Debian's apt `ffmpeg` package and
+Homebrew's default bottle use the native RTMP implementation, which AWS
+IVS (Grip's backend) silently rejects — publish cuts at frame 3 with no
+`Publish.Start` ack and no stderr error. librtmp (via rtmpdump) is what
+OBS uses and is what IVS fingerprints against.
+
+The Dockerfile therefore uses a multi-stage build that compiles ffmpeg
+6.1.2 from source with `--enable-librtmp --enable-openssl --enable-libx264
+--enable-libx265 --enable-libmp3lame --enable-libopus --enable-libfreetype
+--enable-libfontconfig --enable-libass`. CI asserts
+`ffmpeg -version | grep enable-librtmp` to prevent silent regression on
+base-image bump.
 
 Flags that matter for Grip:
 
@@ -79,12 +92,34 @@ If Grip's TLS stack is failing wholesale (rare but observed), set
 `rtmps://` → `rtmp://` before FFmpeg spawn. Only use on platforms that
 accept unsecured RTMP — confirm with the platform owner first.
 
+## Official Seller API (discovered 2026-04-19)
+
+Grip has an **official Seller API** with `AccessKey` + `SecretKey` auth,
+surfaced on Seller Center → profile → "Grip API (외부 연동)".
+Support contact: `seller_support@gripcorp.co`.
+
+Status 2026-04-20: Aziz emailed requesting the API spec. Reply pending.
+
+If the spec covers the operations the paste-cred path reverse-engineers
+(provision broadcast, fetch stream key, start, end, health), most of the
+workarounds in this file retire post-May-10. Migration is gated behind
+`BRIVVA_GRIP_USE_LEGACY` kill-switch so paste-cred remains instant
+rollback. Not on the May 10 critical path — current paste-cred + librtmp
+flow is working e2e.
+
+See `docs/may10-agent-tasks.md` Task 15 for the evaluation prompt.
+
+## What we verified (2026-04-20)
+
+- Live handshake against `live.grip.fans:443` from Fargate: **working**.
+  600 frames pushed in 20s, broadcast flipped to `방송중` on Grip's end.
+  This required ffmpeg compiled with librtmp — see above.
+- YouTube + Grip e2e in prod: **working**. Test users invited via Gmail
+  through WhatsApp group. TikTok integration is the next target.
+
 ## What we did NOT verify
 
-- A live handshake against `live.grip.fans:443` from Fargate. The test
-  would require a real stream key and a live creator account; the shared
-  Simon key rotates on use. Rehearse once before `May 10` against a
-  known-idle test key rather than live credentials.
 - Grip's undocumented stream-health API. As called out in
   `ARCHITECTURE.md`, we do not poll it. FFmpeg exit codes remain the
-  authoritative signal.
+  authoritative signal. (Seller API may provide an official health
+  endpoint — evaluate post-reply.)
