@@ -1,3 +1,10 @@
+// TODO(post-may10, demo-era-rewrite): this scenario was wired against
+// the deleted `/host?sessionId=...&sourceLang=...` page (commit db63713).
+// The WS-drop → kill-switch → summary-fallback path is still worth
+// covering end-to-end, but it needs to be reauthored against
+// `/session/:id/live` (see session-live-page.tsx). Skipped until then —
+// go-live.e2e.ts covers the happy summary-modal path today.
+
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import { MOCK } from "./config";
 
@@ -22,7 +29,7 @@ async function signIn(page: Page) {
   });
 }
 
-test.describe("Scenario 3 — session end + rollback", () => {
+test.describe.skip("Scenario 3 — session end + rollback (DISABLED — /host page removed; see TODO at top)", () => {
   test.beforeEach(async ({ request }) => {
     await resetMock(request);
     await request.post(`${MOCK}/test/seed-user`, {

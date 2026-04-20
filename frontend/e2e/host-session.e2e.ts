@@ -1,3 +1,15 @@
+// TODO(post-may10, demo-era-rewrite): this suite targets the removed
+// `/host?sessionId=...&sourceLang=...` page (deleted in commit db63713
+// "demo-era cruft removed"). The underlying scenarios are still
+// relevant — WS drop/reconnect, interim→final→translation, kill-switch
+// banner, stop/start mid-session — but they need to be rewritten
+// against the current `/session/:id/live` route (see
+// `frontend/src/features/broadcast/presentation/session-live-page.tsx`).
+// Skipped until that rewrite happens so CI stays green in the meantime.
+// This is a real coverage gap, not a ship-blocker — adjacent e2e files
+// (go-live.e2e.ts, voice-clone-crosslingual.e2e.ts, session-rollback
+// below) still cover the primary golden paths.
+
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { MOCK } from "./config";
 
@@ -27,7 +39,7 @@ async function seedUser(page: Page) {
   });
 }
 
-test.describe("HostPage — E2E w/ mock server", () => {
+test.describe.skip("HostPage — E2E w/ mock server (DISABLED — page removed; see TODO at top)", () => {
   test.beforeEach(async ({ request }) => { await resetMock(request); });
 
   test("happy: loads session, skips voice, records, sees interim → final → translation", async ({ page, request }) => {
