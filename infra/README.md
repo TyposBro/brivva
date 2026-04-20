@@ -11,7 +11,7 @@ Reproducible AWS infra for Brivva backend. Region fixed to `us-east-1` for proxi
 | IAM role | `brivva-ecs-execution` | ECS task exec + `secretsmanager:GetSecretValue` on `brivva/env` |
 | CloudWatch log group | `/ecs/brivva` | 7d retention |
 | ECS cluster | `brivva` | Fargate-only |
-| ECS task def | `brivva` | 2 vCPU / 4 GB, server-rs + optional cloudflared sidecar |
+| ECS task def | `brivva` | 8 vCPU / 16 GB, server-rs + optional cloudflared sidecar |
 | ECS service | `brivva` | 1 task, public IP in default VPC |
 | Security group | `brivva-task` | Egress-only (cloudflared handles ingress) |
 
@@ -77,7 +77,9 @@ Tasks fetch secrets at container start — they don't hot-reload.
 
 ## Sizing
 
-**Current default: 2 vCPU / 4 GB.**
+**Current default: 8 vCPU / 16 GB.** (bumped from 2/4 on 2026-04-20 to
+carry the May 10 "ultimate test" shape: En source → Ko+Zh+Ja
+translations + passthrough on Grip+TikTok+YouTube simultaneously.)
 
 Rough budget per running stream:
 
@@ -91,20 +93,23 @@ Rough budget per running stream:
 
 **One stream = one ffmpeg process per RTMP destination** (source + K translated languages = 1+K processes).
 
-### Can a 2 vCPU / 4 GB task handle it?
+### Can an 8 vCPU / 16 GB task handle it?
 
 | Scenario | Fit |
 |---|---|
-| 1 stream, 1080p transcode, 2 translations + burn-in subs | ✅ comfortable (~2.5 cores worth spread across 2 actual — Fargate lets you burst briefly, sustained 2-lang OK, 3-lang tight) |
-| 1 stream, H.264 passthrough from browser, 4 translations | ✅ lots of headroom |
-| 2 concurrent host sessions, 1080p transcode, 2 translations each | ❌ needs 4 vCPU / 8 GB, or horizontal scale |
+| 1 stream, 1080p transcode, 3 translations + passthrough + burn-in subs ("ultimate test") | ✅ ~3.45 cores used, 4.5 cores headroom for STT/TTS orchestration |
+| 1 stream, 1080p transcode, 5 translations + passthrough | ✅ ~5.1 cores, still fits |
+| 2 concurrent host sessions, 1080p transcode, 3 translations each | ⚠️ ~7 cores used, tight. Scale horizontally (second task) rather than vertically |
+| 3 concurrent host sessions | ❌ needs horizontal scale-out (see `docs/horizontal-scaling-plan.md` — Phase 2) |
 
 ### Tune via tfvars
 
+If you need to override the new default:
+
 ```hcl
 # infra/terraform.tfvars
-task_cpu    = "4096"   # 4 vCPU
-task_memory = "8192"   # 8 GB
+task_cpu    = "8192"   # 8 vCPU (current default)
+task_memory = "16384"  # 16 GB
 ```
 
 Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html). Common pairs: 1024/2048, 2048/4096, 4096/8192, 8192/16384.

@@ -30,18 +30,21 @@ variable "broadcast_delay_ms" {
 
 variable "task_cpu" {
   description = <<-EOT
-    Fargate CPU units (1024 = 1 vCPU). Default 2048 = 2 vCPU.
-    Sized for 1 concurrent stream with 1080p transcode + 2 translations + burn-in subtitles.
+    Fargate CPU units (1024 = 1 vCPU). Default 8192 = 8 vCPU.
+    Sized for 1 concurrent stream with 1080p transcode + up to 3 translations
+    + passthrough + burn-in subtitles (May 10 "ultimate test" shape:
+    En -> Ko+Zh+Ja + passthrough = ~3.45 cores under load, comfortable
+    headroom for STT/translate/TTS orchestration).
     See infra/README.md "Sizing" for the math and scale-out guidance.
   EOT
   type        = string
-  default     = "2048"
+  default     = "8192"
 }
 
 variable "task_memory" {
-  description = "Fargate memory MB. Default 4096 = 4 GB (paired with 2 vCPU)."
+  description = "Fargate memory MB. Default 16384 = 16 GB (paired with 8 vCPU)."
   type        = string
-  default     = "4096"
+  default     = "16384"
 }
 
 variable "log_retention_days" {
