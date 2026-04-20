@@ -29,10 +29,69 @@ pub struct SonioxTranslation {
 pub struct SonioxResponse {
     #[serde(default)]
     pub tokens: Vec<SonioxToken>,
-    #[serde(default)]
+    /// Soniox sends `error_code` as an integer (e.g. `408`) for transport
+    /// errors but as a string (e.g. `"auth_failed"`) for application errors.
+    /// Accept both shapes so the caller can detect either kind — earlier the
+    /// strict `Option<String>` deserializer rejected every `408`/`429`/etc.
+    /// response, which made `parse_soniox_response` return `None` and the
+    /// processor loop treated those errors as "no usable response, keep going"
+    /// rather than tearing down the pipeline. Burn-in captions never appeared
+    /// because every translation utterance died in this swallowed-error path.
+    #[serde(default, deserialize_with = "deserialize_error_code")]
     pub error_code: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+fn deserialize_error_code<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct ErrorCodeVisitor;
+
+    impl<'de> Visitor<'de> for ErrorCodeVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string, integer, or null Soniox error_code")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(ErrorCodeVisitor)
+        }
+    }
+
+    deserializer.deserialize_option(ErrorCodeVisitor)
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,5 +259,38 @@ mod tests {
     fn source_tag_uses_src_prefix() {
         let mode = SonioxMode::Source { lang: Lang::Ko };
         assert_eq!(mode.tag(), "src:ko");
+    }
+
+    #[test]
+    fn deserializes_error_code_when_soniox_sends_it_as_a_string() {
+        let json = r#"{"error_code":"auth_failed","error_message":"bad key"}"#;
+        let resp: SonioxResponse = serde_json::from_str(json).expect("parses");
+        assert_eq!(resp.error_code.as_deref(), Some("auth_failed"));
+    }
+
+    #[test]
+    fn deserializes_error_code_when_soniox_sends_it_as_an_integer() {
+        // Production regression: Soniox sends transport errors with numeric
+        // codes (`408 "Request timeout."`, `429 "Rate limited."`) but used
+        // to deserialize into `Option<String>` strictly, which made every
+        // such response fail parse and disappear silently. The processor
+        // then never tore down the pipeline on Soniox errors and translation
+        // utterances stalled forever — burn-in captions never followed.
+        let json = r#"{"tokens":[],"error_code":408,"error_message":"Request timeout."}"#;
+        let resp: SonioxResponse = serde_json::from_str(json).expect("parses");
+        assert_eq!(resp.error_code.as_deref(), Some("408"));
+        assert_eq!(resp.error_message.as_deref(), Some("Request timeout."));
+    }
+
+    #[test]
+    fn deserializes_error_code_as_none_when_field_absent() {
+        let resp: SonioxResponse = serde_json::from_str("{}").expect("parses");
+        assert!(resp.error_code.is_none());
+    }
+
+    #[test]
+    fn deserializes_error_code_as_none_when_field_explicitly_null() {
+        let resp: SonioxResponse = serde_json::from_str(r#"{"error_code":null}"#).expect("parses");
+        assert!(resp.error_code.is_none());
     }
 }

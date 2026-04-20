@@ -92,4 +92,53 @@ test.describe("HostPage — E2E w/ mock server", () => {
     await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
     await expect(page.getByText("foo")).toBeVisible();
   });
+
+  // Production regression (2026-04-20): host pressed stop -> start without
+  // ending the session. Server-side eviction now guarantees only one
+  // live_session per FE session_id; the FE must keep the WS open and
+  // continue rendering translations after the second start.
+  test("regression: stop -> start within session keeps Live Streams + translations flowing", async ({ page, request }) => {
+    await seedUser(page);
+    await page.goto("/host?sessionId=s1&sourceLang=en");
+    await waitForSocket(request);
+    await page.getByRole("button", { name: /Skip/ }).click();
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
+
+    await page.getByRole("button", { name: /^Record$/ }).click();
+    await emit(request, { type: "final", utteranceId: 1, transcript: "first run", sttMs: 100 });
+    await expect(page.getByText("first run")).toBeVisible();
+    await emit(request, { type: "translation", utteranceId: 1, targetLang: "ja", text: "最初", translateMs: 80 });
+    await expect(page.getByText("最初")).toBeVisible();
+    await page.getByRole("button", { name: /^Stop$/ }).click();
+
+    // Second recording window — start again WITHOUT ending the session.
+    // Pre-fix this is where TTS went silent on the server because the
+    // prior live_session lingered. The FE state must stay healthy: Live
+    // Streams visible, no error banner, and a fresh translation renders.
+    await page.getByRole("button", { name: /^Record$/ }).click();
+    await emit(request, { type: "final", utteranceId: 2, transcript: "second run", sttMs: 110 });
+    await expect(page.getByText("second run")).toBeVisible();
+    await emit(request, { type: "translation", utteranceId: 2, targetLang: "ja", text: "二回目", translateMs: 90 });
+    await expect(page.getByText("二回目")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Live Streams" })).toBeVisible();
+  });
+
+  // Regression — prod incident 2026-04-20. Clicking End-Session used to flash
+  // "Session not found" because Workers hard-deleted the row, the FE refresh
+  // GET returned `session:null`, and the page short-circuited to its
+  // "missing" branch instead of opening the summary modal. Soft-end + an
+  // optimistic state flip on End should mean the host only ever sees the
+  // summary surface.
+  test("regression: End Session shows summary modal — never the 'Session not found' fallback", async ({ page }) => {
+    await seedUser(page);
+    await page.goto("/session/s-end-test");
+
+    // Wait for the live session to render so the End button is reachable.
+    await expect(page.getByText("E2E Test Session")).toBeVisible();
+    await page.getByRole("button", { name: /End Session/i }).click();
+
+    await expect(page.getByRole("heading", { name: /Session ended/i })).toBeVisible();
+    // The fallback state must not appear at any point during/after End.
+    await expect(page.getByText(/Session not found/i)).toHaveCount(0);
+  });
 });

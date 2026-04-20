@@ -54,6 +54,10 @@ const voices = new Map();
 // Per-user platform credentials (grip/tiktok paste-creds flow).
 // Keyed by user_id → { [platform]: credential row }.
 const credentials = new Map();
+// Track ended sessions so the post-End GET returns the row with status='ended'
+// instead of falling back to the stub default ('live'). Mirrors the soft-end
+// contract in workers/src/orchestration/app.ts. Keyed by session id.
+const endedSessions = new Set();
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -161,6 +165,7 @@ const server = createServer(async (req, res) => {
     users.clear();
     voices.clear();
     credentials.clear();
+    endedSessions.clear();
     return json(res, 200, { ok: true });
   }
 
@@ -341,8 +346,11 @@ const server = createServer(async (req, res) => {
         title: "E2E Test Session",
         source_lang: "en",
         target_langs: '["ja","zh"]',
-        status: "live",
-        live_session_id: "live-1",
+        // Soft-end contract: once End-Session lands, GET still returns the
+        // row but with status='ended' so the SessionPage renders the summary
+        // surface instead of "Session not found".
+        status: endedSessions.has(id) ? "ended" : "live",
+        live_session_id: endedSessions.has(id) ? null : "live-1",
         created_at: Math.floor(Date.now() / 1000) - 60,
       },
       streams: [
@@ -352,6 +360,8 @@ const server = createServer(async (req, res) => {
     });
   }
   if (url.pathname.startsWith("/api/sessions/") && req.method === "DELETE") {
+    const id = url.pathname.split("/")[3];
+    if (id) endedSessions.add(id);
     return json(res, 200, { status: "ended" });
   }
 

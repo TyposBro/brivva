@@ -752,8 +752,8 @@ describe("GET /api/sessions/:id", () => {
   });
 });
 
-describe("DELETE /api/sessions/:id + stream delete (happy)", () => {
-  it("DELETE session cascades metrics + streams", async () => {
+describe("DELETE /api/sessions/:id soft-ends the session (happy)", () => {
+  it("DELETE marks status='ended' and keeps the row + streams reachable so the summary view can render", async () => {
     await seedUser("u-del-s");
     const createRes = await call("/api/sessions", {
       method: "POST",
@@ -773,6 +773,9 @@ describe("DELETE /api/sessions/:id + stream delete (happy)", () => {
       streams: Array<{ id: string }>;
     };
 
+    // Stream-level deletes are still hard deletes — the row is per-destination
+    // not per-session, and the host can prune destinations mid-setup. Keep
+    // that path as-is and assert it.
     const delStreamRes = await call(
       `/api/sessions/${session.id}/streams/${streams[0]!.id}`,
       { method: "DELETE" },
@@ -783,10 +786,27 @@ describe("DELETE /api/sessions/:id + stream delete (happy)", () => {
       method: "DELETE",
     });
     expect(delSessionRes.status).toBe(200);
+    const delBody = (await delSessionRes.json()) as { status: string };
+    expect(delBody.status).toBe("ended");
 
+    // GET still returns 200 with the row — status flipped to 'ended'. This
+    // is the contract the FE relies on to render the post-stream summary
+    // instead of "Session not found" (prod 2026-04-20 incident).
     const getRes = await call(`/api/sessions/${session.id}`);
-    const getBody = (await getRes.json()) as { session: unknown | null };
-    expect(getBody.session).toBeNull();
+    expect(getRes.status).toBe(200);
+    const getBody = (await getRes.json()) as {
+      session: { id: string; status: string } | null;
+    };
+    expect(getBody.session).not.toBeNull();
+    expect(getBody.session!.id).toBe(session.id);
+    expect(getBody.session!.status).toBe("ended");
+  });
+
+  it("DELETE on a missing session returns 200 (idempotent — server-rs may race the FE)", async () => {
+    const res = await call("/api/sessions/does-not-exist", { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("ended");
   });
 });
 

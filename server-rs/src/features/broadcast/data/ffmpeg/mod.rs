@@ -402,11 +402,57 @@ impl RtmpManager {
         }
     }
 
+    /// Test-only: register a target-language stream wired to a real
+    /// `CaptionState` textfile but with no FFmpeg child. Lets cross-module
+    /// integration tests exercise `push_caption` end-to-end (translation →
+    /// disk) without spawning FFmpeg. Returns the textfile path so callers
+    /// can read it back to verify burn-in delivery.
+    ///
+    /// The stub child is a short-lived `sh -c "exit 0"`; drain/health
+    /// monitor code paths are not exercised here. Caller is responsible for
+    /// removing the textfile on test cleanup.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn insert_test_target_stream(&mut self, stream_id: &str, lang: &str) -> String {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn shell child");
+        let _ = child.wait();
+        let cap = CaptionState::spawn(stream_id);
+        let path = cap.path.clone();
+        self.streams.insert(
+            stream_id.to_string(),
+            RtmpStream {
+                child,
+                video_handle: Some(thread::spawn(|| {})),
+                audio_handle: Some(thread::spawn(|| {})),
+                audio_fifo: format!("/tmp/brivva_audio_fake_{stream_id}"),
+                lang: lang.to_string(),
+                rtmp_url: "rtmp://fake".into(),
+                delay: Duration::from_millis(1000),
+                is_source: false,
+                host_gain: 0.2,
+                passthrough: false,
+                buffers: StreamBuffers::new(),
+                caption: Some(cap),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                restart_count: 0,
+                last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
+            },
+        );
+        path
+    }
+
     /// Update the burn-in caption for a target-language stream. Write is
     /// rate-limited to MIN_CAPTION_DWELL_MS so each line gets read time.
     /// Source + passthrough streams have no caption track — this is a no-op
     /// for them (no translation text to burn in).
     pub fn push_caption(&self, lang: &str, text: String) {
+        let mut delivered = 0usize;
+        let mut skipped = 0usize;
         for stream in self.streams.values() {
             if stream.lang == lang
                 && !stream.is_source
@@ -414,8 +460,22 @@ impl RtmpManager {
                 && let Some(cap) = &stream.caption
             {
                 cap.push(&text);
+                delivered += 1;
+            } else if stream.lang == lang {
+                skipped += 1;
             }
         }
+        // Without this log line, the operator has no way to tell whether a
+        // missing burn-in caption is the writer's fault, the consumer's
+        // fault, or a stream-flag classification bug. `delivered=0` with
+        // `skipped>0` is the smoking gun for the latter.
+        tracing::debug!(
+            lang = %lang,
+            char_count = text.chars().count(),
+            delivered,
+            skipped_same_lang = skipped,
+            "push_caption fan-out"
+        );
     }
 
     /// Kill FFmpeg children that have gone silent (no drain writes in
@@ -584,6 +644,26 @@ impl RtmpManager {
             &args.rtmp_url,
             Some(args.lang.as_str()),
         );
+        // Surface whether the drawtext burn-in filter is attached to this
+        // stream's ffmpeg invocation. Caption visibility regressions live in
+        // exactly two places: this attach decision (`is_source||passthrough`
+        // wrongly true), or `push_caption` not delivering. Logging the path
+        // here closes the gap in the operator's mental model.
+        match &caption {
+            Some(c) => tracing::info!(
+                stream_id = %args.stream_id,
+                lang = %args.lang,
+                caption_path = %c.path,
+                "ffmpeg spawn: drawtext burn-in attached"
+            ),
+            None => tracing::info!(
+                stream_id = %args.stream_id,
+                lang = %args.lang,
+                is_source = args.is_source,
+                passthrough = args.passthrough,
+                "ffmpeg spawn: no drawtext (source/passthrough stream)"
+            ),
+        }
 
         let mut child = std::process::Command::new("ffmpeg")
             .args(&ffmpeg_args)
@@ -1281,5 +1361,105 @@ mod tests {
         assert_eq!(crashed[0].0, "p");
         assert!(crashed[0].4, "is_source preserved");
         assert!(crashed[0].6, "passthrough preserved across restart");
+    }
+
+    /// Same fake-stream scaffolding as `fake_exited_stream_full` but with a
+    /// real `CaptionState` attached so `push_caption` exercises the textfile
+    /// writer end-to-end. Used to assert the on-disk side of the burn-in
+    /// pipeline without spawning FFmpeg.
+    fn fake_stream_with_caption(id: &str, lang: &str) -> RtmpStream {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn shell child");
+        let _ = child.wait();
+        RtmpStream {
+            child,
+            video_handle: Some(thread::spawn(|| {})),
+            audio_handle: Some(thread::spawn(|| {})),
+            audio_fifo: format!("/tmp/brivva_audio_fake_{id}"),
+            lang: lang.to_string(),
+            rtmp_url: "rtmp://fake".into(),
+            delay: Duration::from_millis(1000),
+            is_source: false,
+            host_gain: 0.2,
+            passthrough: false,
+            buffers: StreamBuffers::new(),
+            caption: Some(CaptionState::spawn(id)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            restart_count: 0,
+            last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_caption_writes_translated_text_to_drawtext_textfile_on_disk() {
+        // Production smoke: a translated utterance arriving at the manager
+        // must end up as bytes on the drawtext textfile within the dwell
+        // window. Pre-fix the textfile was created at spawn time but the
+        // fan-out from emit_translation never logged anything, so we had no
+        // way to tell whether captions were silently failing here.
+        let mut m = RtmpManager::new();
+        let stream_id = format!("captest-{}", std::process::id());
+        let stream = fake_stream_with_caption(&stream_id, "ja");
+        let caption_path = stream
+            .caption
+            .as_ref()
+            .expect("fake stream must have caption")
+            .path
+            .clone();
+        m.streams.insert(stream_id.clone(), stream);
+
+        m.push_caption("ja", "こんにちは".into());
+
+        // First write has no dwell debt — should land within ~100 ms.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let on_disk = std::fs::read_to_string(&caption_path).expect("textfile present");
+        assert_eq!(on_disk, "こんにちは");
+
+        if let Some(mut s) = m.streams.remove(&stream_id)
+            && let Some(mut cap) = s.caption.take()
+        {
+            cap.shutdown();
+        }
+        let _ = std::fs::remove_file(&caption_path);
+    }
+
+    #[tokio::test]
+    async fn push_caption_does_not_write_textfile_when_lang_does_not_match() {
+        // Defensive: a translated text for `ko` must not leak onto a `ja`
+        // stream's textfile. Otherwise hosts running multiple target streams
+        // would see other languages flicker through their burn-in.
+        let mut m = RtmpManager::new();
+        let stream_id = format!("captest-mismatch-{}", std::process::id());
+        let stream = fake_stream_with_caption(&stream_id, "ja");
+        let caption_path = stream
+            .caption
+            .as_ref()
+            .expect("fake stream must have caption")
+            .path
+            .clone();
+        m.streams.insert(stream_id.clone(), stream);
+
+        m.push_caption("ko", "안녕하세요".into());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Spawn writes an empty file initially; no caption push for `ja`
+        // means the file stays empty.
+        let on_disk = std::fs::read_to_string(&caption_path).unwrap_or_default();
+        assert!(
+            on_disk.is_empty(),
+            "ja stream's textfile must stay empty when ko text is pushed: got {on_disk:?}"
+        );
+
+        if let Some(mut s) = m.streams.remove(&stream_id)
+            && let Some(mut cap) = s.caption.take()
+        {
+            cap.shutdown();
+        }
+        let _ = std::fs::remove_file(&caption_path);
     }
 }

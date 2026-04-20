@@ -20,6 +20,19 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 libc = "0.2"
 
+[features]
+# Exposes a small surface of test-only constructors (e.g.
+# `RtmpManager::insert_test_target_stream`) so integration tests under
+# `tests/` can wire fake streams without spawning real FFmpeg children.
+# Production builds never enable this; the feature is gated to keep the
+# normal binary surface free of test-only API.
+test-helpers = []
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 dashmap = "6.1.0"
+
+[[test]]
+name = "caption_burn_in"
+path = "tests/caption_burn_in.rs"
+required-features = ["test-helpers"]

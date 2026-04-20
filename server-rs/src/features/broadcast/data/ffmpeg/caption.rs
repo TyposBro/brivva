@@ -18,6 +18,11 @@ impl CaptionState {
         let path = format!("/tmp/brivva_caption_{}.txt", stream_id);
         // Empty initial file so drawtext reads cleanly from the first frame.
         let _ = std::fs::write(&path, "");
+        tracing::info!(
+            stream_id = %stream_id,
+            caption_path = %path,
+            "caption textfile spawned for drawtext reload=1"
+        );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let path_clone = path.clone();
         let writer = tokio::spawn(async move {
@@ -35,6 +40,11 @@ impl CaptionState {
                 }
                 let sanitized = sanitize_caption(&text);
                 write_caption_atomic(&path_clone, &sanitized);
+                tracing::debug!(
+                    caption_path = %path_clone,
+                    char_count = sanitized.chars().count(),
+                    "caption textfile updated"
+                );
                 last_written = Instant::now();
             }
         });
