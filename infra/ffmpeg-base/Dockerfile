@@ -25,7 +25,7 @@
 # The CI workflow in .github/workflows/ffmpeg-base.yml automates the above
 # on pushes that touch this directory.
 
-FROM --platform=linux/arm64 debian:bookworm-slim AS build
+FROM debian:bookworm-slim AS build
 
 ARG FFMPEG_VERSION=6.1.2
 
@@ -64,12 +64,14 @@ RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
 # Final image is minimal: just the ffmpeg + ffprobe binaries. The server-rs
 # runtime stage copies these out; the runtime-side .so deps (librtmp1,
 # libssl3, libx264/5, libass, fonts) are apt-installed there, not here.
-FROM --platform=linux/arm64 debian:bookworm-slim
+#
+# No post-COPY `ffmpeg -version` check here — this stage lacks the
+# runtime .so libs (libass.so.9 etc.), so executing ffmpeg would fail
+# even for a healthy binary. The build-stage verify above catches any
+# librtmp regression at compile time, and `server-rs/Dockerfile` re-runs
+# the same check after its own COPY in an image that has the runtime
+# deps installed.
+FROM debian:bookworm-slim
 
 COPY --from=build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
-
-# Sanity re-check at image start so a corrupted COPY fails immediately
-# instead of silently shipping a useless binary to downstream builds.
-RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
-    || (echo "CRITICAL: ffmpeg binary lost librtmp between stages"; exit 1)
