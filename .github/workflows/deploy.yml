@@ -68,7 +68,13 @@ jobs:
   deploy-fargate:
     name: Fargate → us-east-1
     needs: gate
-    runs-on: ubuntu-latest
+    # Native arm64 runner. Before 2026-04-20, this ran on ubuntu-latest
+    # (amd64) with BuildKit QEMU-emulating the arm64 ffmpeg compile; that
+    # took 2+hr per deploy. On ubuntu-24.04-arm: every step is native, no
+    # QEMU, cargo-zigbuild becomes an effective no-op (host==target), and
+    # the ffmpeg stage is now a tiny pull of a prebuilt image instead of
+    # a full source build.
+    runs-on: ubuntu-24.04-arm
     permissions:
       id-token: write
       contents: read
@@ -76,6 +82,8 @@ jobs:
     env:
       ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
       ECR_REPO: brivva/server-rs
+      FFMPEG_BASE_REPO: brivva/ffmpeg-base
+      FFMPEG_VERSION: "6.1.2"
       ECS_CLUSTER: brivva
       ECS_SERVICE: brivva
       ECS_CONTAINER: server-rs
@@ -95,13 +103,18 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
-      # Cross-compile on amd64 runner via cargo-zigbuild (see Dockerfile).
-      # GitHub Actions cache keeps warm builds fast: cargo-chef's deps layer
-      # is reused unless Cargo.lock changes.
+      # Native arm64 build — runner, Rust target, ffmpeg base, final
+      # image all share linux/arm64 so BuildKit never invokes QEMU.
+      # cargo-zigbuild still works (treats host==target as a no-op
+      # cross-compile) so the Dockerfile stays unchanged in that shape.
       #
-      # Was: type=registry cache in ECR. Abandoned because ECR lifecycle
-      # prunes untagged blobs referenced by the buildcache manifest →
-      # 403 on pull → full rebuild (~12 min). GHA cache sidesteps both.
+      # FFMPEG_BASE_IMAGE pins the ffmpeg binary to whatever was last
+      # published by `ffmpeg-base.yml`. Bump FFMPEG_VERSION above +
+      # re-run that workflow to ship a new ffmpeg; deploy.yml picks it
+      # up automatically on the next run.
+      #
+      # GitHub Actions cache keeps warm builds fast: cargo-chef's deps
+      # layer is reused unless Cargo.lock changes.
       - name: Build and push server-rs
         uses: docker/build-push-action@v6
         with:
@@ -109,6 +122,8 @@ jobs:
           file: server-rs/Dockerfile
           platforms: linux/arm64
           push: true
+          build-args: |
+            FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest

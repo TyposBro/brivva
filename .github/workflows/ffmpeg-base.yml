@@ -1,0 +1,85 @@
+name: ffmpeg-base
+
+# Prebuilds the arm64 ffmpeg image with --enable-librtmp and pushes to
+# ECR. Downstream `server-rs/Dockerfile` COPYs the binary out instead of
+# compiling ffmpeg on every deploy (which was a 2+hr QEMU build on the
+# amd64 runner; 2026-04-20 incident).
+#
+# Rebuild triggers:
+#   - any change to infra/ffmpeg-base/** (Dockerfile bump, libs change)
+#   - manual via workflow_dispatch
+#
+# The image is content-addressed by the FFMPEG_VERSION input (default
+# 6.1.2) plus the `-librtmp` suffix. Never overwrite a version tag in
+# place — bump FFMPEG_VERSION when the underlying ffmpeg changes so
+# every downstream server-rs image pins a known binary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "ffmpeg source version to build (must match upstream release tarball)"
+        required: false
+        default: "6.1.2"
+  push:
+    branches: [prod, main]
+    paths:
+      - "infra/ffmpeg-base/**"
+      - ".github/workflows/ffmpeg-base.yml"
+
+concurrency:
+  group: ffmpeg-base-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build + push ffmpeg-base → ECR
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
+      ECR_REPO: brivva/ffmpeg-base
+      FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version || '6.1.2' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Native arm64 runner means no QEMU — the ffmpeg build runs at full
+      # speed (~8-12 min) instead of the 2hr QEMU-emulated path.
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/ffmpeg-base
+          file: infra/ffmpeg-base/Dockerfile
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
+          cache-from: type=gha,scope=ffmpeg-base
+          cache-to: type=gha,mode=max,scope=ffmpeg-base
+
+      - name: Verify published manifest
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --region us-east-1 \
+            --repository-name "${ECR_REPO}" \
+            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
+            --query 'imageDetails[0].{digest:imageDigest,size:imageSizeInBytes,pushed:imagePushedAt}' \
+            --output table

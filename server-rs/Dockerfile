@@ -32,57 +32,25 @@ COPY server-rs/src server-rs/src
 RUN cargo zigbuild --release --target aarch64-unknown-linux-gnu \
     --manifest-path server-rs/Cargo.toml --bin server-rs
 
-# ── ffmpeg-builder: compile ffmpeg with --enable-librtmp ─────
-# Debian's apt ffmpeg does NOT include librtmp. Without librtmp, pushes
-# to AWS IVS (Grip's backend) silently fail after ~3 frames — IVS
-# accepts the RTMP handshake but never sends onStatus Publish.Start,
-# then closes the socket server-side. ffmpeg's native RTMP implementation
-# doesn't satisfy IVS's client fingerprinting; librtmp (same lib OBS
-# uses) does. See `docs/runbook.md §2b` for the full write-up.
+# ── ffmpeg-builder: pull prebuilt arm64 ffmpeg (with --enable-librtmp) ─
+# Previously this stage compiled ffmpeg from source. Under QEMU emulation
+# on an amd64 runner that took 2+ hours per push (2026-04-20 incident).
+# The build now lives in `infra/ffmpeg-base/Dockerfile` + is published by
+# `.github/workflows/ffmpeg-base.yml` as an ECR image; this stage just
+# COPYs the binary out, taking the full ffmpeg work out of the critical
+# deploy path.
 #
-# Compile native on TARGETPLATFORM (arm64). Cross-compiling ffmpeg from
-# amd64 is possible but the configure plumbing is fragile; QEMU-emulated
-# native build is ~8 min on CI and fully cached in BuildKit, so unless
-# the FFMPEG_VERSION pin changes this stage is a no-op on rebuilds.
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS ffmpeg-builder
-
-ARG FFMPEG_VERSION=6.1.2
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential yasm nasm pkg-config curl xz-utils ca-certificates \
-        libx264-dev libx265-dev libmp3lame-dev libopus-dev \
-        librtmp-dev libssl-dev \
-        libfreetype-dev libfontconfig-dev libass-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /tmp
-RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | tar -xJ
-WORKDIR /tmp/ffmpeg-${FFMPEG_VERSION}
-
-RUN ./configure \
-        --prefix=/usr/local \
-        --enable-gpl \
-        --enable-nonfree \
-        --enable-openssl \
-        --enable-librtmp \
-        --enable-libx264 \
-        --enable-libx265 \
-        --enable-libmp3lame \
-        --enable-libopus \
-        --enable-libfreetype \
-        --enable-libfontconfig \
-        --enable-libass \
-        --disable-doc \
-        --disable-debug \
-    && make -j"$(nproc)" \
-    && make install
-
-# Build-time guard: fail the image if librtmp didn't make it into the
-# binary. A silent regression here produces a green deploy that breaks
-# every RTMP push to IVS on first real traffic — that's worse than a
-# broken build, so stop it at the build.
-RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
-    || (echo "CRITICAL: ffmpeg built without --enable-librtmp — IVS pushes will silently fail (docs/runbook.md §2b)"; exit 1)
+# librtmp is still non-negotiable (AWS IVS rejects ffmpeg's native RTMP
+# impl after ~3 frames). The runtime `ffmpeg -version | grep enable-librtmp`
+# check below still fires so a mistagged base image can't ship silently.
+#
+# FFMPEG_BASE_IMAGE must be passed at build time as
+# `<ECR_REGISTRY>/brivva/ffmpeg-base:<FFMPEG_VERSION>-librtmp`.
+# CI sets it in `.github/workflows/deploy.yml`. Local builds must pass
+# `--build-arg FFMPEG_BASE_IMAGE=...` — the default string is intentionally
+# invalid so an omitted arg fails fast with a clear image-not-found.
+ARG FFMPEG_BASE_IMAGE=brivva-ffmpeg-base-image-not-set-pass-build-arg:latest
+FROM ${FFMPEG_BASE_IMAGE} AS ffmpeg-builder
 
 # ── runtime: arm64 slim debian with ffmpeg + subtitle fonts ──
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim

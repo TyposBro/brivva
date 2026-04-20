@@ -45,6 +45,38 @@ resource "aws_ecr_lifecycle_policy" "server" {
   })
 }
 
+# Prebuilt ffmpeg arm64 image with --enable-librtmp, referenced by
+# server-rs/Dockerfile's `ffmpeg-builder` stage. Decouples the 2+hr
+# ffmpeg source build from every deploy — rebuilt only when the
+# FFMPEG_VERSION pin or the infra/ffmpeg-base/Dockerfile changes.
+resource "aws_ecr_repository" "ffmpeg_base" {
+  name = "${var.project}/ffmpeg-base"
+  # MUTABLE so the CI workflow can advance `latest` to the newest build.
+  # The version-suffixed tag (e.g. `6.1.2-librtmp`) is treated as
+  # immutable-by-convention: bump FFMPEG_VERSION rather than rebuilding
+  # over an existing tag.
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "ffmpeg_base" {
+  repository = aws_ecr_repository.ffmpeg_base.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 5 versioned images — rebuilds are rare"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 5
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
 # ── CloudWatch Logs ────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "app" {
