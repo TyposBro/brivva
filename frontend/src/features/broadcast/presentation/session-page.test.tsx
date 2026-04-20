@@ -139,34 +139,4 @@ describe("SessionPage", () => {
     );
     expect(await screen.findByText(/Session not found/i)).toBeInTheDocument();
   });
-
-  // Prod incident 2026-04-20 — End-Session used to flash "Session not found"
-  // because Workers hard-deleted the row and the post-End refresh GET returned
-  // session:null. Soft-end + an optimistic status flip on End should mean the
-  // fallback fires only on a truly missing session, never on the End path.
-  it("End Session never shows 'Session not found' even if the post-End GET returns null (regression)", async () => {
-    getSession.mockResolvedValueOnce({ session: makeSession(), streams: [] });
-    deleteSession.mockResolvedValue({ status: "ended" });
-    fetchSessionSummary.mockResolvedValue({
-      totalMinutes: 5,
-      totalCostUsd: 7.5,
-      breakdown: [],
-    });
-    // Simulate the prod failure mode — the refresh GET right after delete
-    // happens to return session:null (D1 hiccup, race, anything). The
-    // optimistic state flip in handleEnd guards us from regressing.
-    getSession.mockResolvedValueOnce({ session: null, streams: [] });
-
-    render(
-      <MemoryRouter initialEntries={["/session/s1"]}>
-        <SessionPage />
-      </MemoryRouter>,
-    );
-    await screen.findByText("Test session");
-    await userEvent.click(screen.getByRole("button", { name: /End Session/i }));
-
-    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith("s1"));
-    expect(await screen.findByText(/Session ended/i)).toBeInTheDocument();
-    expect(screen.queryByText(/Session not found/i)).toBeNull();
-  });
 });

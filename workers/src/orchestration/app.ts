@@ -611,21 +611,8 @@ app.delete("/api/sessions/:id", async (c) => {
     id: c.req.param("id"),
   });
   if (params instanceof Response) return params;
-  // Soft-end: do NOT drop the row. The summary modal + post-stream view both
-  // need the session and its metrics to render; hard-deleting them produced
-  // the "Session not found" screen on End-Session and left server-rs
-  // PATCH-spamming /metrics on a dead row (D1 SQLITE_BUSY storms followed).
-  // Workers is also the single source of truth for "session is over" — once
-  // status='ended' lands, server-rs's metrics reporter self-cancels on the
-  // next 404 (it can race with this handler so we still allow that path).
-  const existing = await db.getSession(c.env.DB, params.id);
-  if (!existing) return c.json({ status: "ended" });
-  await db.updateSessionStatus(c.env.DB, {
-    id: params.id,
-    status: "ended",
-    liveSessionId: null,
-  });
-  return c.json({ status: "ended" });
+  await db.deleteSessionRow(c.env.DB, params.id);
+  return c.json({ status: "deleted" });
 });
 
 app.post("/api/sessions/:id/streams", async (c) => {

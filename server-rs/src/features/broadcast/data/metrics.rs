@@ -9,21 +9,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::workers_api::{MetricsReportError, WorkersApi};
+use super::workers_api::WorkersApi;
 use crate::features::broadcast::domain::SessionMetrics;
 
 pub use crate::features::broadcast::domain::metrics::MetricsPayload;
 
 /// How often the reporter task snapshots + POSTs billing metrics.
 const METRICS_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Stop reporting after this many consecutive 404 responses from Workers.
-/// 404 means the session was deleted/ended out from under us — at that
-/// point further PATCHes are pure noise (and the most likely trigger of
-/// the SQLITE_BUSY_RECOVERY storms we saw in prod 2026-04-20). One stray
-/// 404 isn't enough — Workers may briefly miss a row mid-rollback — but
-/// two in a row is decisive.
-const MAX_CONSECUTIVE_NOT_FOUND: u32 = 2;
 
 /// Background reporter. Ticks every `METRICS_INTERVAL`, snapshots the
 /// counters, and PATCHes to Workers. When `WorkersApi.base_url` is empty
@@ -65,7 +57,6 @@ pub(crate) fn spawn_metrics_reporter_with_interval(
         // First tick fires immediately; skip so we don't POST empty counters
         // right after start.
         ticker.tick().await;
-        let mut consecutive_not_found: u32 = 0;
         loop {
             ticker.tick().await;
             if stop_flag.load(Ordering::Acquire) {
@@ -74,43 +65,13 @@ pub(crate) fn spawn_metrics_reporter_with_interval(
             let payload = metrics.snapshot();
             match &session_id {
                 Some(sid) => match workers_api.report_session_metrics(sid, &payload).await {
-                    Ok(()) => {
-                        // Successful report → reset the 404 streak so a single
-                        // mid-rollback miss can't accidentally retire a still
-                        // live session later.
-                        consecutive_not_found = 0;
-                    }
-                    Err(MetricsReportError::NotFound) => {
-                        consecutive_not_found += 1;
-                        tracing::warn!(
-                            live_session_id = %live_session_id,
-                            session_id = %sid,
-                            streak = consecutive_not_found,
-                            limit = MAX_CONSECUTIVE_NOT_FOUND,
-                            "workers metrics PATCH 404 — session row missing"
-                        );
-                        if consecutive_not_found >= MAX_CONSECUTIVE_NOT_FOUND {
-                            // Session has been ended/deleted server-side and
-                            // the WS lifecycle hasn't torn us down yet (or
-                            // never will — the End path raced our snapshot).
-                            // Stop spamming Workers. Don't touch stop_flag —
-                            // it owns the FFmpeg/health-monitor lifecycle and
-                            // we don't want one network class to take those
-                            // down with us.
-                            tracing::info!(
-                                live_session_id = %live_session_id,
-                                session_id = %sid,
-                                "metrics reporter self-cancelled after consecutive 404s"
-                            );
-                            break;
-                        }
-                    }
-                    Err(MetricsReportError::Other(msg)) => tracing::debug!(
+                    Ok(()) => {}
+                    Err(e) => tracing::debug!(
                         live_session_id = %live_session_id,
                         session_id = %sid,
-                        error = %msg,
+                        error = %e,
                         payload = ?payload,
-                        "metrics report failed — logging locally and retrying next tick"
+                        "metrics report failed — logging locally until endpoint lands"
                     ),
                 },
                 None => tracing::info!(
@@ -186,50 +147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reporter_keeps_running_when_workers_returns_5xx() {
-        // 5xx is treated as a transient hiccup — the reporter logs and keeps
-        // ticking so a temporary Workers outage doesn't drop billing data.
-        // Only 404 (session row gone) should retire the task; 5xx must not.
-        let counter = Arc::new(AtomicU32::new(0));
-        let (base, server) =
-            spawn_counting_mock(counter.clone(), StatusCode::INTERNAL_SERVER_ERROR).await;
-
-        let metrics = SessionMetrics::new();
-        let api = Arc::new(WorkersApi::new(&base, "sec"));
-        let stop = Arc::new(AtomicBool::new(false));
-        let reporter = spawn_metrics_reporter_with_interval(
-            metrics,
-            api,
-            Some("S".into()),
-            "LIVE".into(),
-            stop.clone(),
-            Duration::from_millis(20),
-        );
-
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        // Still ticking after several 5xx responses — task didn't abort.
-        let first = counter.load(Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let second = counter.load(Ordering::Relaxed);
-        stop.store(true, Ordering::Release);
-        let _ = tokio::time::timeout(Duration::from_millis(200), reporter).await;
-
-        assert!(
-            second > first,
-            "expected task to keep ticking past 5xx; first={first} second={second}"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn reporter_self_cancels_after_consecutive_404s_when_workers_session_is_gone() {
-        // Prod incident 2026-04-20: Workers used to hard-delete the session
-        // row on End-Session, then server-rs spammed `PATCH /metrics/:id` for
-        // minutes against a row that no longer existed (and likely triggered
-        // the SQLITE_BUSY_RECOVERY storm in the same trace). The reporter
-        // must self-cancel after `MAX_CONSECUTIVE_NOT_FOUND` consecutive
-        // 404s so we stop the noise on its own — even when the WS-driven
-        // teardown hasn't fired yet.
+    async fn reporter_keeps_running_when_workers_returns_non_2xx() {
         let counter = Arc::new(AtomicU32::new(0));
         let (base, server) = spawn_counting_mock(counter.clone(), StatusCode::NOT_FOUND).await;
 
@@ -245,105 +163,17 @@ mod tests {
             Duration::from_millis(20),
         );
 
-        // The reporter should join on its own — without us flipping stop_flag
-        // — once the 404 streak passes the threshold.
-        let join = tokio::time::timeout(Duration::from_secs(2), reporter)
-            .await
-            .expect("reporter must self-cancel on consecutive 404s without external stop signal");
-        join.expect("reporter task panicked");
-
-        // The reporter handles the ticks BETWEEN counter increments via the
-        // mock — the stop happens after >= MAX_CONSECUTIVE_NOT_FOUND 404s
-        // are observed. Bound the upper count tightly so a future regression
-        // (e.g. raising the threshold) trips this test.
-        let ticks = counter.load(Ordering::Relaxed);
-        assert!(
-            ticks >= MAX_CONSECUTIVE_NOT_FOUND,
-            "expected ≥{MAX_CONSECUTIVE_NOT_FOUND} ticks before self-cancel, got {ticks}"
-        );
-        // Stop flag must NOT be touched by the self-cancel — it owns FFmpeg
-        // + health-monitor lifecycles, and a network class shouldn't tear
-        // those down on its own.
-        assert!(
-            !stop.load(Ordering::Acquire),
-            "self-cancel must not flip the FFmpeg stop flag"
-        );
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn reporter_resets_404_streak_on_successful_report() {
-        // A single mid-rollback 404 must not poison a still-live session.
-        // We start the mock returning 404, let the reporter accumulate one
-        // 404, then flip the mock to 200 — the streak should reset, and a
-        // later 404 should NOT immediately self-cancel because the streak
-        // is back at zero.
-        use axum::extract::State;
-        use std::sync::Mutex as StdMutex;
-
-        #[derive(Clone)]
-        struct Toggle {
-            tick_count: Arc<AtomicU32>,
-            status: Arc<StdMutex<StatusCode>>,
-        }
-
-        async fn toggling_handler(
-            State(state): State<Toggle>,
-            Path(_): Path<String>,
-            _body: axum::body::Bytes,
-        ) -> StatusCode {
-            state.tick_count.fetch_add(1, Ordering::Relaxed);
-            *state.status.lock().unwrap()
-        }
-
-        let tick_count = Arc::new(AtomicU32::new(0));
-        let status = Arc::new(StdMutex::new(StatusCode::NOT_FOUND));
-        let toggle = Toggle {
-            tick_count: tick_count.clone(),
-            status: status.clone(),
-        };
-
-        let app = Router::new()
-            .route("/internal/sessions/{id}/metrics", patch(toggling_handler))
-            .with_state(toggle);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let base = format!("http://{}", addr);
-
-        let metrics = SessionMetrics::new();
-        let api = Arc::new(WorkersApi::new(&base, "sec"));
-        let stop = Arc::new(AtomicBool::new(false));
-        let reporter = spawn_metrics_reporter_with_interval(
-            metrics,
-            api,
-            Some("S".into()),
-            "LIVE".into(),
-            stop.clone(),
-            Duration::from_millis(15),
-        );
-
-        // First, allow exactly one 404 to land, then flip the mock to 200
-        // before the streak hits MAX_CONSECUTIVE_NOT_FOUND.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        *status.lock().unwrap() = StatusCode::OK;
-        // Let several 200 ticks land to confirm the streak reset.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // Still ticking after the first 404 — task didn't abort.
+        let first = counter.load(Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(80)).await;
-        // Flip back to 404 — even if a single 404 lands now, the streak
-        // restarts from 0, so the reporter must still be alive.
-        *status.lock().unwrap() = StatusCode::NOT_FOUND;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let still_running_ticks = tick_count.load(Ordering::Relaxed);
+        let second = counter.load(Ordering::Relaxed);
         stop.store(true, Ordering::Release);
         let _ = tokio::time::timeout(Duration::from_millis(200), reporter).await;
 
         assert!(
-            still_running_ticks >= 4,
-            "expected reporter to keep ticking after a mid-stream 200 reset the 404 streak; got {still_running_ticks}"
+            second > first,
+            "expected task to keep ticking past 404; first={first} second={second}"
         );
         server.abort();
     }

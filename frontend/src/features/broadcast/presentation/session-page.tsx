@@ -34,14 +34,7 @@ export default function SessionPage() {
     if (!id) return;
     try {
       const data = await api.getSession(id);
-      // Don't clobber an already-loaded session with null. A null response on
-      // a subsequent refresh is almost always a race (Workers soft-ends the
-      // row, an in-flight GET that started before End-Session can return
-      // session:null on D1 read-after-write), and falling back to "Session
-      // not found" right after the host clicked End was the prod incident
-      // 2026-04-20 we are fixing. The `!session` fallback is only meaningful
-      // on the FIRST load — once we have a row we keep it.
-      setSession((prev) => data.session ?? prev);
+      setSession(data.session);
       setStreams(data.streams);
     } catch (e) {
       console.error("Failed to load session:", e);
@@ -71,16 +64,8 @@ export default function SessionPage() {
     setEnding(true);
     try {
       await api.deleteSession(id);
-      // Optimistically flip status BEFORE the refresh round-trip. Workers
-      // soft-ends the row (status='ended') so the GET below returns the same
-      // session, but if that GET races / errors we still want the host to
-      // see the summary modal — not a "Session not found" screen — because
-      // the End was already accepted. Prod incident 2026-04-20: the row used
-      // to be hard-deleted, GET returned `session:null`, and the page fell
-      // through to its `!session` branch under the modal.
-      setSession((prev) => (prev ? { ...prev, status: "ended" } : prev));
-      setShowSummary(true);
       await loadSession();
+      setShowSummary(true);
     } catch (e) {
       console.error("Failed to end session:", e);
     } finally {

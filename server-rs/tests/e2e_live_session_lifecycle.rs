@@ -102,6 +102,7 @@ async fn get_session_json(
             "target_langs": "ja,ko",
             "status": "scheduled",
             "live_session_id": null,
+            "voice_preset": "female",
             "created_at": 1
         },
         "streams": [],
@@ -356,6 +357,105 @@ async fn sad_path_owner_mismatch_rejects_connection_before_live_session_creation
     let requests = wait_for_requests(&workers_state, 1).await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "GET");
+
+    app_server.abort();
+    workers_server.abort();
+}
+
+/// Production regression (2026-04-20): host pressed stop→start without
+/// ending the session. The FE re-opened the WS while the prior connection
+/// lingered, leaving two live_sessions for the same FE session_id and
+/// silencing TTS for the entire restart window. The server must evict the
+/// stale row at the new WS upgrade so only one pipeline is ever active.
+#[tokio::test]
+async fn stop_start_within_session_evicts_prior_live_session_before_starting_new_one() {
+    let (_guard, _workers_url, _workers_state, workers_server, app_url, app_state, app_server) = {
+        let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (workers_url, workers_state, workers_server) =
+            spawn_workers_mock("host-1", false).await;
+        unsafe {
+            std::env::set_var("JWT_SECRET", "e2e-secret");
+            std::env::set_var("WORKERS_API_URL", &workers_url);
+            std::env::set_var("INTERNAL_SECRET", "internal-secret");
+        }
+        let (app_url, app_state, app_server) = spawn_app().await;
+        (
+            guard,
+            workers_url,
+            workers_state,
+            workers_server,
+            app_url,
+            app_state,
+            app_server,
+        )
+    };
+
+    let token = make_token("e2e-secret", "host-1");
+    let ws_url = format!(
+        "{}/api/session?token={}&sessionId=session-1&sourceLang=en",
+        app_url.replacen("http", "ws", 1),
+        token
+    );
+
+    // First WS — simulates the host pressing "start recording".
+    let (mut first_socket, _) = connect_async(&ws_url).await.expect("connect first ws");
+    wait_for_live_session_count(&app_state, 1).await;
+    let first_runtime_id = app_state
+        .live_sessions
+        .iter()
+        .next()
+        .expect("first live session")
+        .key()
+        .clone();
+
+    // Second WS — simulates the host pressing "stop" (FE drops the
+    // MediaRecorder but the prior WS lingers) and then "start recording"
+    // again. The new connection lands at the server BEFORE the old one
+    // closes, so the eviction MUST replace the prior live_session in-place.
+    let (mut second_socket, _) = connect_async(&ws_url).await.expect("connect second ws");
+
+    // The new live_session ID is whatever entry now sits in the map. The
+    // count must be exactly one — never two — at every observation point.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entries: Vec<String> = app_state
+                .live_sessions
+                .iter()
+                .map(|e| e.key().clone())
+                .collect();
+            if entries.len() == 1 && entries[0] != first_runtime_id {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("eviction replaced the stale live_session with a fresh one");
+
+    let second_runtime_id = app_state
+        .live_sessions
+        .iter()
+        .next()
+        .expect("second live session")
+        .key()
+        .clone();
+    assert_ne!(
+        first_runtime_id, second_runtime_id,
+        "second connect should mint a new live_session_id"
+    );
+
+    // Drain anything the first socket still has buffered, then close it
+    // explicitly so the test cleanup path doesn't leak the connection.
+    let _ = tokio::time::timeout(Duration::from_millis(100), first_socket.next()).await;
+    let _ = first_socket.close(None).await;
+
+    second_socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "host:end".into(),
+        ))
+        .await
+        .expect("send host:end on second");
+    wait_for_live_session_count(&app_state, 0).await;
 
     app_server.abort();
     workers_server.abort();
