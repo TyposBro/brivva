@@ -5,10 +5,35 @@ from `vision.md`. Each prompt briefs a cold agent with enough context to
 act without reading this document.
 
 **Generated:** 2026-04-20
+**Last reconciled with codebase:** 2026-04-20 evening
 **Source:** `vision.md` §"Round 2 Remaining" + §"Testing Debt" + §"Priority Stack"
 
 Tasks map to `vision.md` table rows by number. See priority table there
 for full context.
+
+## Status Snapshot (2026-04-20 evening)
+
+| Task | Status | Landed in |
+|---|---|---|
+| 1 — `/quote` breakdown | ✅ shipped | `a74993d` |
+| 2 — `/summary` reshape + B2B | ✅ shipped | `a74993d` |
+| 3 — SEA `stream-defaults.ts` | ✅ shipped | `a74993d` |
+| 4 — `active_voice_id` dispatch | ✅ shipped | `a74993d` (+ `active_voice_refresh.rs` mid-session retarget) |
+| 6 — D1 migrations 0001-0010 prod | ✅ applied | 2026-04-20 via `wrangler d1 migrations apply brivva --remote` |
+| 7 — Google OAuth redirect URIs | ✅ confirmed | user-verified |
+| 8 — `wrangler secret put GOOGLE_*` | ✅ verified | all 7 required secrets present on prod Workers |
+| 10 — Accent-bug fix | ✅ verified | user-confirmed |
+| 17 — §0.5.4 silent-path log **infra** | ✅ shipped | `03b36d1` — wired + 44-row audit checklist + runner script |
+| 17 — §0.5.4 30-min **verification run** | ⏳ pending | human: `bash scripts/post-merge-log-audit.sh` |
+| 16 — §0.5.1 capture **scripts** | ✅ shipped | `03b36d1` — Soniox + YouTube scripts |
+| 16 — §0.5.1 real-capture **runs** | ⏳ pending | human: needs real creds + live audio |
+| 19 — §0.5.3 multi-step chain | ✅ shipped | `03b36d1` + migration 0010 unique index |
+| 20 — full-chain voice-clone e2e | ✅ shipped | `db63713` — `voice-clone-cross-lang-full-chain.e2e.ts` |
+| 21 — §0.6 pre-merge CI gate | ✅ shipped | `db63713` — `.github/workflows/pre-merge-gate.yml` + 4 check scripts |
+| 23 — demo cruft removal | ✅ shipped | `db63713` |
+| ffmpeg-base prebuilt ECR | ✅ shipped | `60bb215` — first build run 2026-04-20 (manual dispatch after IAM trust fix) |
+
+Prompts below are preserved for history. Skip any row marked ✅.
 
 ---
 

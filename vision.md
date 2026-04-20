@@ -258,14 +258,16 @@ API endpoints:
 | CI/CD | Contracts drift check, server-rs + workers + frontend typecheck/test/build, layer audits (0 violations across all 3), pre-commit + pre-push + post-merge git hooks |
 | docs | ARCHITECTURE.md, runbook.md, grip-integration-notes.md, terraform-state-migration-plan.md, this file |
 
-### Round 2 Remaining (audit 2026-04-20 — mismatches + gaps surfaced)
+### Round 2 Remaining (audit 2026-04-20 — LANDED same day)
 
-The bulk of Round 2 landed. What's left are response-shape mismatches
-between Workers and the frontend, plus table gaps. These block the
-quote/summary UX from rendering correctly end-to-end.
+All four Round 2 rows shipped in commit `a74993d` on 2026-04-20:
+`/quote` breakdown, `/summary` reshape + B2B variant, SEA defaults
+(ko→th/vi/id), and `active_voice_id` dispatch with a new
+`session_ws/active_voice_refresh.rs` periodic task so re-records
+retarget TTS mid-session without a restart.
 
-**Agent prompts for each row live in
-[`docs/may10-agent-tasks.md`](./may10-agent-tasks.md) under Tasks 1-4.**
+Prompt history preserved in
+[`docs/may10-agent-tasks.md`](./may10-agent-tasks.md) under Tasks 1-4.
 
 | Agent | Task | Why |
 |---|---|---|
@@ -602,6 +604,43 @@ until the company hires. Stay disciplined about what to take on.
   surfaced in this vision. Critical-chain for May 10:
   `10 → 6/7/8 → 11 → 24 → 28`. Tasks 1/2/4 ship before 11. Tasks 15,
   21, 23 are Phase 2.
+- `2026-04-20` (late evening) — Massive parallel-agent sprint
+  landed the bulk of the remaining list to main:
+  - `a74993d` Tasks 1/2/3/4 (all of Round 2): `/quote` breakdown
+    array, `/summary` reshape + B2B variant, `stream-defaults`
+    SEA rows, `active_voice_id` dispatch + mid-session refresh
+    task.
+  - `03b36d1` Tasks 17/16/19 infrastructure: §0.5.4 silent-path
+    logs + 44-row audit checklist + runner (`scripts/post-merge-log-audit.sh`);
+    §0.5.1 real-capture scripts (`scripts/capture-{soniox,youtube}-fixtures.sh`);
+    §0.5.3 multi-step integration chain plus migration 0010
+    unique index `streams(session_id, lang, platform)` to block
+    duplicate-ffmpeg-spawn on concurrent add-stream.
+  - `60bb215` ffmpeg-base prebuilt ECR image: `infra/ffmpeg-base/`
+    + `.github/workflows/ffmpeg-base.yml` on native arm64 runner.
+    Server-rs Dockerfile now `COPY --from=ffmpeg-base` instead of
+    recompiling from source each deploy (was 2hr QEMU amd64, now
+    ~10min native arm). IAM trust policy widened AWS-side, first
+    manual workflow_dispatch run succeeded 2026-04-20.
+  - `db63713` Tasks 21/20/23: §0.6 pre-merge CI gate
+    (`.github/workflows/pre-merge-gate.yml` + 4 delta-check
+    scripts, all green on HEAD locally), full-chain cross-lang
+    voice-clone e2e (`voice-clone-cross-lang-full-chain.e2e.ts`
+    asserts source_lang carries through `POST /api/voices` +
+    `POST /api/sessions`), and all demo-era cruft removed
+    (`/host` route + `Quick Session` + `Audience Resume` gone;
+    grep now zero across frontend + backend + e2e).
+- `2026-04-20` (late evening) — Prod wiring complete. Wrangler
+  secrets verified present (`ELEVENLABS_API_KEY`, `GOOGLE_CLIENT_ID`,
+  `GOOGLE_CLIENT_SECRET`, `GRIP_{ACCESS,SECRET}_KEY`,
+  `INTERNAL_SECRET`, `JWT_SECRET`; `STRIPE_WEBHOOK_SECRET` deferred
+  to Phase 2). D1 prod migration 0010 applied (`wrangler d1
+  migrations apply brivva --remote` — zero pre-existing dupes in
+  `streams`, unique index created, applied migrations now
+  0001-0010). Google OAuth redirect URIs confirmed registered by
+  Aziz. Accent-bug fix confirmed by Aziz. Critical chain collapse:
+  Tasks 6/7/8/10 all ✅ — next blocker is Task 11 (40-min endurance
+  with MJ).
 - `2026-04-20` (evening) — Aziz shared En→Ja YouTube demo in Brivva
   WhatsApp group. Yuni (native JP, new QA resource) approved quality
   ("No issue with Japanese language, they even attached the
