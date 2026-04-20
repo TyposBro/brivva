@@ -44,7 +44,88 @@ Every non-trivial change is expected to touch at least the unit tier. Changes to
 - **Test data**: prefer real fixtures over mocks. Mock only the outermost external SaaS.
 - **Flaky test = broken test.** Fix or delete within 24h — never retry-loop.
 
-### 0.4 Pre-Merge Gate
+### 0.4 Commit Strategy
+
+- Commit logical units. Descriptive messages in imperative mood.
+- **Tests land in the same commit as the code they cover.** Never ship code now and "tests later."
+- No secrets, keys, or credentials. No generated files in version control.
+
+### 0.5 Realism Rules — What Breadth Can't Catch
+
+Three-tier coverage guarantees every layer is exercised. It does NOT
+guarantee the tests resemble production. The April 2026 triad
+(Soniox integer `error_code`, double `live_session` on WS reconnect,
+`SQLITE_BUSY` from metrics loop spamming a deleted session) all slipped
+past 689 tests because we validated *assumptions*, not *reality*.
+These four rules close the gap:
+
+#### 0.5.1 Real-Response Fixtures At Every Network Boundary
+
+Every external API (Soniox, ElevenLabs, Grip, YouTube, Stripe, Google
+OAuth) must have test fixtures derived from **real captured responses**,
+not invented shapes. Capture both happy-path AND error responses at
+least once from the live API, store as JSON under
+`<component>/tests/fixtures/<vendor>/`, and assert your deserializer
+parses each one. If the vendor changes a field's type from string to
+integer overnight (this happens), tests must be the place it breaks
+first — not prod.
+
+Anti-pattern this replaces:
+```rust
+// WRONG — invented error_code shape; vendor actually sends integers
+let mock = r#"{"error_code": "408", "error_message": "timeout"}"#;
+```
+
+#### 0.5.2 Lifecycle Matrices For Every State Machine
+
+Any component with more than two states (WS session, recording, auth,
+Stripe subscription, broadcast lifecycle) requires a test matrix that
+enumerates transitions, not just the happy path. For each `(current_state, event)` row, one test asserts the next state.
+
+Required coverage for lifecycle tests:
+- Every `start → stop` flow
+- Every `start → stop → start` repeat (catches "cleanup didn't fire")
+- Every `start → crash → restart` recovery
+- Concurrent `start × 2` (catches "second caller overwrites first")
+
+"We tested the happy path" = you tested ONE point in a graph. Test the
+graph.
+
+#### 0.5.3 Multi-Step Integration Scenarios
+
+Integration tests must chain API calls the way production does — NOT
+verify one endpoint in isolation. A passing `DELETE /api/sessions/:id`
+test that doesn't also verify `GET /api/sessions/:id` after, and
+doesn't check the metrics reporter handles the gone-row, is incomplete.
+
+For every user journey, the integration suite should have at least one
+test that chains:
+1. Create the resource
+2. Mutate it end-to-end (through the real pipeline, not mocked pieces)
+3. Verify background loops (metrics, heartbeat, cleanup) handle the
+   final state correctly
+4. Assert final DB state
+
+Single-endpoint round-trips are necessary but not sufficient.
+
+#### 0.5.4 Silent-Path Observability
+
+Any branch that silently continues, swallows an error, or no-ops MUST
+emit a structured `tracing` (Rust) / `console.info` (TS) event at
+`warn` or `info` level. Bugs hide in silent paths by default; operators
+can't diagnose what they can't grep.
+
+Concretely: every `continue`, every `if let Ok(_) = ... { /* nothing */ }`,
+every error branch that falls back to a default, and every background
+task's idle/skip decision must be greppable in production logs with
+enough context (session id, lang, stream id, etc.) to trace the flow.
+
+Coverage of this rule is verified by a post-merge log-audit: run the
+code against a real session, grep for each silent branch, confirm
+every one emits at least one log line. If a caption pipeline produces
+zero log lines across a 30-min session, the silent-path rule failed.
+
+### 0.6 Pre-Merge Gate
 
 A change is not ready for review until:
 
@@ -52,15 +133,12 @@ A change is not ready for review until:
 2. `bun run test` passes in `workers/` and `frontend/` (unit + integration).
 3. `bun run e2e` (Playwright) passes for any flow the change touches.
 4. New tests are present at each required tier for the change (see §0.2).
-5. `scripts/dev-stack.sh` smoke-test passes locally against the branch.
+5. If the change crosses a network boundary, §0.5.1 fixture compliance is checked.
+6. If the change touches a state machine, §0.5.2 lifecycle matrix row(s) are added.
+7. If the change adds a silent branch, §0.5.4 observability is wired.
+8. `scripts/dev-stack.sh` smoke-test passes locally against the branch.
 
 CI runs all of the above. Merge is blocked on any failure.
-
-### 0.5 Commit Strategy
-
-- Commit logical units. Descriptive messages in imperative mood.
-- **Tests land in the same commit as the code they cover.** Never ship code now and "tests later."
-- No secrets, keys, or credentials. No generated files in version control.
 
 ---
 
