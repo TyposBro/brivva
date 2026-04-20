@@ -1,0 +1,79 @@
+# CLAUDE.md §0.6 — 8-step pre-merge gate.
+#
+# Jobs 1-4 (build, tests, contract drift, layer audit) delegate to ci.yml
+# via workflow_call — the existing CI is already wired and we don't want
+# a second source of truth for those checks.
+#
+# Jobs 5-8 (file size, fixture presence, silent-path log audit,
+# three-tier coverage) live here because they're PR-delta checks that
+# the base CI doesn't model.
+#
+# To make this gate *block merges*, configure branch protection on main
+# (GitHub → Settings → Branches → main → Require status checks) and tick
+# every job name below plus the four CI jobs (contracts, server-rs,
+# workers, frontend, frontend-e2e). Doing that is a GitHub UI step — it
+# can't be expressed in the workflow file itself.
+
+name: Pre-merge gate
+
+on:
+  pull_request:
+    branches: [main, prod]
+  workflow_dispatch: {}
+
+concurrency:
+  group: pre-merge-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Jobs 1-4: delegate to the existing CI workflow ────────────────
+  ci:
+    name: ci (build + tests + contract-drift + layer-audit)
+    uses: ./.github/workflows/ci.yml
+
+  # ── Job 5: §5.1 file-size check (>800L fails, >500L warns) ────────
+  file-size:
+    name: §5.1 file-size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-file-size.sh
+
+  # ── Job 6: §0.5.1 fixture-presence (≥1 real fixture per vendor) ───
+  fixture-presence:
+    name: §0.5.1 fixture-presence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-fixture-presence.sh
+
+  # ── Job 7: §0.5.4 silent-path log audit ───────────────────────────
+  #
+  # Every `continue;` in pipeline code must have a tracing::{…}! call in
+  # its immediate vicinity OR a `// AUDIT: <reason>` acknowledgement
+  # for legitimate non-silent branches (filters, sentinels). Catches the
+  # "someone deleted a warn! line" regression class.
+  silent-path-logs:
+    name: §0.5.4 silent-path audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-silent-path-logs.sh
+
+  # ── Job 8: §0.2 three-tier coverage delta check ───────────────────
+  #
+  # Runs against the PR diff so it only polices NEW source files. Needs
+  # fetch-depth: 0 to see origin/main as a merge base.
+  three-tier-coverage:
+    name: §0.2 three-tier coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: fetch base branch
+        run: git fetch origin ${{ github.event.pull_request.base.ref || 'main' }}:refs/remotes/origin/${{ github.event.pull_request.base.ref || 'main' }}
+      - name: three-tier coverage delta vs base
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check-three-tier-coverage.sh

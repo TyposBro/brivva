@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import HomePage from "../features/public/presentation/home-page";
-import HostPage from "../features/broadcast/presentation/host-page";
 import DashboardPage from "../features/broadcast/presentation/dashboard-page";
 import SessionPage from "../features/broadcast/presentation/session-page";
 import SessionSetupPage from "../features/broadcast/presentation/session-setup-page";
@@ -14,7 +13,6 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/host" element={<HostPage />} />
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/session/:id" element={<SessionPage />} />

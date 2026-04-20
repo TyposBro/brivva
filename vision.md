@@ -351,9 +351,10 @@ Everything else is out of scope.
 
 Explicitly deferred. Do not let these creep in.
 
-- **Stripe real billing** — B2B doesn't need it; self-serve is post-launch
+- **Stripe real billing** — B2B doesn't need it; self-serve is post-launch (committed Phase 2)
 - **Tier 4 post-processed VOD** — no current customer demand
-- **Admin dashboard for Simon** — direct D1 queries work; UI later
+- **Admin dashboard for Simon** — direct D1 queries work for May 10. Committed Phase 2 (promised to Simon + Yuni 2026-04-20 in WhatsApp: "after May-10th I will build B2B admin panel so you guys can onboard clients more smoothly")
+- **Multi-speaker support** — single-speaker only for May 10. Committed Phase 2 (promised 2026-04-20 alongside SEA + Stripe)
 - **Multi-region Fargate** — us-east-1 only; performance is fine for Korean + SEA
 - **Terraform S3 state cutover** — scheduled post-May-10 (infrastructure prepped, disabled pending drift resolution)
 - **Naver OAuth / Apple Sign-In** — Google only until demand proves otherwise
@@ -361,6 +362,17 @@ Explicitly deferred. Do not let these creep in.
 - **Mobile apps** — web-only for launch
 - **Per-language pricing** — flat `$1.50/min` across all languages for launch
 - **Incorporation details** — Brivva Tech entity formation (34% equity push) is parallel, not blocking
+
+### Committed Phase 2 (post-May-10)
+
+Scope promised externally. Cannot quietly drop without pushback.
+
+| Commitment | Promised to | When | Source |
+|---|---|---|---|
+| B2B admin panel (Simon + Yuni can onboard clients without Aziz) | Simon, Yuni | 2026-04-20 | WhatsApp: "after May-10th I will build B2B admin panel" |
+| SEA language expansion (Thai / Vietnamese / Indonesian) | Simon | 2026-04-20 | WhatsApp: "once it succeeds, I will work on adding SEA languages" |
+| Multi-speaker support | Simon | 2026-04-20 | WhatsApp: "multi-speaker support". **Implementation:** Soniox now supports multi-speaker diarization + translation natively. Delta is on our side: one TTS WebSocket connection per speaker, each with its own `voice_id`. Requires per-speaker voice enrollment in onboarding and a `speaker_id → voice_id` routing map in server-rs dispatch. ElevenLabs rate / quota scales linearly with speaker count — verify before multi-speaker shows. |
+| Stripe self-serve billing | Simon | 2026-04-20 | WhatsApp: "Stripe integration" |
 
 ---
 
@@ -400,6 +412,14 @@ weekend for extra confidence.
 
 MJ drives from the host side (Korean). Aziz drives from ops. Gitae joins
 on the weekend if accent-bug validation needs a second native voice.
+
+**"Ultimate test" (promised 2026-04-20):** Aziz's cloned voice,
+English source → Korean + Chinese + Japanese targets simultaneously,
+broadcasting to Grip + TikTok + YouTube simultaneously. This is the
+public commitment to Simon + Yuni. Native-speaker sign-off required on
+all three target langs (MJ for KR, Yuni for JP, default-library voice
+QA for ZH). Exercises the 3-lang × 3-platform concurrent-stream path
+and flips source to English (inverse of today's En→Ja single demo).
 
 - First full dry run with shared Grip + TikTok creds (MJ speaks Korean)
 - Stream Korean → Chinese (Grip) + Japanese (TikTok) for 40 minutes
@@ -488,6 +508,7 @@ before rehearsal.
 | Tech / CTO | Aziz | All engineering, infra, ops, on-call | full-time |
 | Sales lead | Simon | B2B clients, pricing, demos | weekday business hours |
 | Client acquisition + Korean test voice | MJ | Deal closing, account management, stand-in host for dry runs (native Korean) | always available |
+| Japanese-language QA | Yuni | Native-JP review of translation + subtitle quality. Validated 2026-04-20 En→Ja demo ("No issue with Japanese language, they even attached the subtitles"). | on-demand |
 | First live show host | Gitae | Broadcast talent, Korean | weekends |
 | Future show hosts | Yuna, others TBD | Broadcast talent | TBD |
 | Videographer | TBD per show | Studio setup for live | per-show |
@@ -581,3 +602,14 @@ until the company hires. Stay disciplined about what to take on.
   surfaced in this vision. Critical-chain for May 10:
   `10 → 6/7/8 → 11 → 24 → 28`. Tasks 1/2/4 ship before 11. Tasks 15,
   21, 23 are Phase 2.
+- `2026-04-20` (evening) — Aziz shared En→Ja YouTube demo in Brivva
+  WhatsApp group. Yuni (native JP, new QA resource) approved quality
+  ("No issue with Japanese language, they even attached the
+  subtitles"). Simon asked for Korean next. Aziz committed publicly
+  to: (a) "ultimate test" = En source → Ko+Zh+Ja targets
+  simultaneously → Grip+TikTok+YouTube simultaneously, cloning own
+  voice, (b) Phase 2 scope of SEA langs + multi-speaker support +
+  Stripe, (c) B2B admin panel post-May-10 so Simon + Yuni onboard
+  clients without Aziz in the loop. Added Yuni to Collaborators table,
+  moved admin panel + multi-speaker from "Not In Scope" to new
+  "Committed Phase 2" table, wrote the ultimate-test brief into Week 2.

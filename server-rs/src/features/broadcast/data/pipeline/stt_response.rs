@@ -136,9 +136,12 @@ fn accumulate_tokens(
     let mut endpoint_hit = false;
 
     for token in &response.tokens {
+        // AUDIT: normal-flow filter — mode selects source vs translation
+        // tokens per the SonioxMode. Not a silent-bug branch.
         if !mode.accepts(token) {
             continue;
         }
+        // AUDIT: end-of-utterance sentinel — marks boundary, not a drop.
         if token.text == SONIOX_END_TOKEN {
             endpoint_hit = true;
             continue;

@@ -10,7 +10,10 @@ import { cn } from "../../../core/cn";
 import * as api from "../data/api-client";
 
 export interface BroadcastViewProps {
-  sessionId?: string;
+  // Required — every broadcast is anchored to a real session row.
+  // Brivva is host-only: see vision.md "What's Intentionally Not In The
+  // Product".
+  sessionId: string;
   sourceLang: string;
   userId: string;
   /** When true the voice-setup phase auto-skips on connect (used after the
@@ -56,7 +59,6 @@ export function BroadcastView({
   const [streams, setStreams] = useState<api.StreamInfo[]>([]);
 
   const loadSession = useCallback(async () => {
-    if (!sessionId) return;
     try {
       const data = await api.getSession(sessionId);
       setSession(data.session);
@@ -95,7 +97,7 @@ export function BroadcastView({
 
   const handleBack = () => {
     closeSession();
-    navigate(sessionId ? `/session/${sessionId}` : "/dashboard");
+    navigate(`/session/${sessionId}`);
   };
 
   const isReady = status === "ready" || status === "recording";
@@ -116,7 +118,7 @@ export function BroadcastView({
             BRIVVA
           </h1>
           <p className="text-on-surface-variant font-label text-sm truncate max-w-[200px]">
-            {session ? session.title : "Quick Session"}
+            {session?.title ?? ""}
           </p>
         </div>
       </header>
