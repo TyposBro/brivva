@@ -13,6 +13,30 @@
 
 use crate::core::contracts::workers::{SessionBundle, SessionStatusUpdate};
 
+/// Outcome of a `report_session_metrics` call. We keep the 404 branch typed
+/// so the metrics reporter can detect "session no longer exists server-side"
+/// (the End-Session race) and self-cancel instead of hammering Workers for
+/// minutes after the host clicked End. All other errors stay opaque — the
+/// reporter logs and keeps trying so a transient hiccup doesn't truncate
+/// billing data.
+#[derive(Debug)]
+pub enum MetricsReportError {
+    /// Workers replied 404 — the session was deleted/ended out from under us.
+    /// Caller should stop reporting.
+    NotFound,
+    /// Anything else (network, 5xx, decode). Caller logs and keeps ticking.
+    Other(String),
+}
+
+impl std::fmt::Display for MetricsReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricsReportError::NotFound => write!(f, "workers metrics 404 (session ended)"),
+            MetricsReportError::Other(m) => write!(f, "{m}"),
+        }
+    }
+}
+
 pub struct WorkersApi {
     base_url: String,
     internal_secret: String,
@@ -59,13 +83,15 @@ impl WorkersApi {
     /// workers/src/orchestration/app.ts with merge-semantics — omitted
     /// fields leave prior values alone; per-lang output seconds shallow-merge.
     /// On non-2xx we return Err, and the caller logs rather than escalating.
+    /// 404 specifically maps to `MetricsReportError::NotFound` so the
+    /// reporter task can self-cancel when the session row was deleted/ended.
     pub async fn report_session_metrics<T: serde::Serialize + ?Sized>(
         &self,
         session_id: &str,
         payload: &T,
-    ) -> Result<(), String> {
+    ) -> Result<(), MetricsReportError> {
         if self.base_url.is_empty() {
-            return Err("WORKERS_API_URL not set".into());
+            return Err(MetricsReportError::Other("WORKERS_API_URL not set".into()));
         }
         let url = format!("{}/internal/sessions/{}/metrics", self.base_url, session_id);
         let resp = self
@@ -75,13 +101,16 @@ impl WorkersApi {
             .json(payload)
             .send()
             .await
-            .map_err(|e| format!("workers metrics error: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!(
+            .map_err(|e| MetricsReportError::Other(format!("workers metrics error: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(MetricsReportError::NotFound);
+        }
+        if !status.is_success() {
+            return Err(MetricsReportError::Other(format!(
                 "workers metrics {} → {}",
-                session_id,
-                resp.status()
-            ));
+                session_id, status
+            )));
         }
         Ok(())
     }
@@ -164,7 +193,8 @@ mod tests {
             .report_session_metrics("X", &json!({}))
             .await
             .expect_err("empty base url must error");
-        assert!(err.contains("WORKERS_API_URL not set"));
+        assert!(matches!(err, MetricsReportError::Other(_)));
+        assert!(err.to_string().contains("WORKERS_API_URL not set"));
     }
 
     #[tokio::test]
@@ -301,7 +331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_session_metrics_errors_on_404() {
+    async fn report_session_metrics_returns_typed_not_found_on_404() {
         async fn not_found() -> StatusCode {
             StatusCode::NOT_FOUND
         }
@@ -313,7 +343,30 @@ mod tests {
             .report_session_metrics("X", &json!({"k":1}))
             .await
             .expect_err("404 must error");
-        assert!(err.contains("→ 404"), "got {err}");
+        assert!(
+            matches!(err, MetricsReportError::NotFound),
+            "404 must map to NotFound, got {err:?}"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn report_session_metrics_returns_other_on_5xx() {
+        async fn boom() -> StatusCode {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        let app = Router::new().route("/internal/sessions/{id}/metrics", patch(boom));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        let err = api
+            .report_session_metrics("X", &json!({"k":1}))
+            .await
+            .expect_err("5xx must error");
+        match err {
+            MetricsReportError::Other(msg) => assert!(msg.contains("→ 500"), "got {msg}"),
+            MetricsReportError::NotFound => panic!("5xx must not map to NotFound"),
+        }
         handle.abort();
     }
 
@@ -339,7 +392,12 @@ mod tests {
             .report_session_metrics("X", &json!({}))
             .await
             .expect_err("refused connection must error");
-        assert!(err.starts_with("workers metrics error"), "got {err}");
+        match err {
+            MetricsReportError::Other(msg) => {
+                assert!(msg.starts_with("workers metrics error"), "got {msg}")
+            }
+            MetricsReportError::NotFound => panic!("network failure must not map to NotFound"),
+        }
     }
 
     #[tokio::test]
