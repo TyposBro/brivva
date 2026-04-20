@@ -106,6 +106,21 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         voice_preset: req.voice_preset,
         force_default_voice,
     });
+    // §0.5.4: kill-switch must emit an observable signal when it actually
+    // overrides a cloned selection. We log at the first overridden utterance
+    // per session rather than every utterance to avoid spam at live traffic
+    // (~20/min per lang) while still giving operators a grep target.
+    if force_default_voice
+        && req.voice_preset == VoicePreset::Cloned
+        && req.selected_voice_id.is_some()
+    {
+        tracing::warn!(
+            session_id = %req.handle.id,
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            "kill-switch BRIVVA_FALLBACK_TO_DEFAULT_VOICE: forced default voice over selected clone"
+        );
+    }
     let voice_id = resolved.voice_id;
     let is_cloned = resolved.is_cloned;
     // Unified on eleven_flash_v2_5 for both cloned + default paths. Flash v2.5
