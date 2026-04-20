@@ -4,6 +4,20 @@
 # runtime on TARGETPLATFORM (arm64 for Fargate Graviton).
 # ~6× faster than QEMU emulation; cargo-chef keeps warm deps cached.
 
+# Global ARG — must be declared BEFORE the first FROM so it expands
+# inside the `FROM ${FFMPEG_BASE_IMAGE}` below. Any ARG defined after a
+# FROM is scoped to that stage only and leaves subsequent `FROM <ARG>`
+# lines empty, which is exactly how the first prod attempt failed (run
+# 24657046453: `ERROR: base name (${FFMPEG_BASE_IMAGE}) should not be
+# blank`).
+#
+# CI sets this in `.github/workflows/deploy.yml` as
+# `<ECR_REGISTRY>/brivva/ffmpeg-base:<FFMPEG_VERSION>-librtmp`. Local
+# builds must pass `--build-arg FFMPEG_BASE_IMAGE=...`; the default
+# string is intentionally invalid so an omitted arg fails fast at
+# `docker pull` with a clear image-not-found.
+ARG FFMPEG_BASE_IMAGE=brivva-ffmpeg-base-image-not-set-pass-build-arg:latest
+
 FROM --platform=$BUILDPLATFORM rust:1.88-slim AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake build-essential libclang-dev python3 python3-pip \
@@ -44,12 +58,8 @@ RUN cargo zigbuild --release --target aarch64-unknown-linux-gnu \
 # impl after ~3 frames). The runtime `ffmpeg -version | grep enable-librtmp`
 # check below still fires so a mistagged base image can't ship silently.
 #
-# FFMPEG_BASE_IMAGE must be passed at build time as
-# `<ECR_REGISTRY>/brivva/ffmpeg-base:<FFMPEG_VERSION>-librtmp`.
-# CI sets it in `.github/workflows/deploy.yml`. Local builds must pass
-# `--build-arg FFMPEG_BASE_IMAGE=...` — the default string is intentionally
-# invalid so an omitted arg fails fast with a clear image-not-found.
-ARG FFMPEG_BASE_IMAGE=brivva-ffmpeg-base-image-not-set-pass-build-arg:latest
+# FFMPEG_BASE_IMAGE is declared as a global ARG at the top of this file
+# — see the comment block next to that declaration for the why.
 FROM ${FFMPEG_BASE_IMAGE} AS ffmpeg-builder
 
 # ── runtime: arm64 slim debian with ffmpeg + subtitle fonts ──
