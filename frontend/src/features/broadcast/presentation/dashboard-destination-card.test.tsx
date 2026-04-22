@@ -31,9 +31,9 @@ describe("PlatformIcon", () => {
 
 describe("DestinationCard", () => {
   it("renders auto platform header + Advanced toggle (happy)", async () => {
-    // ko→en stream-default is 3000ms / 0.2, so this dest should start
-    // collapsed since values match the curated defaults.
-    const dest = makeDest({ platform: "youtube", lang: "en", delay_ms: 3000 });
+    // ko→en stream-default is 1000ms / 0.03 (retuned 2026-04-22), so this
+    // dest should start collapsed since values match the curated defaults.
+    const dest = makeDest({ platform: "youtube", lang: "en", delay_ms: 1000, host_gain: 0.03 });
     render(
       <DestinationCard
         dest={dest}
