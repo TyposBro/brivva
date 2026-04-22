@@ -2,7 +2,7 @@
 //! one-off MP3 → PCM decoder used by the TTS ingest path.
 
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 
 pub fn kill_orphan_ffmpeg() {
@@ -85,19 +85,97 @@ async fn decode_mp3_to_pcm_inner(mp3: &[u8]) -> Result<Vec<u8>, String> {
         .spawn()
         .map_err(|e| format!("FFmpeg decode spawn failed: {}", e))?;
 
+    // Drain stdout concurrently with stdin write. Sequential write→read
+    // deadlocks on multi-MB PCM output: ffmpeg's 64KB stdout pipe fills
+    // before it finishes reading stdin, so stdin write blocks → decode
+    // stalls and hits the 30s outer timeout. This manifested as zh TTS
+    // (multi-second Chinese utterances → multi-MB PCM) silently dropping
+    // while en (shorter PCM < 64KB pipe cap) decoded fine.
     let mut stdin = child.stdin.take().ok_or("No stdin")?;
-    stdin
-        .write_all(mp3)
+    let mut stdout = child.stdout.take().ok_or("No stdout")?;
+    let mp3_owned = mp3.to_vec();
+    let write_task = tokio::spawn(async move {
+        let res = stdin.write_all(&mp3_owned).await;
+        drop(stdin);
+        res
+    });
+    let mut pcm = Vec::new();
+    let read_res = stdout.read_to_end(&mut pcm).await;
+    let write_res = write_task
         .await
-        .map_err(|e| format!("FFmpeg stdin write failed: {}", e))?;
-    drop(stdin);
+        .map_err(|e| format!("FFmpeg stdin writer join failed: {}", e))?;
+    write_res.map_err(|e| format!("FFmpeg stdin write failed: {}", e))?;
+    read_res.map_err(|e| format!("FFmpeg stdout read failed: {}", e))?;
 
-    let output = child
-        .wait_with_output()
+    let status = child
+        .wait()
         .await
         .map_err(|e| format!("FFmpeg wait failed: {}", e))?;
-    if output.stdout.is_empty() {
+    if !status.success() {
+        return Err(format!("FFmpeg exited with status {}", status));
+    }
+    if pcm.is_empty() {
         return Err("Empty PCM output".to_string());
     }
-    Ok(output.stdout)
+    Ok(pcm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: zh TTS dropped silently because decode deadlocked on
+    /// multi-MB PCM output (stdout pipe filled before stdin drained).
+    /// This test encodederates a 3-second sine MP3 — whose PCM is ~264KB,
+    /// well over the 64KB kernel pipe buffer — and asserts decode
+    /// completes without hitting the outer 30s timeout.
+    #[tokio::test]
+    async fn decode_mp3_survives_pcm_output_larger_than_pipe_buffer() {
+        // Skip on systems without ffmpeg (CI containers, sandboxes).
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            eprintln!("ffmpeg not available; skipping decode test");
+            return;
+        }
+
+        // Generate 3s of sine at 44.1k mono, encode as mp3 into memory.
+        let encoded = TokioCommand::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=3:sample_rate=44100",
+                "-ac",
+                "1",
+                "-b:a",
+                "128k",
+                "-f",
+                "mp3",
+                "pipe:1",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .expect("ffmpeg mp3 encoded");
+        assert!(encoded.status.success(), "mp3 encoded failed");
+        let mp3 = encoded.stdout;
+        assert!(!mp3.is_empty(), "expected non-empty mp3");
+
+        let pcm = decode_mp3_to_pcm(&mp3).await.expect("decode ok");
+        // 3s @ 44.1k @ 16-bit mono = 264_600 bytes expected (± encoder
+        // framing). Key assertion: well above 64KB pipe buffer — the
+        // exact size the sequential-write-then-read path deadlocked on.
+        assert!(
+            pcm.len() > 200_000,
+            "expected >200KB pcm (got {}) — deadlock regression?",
+            pcm.len()
+        );
+    }
 }
