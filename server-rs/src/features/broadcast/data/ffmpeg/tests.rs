@@ -320,6 +320,46 @@ fn kill_idle_streams_skips_streams_with_zero_last_write() {
 }
 
 #[test]
+fn kill_idle_streams_does_not_fire_on_fresh_stream_even_past_threshold() {
+    // Regression guard for the 2026-04-22 fix: spawn_stream_inner used to
+    // seed last_write_ms to now_unix_ms(). Hosts that took >25s to push
+    // their first frame (browser permission dialogs, OBS connect) got
+    // falsely idle-killed, burning one of MAX_FFMPEG_RESTARTS=3 attempts
+    // on every session. The seed is now 0 and the skip branch in
+    // kill_idle_streams treats it as "not yet written, don't kill".
+    //
+    // This test simulates the case: stream seeded to 0, wall-clock now
+    // already well past the 25s threshold, idle-kill still no-ops.
+    let mut m = RtmpManager::new();
+    let stream = fake_exited_stream("warming_up", "ja", false);
+    // Fresh-seed sentinel — matches spawn_stream_inner.
+    stream.last_write_ms.store(0, Ordering::Release);
+    m.streams.insert("warming_up".into(), stream);
+
+    // First call: sentinel unchanged, no kill.
+    m.kill_idle_streams();
+    assert_eq!(
+        m.streams["warming_up"]
+            .last_write_ms
+            .load(Ordering::Acquire),
+        0,
+        "fresh stream must stay at 0 sentinel after kill_idle_streams"
+    );
+
+    // Simulate time passing far beyond IDLE_RESTART_THRESHOLD. Since the
+    // check is wall-clock based, we can't advance time directly — but the
+    // sentinel branch fires before the threshold math, so repeating the
+    // call proves the guard.
+    m.kill_idle_streams();
+    assert_eq!(
+        m.streams["warming_up"]
+            .last_write_ms
+            .load(Ordering::Acquire),
+        0,
+    );
+}
+
+#[test]
 fn kill_idle_streams_skips_streams_with_stop_flag_set() {
     let mut m = RtmpManager::new();
     let stream = fake_exited_stream("stopped", "ja", false);

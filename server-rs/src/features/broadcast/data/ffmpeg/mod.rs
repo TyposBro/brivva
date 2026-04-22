@@ -117,6 +117,12 @@ struct RtmpStream {
     /// Unix-ms wall clock of the most recent successful FFmpeg-stdin write
     /// from either drain thread. The health monitor uses it to detect silent
     /// output stalls that don't crash FFmpeg (see `IDLE_RESTART_THRESHOLD`).
+    ///
+    /// **Sentinel `0`** means "no drain write has happened yet" — the stream
+    /// is still warming up (host hasn't pushed a frame/sample, or ffmpeg's
+    /// output init is still mid-connection). `kill_idle_streams` treats
+    /// `0` as "not idle, skip" so a slow-starting host doesn't burn the
+    /// first `MAX_FFMPEG_RESTARTS` attempt on a false-positive idle kill.
     last_write_ms: Arc<AtomicI64>,
 }
 
@@ -353,6 +359,12 @@ impl RtmpManager {
                 continue;
             }
             let last = stream.last_write_ms.load(Ordering::Acquire);
+            // Sentinel: drain has not written yet. Stream is warming up
+            // (host hasn't pushed first frame, or ffmpeg's still opening
+            // the output). Counting this as "idle" would kill every
+            // session that takes >25s to produce its first sample — the
+            // common case on browser hosts with mic/cam permission
+            // prompts. See `RtmpStream::last_write_ms`.
             if last == 0 {
                 continue;
             }
@@ -568,10 +580,15 @@ impl RtmpManager {
         let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let delay = Duration::from_millis(args.delay_ms);
-        // Seed last_write to now so a freshly-spawned stream isn't instantly
-        // classified as idle before the drain threads have had a chance to
-        // write their first tick.
-        let last_write_ms = Arc::new(AtomicI64::new(now_unix_ms()));
+        // Seed last_write to 0 — the "not yet written" sentinel read by
+        // `kill_idle_streams`. A freshly-spawned stream is not idle until
+        // the drain has produced at least one successful write; before
+        // 2026-04-22 we seeded to `now_unix_ms()` instead, which meant the
+        // idle detector fired at +25s for any session where the host
+        // (browser mic/cam permission dialog, OBS warm-up) took longer
+        // than 25s to push its first byte. That falsely burned one of
+        // `MAX_FFMPEG_RESTARTS` on every session.
+        let last_write_ms = Arc::new(AtomicI64::new(0));
 
         let video_stdin = child
             .stdin
