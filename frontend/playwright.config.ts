@@ -9,6 +9,13 @@ const APP_PORT = Number(process.env.PLAYWRIGHT_APP_PORT ?? 5174);
 export default defineConfig({
   testDir: "./e2e",
   testMatch: /.*\.e2e\.ts$/,
+  // full-stack-live.e2e.ts targets the REAL local dev stack
+  // (server-rs + workers with DEV_AUTH_BYPASS=true + real Soniox /
+  // ElevenLabs / Grip / YouTube). It needs `./scripts/dev-all.sh`
+  // running and ships in a separate playwright.real-stack.config.ts
+  // (launched via scripts/test-e2e-real.sh). Exclude it here so the
+  // mock-backend CI gate doesn't pick it up and 404 on /test/reset-dev-user.
+  testIgnore: /full-stack-live\.e2e\.ts$/,
   fullyParallel: false,
   workers: 1,
   retries: 0,
