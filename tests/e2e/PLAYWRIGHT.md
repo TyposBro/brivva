@@ -25,6 +25,8 @@ in CI; use this one for manual matrix testing before a release.
 | `--youtube <lang>` | `en` `ko` `ja` `zh` | Add a Custom-RTMP destination using `YOUTUBE_RTMP_URL/KEY` from `.env`. |
 | `--rtmp <lang>` | `en` `ko` `ja` `zh` | Add a second Custom-RTMP destination using `RTMP_URL/KEY`. |
 | `--rtmp2 <lang>` | `en` `ko` `ja` `zh` | Add a third Custom-RTMP destination using `RTMP2_URL/KEY`. |
+| `--instagram <lang>` | `en` `ko` `ja` `zh` | Add a Custom-RTMP destination using `IG_RTMP_URL/KEY`. |
+| `--tiktok <lang>` | `en` `ko` `ja` `zh` | Add a Custom-RTMP destination using `TIKTOK_RTMP_URL/KEY`. |
 | `--duration <sec>` | integer | How long to record after going live (default `90`). |
 | `--headed` | (boolean) | Open the browser visibly so you can watch the run. |
 
@@ -142,3 +144,5 @@ matching `*_URL` / `*_KEY` is missing or still a placeholder.
 | `--youtube` | `YOUTUBE_RTMP_URL`, `YOUTUBE_RTMP_KEY` |
 | `--rtmp` | `RTMP_URL`, `RTMP_KEY` |
 | `--rtmp2` | `RTMP2_URL`, `RTMP2_KEY` |
+| `--instagram` | `IG_RTMP_URL`, `IG_RTMP_KEY` |
+| `--tiktok` | `TIKTOK_RTMP_URL`, `TIKTOK_RTMP_KEY` |

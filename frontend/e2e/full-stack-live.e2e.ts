@@ -23,7 +23,13 @@ interface DestConfig {
   /** UI tile to click in the platform picker. */
   platform: DestPlatform;
   /** Which env-var pair the credentials live under. */
-  credPrefix: "GRIP_RTMP" | "YOUTUBE_RTMP" | "RTMP" | "RTMP2";
+  credPrefix:
+    | "GRIP_RTMP"
+    | "YOUTUBE_RTMP"
+    | "RTMP"
+    | "RTMP2"
+    | "IG_RTMP"
+    | "TIKTOK_RTMP";
   /** Target language. If equal to the session source-lang, the test
    *  selects "pass" (raw passthrough) instead of issuing translation. */
   lang: Lang;
@@ -92,10 +98,26 @@ function buildPlan(): {
       lang: rtmp2,
       label: "rtmp2",
     });
+  const instagram = envLang("E2E_INSTAGRAM_LANG");
+  if (instagram)
+    destinations.push({
+      platform: "custom",
+      credPrefix: "IG_RTMP",
+      lang: instagram,
+      label: "instagram",
+    });
+  const tiktok = envLang("E2E_TIKTOK_LANG");
+  if (tiktok)
+    destinations.push({
+      platform: "custom",
+      credPrefix: "TIKTOK_RTMP",
+      lang: tiktok,
+      label: "tiktok",
+    });
   if (destinations.length === 0) {
     throw new Error(
       "No destinations configured. Pass at least one of " +
-        "--grip/--youtube/--rtmp/--rtmp2 to test-e2e-real.sh.",
+        "--grip/--youtube/--rtmp/--rtmp2/--instagram/--tiktok to test-e2e-real.sh.",
     );
   }
   return { clone, sourceLang, recordSeconds, destinations };

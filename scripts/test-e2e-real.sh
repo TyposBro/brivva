@@ -15,6 +15,8 @@
 #                           YOUTUBE_RTMP_URL/KEY (typically a YouTube Live ingest URL).
 #   --rtmp <lang>           Add a second Custom-RTMP destination using RTMP_URL/KEY.
 #   --rtmp2 <lang>          Add a third Custom-RTMP destination using RTMP2_URL/KEY.
+#   --instagram <lang>      Add a Custom-RTMP destination using IG_RTMP_URL/KEY.
+#   --tiktok <lang>         Add a Custom-RTMP destination using TIKTOK_RTMP_URL/KEY.
 #   --duration <sec>        How long to record audio after going live. Default: 90.
 #   --headed                Open the browser visibly so you can watch.
 #   -h, --help              This help text.
@@ -24,6 +26,8 @@
 #   YOUTUBE_RTMP_URL / YOUTUBE_RTMP_KEY   — required if --youtube set
 #   RTMP_URL / RTMP_KEY                   — required if --rtmp set
 #   RTMP2_URL / RTMP2_KEY                 — required if --rtmp2 set
+#   IG_RTMP_URL / IG_RTMP_KEY             — required if --instagram set
+#   TIKTOK_RTMP_URL / TIKTOK_RTMP_KEY     — required if --tiktok set
 #
 # Examples:
 #   # Default-voice smoke test, two destinations:
@@ -48,6 +52,8 @@ E2E_GRIP_LANG=""
 E2E_YOUTUBE_LANG=""
 E2E_RTMP_LANG=""
 E2E_RTMP2_LANG=""
+E2E_INSTAGRAM_LANG=""
+E2E_TIKTOK_LANG=""
 E2E_RECORD_SECONDS="90"
 PW_EXTRA=()
 HEADED=""
@@ -66,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     --youtube)         E2E_YOUTUBE_LANG="$2"; shift 2 ;;
     --rtmp)            E2E_RTMP_LANG="$2"; shift 2 ;;
     --rtmp2)           E2E_RTMP2_LANG="$2"; shift 2 ;;
+    --instagram)       E2E_INSTAGRAM_LANG="$2"; shift 2 ;;
+    --tiktok)          E2E_TIKTOK_LANG="$2"; shift 2 ;;
     --duration)        E2E_RECORD_SECONDS="$2"; shift 2 ;;
     --headed)          HEADED="--headed"; shift ;;
     -h|--help)         usage ;;
@@ -75,9 +83,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # At least one destination is required for the test to be meaningful.
-if [[ -z "$E2E_GRIP_LANG" && -z "$E2E_YOUTUBE_LANG" && -z "$E2E_RTMP_LANG" && -z "$E2E_RTMP2_LANG" ]]; then
+if [[ -z "$E2E_GRIP_LANG" && -z "$E2E_YOUTUBE_LANG" && -z "$E2E_RTMP_LANG" && -z "$E2E_RTMP2_LANG" && -z "$E2E_INSTAGRAM_LANG" && -z "$E2E_TIKTOK_LANG" ]]; then
   echo "ERROR: no destinations configured." >&2
-  echo "  Pass at least one of --grip/--youtube/--rtmp/--rtmp2 <lang>." >&2
+  echo "  Pass at least one of --grip/--youtube/--rtmp/--rtmp2/--instagram/--tiktok <lang>." >&2
   echo "  See $0 --help" >&2
   exit 1
 fi
@@ -100,6 +108,8 @@ validate_lang --grip "$E2E_GRIP_LANG"
 validate_lang --youtube "$E2E_YOUTUBE_LANG"
 validate_lang --rtmp "$E2E_RTMP_LANG"
 validate_lang --rtmp2 "$E2E_RTMP2_LANG"
+validate_lang --instagram "$E2E_INSTAGRAM_LANG"
+validate_lang --tiktok "$E2E_TIKTOK_LANG"
 
 # ── Preconditions ─────────────────────────────────────────
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -149,8 +159,10 @@ require_creds() {
 }
 require_creds --grip    "$E2E_GRIP_LANG"    GRIP_RTMP_URL    GRIP_RTMP_KEY
 require_creds --youtube "$E2E_YOUTUBE_LANG" YOUTUBE_RTMP_URL YOUTUBE_RTMP_KEY
-require_creds --rtmp    "$E2E_RTMP_LANG"    RTMP_URL         RTMP_KEY
-require_creds --rtmp2   "$E2E_RTMP2_LANG"   RTMP2_URL        RTMP2_KEY
+require_creds --rtmp      "$E2E_RTMP_LANG"      RTMP_URL         RTMP_KEY
+require_creds --rtmp2     "$E2E_RTMP2_LANG"     RTMP2_URL        RTMP2_KEY
+require_creds --instagram "$E2E_INSTAGRAM_LANG" IG_RTMP_URL      IG_RTMP_KEY
+require_creds --tiktok    "$E2E_TIKTOK_LANG"    TIKTOK_RTMP_URL  TIKTOK_RTMP_KEY
 
 export E2E_CLONE
 export E2E_SOURCE_LANG
@@ -158,6 +170,8 @@ export E2E_GRIP_LANG
 export E2E_YOUTUBE_LANG
 export E2E_RTMP_LANG
 export E2E_RTMP2_LANG
+export E2E_INSTAGRAM_LANG
+export E2E_TIKTOK_LANG
 export E2E_RECORD_SECONDS
 set +a
 
@@ -169,6 +183,8 @@ printf "  source lang  : %s\n" "$E2E_SOURCE_LANG"
 [[ -n "$E2E_YOUTUBE_LANG" ]] && printf "  youtube/rtmp1: %s%s\n" "$E2E_YOUTUBE_LANG" "$([ "$E2E_YOUTUBE_LANG" = "$E2E_SOURCE_LANG" ] && echo ' (auto-passthrough)' || true)"
 [[ -n "$E2E_RTMP_LANG"    ]] && printf "  rtmp2        : %s%s\n" "$E2E_RTMP_LANG"    "$([ "$E2E_RTMP_LANG"    = "$E2E_SOURCE_LANG" ] && echo ' (auto-passthrough)' || true)"
 [[ -n "$E2E_RTMP2_LANG"   ]] && printf "  rtmp3        : %s%s\n" "$E2E_RTMP2_LANG"   "$([ "$E2E_RTMP2_LANG"   = "$E2E_SOURCE_LANG" ] && echo ' (auto-passthrough)' || true)"
+[[ -n "$E2E_INSTAGRAM_LANG" ]] && printf "  instagram    : %s%s\n" "$E2E_INSTAGRAM_LANG" "$([ "$E2E_INSTAGRAM_LANG" = "$E2E_SOURCE_LANG" ] && echo ' (auto-passthrough)' || true)"
+[[ -n "$E2E_TIKTOK_LANG"    ]] && printf "  tiktok       : %s%s\n" "$E2E_TIKTOK_LANG"    "$([ "$E2E_TIKTOK_LANG"    = "$E2E_SOURCE_LANG" ] && echo ' (auto-passthrough)' || true)"
 printf "  record secs  : %s\n" "$E2E_RECORD_SECONDS"
 echo "───────────────────────────────────────────────────"
 
