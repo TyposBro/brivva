@@ -511,6 +511,17 @@ function DashboardInner() {
                 recordRequestKey={recordRequestKey}
               />
             </div>
+
+            {/* Account management (hard-delete + full voice clone list) */}
+            <div className="pt-2 border-t border-surface-container-high">
+              <button
+                onClick={() => navigate("/settings")}
+                className="text-on-surface-variant hover:text-on-surface font-label text-sm transition-colors"
+                data-testid="open-settings"
+              >
+                Manage account →
+              </button>
+            </div>
           </div>
         )}
 

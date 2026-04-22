@@ -4,7 +4,7 @@
 // tiny `drizzle(...)` wrap is cheap — it's just a typed proxy around the
 // same prepared-statement API underneath.
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import * as schema from "../../core/schema";
@@ -187,7 +187,95 @@ export async function deleteVoiceRow(
   db: D1Database,
   voiceId: string,
 ): Promise<void> {
-  await wrap(db).delete(schema.voices).where(eq(schema.voices.id, voiceId)).run();
+  const d = wrap(db);
+  // Detach any historical (ended) sessions before dropping the voice row.
+  // FK enforcement in D1 would otherwise reject the DELETE. Setup/live
+  // sessions are guarded at the handler, so anything surviving here is
+  // archival and safe to null-detach.
+  await d
+    .update(schema.sessions)
+    .set({ voice_id: null })
+    .where(eq(schema.sessions.voice_id, voiceId))
+    .run();
+  await d.delete(schema.voices).where(eq(schema.voices.id, voiceId)).run();
+}
+
+// Active == setup-or-live: a session in setup is mid-preflight and
+// about to ffmpeg-spawn, so yanking its voice still breaks the pipeline.
+const ACTIVE_SESSION_STATUSES = ["setup", "live"] as const;
+
+export async function countActiveSessionsForVoice(
+  db: D1Database,
+  voiceId: string,
+): Promise<number> {
+  const row = await wrap(db)
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.voice_id, voiceId),
+        inArray(schema.sessions.status, [...ACTIVE_SESSION_STATUSES]),
+      ),
+    )
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+export async function countActiveSessionsForUser(
+  db: D1Database,
+  userId: string,
+): Promise<number> {
+  const row = await wrap(db)
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.user_id, userId),
+        inArray(schema.sessions.status, [...ACTIVE_SESSION_STATUSES]),
+      ),
+    )
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+// Hard-delete everything we own for a user. Children-first cascade
+// mirrors /test/reset-dev-user. Callers MUST have already guarded
+// against active sessions and fanned out ElevenLabs voice deletion —
+// this function only touches D1.
+export async function hardDeleteUserCascade(
+  db: D1Database,
+  userId: string,
+): Promise<void> {
+  const d = wrap(db);
+  await d
+    .delete(schema.session_metrics)
+    .where(
+      inArray(
+        schema.session_metrics.session_id,
+        d.select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(eq(schema.sessions.user_id, userId)),
+      ),
+    )
+    .run();
+  await d
+    .delete(schema.streams)
+    .where(
+      inArray(
+        schema.streams.session_id,
+        d.select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(eq(schema.sessions.user_id, userId)),
+      ),
+    )
+    .run();
+  await d.delete(schema.sessions).where(eq(schema.sessions.user_id, userId)).run();
+  await d.delete(schema.voices).where(eq(schema.voices.user_id, userId)).run();
+  await d
+    .delete(schema.platform_credentials)
+    .where(eq(schema.platform_credentials.user_id, userId))
+    .run();
+  await d.delete(schema.users).where(eq(schema.users.id, userId)).run();
 }
 
 // ── sessions ──────────────────────────────────────────────

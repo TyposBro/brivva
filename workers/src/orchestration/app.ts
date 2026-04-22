@@ -186,6 +186,21 @@ app.delete("/api/voices/:id", async (c) => {
   const id = c.req.param("id");
   const v = await db.getVoice(c.env.DB, id);
   if (!v) return c.json({ error: "not found" }, 404);
+  const active = await db.countActiveSessionsForVoice(c.env.DB, id);
+  if (active > 0) {
+    console.warn(
+      `[voices.delete] blocked voice=${id} user=${v.user_id} active_sessions=${active}`,
+    );
+    return c.json(
+      {
+        error: "voice_in_use",
+        message:
+          "This voice clone is attached to a live session. End the session before deleting.",
+        active_sessions: active,
+      },
+      409,
+    );
+  }
   await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, v.elevenlabs_voice_id);
   await db.deleteVoiceRow(c.env.DB, id);
   // Clear active pointer if the deleted voice was the active one.
@@ -194,6 +209,61 @@ app.delete("/api/voices/:id", async (c) => {
     await db.setActiveVoice(c.env.DB, v.user_id, null);
   }
   return c.json({ status: "deleted" });
+});
+
+// ── account ──────────────────────────────────────────────
+
+// Hard-deletes everything owned by the user: voices (local + ElevenLabs),
+// sessions, session_metrics, streams, platform credentials, then the
+// user row itself. Refuses when any session is still setup/live so the
+// pipeline can't be yanked mid-broadcast.
+app.delete("/api/account", async (c) => {
+  const query = parseWithSchema(c, UserQuerySchema, {
+    user_id: c.req.query("user_id"),
+  });
+  if (query instanceof Response) return query;
+
+  const user = await db.getUserById(c.env.DB, query.user_id);
+  if (!user) {
+    console.info(`[account.delete] noop user=${query.user_id} reason=not_found`);
+    return c.json({ error: "not found" }, 404);
+  }
+
+  const active = await db.countActiveSessionsForUser(c.env.DB, query.user_id);
+  if (active > 0) {
+    console.warn(
+      `[account.delete] blocked user=${query.user_id} active_sessions=${active}`,
+    );
+    return c.json(
+      {
+        error: "account_in_use",
+        message:
+          "End all live sessions before deleting your account.",
+        active_sessions: active,
+      },
+      409,
+    );
+  }
+
+  // ElevenLabs cleanup: fire-and-forget per voice. A 4xx on one voice
+  // must not block the account wipe — billing slots leak is recoverable
+  // manually; a half-deleted account is not.
+  const voices = await db.listVoices(c.env.DB, query.user_id);
+  for (const v of voices) {
+    try {
+      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, v.elevenlabs_voice_id);
+    } catch (err) {
+      console.warn(
+        `[account.delete] elevenlabs delete failed voice=${v.id} el_voice=${v.elevenlabs_voice_id} err=${String(err)}`,
+      );
+    }
+  }
+
+  await db.hardDeleteUserCascade(c.env.DB, query.user_id);
+  console.info(
+    `[account.delete] ok user=${query.user_id} voices=${voices.length}`,
+  );
+  return c.json({ status: "deleted", voices_removed: voices.length });
 });
 
 // ── platform credentials ─────────────────────────────────

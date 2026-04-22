@@ -603,6 +603,16 @@ function userPaths() {
         requestBody: jsonBody(ref("CompleteOnboardingRequest")),
       }),
     },
+    "/api/account": {
+      delete: getOperation("Hard-delete user account and all owned data", {
+        200: jsonResponse(ref("StatusResponse"), "Delete status"),
+        400: jsonResponse(ref("ErrorResponse"), "Invalid request"),
+        404: jsonResponse(ref("ErrorResponse"), "User not found"),
+        409: jsonResponse(ref("ErrorResponse"), "Account has active sessions"),
+      }, {
+        parameters: [queryParam("user_id")],
+      }),
+    },
   };
 }
 
@@ -626,6 +636,7 @@ function voicePaths() {
       delete: getOperation("Delete voice clone", {
         200: jsonResponse(ref("StatusResponse"), "Delete status"),
         404: jsonResponse(ref("ErrorResponse"), "Voice not found"),
+        409: jsonResponse(ref("ErrorResponse"), "Voice attached to active session"),
       }, {
         parameters: [pathParam("id", "Voice id")],
       }),

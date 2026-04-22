@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:test";
 
 import app from "../src/orchestration/app";
+import * as db from "../src/shared/db/db";
 import { verifyJwt } from "../src/shared/auth/jwt";
 
 // Build a minimal PCM WAV of the requested duration, encoded as base64.
@@ -3034,6 +3035,226 @@ describe("GET /api/sessions/:id/summary", () => {
   it("404 when session does not exist (sad)", async () => {
     const res = await call("/api/sessions/nope/summary");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("DELETE /api/voices/:id active-session guard", () => {
+  it("409 when voice is attached to a live session (sad)", async () => {
+    await seedUser("u-guard-live");
+    const voice = await db.createVoice(env.DB, {
+      userId: "u-guard-live",
+      elevenlabsVoiceId: "el-guard-live",
+      name: "v",
+      sourceLang: "en",
+    });
+    const session = await db.createSession(env.DB, {
+      userId: "u-guard-live",
+      voiceId: voice.id,
+      title: "ongoing",
+      sourceLang: "en",
+      targetLangs: '["ja"]',
+    });
+    await db.updateSessionStatus(env.DB, {
+      id: session.id,
+      status: "live",
+      liveSessionId: "room-guard",
+    });
+
+    const res = await call(`/api/voices/${voice.id}`, { method: "DELETE" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      error: string;
+      active_sessions: number;
+    };
+    expect(body.error).toBe("voice_in_use");
+    expect(body.active_sessions).toBe(1);
+
+    // Voice row must still exist on a blocked delete.
+    const stillThere = await db.getVoice(env.DB, voice.id);
+    expect(stillThere?.id).toBe(voice.id);
+  });
+
+  it("allows delete once the referencing session has ended (happy)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("", { status: 200 })),
+    );
+    await seedUser("u-guard-ended");
+    const voice = await db.createVoice(env.DB, {
+      userId: "u-guard-ended",
+      elevenlabsVoiceId: "el-guard-ended",
+      name: "v",
+      sourceLang: "en",
+    });
+    const session = await db.createSession(env.DB, {
+      userId: "u-guard-ended",
+      voiceId: voice.id,
+      title: "past",
+      sourceLang: "en",
+      targetLangs: '["ja"]',
+    });
+    await db.updateSessionStatus(env.DB, {
+      id: session.id,
+      status: "ended",
+      liveSessionId: null,
+    });
+
+    const res = await call(`/api/voices/${voice.id}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await db.getVoice(env.DB, voice.id)).toBeNull();
+  });
+});
+
+describe("DELETE /api/account", () => {
+  it("404 when user does not exist (sad)", async () => {
+    const res = await call("/api/account?user_id=nobody", { method: "DELETE" });
+    expect(res.status).toBe(404);
+  });
+
+  it("400 when user_id missing (sad)", async () => {
+    const res = await call("/api/account", { method: "DELETE" });
+    expect(res.status).toBe(400);
+  });
+
+  it("409 when account has a live session (sad)", async () => {
+    await seedUser("u-acct-live");
+    const voice = await db.createVoice(env.DB, {
+      userId: "u-acct-live",
+      elevenlabsVoiceId: "el-acct-live",
+      name: "v",
+      sourceLang: "en",
+    });
+    const session = await db.createSession(env.DB, {
+      userId: "u-acct-live",
+      voiceId: voice.id,
+      title: "ongoing",
+      sourceLang: "en",
+      targetLangs: '["ja"]',
+    });
+    await db.updateSessionStatus(env.DB, {
+      id: session.id,
+      status: "live",
+      liveSessionId: "room-acct",
+    });
+
+    const res = await call("/api/account?user_id=u-acct-live", {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      error: string;
+      active_sessions: number;
+    };
+    expect(body.error).toBe("account_in_use");
+    expect(body.active_sessions).toBe(1);
+
+    // Nothing was deleted — user, voice, session all intact.
+    expect(await db.getUserById(env.DB, "u-acct-live")).not.toBeNull();
+    expect(await db.getVoice(env.DB, voice.id)).not.toBeNull();
+    expect(await db.getSession(env.DB, session.id)).not.toBeNull();
+  });
+
+  it("hard-deletes user, voices, sessions, streams, metrics, credentials (happy)", async () => {
+    const elCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = (
+          init?.method ?? (input instanceof Request ? input.method : "GET")
+        ).toUpperCase();
+        if (/api\.elevenlabs\.io\/v1\/voices\//.test(url) && method === "DELETE") {
+          elCalls.push(url);
+          return new Response("", { status: 200 });
+        }
+        throw new Error(`unstubbed fetch: ${method} ${url}`);
+      }),
+    );
+
+    await seedUser("u-acct-wipe");
+    const voiceA = await db.createVoice(env.DB, {
+      userId: "u-acct-wipe",
+      elevenlabsVoiceId: "el-wipe-a",
+      name: "a",
+      sourceLang: "en",
+    });
+    const voiceB = await db.createVoice(env.DB, {
+      userId: "u-acct-wipe",
+      elevenlabsVoiceId: "el-wipe-b",
+      name: "b",
+      sourceLang: "ko",
+    });
+    const session = await db.createSession(env.DB, {
+      userId: "u-acct-wipe",
+      voiceId: voiceA.id,
+      title: "past",
+      sourceLang: "en",
+      targetLangs: '["ja"]',
+    });
+    await db.updateSessionStatus(env.DB, {
+      id: session.id,
+      status: "ended",
+      liveSessionId: null,
+    });
+    await db.upsertCredential(env.DB, {
+      userId: "u-acct-wipe",
+      platform: "tiktok",
+      rtmpUrl: "rtmp://x",
+      streamKey: "k",
+      displayName: null,
+    });
+
+    const res = await call("/api/account?user_id=u-acct-wipe", {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      status: string;
+      voices_removed: number;
+    };
+    expect(body.status).toBe("deleted");
+    expect(body.voices_removed).toBe(2);
+
+    // Both voices hit ElevenLabs delete.
+    expect(elCalls).toHaveLength(2);
+    expect(elCalls.some((u) => u.includes("el-wipe-a"))).toBe(true);
+    expect(elCalls.some((u) => u.includes("el-wipe-b"))).toBe(true);
+
+    // D1 is fully wiped.
+    expect(await db.getUserById(env.DB, "u-acct-wipe")).toBeNull();
+    expect(await db.getVoice(env.DB, voiceA.id)).toBeNull();
+    expect(await db.getVoice(env.DB, voiceB.id)).toBeNull();
+    expect(await db.getSession(env.DB, session.id)).toBeNull();
+    expect(await db.listCredentials(env.DB, "u-acct-wipe")).toHaveLength(0);
+  });
+
+  it("still wipes D1 when ElevenLabs delete errors on a voice (silent-path)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("elevenlabs down");
+      }),
+    );
+
+    await seedUser("u-acct-el-err");
+    const voice = await db.createVoice(env.DB, {
+      userId: "u-acct-el-err",
+      elevenlabsVoiceId: "el-err",
+      name: "v",
+      sourceLang: "en",
+    });
+
+    const res = await call("/api/account?user_id=u-acct-el-err", {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+    expect(await db.getUserById(env.DB, "u-acct-el-err")).toBeNull();
+    expect(await db.getVoice(env.DB, voice.id)).toBeNull();
   });
 });
 

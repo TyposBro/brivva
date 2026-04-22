@@ -68,6 +68,17 @@ const StreamInfoSchema = StreamSchema.transform((stream): StreamInfo => ({
   watch_url: stream.watch_url ?? undefined,
 }));
 
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function parseResult<T>(
   promise: Promise<{ data?: unknown; error?: unknown; response: Response }>,
   schema: { parse(input: unknown): T },
@@ -75,10 +86,11 @@ async function parseResult<T>(
   const { data, error, response } = await promise;
   if (!response.ok || data === undefined) {
     const parsed = ErrorResponseSchema.safeParse(error);
-    if (parsed.success) {
-      throw new Error(`API ${response.status}: ${parsed.data.error}`);
-    }
-    throw new Error(`API ${response.status}: request failed`);
+    const code = parsed.success ? parsed.data.error : null;
+    const message = code
+      ? `API ${response.status}: ${code}`
+      : `API ${response.status}: request failed`;
+    throw new ApiError(response.status, code, message);
   }
   return schema.parse(data);
 }
@@ -227,6 +239,15 @@ export function createVoice(body: {
 export function deleteVoice(id: string): Promise<{ status: string }> {
   return parseResult(
     client().DELETE("/api/voices/{id}", { params: { path: { id } } }),
+    StatusResponseSchema,
+  );
+}
+
+export function deleteAccount(userId: string): Promise<{ status: string }> {
+  return parseResult(
+    client().DELETE("/api/account", {
+      params: { query: { user_id: userId } },
+    }),
     StatusResponseSchema,
   );
 }
