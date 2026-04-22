@@ -1644,6 +1644,43 @@ describe("GET /auth/google (happy)", () => {
     expect(location).toContain("scope=openid+email+profile");
     expect(location).toContain(encodeURIComponent(env.GOOGLE_SIGNIN_REDIRECT_URI));
   });
+
+  it("DEV_AUTH_BYPASS=true mints JWT and skips Google round-trip", async () => {
+    const url = new URL("/auth/google", "https://test.local");
+    const devEnv = { ...env, DEV_AUTH_BYPASS: "true" };
+    const res = await app.fetch(new Request(url, { redirect: "manual" }), devEnv);
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    // Must go straight to the FE, never to accounts.google.com.
+    expect(location.startsWith(env.FRONTEND_URL)).toBe(true);
+    expect(location).not.toContain("accounts.google.com");
+    expect(location).toContain("user_id=dev-user");
+    expect(location).toMatch(/#token=eyJ/);
+
+    const jwt = /#token=([^&]+)/.exec(location)![1]!;
+    const claims = await verifyJwt(env.JWT_SECRET, jwt);
+    expect(claims.sub).toBe("dev-user");
+
+    const row = (await env.DB.prepare("SELECT * FROM users WHERE id = ?")
+      .bind("dev-user")
+      .first()) as {
+      email: string;
+      name: string;
+      picture: string | null;
+    } | null;
+    expect(row?.email).toBe("dev@brivva.local");
+    expect(row?.name).toBe("Dev User");
+    expect(row?.picture).toBe(null);
+  });
+
+  it("DEV_AUTH_BYPASS=false keeps the real Google flow intact", async () => {
+    const url = new URL("/auth/google", "https://test.local");
+    const devEnv = { ...env, DEV_AUTH_BYPASS: "false" };
+    const res = await app.fetch(new Request(url, { redirect: "manual" }), devEnv);
+    expect(res.status).toBe(302);
+    // Strict "true" check — any other value falls through to real OAuth.
+    expect(res.headers.get("location") ?? "").toContain("accounts.google.com");
+  });
 });
 
 describe("GET /auth/google/callback (fetch-stubbed, happy)", () => {

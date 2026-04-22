@@ -57,3 +57,18 @@ GRIP_SECRET_KEY=
 
 # Stripe webhook signing secret — optional until billing ships.
 STRIPE_WEBHOOK_SECRET=
+
+# ── Dev-only sign-in bypass ──────────────────────────────────────────────
+#
+# Set to "true" to skip Google OAuth entirely. Clicking "Sign in with
+# Google" in the FE mints a JWT for user_id=dev-user and redirects straight
+# back — no accounts.google.com round-trip, no consent screen, no need to
+# add the dev machine's email to Google's OAuth test users list.
+#
+# Leave unset (or any other value) to exercise the real OAuth flow, which
+# you'll still need when testing YouTube add-channel (that uses a separate
+# callback and is unaffected by this flag).
+#
+# SAFETY: this var is NOT declared in wrangler.toml [vars] — prod deploys
+# run with it unset, so the bypass branch is never reachable there.
+DEV_AUTH_BYPASS=true

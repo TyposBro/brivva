@@ -914,10 +914,69 @@ app.get("/auth/youtube/callback", async (c) => {
 // the same JWT shape /auth/token returns so the FE path after sign-in is
 // unchanged.
 
-app.get("/auth/google", (c) => {
+app.get("/auth/google", async (c) => {
+  // Dev-only bypass: skip the real Google round-trip, mint a JWT for a
+  // fixed local user, and redirect back to the FE as if OAuth completed.
+  // Guarded by a strict "true" string check so only `.dev.vars` (never
+  // wrangler.toml [vars]) can trip it. Prod Workers never set this var,
+  // so this branch is a compile-time no-op there.
+  if (c.env.DEV_AUTH_BYPASS === "true") {
+    const DEV_USER_ID = "dev-user";
+    const user = await db.getOrCreateUser(c.env.DB, DEV_USER_ID);
+    await db.updateUserProfile(c.env.DB, {
+      userId: user.id,
+      email: "dev@brivva.local",
+      name: "Dev User",
+      picture: null,
+    });
+    const jwt = await signJwt(c.env.JWT_SECRET, { sub: user.id });
+    console.warn("[auth] DEV_AUTH_BYPASS active — skipping Google OAuth", {
+      user_id: user.id,
+    });
+    return c.redirect(
+      `${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(user.id)}#token=${jwt}`,
+    );
+  }
   // State is an opaque CSRF token; for sign-in we don't have a user_id yet.
   const state = crypto.randomUUID();
   return c.redirect(gsignin.authorizeUrl(c.env, state));
+});
+
+// Test-only endpoint that hard-resets the dev-user D1 state so the
+// Playwright e2e at `frontend/e2e/full-stack-live.e2e.ts` can run
+// idempotently. Gated by DEV_AUTH_BYPASS — prod Workers have the var
+// unset, so the route 404s.
+app.post("/test/reset-dev-user", async (c) => {
+  if (c.env.DEV_AUTH_BYPASS !== "true") {
+    return c.json({ error: "not found" }, 404);
+  }
+  const DEV_USER_ID = "dev-user";
+  // Delete children before parents to satisfy FK references. session_metrics
+  // rows are keyed by session_id, so they go with sessions.
+  await c.env.DB.prepare(
+    "DELETE FROM session_metrics WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)",
+  )
+    .bind(DEV_USER_ID)
+    .run();
+  await c.env.DB.prepare(
+    "DELETE FROM streams WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)",
+  )
+    .bind(DEV_USER_ID)
+    .run();
+  await c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+    .bind(DEV_USER_ID)
+    .run();
+  await c.env.DB.prepare("DELETE FROM voices WHERE user_id = ?")
+    .bind(DEV_USER_ID)
+    .run();
+  await c.env.DB.prepare("DELETE FROM platform_credentials WHERE user_id = ?")
+    .bind(DEV_USER_ID)
+    .run();
+  await c.env.DB.prepare("DELETE FROM users WHERE id = ?")
+    .bind(DEV_USER_ID)
+    .run();
+  console.warn("[test] DEV_AUTH_BYPASS reset: wiped dev-user D1 state");
+  return c.json({ ok: true });
 });
 
 app.get("/auth/google/callback", async (c) => {

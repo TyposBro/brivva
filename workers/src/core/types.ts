@@ -66,4 +66,11 @@ export type Env = {
   GRIP_SECRET_KEY?: string;
   // Optional — unset during early dev, required before turning billing on.
   STRIPE_WEBHOOK_SECRET?: string;
+  // Dev-only sign-in bypass. When the string "true", `/auth/google` mints a
+  // JWT for a fixed local user and redirects back without ever contacting
+  // accounts.google.com. Guarded by strict string comparison so a stray
+  // value ("false", "1", undefined) keeps the real Google flow. Only set in
+  // `.dev.vars`; never declared in wrangler.toml [vars] so prod Workers run
+  // without this branch compiled in — the `else` path enforces real OAuth.
+  DEV_AUTH_BYPASS?: string;
 };
