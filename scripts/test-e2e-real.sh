@@ -173,4 +173,7 @@ printf "  record secs  : %s\n" "$E2E_RECORD_SECONDS"
 echo "───────────────────────────────────────────────────"
 
 cd "$ROOT/frontend"
-exec bunx playwright test -c playwright.real-stack.config.ts $HEADED "${PW_EXTRA[@]}"
+# `${arr[@]+"${arr[@]}"}` is the macOS-bash-3.2-safe way to expand a
+# possibly-empty array under `set -u` — plain `"${arr[@]}"` errors with
+# "unbound variable" when no extra Playwright args were passed.
+exec bunx playwright test -c playwright.real-stack.config.ts $HEADED ${PW_EXTRA[@]+"${PW_EXTRA[@]}"}
