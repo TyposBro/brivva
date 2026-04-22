@@ -518,6 +518,7 @@ function DashboardInner() {
           />
           <div className="relative shrink-0">
             <select
+              data-testid="session-source-lang"
               className="appearance-none bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label focus:ring-2 focus:ring-primary/50 transition-all outline-none pr-9 cursor-pointer"
               value={sourceLang}
               onChange={(e) => {

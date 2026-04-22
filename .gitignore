@@ -14,6 +14,14 @@ target/
 .test-logs/
 .dev-logs/
 
+# Playwright artifacts (logs, traces, videos, screenshots, reports)
+frontend/test-results/
+frontend/playwright-report/
+**/playwright/.cache/
+**/.last-run.json
+**/trace.zip
+**/error-context.md
+
 # Terraform
 **/.terraform/
 *.tfstate

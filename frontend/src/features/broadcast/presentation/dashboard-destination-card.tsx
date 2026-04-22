@@ -374,6 +374,7 @@ export function DestinationCard(props: {
 
   return (
     <div
+      data-testid={`destination-card-${dest.platform}`}
       className={cn(
         "bg-surface-container-low rounded-xl overflow-hidden",
         validationError && "ring-1 ring-error/60",
