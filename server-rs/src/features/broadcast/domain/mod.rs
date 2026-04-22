@@ -3,6 +3,7 @@ pub mod metrics;
 use axum::extract::ws::Message;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -159,6 +160,23 @@ impl LiveSessionHandle {
     }
 }
 
+// ── TTS dispatch request ──────────────────────────────────
+
+/// All inputs the per-lang TTS worker needs to render + broadcast a single
+/// utterance. Lives in the domain layer (rather than next to the ElevenLabs
+/// client) because `LiveSession.tts_workers` stores `mpsc::Sender<TtsRequest>`
+/// and the domain layer cannot depend on `data/`. The data-layer worker
+/// consumes requests from the channel and performs the network I/O.
+pub struct TtsRequest {
+    pub text: String,
+    pub utterance_id: u64,
+    pub target_lang: Lang,
+    pub handle: LiveSessionHandle,
+    pub selected_voice_id: Option<String>,
+    pub selected_voice_enrollment_lang: Option<Lang>,
+    pub voice_preset: VoicePreset,
+}
+
 // ── Live Session Runtime ──────────────────────────────────
 
 pub struct LiveSession {
@@ -190,6 +208,14 @@ pub struct LiveSession {
     /// task. `None` for sessions that don't have a Workers session_id (no
     /// one to report to).
     pub metrics: Option<Arc<SessionMetrics>>,
+    /// Per-target-language TTS worker channels. Populated in
+    /// `start_stt_pipelines` before the Soniox tasks spawn. The STT response
+    /// processor does a non-blocking `try_send` here instead of awaiting TTS
+    /// inline — that was the April 2026 backpressure bug where one slow
+    /// ElevenLabs call stalled the Soniox read loop. Dropping `LiveSession`
+    /// drops every `Sender`, which closes the channels and lets workers exit
+    /// naturally on `recv() == None`.
+    pub tts_workers: HashMap<Lang, mpsc::Sender<TtsRequest>>,
 }
 
 impl LiveSession {
@@ -211,6 +237,7 @@ impl LiveSession {
             rtmp_langs: Vec::new(),
             pipeline_config,
             metrics: None,
+            tts_workers: HashMap::new(),
         }
     }
 

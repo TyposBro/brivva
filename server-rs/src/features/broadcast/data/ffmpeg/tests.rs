@@ -8,7 +8,7 @@ fn timing_constants_match_documented_values() {
     assert_eq!(IDLE_RESTART_THRESHOLD, Duration::from_secs(25));
     assert_eq!(HOST_AUDIO_CAP_BYTES, 20 * 88_200);
     assert_eq!(HOST_VIDEO_CAP_FRAMES, 20 * 30);
-    assert_eq!(TTS_QUEUE_CAP_BYTES, 5 * 88_200);
+    assert_eq!(TTS_QUEUE_CAP_BYTES, 60 * 88_200);
 }
 
 #[test]
@@ -237,15 +237,33 @@ fn push_tts_skips_source_streams_even_when_lang_matches() {
 }
 
 #[test]
-fn push_tts_caps_queue_at_5s_of_pcm_discarding_oldest_bytes() {
+fn push_tts_caps_queue_at_60s_of_pcm_discarding_oldest_bytes() {
     let mut m = RtmpManager::new();
     m.streams
         .insert("t".into(), fake_exited_stream("t", "ja", false));
 
-    // Push more than the 5s cap — oldest bytes drop so head index shifts.
+    // Push 1 byte beyond the 60s cap — the head-chop loop must reduce the
+    // queue to exactly the cap, and (per §0.5.4) emit a warn log. The warn
+    // isn't asserted here without a tracing capture sink; the plan verifies
+    // it by grep during the dev-stack smoke test.
     m.push_tts("ja", vec![1u8; TTS_QUEUE_CAP_BYTES + 100]);
     let q_len = m.streams["t"].buffers.tts.lock().unwrap().len();
     assert!(q_len <= TTS_QUEUE_CAP_BYTES);
+}
+
+#[test]
+fn push_tts_does_not_drop_when_payload_fits_within_cap() {
+    // Regression guard for the April 2026 bump from 5s → 60s: a 15s utterance
+    // (≈ one 291-char Korean sentence) used to trigger head-chop under the
+    // old cap. At 60s it must land fully intact.
+    let mut m = RtmpManager::new();
+    m.streams
+        .insert("t".into(), fake_exited_stream("t", "ja", false));
+
+    let fifteen_seconds = 15 * 88_200;
+    m.push_tts("ja", vec![1u8; fifteen_seconds]);
+    let q_len = m.streams["t"].buffers.tts.lock().unwrap().len();
+    assert_eq!(q_len, fifteen_seconds, "15s of PCM must fit under 60s cap");
 }
 
 #[test]

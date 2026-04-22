@@ -56,7 +56,25 @@ pub fn kill_orphan_ffmpeg() {
 }
 
 /// Decode MP3 bytes to raw PCM s16le 44.1 kHz mono via FFmpeg subprocess.
+///
+/// Wrapped in a hard 30s timeout (§0.5.4): without it, a hung ffmpeg child
+/// (malformed MP3, fd exhaustion, kernel pipe stall) silently froze the
+/// per-lang TTS worker — every subsequent utterance queued behind it,
+/// listeners on Grip / YouTube heard nothing, and ops had no greppable
+/// trace. April 2026 default-male-voice dropout was this exact path.
 pub async fn decode_mp3_to_pcm(mp3: &[u8]) -> Result<Vec<u8>, String> {
+    use std::time::Duration;
+    const DECODE_TIMEOUT: Duration = Duration::from_secs(30);
+    match tokio::time::timeout(DECODE_TIMEOUT, decode_mp3_to_pcm_inner(mp3)).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "FFmpeg mp3→pcm decode exceeded {}s timeout",
+            DECODE_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+async fn decode_mp3_to_pcm_inner(mp3: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = TokioCommand::new("ffmpeg")
         .args([
             "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1",

@@ -71,10 +71,21 @@ impl CaptionState {
 }
 
 /// Remove control chars and cap caption length so drawtext stays legible.
+/// Also escape `%` and `\` because ffmpeg's drawtext filter treats `%` as
+/// a printf-style format prefix and `\` as an escape introducer — when a
+/// translation contains literal `7%` or `2\3`, drawtext throws
+/// `[Parsed_drawtext_0] Stray % near '...'` and skips the frame's caption.
+/// April 2026 prod regression: Chinese promo translations carrying `%`
+/// disappeared from the burn-in despite the rest of the pipeline working.
 pub(super) fn sanitize_caption(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || *c == '\n')
         .take(200)
+        .flat_map(|c| match c {
+            '%' => vec!['\\', '%'],
+            '\\' => vec!['\\', '\\'],
+            _ => vec![c],
+        })
         .collect()
 }
 
@@ -112,6 +123,20 @@ mod tests {
     #[test]
     fn sanitize_caption_keeps_short_text_unchanged() {
         assert_eq!(sanitize_caption("안녕하세요"), "안녕하세요");
+    }
+
+    #[test]
+    fn sanitize_caption_escapes_percent_for_drawtext() {
+        // ffmpeg drawtext treats `%` as a printf-style format prefix.
+        // Untouched, `7%` causes "Stray % near ..." and the caption
+        // disappears for that frame. Escape must produce `\%`.
+        assert_eq!(sanitize_caption("7%"), "7\\%");
+        assert_eq!(sanitize_caption("100% off"), "100\\% off");
+    }
+
+    #[test]
+    fn sanitize_caption_escapes_backslash_for_drawtext() {
+        assert_eq!(sanitize_caption("path\\to"), "path\\\\to");
     }
 
     #[test]

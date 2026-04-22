@@ -1,11 +1,11 @@
-use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg, TtsRequest};
 use futures_util::StreamExt;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_tungstenite::tungstenite;
 
 use super::soniox::{SONIOX_END_TOKEN, SonioxMode, SonioxResponse};
 use super::stt_transport::SonioxStream;
 use super::to_ws;
-use super::tts::{TtsRequest, broadcast_translated_tts};
 
 pub(super) struct ProcessorArgs {
     pub handle: LiveSessionHandle,
@@ -63,7 +63,18 @@ pub(super) fn spawn_response_processor(
                 interim_tail: &interim_tail,
             });
 
-            if endpoint_hit {
+            let flush_reason = flush_reason(endpoint_hit, &final_text);
+            if let Some(reason) = flush_reason {
+                // §0.5.4: operators need to tell "Soniox sent <end>" apart
+                // from "our punctuation/length heuristic fired" when
+                // diagnosing choppy playback or scrambled sentence breaks.
+                tracing::debug!(
+                    session_id = %handle.id,
+                    tag = %tag,
+                    reason = reason,
+                    char_count = final_text.chars().count(),
+                    "flushing utterance"
+                );
                 utterance_counter = finalize_utterance_if_needed(FinalizeArgs {
                     mode: &mode,
                     utterance_counter,
@@ -125,6 +136,46 @@ fn parse_soniox_response(tag: &str, text: &str) -> Option<SonioxResponse> {
             None
         }
     }
+}
+
+/// Decide whether to flush the in-flight utterance now, and why. The old
+/// behaviour flushed only when Soniox emitted `<end>` — for fast-talking
+/// hosts reading a script with no pauses, that meant one giant utterance
+/// that then hit the TTS deadline and got dropped wholesale. We now also
+/// flush on sentence-ending punctuation or a hard length ceiling so the
+/// translation ships in chewable chunks.
+///
+/// Order matters: endpoint wins, then length, then punctuation. Reporting
+/// the reason is §0.5.4 observability — absent a log line, we can't tell
+/// which heuristic is firing in prod.
+fn flush_reason(endpoint_hit: bool, final_text: &str) -> Option<&'static str> {
+    if endpoint_hit {
+        return Some("endpoint");
+    }
+    let char_count = final_text.chars().count();
+    // Minimum chunk size so "Hi." doesn't trigger a flush on its own — short
+    // utterances cost as much as long ones to synthesize and piling up tiny
+    // chunks shreds ElevenLabs concurrency limits.
+    const FLUSH_MIN_CHARS: usize = 30;
+    // Hard ceiling. 120 chars ≈ 6-12 seconds of synth at Flash v2.5 rates,
+    // which fits comfortably under the 30s TTS deadline.
+    const FLUSH_MAX_CHARS: usize = 120;
+    if char_count < FLUSH_MIN_CHARS {
+        return None;
+    }
+    if char_count >= FLUSH_MAX_CHARS {
+        return Some("length");
+    }
+    const SENTENCE_ENDERS: &[char] = &['.', '!', '?', '。', '！', '？', ',', '，', ';', '；', '、'];
+    if final_text
+        .chars()
+        .rev()
+        .take(3)
+        .any(|c| SENTENCE_ENDERS.contains(&c))
+    {
+        return Some("punctuation");
+    }
+    None
 }
 
 fn accumulate_tokens(
@@ -293,16 +344,82 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         );
     }
 
-    broadcast_translated_tts(TtsRequest {
-        text: committed.to_string(),
+    dispatch_tts_to_worker(DispatchTtsArgs {
+        committed,
         utterance_id,
-        target_lang: target_lang.clone(),
-        handle: handle.clone(),
+        target_lang,
+        handle,
         selected_voice_id,
         selected_voice_enrollment_lang,
         voice_preset,
-    })
-    .await;
+    });
+}
+
+struct DispatchTtsArgs<'a> {
+    committed: &'a str,
+    utterance_id: u64,
+    target_lang: &'a Lang,
+    handle: &'a LiveSessionHandle,
+    selected_voice_id: Option<String>,
+    selected_voice_enrollment_lang: Option<Lang>,
+    voice_preset: crate::features::broadcast::domain::VoicePreset,
+}
+
+/// Non-blocking hand-off to the per-lang TTS worker. Before April 2026 this
+/// code awaited `broadcast_translated_tts` inline inside the Soniox response
+/// loop, which meant a single slow ElevenLabs call stalled every subsequent
+/// STT frame — the session looked like Soniox stopped sending transcripts.
+/// Now the STT loop dispatches in O(µs) and the worker does the heavy lift.
+fn dispatch_tts_to_worker(args: DispatchTtsArgs<'_>) {
+    let sender = args
+        .handle
+        .sessions
+        .get(&args.handle.id)
+        .and_then(|session| session.tts_workers.get(args.target_lang).cloned());
+    let Some(sender) = sender else {
+        // §0.5.4: no worker registered — either the session is torn down or
+        // ElevenLabs credentials were missing at spawn time. Either way the
+        // utterance will not be synthesized; log it so operators don't
+        // chase ghost Soniox failures.
+        tracing::warn!(
+            target_lang = %args.target_lang,
+            utterance_id = args.utterance_id,
+            "tts dispatch dropped: no worker registered for target_lang"
+        );
+        return;
+    };
+    let req = TtsRequest {
+        text: args.committed.to_string(),
+        utterance_id: args.utterance_id,
+        target_lang: args.target_lang.clone(),
+        handle: args.handle.clone(),
+        selected_voice_id: args.selected_voice_id,
+        selected_voice_enrollment_lang: args.selected_voice_enrollment_lang,
+        voice_preset: args.voice_preset,
+    };
+    match sender.try_send(req) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            // §0.5.4: worker backlog saturated — ElevenLabs is likely slow
+            // or down. Dropping the new request keeps the STT loop moving
+            // forward; an older in-flight utterance will still reach the
+            // viewer, which is better than freezing the stream.
+            tracing::warn!(
+                target_lang = %args.target_lang,
+                utterance_id = args.utterance_id,
+                "tts dispatch dropped: worker queue full"
+            );
+        }
+        Err(TrySendError::Closed(_)) => {
+            // §0.5.4: receiver end gone. Normally this only happens during
+            // teardown; if it fires mid-session the worker task crashed.
+            tracing::warn!(
+                target_lang = %args.target_lang,
+                utterance_id = args.utterance_id,
+                "tts dispatch dropped: worker channel closed"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +858,166 @@ mod tests {
         // disconnect so outer loop may attempt reconnect.
         assert!(disconnected);
         server.abort();
+    }
+
+    // ── flush_reason ──────────────────────────────────────────
+
+    #[test]
+    fn flush_reason_returns_endpoint_when_soniox_end_token_fired() {
+        assert_eq!(flush_reason(true, ""), Some("endpoint"));
+        // Endpoint wins even if other heuristics would also fire.
+        assert_eq!(flush_reason(true, &"a".repeat(500)), Some("endpoint"));
+    }
+
+    #[test]
+    fn flush_reason_returns_none_for_text_shorter_than_min_chars() {
+        assert_eq!(flush_reason(false, ""), None);
+        assert_eq!(flush_reason(false, "Hi."), None);
+        assert_eq!(flush_reason(false, &"a".repeat(29)), None);
+    }
+
+    #[test]
+    fn flush_reason_returns_length_when_text_exceeds_hard_ceiling() {
+        // 120 chars with no punctuation — force-flush on length alone so
+        // long pauseless monologues don't accumulate into one giant chunk
+        // that then blows the TTS deadline.
+        assert_eq!(flush_reason(false, &"a".repeat(120)), Some("length"));
+        assert_eq!(flush_reason(false, &"b".repeat(500)), Some("length"));
+    }
+
+    #[test]
+    fn flush_reason_returns_punctuation_when_final_char_is_sentence_end() {
+        let text = "This is a long enough sentence.";
+        assert!(text.chars().count() >= 30);
+        assert_eq!(flush_reason(false, text), Some("punctuation"));
+    }
+
+    #[test]
+    fn flush_reason_handles_cjk_sentence_enders() {
+        // Build each string by padding a 30-char filler with the ender so
+        // the min-length gate passes regardless of how many chars the
+        // human-readable stem happens to have.
+        let ko_base: String = "가".repeat(35);
+        let ko = format!("{}。", ko_base);
+        assert_eq!(flush_reason(false, &ko), Some("punctuation"));
+        let zh_base: String = "中".repeat(35);
+        let zh = format!("{}？", zh_base);
+        assert_eq!(flush_reason(false, &zh), Some("punctuation"));
+        let ja_base: String = "あ".repeat(35);
+        let ja = format!("{}、", ja_base);
+        assert_eq!(flush_reason(false, &ja), Some("punctuation"));
+    }
+
+    #[test]
+    fn flush_reason_returns_none_when_over_min_but_no_punctuation_and_under_ceiling() {
+        // 30 chars, no punctuation — keep accumulating until we see one.
+        let text: String = "x".repeat(40);
+        assert_eq!(flush_reason(false, &text), None);
+    }
+
+    // ── dispatch_tts_to_worker ────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_tts_to_worker_forwards_request_when_worker_registered() {
+        use crate::features::broadcast::domain::VoicePreset;
+
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        dispatch_tts_to_worker(DispatchTtsArgs {
+            committed: "konnichiwa",
+            utterance_id: 42,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+        });
+
+        let req = tts_rx.recv().await.expect("worker should receive");
+        assert_eq!(req.utterance_id, 42);
+        assert_eq!(req.text, "konnichiwa");
+        assert_eq!(req.target_lang, Lang::Ja);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tts_to_worker_drops_silently_when_no_worker_for_target_lang() {
+        use crate::features::broadcast::domain::VoicePreset;
+
+        // Session exists but no worker registered for Ja — the dispatch
+        // should just log + return. Previously the STT loop awaited TTS
+        // inline and would hang here; now it must not panic or block.
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        dispatch_tts_to_worker(DispatchTtsArgs {
+            committed: "hello",
+            utterance_id: 1,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+        });
+        // Nothing observable beyond no-panic; the §0.5.4 warn is fired by
+        // `tracing` into a test-mode sink.
+    }
+
+    #[tokio::test]
+    async fn dispatch_tts_to_worker_drops_request_when_worker_queue_is_full() {
+        use crate::features::broadcast::domain::VoicePreset;
+
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        // Single-slot channel that we will not drain, so the second send
+        // exercises the TrySendError::Full branch.
+        let (tts_tx, _tts_rx) = mpsc::channel::<TtsRequest>(1);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        let args_template = || DispatchTtsArgs {
+            committed: "t",
+            utterance_id: 1,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+        };
+        dispatch_tts_to_worker(args_template()); // fills the single slot
+        // Second call must not block, panic, or loop.
+        dispatch_tts_to_worker(args_template());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tts_to_worker_logs_when_channel_is_closed_after_receiver_drop() {
+        use crate::features::broadcast::domain::VoicePreset;
+
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, tts_rx) = mpsc::channel::<TtsRequest>(1);
+        drop(tts_rx); // simulate worker already gone
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        // Must return without panic; this path fires the closed-channel warn.
+        dispatch_tts_to_worker(DispatchTtsArgs {
+            committed: "x",
+            utterance_id: 1,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+        });
     }
 }

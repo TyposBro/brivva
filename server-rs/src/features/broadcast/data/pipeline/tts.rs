@@ -1,3 +1,4 @@
+pub use crate::features::broadcast::domain::TtsRequest;
 use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg, VoicePreset};
 use futures_util::StreamExt;
 use std::time::{Duration, Instant};
@@ -65,27 +66,35 @@ fn default_voice(target_lang: &Lang, preset: VoicePreset) -> ResolvedVoice {
     }
 }
 
-/// All inputs to the TTS broadcast path bundled so the public entry point
-/// stays within the §3.3 arg budget.
-pub struct TtsRequest {
-    pub text: String,
-    pub utterance_id: u64,
-    pub target_lang: Lang,
-    pub handle: LiveSessionHandle,
-    pub selected_voice_id: Option<String>,
-    /// Enrollment language of the cloned voice, when Workers sends it. None
-    /// when the voice row is pre-schema or the voice is a default library
-    /// voice. When `Some(enroll) != target_lang`, we log a warning and bias
-    /// back to the default voice to avoid the April 2026 Indian-accent
-    /// regression (cross-lingual inference on a cloned v2 voice).
-    pub selected_voice_enrollment_lang: Option<Lang>,
-    /// Host-selected voice preset for this session.
-    pub voice_preset: VoicePreset,
+/// Compute the per-utterance TTS deadline from its character count. Short
+/// utterances get a tight 5 s floor so a stuck request fails fast; long ones
+/// get up to 30 s because Flash v2.5 streams MP3 at roughly 8-12 chars/s and
+/// a 291-char monologue cannot possibly finish inside 5 s. The old fixed
+/// `Duration::from_secs(5)` silently dropped every long utterance — that was
+/// the other half of the April 2026 Korean/Japanese dropout bug.
+pub fn compute_tts_deadline(text: &str) -> Duration {
+    let char_count = text.chars().count() as u64;
+    const FLOOR_MS: u64 = 5_000;
+    const PER_CHAR_MS: u64 = 120;
+    const CEILING_MS: u64 = 30_000;
+    Duration::from_millis((FLOOR_MS + char_count * PER_CHAR_MS).min(CEILING_MS))
 }
 
 pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
-    let tts_deadline = Duration::from_secs(5);
+    let tts_deadline = compute_tts_deadline(&req.text);
+    // §0.5.4: operators reading logs need to distinguish "deadline too
+    // tight" (scale bug) from "utterance dropped for another reason".
+    // Emit the computed deadline + char count at dispatch entry so a
+    // post-mortem can correlate.
+    tracing::info!(
+        live_session_id = %req.handle.id,
+        utterance_id = req.utterance_id,
+        target_lang = %req.target_lang,
+        char_count = req.text.chars().count(),
+        deadline_ms = tts_deadline.as_millis() as u64,
+        "tts dispatch starting"
+    );
 
     let Some((api_key, base_url, force_default_voice)) =
         req.handle.sessions.get(&req.handle.id).map(|s| {
@@ -173,6 +182,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     };
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
+    let pcm_bytes = audio_buffer.len();
     push_tts_into_rtmp(&req.target_lang, &req.handle, &audio_buffer).await;
     notify_host_tts_complete(NotifyCompleteArgs {
         lang: &req.target_lang,
@@ -180,6 +190,19 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         tts_ms,
         handle: &req.handle,
     });
+    // §0.5.4: positive-path grep target — "tts complete" paired with the
+    // "tts dispatch starting" log gives operators a full roundtrip view.
+    // Absence of this line for a given utterance_id + lang is the
+    // unambiguous signal that synthesis dropped (vs WS transport dropped).
+    tracing::info!(
+        live_session_id = %req.handle.id,
+        utterance_id = req.utterance_id,
+        target_lang = %req.target_lang,
+        pcm_bytes,
+        duration_ms = tts_ms,
+        deadline_ms = tts_deadline.as_millis() as u64,
+        "tts complete"
+    );
 }
 
 struct FetchTtsArgs<'a> {
@@ -406,6 +429,37 @@ mod tests {
         session.host_tx = Some(tx);
         sessions.insert(id.into(), session);
         (sessions, rx)
+    }
+
+    #[test]
+    fn compute_tts_deadline_floor_is_5s_for_empty_or_short_text() {
+        assert_eq!(compute_tts_deadline(""), Duration::from_millis(5_000));
+        assert_eq!(compute_tts_deadline("Hi."), Duration::from_millis(5_360));
+    }
+
+    #[test]
+    fn compute_tts_deadline_scales_linearly_in_the_middle_range() {
+        // 100 chars → 5000 + 100*120 = 17000 ms.
+        let text: String = "a".repeat(100);
+        assert_eq!(compute_tts_deadline(&text), Duration::from_millis(17_000));
+    }
+
+    #[test]
+    fn compute_tts_deadline_is_clamped_to_30s_ceiling() {
+        let long: String = "a".repeat(300);
+        // 5000 + 300*120 = 41000 → clamp to 30000.
+        assert_eq!(compute_tts_deadline(&long), Duration::from_millis(30_000));
+        let longer: String = "a".repeat(10_000);
+        assert_eq!(compute_tts_deadline(&longer), Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn compute_tts_deadline_counts_chars_not_bytes_for_cjk() {
+        // 100 Korean hangul chars (3 bytes each in UTF-8). If the impl
+        // counted bytes, it would compute 5000 + 300*120 = 41000 → clamp.
+        // Correct behaviour counts chars → 17000.
+        let ko: String = "안".repeat(100);
+        assert_eq!(compute_tts_deadline(&ko), Duration::from_millis(17_000));
     }
 
     #[test]

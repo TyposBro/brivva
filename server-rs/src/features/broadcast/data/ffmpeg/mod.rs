@@ -43,9 +43,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
 /// Cap the host video buffer at ~20 s of frames @ 30 fps.
 const HOST_VIDEO_CAP_FRAMES: usize = 20 * 30;
-/// Cap the TTS queue at 5 s of PCM. Oldest bytes are dropped on overflow so
+/// Cap the TTS queue at 60 s of PCM. Oldest bytes are dropped on overflow so
 /// the translated speech stays fresh rather than falling further behind.
-const TTS_QUEUE_CAP_BYTES: usize = 5 * 88_200;
+/// Raised from 5 s in April 2026: a single 291-char Korean utterance renders
+/// to ~15 s of PCM, which at the old 5 s cap got its head silently chopped
+/// off — listeners heard translations starting mid-sentence. 60 s gives a
+/// 3x margin over worst-case ElevenLabs slowdown backlog.
+const TTS_QUEUE_CAP_BYTES: usize = 60 * 88_200;
 /// Max FFmpeg restart attempts per stream.
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
@@ -277,8 +281,21 @@ impl RtmpManager {
             if stream.lang == lang && !stream.is_source && !stream.passthrough {
                 let mut q = stream.buffers.tts.lock().unwrap();
                 q.extend(pcm.iter().copied());
+                let before = q.len();
                 while q.len() > TTS_QUEUE_CAP_BYTES {
                     q.pop_front();
+                }
+                let dropped = before.saturating_sub(q.len());
+                // §0.5.4: head-chop was silent before April 2026. A listener
+                // would hear a translation starting mid-sentence with no log
+                // line anywhere. Now every overflow leaves a greppable trace.
+                if dropped > 0 {
+                    tracing::warn!(
+                        lang = %lang,
+                        dropped_bytes = dropped,
+                        cap_bytes = TTS_QUEUE_CAP_BYTES,
+                        "tts pcm queue overflow — head bytes dropped"
+                    );
                 }
             }
         }

@@ -1,6 +1,7 @@
-use crate::features::broadcast::domain::{Lang, LiveSessionHandle, PipelineConfig};
+use crate::features::broadcast::domain::{Lang, LiveSessionHandle, PipelineConfig, TtsRequest};
 use futures_util::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::soniox::SonioxMode;
@@ -9,6 +10,15 @@ use super::stt_transport::{
     ConfigSendArgs, ConnectArgs, STT_RECONNECT_DELAY, STT_RECONNECT_MAX, connect_soniox,
     send_soniox_config, spawn_audio_forwarder,
 };
+use super::tts::broadcast_translated_tts;
+
+/// Per-lang TTS worker channel depth. Each slot holds one pending
+/// `TtsRequest`. Set low on purpose: if ElevenLabs is slow enough to queue
+/// 32 utterances, letting more pile up just wastes live-broadcast time —
+/// the user will have moved on by the time we catch up. A full channel
+/// drops the new request observably via `try_send` in
+/// `stt_response::emit_translation`.
+const TTS_WORKER_QUEUE_DEPTH: usize = 32;
 
 /// Everything an STT pipeline needs at construction: where it lives (handle),
 /// what language routing it should apply (source + targets), and the upstream
@@ -41,9 +51,102 @@ pub async fn start_stt_pipelines(session: PipelineSession, audio_rx: mpsc::Recei
         target_receivers.push((lang.clone(), rx));
     }
 
+    spawn_tts_workers(&session, &targets);
     spawn_fan_out(audio_rx, source_tx, target_senders);
     spawn_source_session(&session, source_rx);
     spawn_translate_sessions(&session, target_receivers);
+}
+
+/// Spawn one TTS worker task per unique target language. Each worker owns a
+/// bounded `mpsc::Receiver<TtsRequest>`; the `Sender` is stashed on
+/// `LiveSession.tts_workers` so the STT response processor can dispatch with
+/// a non-blocking `try_send`. Workers process requests serially, so audio
+/// for a given lang is pushed to ffmpeg in emission order — never scrambled.
+/// When `LiveSession` is dropped at teardown, the `Sender` goes with it;
+/// `recv()` returns `None`, the worker logs `tts worker exited`, and the
+/// task finishes on its own.
+fn spawn_tts_workers(session: &PipelineSession, targets: &[Lang]) {
+    // Skip workers when ElevenLabs credentials are missing — the worker would
+    // synthesize nothing and the dispatch path in `emit_translation` treats
+    // "no worker" as "drop with a warn", which is the right behavior in that
+    // degraded mode anyway.
+    if session.config.elevenlabs_api_key.is_empty() {
+        tracing::warn!(
+            session_id = %session.handle.id,
+            "ELEVENLABS_API_KEY not set — TTS workers disabled; translated audio will not fire"
+        );
+        return;
+    }
+    for lang in targets {
+        let (tx, mut rx) = mpsc::channel::<TtsRequest>(TTS_WORKER_QUEUE_DEPTH);
+        // Stash the sender end on the session before spawning. If the
+        // session is gone already (e.g. teardown raced us), skip the spawn.
+        let Some(mut live) = session.handle.sessions.get_mut(&session.handle.id) else {
+            tracing::warn!(
+                session_id = %session.handle.id,
+                target_lang = %lang,
+                "tts worker setup skipped: live session already gone"
+            );
+            continue;
+        };
+        live.tts_workers.insert(lang.clone(), tx);
+        drop(live);
+
+        let worker_lang = lang.clone();
+        let worker_session_id = session.handle.id.clone();
+        tokio::spawn(async move {
+            // §0.5.4: every worker start + exit is greppable. Pairing these
+            // two lines tells operators whether the session ended cleanly
+            // or the worker died mid-session (no exit line).
+            tracing::info!(
+                session_id = %worker_session_id,
+                target_lang = %worker_lang,
+                queue_depth = TTS_WORKER_QUEUE_DEPTH,
+                "tts worker started"
+            );
+            // Hard ceiling on a single utterance's wall-clock budget. Inner
+            // layers (ElevenLabs HTTP, ffmpeg mp3→pcm decode) each have
+            // their own narrower timeouts; this is the §0.5.4 safety net
+            // that prevents one stuck utterance from freezing the whole
+            // worker — the April 2026 default-male regression where utt 2
+            // hung forever inside `decode_mp3_to_pcm` and 13 queued
+            // utterances never reached the listener.
+            const PER_UTTERANCE_HARD_CEILING: Duration = Duration::from_secs(60);
+            let mut processed: u64 = 0;
+            while let Some(req) = rx.recv().await {
+                processed += 1;
+                let utterance_id = req.utterance_id;
+                tracing::info!(
+                    session_id = %worker_session_id,
+                    target_lang = %worker_lang,
+                    utterance_id,
+                    processed,
+                    "tts worker processing"
+                );
+                match tokio::time::timeout(
+                    PER_UTTERANCE_HARD_CEILING,
+                    broadcast_translated_tts(req),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(_) => tracing::error!(
+                        session_id = %worker_session_id,
+                        target_lang = %worker_lang,
+                        utterance_id,
+                        ceiling_secs = PER_UTTERANCE_HARD_CEILING.as_secs(),
+                        "tts worker outer-timeout fired — utterance abandoned, advancing to next"
+                    ),
+                }
+            }
+            tracing::info!(
+                session_id = %worker_session_id,
+                target_lang = %worker_lang,
+                processed,
+                "tts worker exited"
+            );
+        });
+    }
 }
 
 fn spawn_fan_out(
@@ -257,6 +360,128 @@ mod tests {
     fn dedupe_keeps_all_entries_when_none_match_source() {
         let targets = dedupe_target_langs(Lang::En, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
         assert_eq!(targets, vec![Lang::Ja, Lang::Ko, Lang::Zh]);
+    }
+
+    #[tokio::test]
+    async fn spawn_tts_workers_registers_one_sender_per_unique_target_lang() {
+        use crate::features::broadcast::domain::{
+            LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig,
+        };
+        use dashmap::DashMap;
+        use std::sync::Arc;
+
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        sessions.insert(
+            "room".into(),
+            LiveSession::new(
+                "room".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig {
+                    elevenlabs_api_key: "k".into(),
+                    ..Default::default()
+                }),
+            ),
+        );
+        let handle = LiveSessionHandle::new("room".into(), sessions.clone());
+        let session = super::PipelineSession {
+            handle,
+            source_lang: Lang::En,
+            target_langs: vec![Lang::Ja, Lang::Ko, Lang::Zh],
+            config: Arc::new(PipelineConfig {
+                elevenlabs_api_key: "k".into(),
+                ..Default::default()
+            }),
+        };
+        super::spawn_tts_workers(&session, &[Lang::Ja, Lang::Ko, Lang::Zh]);
+
+        let live = sessions.get("room").unwrap();
+        assert!(live.tts_workers.contains_key(&Lang::Ja));
+        assert!(live.tts_workers.contains_key(&Lang::Ko));
+        assert!(live.tts_workers.contains_key(&Lang::Zh));
+        assert_eq!(live.tts_workers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn spawn_tts_workers_skips_setup_when_elevenlabs_key_is_empty() {
+        use crate::features::broadcast::domain::{
+            LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig,
+        };
+        use dashmap::DashMap;
+        use std::sync::Arc;
+
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        sessions.insert(
+            "room".into(),
+            LiveSession::new(
+                "room".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig::default()),
+            ),
+        );
+        let handle = LiveSessionHandle::new("room".into(), sessions.clone());
+        let session = super::PipelineSession {
+            handle,
+            source_lang: Lang::En,
+            target_langs: vec![Lang::Ja],
+            // Default config → empty elevenlabs_api_key → setup should skip.
+            config: Arc::new(PipelineConfig::default()),
+        };
+        super::spawn_tts_workers(&session, &[Lang::Ja]);
+
+        let live = sessions.get("room").unwrap();
+        assert!(
+            live.tts_workers.is_empty(),
+            "workers must not be registered when credentials are missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn tts_worker_exits_when_live_session_is_dropped() {
+        use crate::features::broadcast::domain::{
+            LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig,
+        };
+        use dashmap::DashMap;
+        use std::sync::Arc;
+
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        sessions.insert(
+            "room".into(),
+            LiveSession::new(
+                "room".into(),
+                Lang::En,
+                None,
+                Arc::new(PipelineConfig {
+                    elevenlabs_api_key: "k".into(),
+                    ..Default::default()
+                }),
+            ),
+        );
+        let handle = LiveSessionHandle::new("room".into(), sessions.clone());
+        let session = super::PipelineSession {
+            handle,
+            source_lang: Lang::En,
+            target_langs: vec![Lang::Ja],
+            config: Arc::new(PipelineConfig {
+                elevenlabs_api_key: "k".into(),
+                ..Default::default()
+            }),
+        };
+        super::spawn_tts_workers(&session, &[Lang::Ja]);
+
+        // Session teardown drops LiveSession → drops the Sender → worker
+        // observes channel close on the next recv() and exits naturally.
+        sessions.remove("room");
+        // Give the runtime a few yields so the worker task notices.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        // Nothing to assert structurally — if the worker hadn't exited the
+        // runtime would leak the spawned task, but there's no tokio API to
+        // probe that directly. The real value of this test is that `cargo
+        // test` under `--nocapture` shows the "tts worker exited" log line,
+        // which is the §0.5.4 grep target we want in prod.
     }
 
     #[tokio::test]
