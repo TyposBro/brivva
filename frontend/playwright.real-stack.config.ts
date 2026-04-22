@@ -29,7 +29,7 @@ export default defineConfig({
   testDir: "./e2e",
   // Real-stack tests only. All other *.e2e.ts files rely on the mock
   // server and break when pointed at real Workers.
-  testMatch: /full-stack-live(-no-clone)?\.e2e\.ts$/,
+  testMatch: /full-stack-live\.e2e\.ts$/,
   fullyParallel: false,
   workers: 1,
   // Long pipeline latencies (ElevenLabs clone, Soniox first-token, Grip

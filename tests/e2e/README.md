@@ -4,6 +4,10 @@ One-scenario regression harness for the media pipeline. Runs nightly + on PRs
 that touch `server-rs/` or this folder. Answers: **is the host-audio → RTMP
 pipeline alive?**
 
+> **Looking for the parameterized real-stack Playwright test?** See
+> [PLAYWRIGHT.md](./PLAYWRIGHT.md) — drives the actual UI against your
+> live Grip / YouTube / custom-RTMP destinations with CLI matrix flags.
+
 ## What it does
 
 1. Spin up a self-contained stack via `compose.e2e.yml`:
