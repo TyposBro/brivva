@@ -36,9 +36,11 @@ pub(super) fn build_ffmpeg_args(
             "-loglevel".into(),
             "warning".into(),
             "-fflags".into(),
-            "+genpts+nobuffer".into(),
+            "+genpts".into(),
             "-flags".into(),
             "low_delay".into(),
+            "-thread_queue_size".into(),
+            "512".into(),
             "-use_wallclock_as_timestamps".into(),
             "1".into(),
             "-r".into(),
@@ -82,9 +84,24 @@ pub(super) fn build_ffmpeg_args(
             "-g".into(),
             "30".into(),
         ]),
-        VideoInputMode::H264AnnexB => {
-            ffmpeg_args.extend_from_slice(&["-c:v".into(), "copy".into()])
-        }
+        VideoInputMode::H264AnnexB => ffmpeg_args.extend_from_slice(&[
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "ultrafast".into(),
+            "-tune".into(),
+            "zerolatency".into(),
+            "-b:v".into(),
+            "2500k".into(),
+            "-maxrate".into(),
+            "2500k".into(),
+            "-bufsize".into(),
+            "5000k".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-g".into(),
+            "30".into(),
+        ]),
     }
     ffmpeg_args.extend_from_slice(&[
         "-c:a".into(),
@@ -199,16 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn build_ffmpeg_args_h264_webrtc_ingest_copies_video_without_x264() {
+    fn build_ffmpeg_args_h264_webrtc_ingest_decodes_browser_video() {
         let args = build_ffmpeg_args("/tmp/fifo", "rtmp://x", VideoInputMode::H264AnnexB);
         let joined = args.join(" ");
-        assert!(joined.contains("-fflags +genpts+nobuffer"));
+        assert!(joined.contains("-fflags +genpts"));
+        assert!(!joined.contains("nobuffer"));
+        assert!(joined.contains("-thread_queue_size 512"));
         assert!(joined.contains("-use_wallclock_as_timestamps 1"));
         assert!(joined.contains("-r 30"));
         assert!(joined.contains("-f h264 -i pipe:0"));
-        assert!(joined.contains("-c:v copy"));
-        assert!(!joined.contains("libx264"));
-        assert!(!joined.contains("-b:v"));
+        assert!(joined.contains("-c:v libx264"));
+        assert!(joined.contains("-preset ultrafast"));
+        assert!(joined.contains("-tune zerolatency"));
+        assert!(joined.contains("-b:v 2500k"));
         assert!(!joined.contains("drawtext"));
     }
 }

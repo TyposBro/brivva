@@ -37,6 +37,6 @@ GOOGLE_SIGNIN_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/au
 # GOOGLE_CLIENT_SECRET
 # JWT_SECRET
 # INTERNAL_SECRET
-# GRIP_ACCESS_KEY         — Grip Cloud Seller API access key (set 2026-04-19)
-# GRIP_SECRET_KEY         — Grip Cloud Seller API secret key (set 2026-04-19)
+# GRIP_ACCESS_KEY         — optional until Grip Seller API path is live
+# GRIP_SECRET_KEY         — optional until Grip Seller API path is live
 # STRIPE_WEBHOOK_SECRET   (optional until billing is live)

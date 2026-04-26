@@ -26,13 +26,18 @@ brew install opentofu
 # 2. Configure AWS creds for an account with admin-ish perms
 aws configure   # or: set -x AWS_PROFILE brivva
 
-# 3. Load secrets from ../.env.local → terraform.tfvars (gitignored)
+# 3. Generate non-secret Terraform overrides from Infisical prod
 cd infra
-./load-env.sh
+infisical run --env=prod -- ./load-env.sh
 
 # 4. Init + apply
 tofu init
 tofu apply
+
+# 5. Fill AWS Secrets Manager from Infisical, then restart tasks
+cd ..
+bun run infisical:sync:aws:prod
+./deploy.sh --skip-build
 ```
 
 Outputs include `ecr_server_url`, `account_id`, etc.
@@ -63,17 +68,17 @@ The SQL lives in [workers/ops/live-session-id-migration.sql](../workers/ops/live
 
 ## Rotate secrets
 
-Edit `../.env.local`, then:
+Edit Infisical `prod`, then sync targets:
 
-```fish
-cd infra
-./load-env.sh
-tofu apply          # updates secret value
-cd ..
-./deploy.sh --skip-build   # restart tasks to pick up new values
+```bash
+bun run infisical:sync:aws:prod
+bun run infisical:sync:workers:prod
+./deploy.sh --skip-build   # restart ECS tasks to pick up changed AWS secret values
 ```
 
 Tasks fetch secrets at container start — they don't hot-reload.
+Terraform owns the Secrets Manager container and IAM permissions only. It ignores
+secret value drift; Infisical owns secret values.
 
 ## Sizing
 
@@ -251,7 +256,9 @@ Local backend for now (`terraform.tfstate` in this dir, gitignored). Migrate to 
 
 ## Cloudflared
 
-Sidecar auto-enabled iff both `tunnel_creds` AND `tunnel_id` are non-empty. Without them, the task has no ingress — add an ALB or populate the vars.
+Sidecar enabled iff `enable_cloudflared = true` and `tunnel_id` is non-empty.
+`TUNNEL_CREDS` must exist in AWS Secrets Manager via Infisical sync. Without
+the sidecar, the task has no ingress — add an ALB or disable only intentionally.
 
 **Named tunnels are persistent.** Same `TUNNEL_CREDS` + `TUNNEL_ID` rejoin the same tunnel after every task restart. Hostname→tunnel route lives in Cloudflare DNS, not regenerated.
 

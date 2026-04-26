@@ -36,6 +36,12 @@ jobs:
         with:
           bun-version: latest
 
+      - name: install e2e dependencies
+        working-directory: tests/e2e
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
       - uses: docker/setup-buildx-action@v4
 
       - name: build ffmpeg base
@@ -93,6 +99,23 @@ jobs:
           docker compose -f compose.e2e.yml up --no-build -d
           docker compose -f compose.e2e.yml ps
 
+      - name: run H.264 RTMP smoke
+        working-directory: tests/e2e
+        env:
+          RTMP_URL: rtmp://localhost:1935/live/h264-copy-smoke
+        run: bun run smoke:h264-copy
+
+      - name: run browser WebRTC H.264 smoke
+        working-directory: tests/e2e
+        env:
+          SERVER_URL: http://localhost:3000
+          WS_URL: ws://localhost:3000/api/session
+          RTMP_URL: rtmp://localhost:1935/live/smoke-ja
+          JWT_SECRET: smoke-jwt-secret
+          SESSION_ID: SMOKEWEBRTC001
+          USER_ID: smoke-user
+        run: bun run smoke:webrtc-h264
+
       - name: run smoke driver
         working-directory: tests/e2e
         env:
@@ -103,6 +126,14 @@ jobs:
           SESSION_ID: SMOKE001
           USER_ID: smoke-user
         run: bun run smoke
+
+      - name: assert media logs are clean
+        if: always()
+        working-directory: tests/e2e
+        run: |
+          docker compose -f compose.e2e.yml logs server > server.log
+          docker compose -f compose.e2e.yml logs rtmp > rtmp.log
+          bun run assert:media-logs server.log rtmp.log
 
       - name: dump server logs on failure
         if: failure()

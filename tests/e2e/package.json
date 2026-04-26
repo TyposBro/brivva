@@ -5,8 +5,14 @@
   "type": "module",
   "scripts": {
     "smoke": "bun driver.ts",
+    "smoke:h264-copy": "bun h264-copy-smoke.ts",
+    "smoke:webrtc-h264": "bun webrtc-h264-smoke.ts",
+    "assert:media-logs": "bun assert-clean-media-logs.ts",
     "stubs:workers": "bun stubs/workers.ts",
     "stubs:soniox": "bun stubs/soniox.ts",
     "stubs:elevenlabs": "bun stubs/elevenlabs.ts"
+  },
+  "devDependencies": {
+    "playwright": "1.59.1"
   }
 }

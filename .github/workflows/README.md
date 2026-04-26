@@ -54,6 +54,7 @@ Set these in the repo's **Settings → Secrets and variables → Actions**:
 | `CLOUDFLARE_API_TOKEN` | Workers + Pages + D1 | Cloudflare dashboard → My Profile → API Tokens → Create Token. Permissions: `Account: Workers Scripts: Edit`, `Account: Cloudflare Pages: Edit`, `Account: D1: Edit`. |
 | `CLOUDFLARE_ACCOUNT_ID` | same | Cloudflare dashboard → Workers & Pages → right sidebar. |
 | `AWS_ACCOUNT` | Fargate | 12-digit account number. GitHub Actions assumes `arn:aws:iam::<AWS_ACCOUNT>:role/github-actions-deploy` via OIDC. |
+| `INFISICAL_TOKEN` | Workers + Fargate secret sync | Infisical service token or machine-identity token with read access to the `brivva` project `prod` environment. |
 
 ### Minimum AWS IAM permissions
 
@@ -65,4 +66,4 @@ smoke/debug steps. Do not use long-lived AWS access keys for Actions.
 ## Skipping deploy for a push
 
 Add `[skip deploy]` or `[skip ci]` to the commit message. Or push to a branch
-other than `main` (deploys only trigger on `main`).
+other than `prod` (deploys only trigger on `prod`).

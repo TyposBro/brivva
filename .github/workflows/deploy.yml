@@ -32,6 +32,16 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: install Infisical CLI
+        run: npm install -g @infisical/cli
+
+      - name: sync Infisical prod → Workers secrets
+        run: bun run infisical:sync:workers:prod
+        env:
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       # wrangler reads CLOUDFLARE_API_TOKEN from env. The token must have
       # Workers Scripts: Edit + D1 Edit for the brivva account.
       - name: wrangler deploy
@@ -102,6 +112,14 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
           aws-region: us-east-1
+
+      - name: install Infisical CLI
+        run: npm install -g @infisical/cli
+
+      - name: sync Infisical prod → AWS Secrets Manager
+        run: ./scripts/sync-infisical-prod-aws.sh
+        env:
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
 
       - name: Verify server image exists
         run: |
