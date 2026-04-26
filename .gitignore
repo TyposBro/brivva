@@ -28,3 +28,9 @@ frontend/playwright-report/
 *.tfstate.*
 terraform.tfvars
 .claude/
+
+# Local agent metadata
+AGENTS.md
+CLAUDE.md
+CODEX.md
+GEMINI.md
