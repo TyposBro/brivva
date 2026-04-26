@@ -39,5 +39,5 @@ export function bootstrap(): void {
 export function resolveVideoIngest(): "jpeg" | "webrtc" {
   const fromUrl = new URLSearchParams(window.location.search).get("ingest");
   const raw = fromUrl ?? import.meta.env.VITE_VIDEO_INGEST;
-  return raw === "jpeg" ? "jpeg" : "webrtc";
+  return raw === "webrtc" ? "webrtc" : "jpeg";
 }

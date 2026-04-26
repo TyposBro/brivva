@@ -41,8 +41,6 @@ pub(super) fn build_ffmpeg_args(
             "low_delay".into(),
             "-thread_queue_size".into(),
             "512".into(),
-            "-use_wallclock_as_timestamps".into(),
-            "1".into(),
             "-r".into(),
             "30".into(),
             "-f".into(),
@@ -222,7 +220,7 @@ mod tests {
         assert!(joined.contains("-fflags +genpts"));
         assert!(!joined.contains("nobuffer"));
         assert!(joined.contains("-thread_queue_size 512"));
-        assert!(joined.contains("-use_wallclock_as_timestamps 1"));
+        assert!(!joined.contains("use_wallclock_as_timestamps"));
         assert!(joined.contains("-r 30"));
         assert!(joined.contains("-f h264 -i pipe:0"));
         assert!(joined.contains("-c:v libx264"));

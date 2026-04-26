@@ -43,6 +43,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
 /// Cap the host video buffer at ~20 s of frames @ 30 fps.
 const HOST_VIDEO_CAP_FRAMES: usize = 20 * 30;
+/// Host camera/original audio must be a live continuous stream. Translated
+/// TTS is mixed in when it arrives; it must not delay or stretch source media.
+const HOST_MEDIA_DELAY: Duration = Duration::ZERO;
 /// Cap the TTS queue at 60 s of PCM. Oldest bytes are dropped on overflow so
 /// the translated speech stays fresh rather than falling further behind.
 /// Raised from 5 s in April 2026: a single 291-char Korean utterance renders
@@ -247,9 +250,8 @@ impl RtmpManager {
         }
     }
 
-    /// Push H.264 Annex B bytes from WebRTC RTP depacketization into every
-    /// stream's delay buffer. FFmpeg copies these bytes into RTMP without a
-    /// CPU video encode.
+    /// Push one H.264 Annex B access unit from WebRTC RTP depacketization into
+    /// every stream's live video buffer.
     pub fn push_h264_annex_b(&self, chunk: &[u8]) {
         if self.video_input_mode != VideoInputMode::H264AnnexB || chunk.is_empty() {
             return;
@@ -258,7 +260,7 @@ impl RtmpManager {
         for stream in self.streams.values() {
             let mut buf = stream.buffers.video.lock().unwrap();
             buf.push_back((now, chunk.to_vec()));
-            while buf.len() > HOST_VIDEO_CAP_FRAMES * 4 {
+            while buf.len() > HOST_VIDEO_CAP_FRAMES {
                 buf.pop_front();
             }
         }
@@ -516,7 +518,8 @@ impl RtmpManager {
         let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
         let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let delay = Duration::from_millis(args.delay_ms);
+        let configured_delay = Duration::from_millis(args.delay_ms);
+        let delay = HOST_MEDIA_DELAY;
         // Seed last_write to now so a freshly-spawned stream isn't instantly
         // classified as idle before the drain threads have had a chance to
         // write their first tick.
@@ -575,7 +578,7 @@ impl RtmpManager {
                 audio_fifo,
                 lang: args.lang,
                 rtmp_url: args.rtmp_url,
-                delay,
+                delay: configured_delay,
                 is_source: args.is_source,
                 host_gain: args.host_gain,
                 passthrough: args.passthrough,

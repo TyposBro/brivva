@@ -124,12 +124,27 @@ async fn accept_whip_offer(
             }
             let mut depacketizer = H264Packet::default();
             let mut parameter_sets = H264ParameterSets::default();
-            let mut pending_chunks: Vec<Vec<u8>> = Vec::new();
+            let mut pending_units: Vec<Vec<u8>> = Vec::new();
+            let mut access_unit = PendingH264AccessUnit::default();
             let mut debug_h264_dump = open_debug_h264_dump();
             loop {
                 let Ok((packet, _)) = track.read_rtp().await else {
                     break;
                 };
+                let timestamp = packet.header.timestamp;
+                if access_unit.should_flush_before(timestamp)
+                    && let Some(unit) = access_unit.take()
+                {
+                    push_h264_access_unit(
+                        &sessions,
+                        &live_session_id,
+                        unit,
+                        &mut parameter_sets,
+                        &mut pending_units,
+                        debug_h264_dump.as_mut(),
+                    )
+                    .await;
+                }
                 let Ok(chunk) =
                     depacketizer.depacketize(&MediaBytes::copy_from_slice(&packet.payload))
                 else {
@@ -138,40 +153,31 @@ async fn accept_whip_offer(
                 if chunk.is_empty() {
                     continue;
                 }
-                let chunk = ensure_annex_b_start_code(&chunk);
-                if let Some(file) = debug_h264_dump.as_mut() {
-                    let _ = file.write_all(&chunk);
+                access_unit.push(timestamp, ensure_annex_b_start_code(&chunk));
+                if packet.header.marker
+                    && let Some(unit) = access_unit.take()
+                {
+                    push_h264_access_unit(
+                        &sessions,
+                        &live_session_id,
+                        unit,
+                        &mut parameter_sets,
+                        &mut pending_units,
+                        debug_h264_dump.as_mut(),
+                    )
+                    .await;
                 }
-                if !parameter_sets.complete() {
-                    parameter_sets.merge(h264_parameter_sets_in_chunk(&chunk));
-                    pending_chunks.push(chunk);
-                    if pending_chunks.len() > H264_PARAMETER_SET_PENDING_LIMIT {
-                        pending_chunks.remove(0);
-                    }
-                    if !parameter_sets.complete() {
-                        continue;
-                    }
-                    tracing::info!(
-                        live_session_id = %live_session_id,
-                        "webrtc h264 parameter sets received"
-                    );
-                    if let Some(manager) = sessions
-                        .get(&live_session_id)
-                        .and_then(|session| session.rtmp_manager.clone())
-                    {
-                        let manager = manager.lock().await;
-                        for pending in pending_chunks.drain(..) {
-                            manager.push_h264_annex_b(&pending);
-                        }
-                    }
-                    continue;
-                }
-                let manager = sessions
-                    .get(&live_session_id)
-                    .and_then(|session| session.rtmp_manager.clone());
-                if let Some(manager) = manager {
-                    manager.lock().await.push_h264_annex_b(&chunk);
-                }
+            }
+            if let Some(unit) = access_unit.take() {
+                push_h264_access_unit(
+                    &sessions,
+                    &live_session_id,
+                    unit,
+                    &mut parameter_sets,
+                    &mut pending_units,
+                    debug_h264_dump.as_mut(),
+                )
+                .await;
             }
             tracing::info!(live_session_id = %live_session_id, "webrtc video track ended");
         })
@@ -201,6 +207,83 @@ async fn accept_whip_offer(
 fn open_debug_h264_dump() -> Option<std::fs::File> {
     let path = std::env::var("BRIVVA_DEBUG_WEBRTC_H264_DUMP").ok()?;
     std::fs::File::create(path).ok()
+}
+
+#[derive(Default)]
+struct PendingH264AccessUnit {
+    timestamp: Option<u32>,
+    chunks: Vec<Vec<u8>>,
+}
+
+impl PendingH264AccessUnit {
+    fn should_flush_before(&self, timestamp: u32) -> bool {
+        self.timestamp.is_some_and(|current| current != timestamp) && !self.chunks.is_empty()
+    }
+
+    fn push(&mut self, timestamp: u32, chunk: Vec<u8>) {
+        self.timestamp = Some(timestamp);
+        self.chunks.push(chunk);
+    }
+
+    fn take(&mut self) -> Option<Vec<u8>> {
+        if self.chunks.is_empty() {
+            self.timestamp = None;
+            return None;
+        }
+        let len = self.chunks.iter().map(Vec::len).sum();
+        let mut unit = Vec::with_capacity(len);
+        for chunk in self.chunks.drain(..) {
+            unit.extend_from_slice(&chunk);
+        }
+        self.timestamp = None;
+        Some(unit)
+    }
+}
+
+async fn push_h264_access_unit(
+    sessions: &crate::features::broadcast::domain::LiveSessions,
+    live_session_id: &str,
+    unit: Vec<u8>,
+    parameter_sets: &mut H264ParameterSets,
+    pending_units: &mut Vec<Vec<u8>>,
+    debug_h264_dump: Option<&mut std::fs::File>,
+) {
+    if unit.is_empty() {
+        return;
+    }
+    if let Some(file) = debug_h264_dump {
+        let _ = file.write_all(&unit);
+    }
+    if !parameter_sets.complete() {
+        parameter_sets.merge(h264_parameter_sets_in_chunk(&unit));
+        pending_units.push(unit);
+        if pending_units.len() > H264_PARAMETER_SET_PENDING_LIMIT {
+            pending_units.remove(0);
+        }
+        if !parameter_sets.complete() {
+            return;
+        }
+        tracing::info!(
+            live_session_id = %live_session_id,
+            "webrtc h264 parameter sets received"
+        );
+        if let Some(manager) = sessions
+            .get(live_session_id)
+            .and_then(|session| session.rtmp_manager.clone())
+        {
+            let manager = manager.lock().await;
+            for pending in pending_units.drain(..) {
+                manager.push_h264_annex_b(&pending);
+            }
+        }
+        return;
+    }
+    let manager = sessions
+        .get(live_session_id)
+        .and_then(|session| session.rtmp_manager.clone());
+    if let Some(manager) = manager {
+        manager.lock().await.push_h264_annex_b(&unit);
+    }
 }
 
 #[derive(Default, Clone, Copy)]

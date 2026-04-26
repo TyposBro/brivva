@@ -7,18 +7,18 @@ describe("resolveVideoIngest", () => {
     window.history.pushState({}, "", "/");
   });
 
-  it("defaults to WebRTC", () => {
+  it("defaults to JPEG ingest", () => {
     window.history.pushState({}, "", "/");
+    expect(resolveVideoIngest()).toBe("jpeg");
+  });
+
+  it("allows URL opt-in to WebRTC ingest", () => {
+    window.history.pushState({}, "", "/?ingest=webrtc");
     expect(resolveVideoIngest()).toBe("webrtc");
   });
 
-  it("allows URL fallback to legacy JPEG ingest", () => {
-    window.history.pushState({}, "", "/?ingest=jpeg");
-    expect(resolveVideoIngest()).toBe("jpeg");
-  });
-
-  it("allows env fallback to legacy JPEG ingest", () => {
-    vi.stubEnv("VITE_VIDEO_INGEST", "jpeg");
-    expect(resolveVideoIngest()).toBe("jpeg");
+  it("allows env opt-in to WebRTC ingest", () => {
+    vi.stubEnv("VITE_VIDEO_INGEST", "webrtc");
+    expect(resolveVideoIngest()).toBe("webrtc");
   });
 });
