@@ -20,6 +20,11 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use crate::features::broadcast::data::{auth, state::BroadcastState};
 use crate::features::broadcast::domain::SessionQuery;
 
+const NALU_TYPE_BITMASK: u8 = 0x1f;
+const STAP_A_NALU_TYPE: u8 = 24;
+const SPS_NALU_TYPE: u8 = 7;
+const STAP_A_NALU_LENGTH_SIZE: usize = 2;
+
 pub async fn whip_session_handler(
     Query(query): Query<SessionQuery>,
     State(state): State<BroadcastState>,
@@ -96,10 +101,21 @@ async fn accept_whip_offer(
                 return;
             }
             let mut depacketizer = H264Packet::default();
+            let mut has_parameter_sets = false;
             loop {
                 let Ok((packet, _)) = track.read_rtp().await else {
                     break;
                 };
+                if !has_parameter_sets {
+                    has_parameter_sets = contains_h264_sps(&packet.payload);
+                    if !has_parameter_sets {
+                        continue;
+                    }
+                    tracing::info!(
+                        live_session_id = %live_session_id,
+                        "webrtc h264 parameter sets received"
+                    );
+                }
                 let Ok(chunk) =
                     depacketizer.depacketize(&MediaBytes::copy_from_slice(&packet.payload))
                 else {
@@ -140,6 +156,35 @@ async fn accept_whip_offer(
     Ok(answer.sdp)
 }
 
+fn contains_h264_sps(payload: &[u8]) -> bool {
+    let Some((&first, rest)) = payload.split_first() else {
+        return false;
+    };
+    match first & NALU_TYPE_BITMASK {
+        SPS_NALU_TYPE => true,
+        STAP_A_NALU_TYPE => stap_a_contains_sps(rest),
+        _ => false,
+    }
+}
+
+fn stap_a_contains_sps(mut payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+    while payload.len() >= STAP_A_NALU_LENGTH_SIZE {
+        let nalu_size = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+        payload = &payload[STAP_A_NALU_LENGTH_SIZE..];
+        if nalu_size == 0 || payload.len() < nalu_size {
+            return false;
+        }
+        if payload[0] & NALU_TYPE_BITMASK == SPS_NALU_TYPE {
+            return true;
+        }
+        payload = &payload[nalu_size..];
+    }
+    false
+}
+
 fn stun_servers(state: &BroadcastState) -> Vec<RTCIceServer> {
     if state.webrtc_stun_urls.is_empty() {
         Vec::new()
@@ -155,4 +200,38 @@ fn sdp_response(answer_sdp: String) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert("content-type", HeaderValue::from_static("application/sdp"));
     (StatusCode::CREATED, headers, answer_sdp).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_h264_sps;
+
+    #[test]
+    fn detects_single_sps_nalu() {
+        assert!(contains_h264_sps(&[0x67, 0x42, 0x00, 0x1f]));
+    }
+
+    #[test]
+    fn detects_sps_inside_stap_a() {
+        let payload = [
+            24, // STAP-A
+            0,
+            4,
+            0x67,
+            0x42,
+            0,
+            0x1f,
+            0,
+            2,
+            0x68,
+            0xce,
+        ];
+        assert!(contains_h264_sps(&payload));
+    }
+
+    #[test]
+    fn ignores_non_parameter_frames() {
+        assert!(!contains_h264_sps(&[0x65, 1, 2, 3]));
+        assert!(!contains_h264_sps(&[28, 0x85, 1, 2, 3]));
+    }
 }
