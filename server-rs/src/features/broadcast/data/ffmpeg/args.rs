@@ -36,9 +36,13 @@ pub(super) fn build_ffmpeg_args(
             "-loglevel".into(),
             "warning".into(),
             "-fflags".into(),
-            "nobuffer".into(),
+            "+genpts+nobuffer".into(),
             "-flags".into(),
             "low_delay".into(),
+            "-use_wallclock_as_timestamps".into(),
+            "1".into(),
+            "-r".into(),
+            "30".into(),
             "-f".into(),
             "h264".into(),
             "-i".into(),
@@ -198,6 +202,9 @@ mod tests {
     fn build_ffmpeg_args_h264_webrtc_ingest_copies_video_without_x264() {
         let args = build_ffmpeg_args("/tmp/fifo", "rtmp://x", VideoInputMode::H264AnnexB);
         let joined = args.join(" ");
+        assert!(joined.contains("-fflags +genpts+nobuffer"));
+        assert!(joined.contains("-use_wallclock_as_timestamps 1"));
+        assert!(joined.contains("-r 30"));
         assert!(joined.contains("-f h264 -i pipe:0"));
         assert!(joined.contains("-c:v copy"));
         assert!(!joined.contains("libx264"));
