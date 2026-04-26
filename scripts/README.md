@@ -34,6 +34,23 @@ Env knobs: `SERVER_PORT` (3000), `WORKERS_PORT` (8787), `BOOT_TIMEOUT` (60s).
 
 Exit codes: `0` smoke passed · `1` smoke failed · `2` services failed to boot.
 
+### `local-prod-parity.sh` — Fargate-shaped local smoke
+
+Builds the same amd64 container shape used by Fargate: source-built
+`ffmpeg-base` with librtmp/drawtext, then `server-rs/Dockerfile` with that
+base image. It starts the docker-compose media smoke stack, verifies the
+server container is `x86_64` and has `enable-librtmp` + `drawtext`, then runs
+the RTMP media smoke.
+
+```bash
+./scripts/local-prod-parity.sh              # build + smoke + stop
+./scripts/local-prod-parity.sh --skip-build # reuse local images
+./scripts/local-prod-parity.sh --keep       # leave stack running
+```
+
+This gives FFmpeg/container parity with prod. External services are still
+stubs unless you run the separate real-stack Playwright flow.
+
 ## Ops
 
 ### `smoke-test.sh` — running-stack sanity check

@@ -38,6 +38,14 @@ it to pre-render the fixture MP3 on startup).
 
 ## Local run
 
+Preferred one-command path:
+
+```bash
+./scripts/local-prod-parity.sh
+```
+
+Manual equivalent:
+
 ```bash
 docker buildx build \
   --platform linux/amd64 \
