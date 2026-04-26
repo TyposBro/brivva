@@ -38,7 +38,7 @@ while keeping the downstream STT / TTS / FFmpeg RTMP pipeline.
 
 ## Scope
 
-### In scope — step 1 (video only, landed behind flag)
+### In scope — step 1 (video only, default on)
 
 - WHIP endpoint in `server-rs` at `POST /whip/session`.
   - Body: SDP offer from browser.
@@ -46,8 +46,9 @@ while keeping the downstream STT / TTS / FFmpeg RTMP pipeline.
   - Auth: reuse existing JWT (same `JWT_SECRET`, same `sub` claim).
 - H.264 RTP depacketization into Annex B chunks.
 - FFmpeg H.264 input mode that uses `-c:v copy`.
-- Frontend `WebRtcVideoIngest` wrapper selected by `?ingest=webrtc` or
-  `VITE_VIDEO_INGEST=webrtc`.
+- Frontend `WebRtcVideoIngest` wrapper is the default. The legacy JPEG
+  websocket video path remains available with `?ingest=jpeg` or
+  `VITE_VIDEO_INGEST=jpeg`.
 - Smoke driver + stubs get a WHIP variant so CI validates the new
   path end-to-end.
 
@@ -55,7 +56,7 @@ while keeping the downstream STT / TTS / FFmpeg RTMP pipeline.
 
 - TURN/NLB hardening if direct Fargate UDP is unreliable.
 - CI smoke test for WHIP video.
-- Flip default from JPEG to WebRTC after production UDP is proven.
+- Remove the legacy JPEG fallback after production streams prove stable.
 
 ### Out of scope
 
@@ -95,11 +96,11 @@ H.264 RTP depacketizer → Annex B chunks
 FFmpeg h264 stdin -> -c:v copy -> RTMP
 ```
 
-The WS path **stays up** alongside WHIP during step 1 for audio,
-control messages, and the default JPEG fallback. WebRTC video is opt-in
-with `?ingest=webrtc` or `VITE_VIDEO_INGEST=webrtc` until UDP is proven
-in production. Production now opens a bounded Fargate UDP media range
-and uses STUN to gather public ICE candidates.
+The WS path **stays up** alongside WHIP for audio, control messages, and
+the explicit JPEG fallback. WebRTC video is now the default; use
+`?ingest=jpeg` or `VITE_VIDEO_INGEST=jpeg` only when debugging the old
+path. Production opens a bounded Fargate UDP media range and uses STUN
+to gather public ICE candidates.
 
 ### Why captions are gone
 
@@ -132,7 +133,7 @@ frontend/src/features/broadcast/presentation/webrtc-video-ingest.ts
 ```
 
 The WS handler remains the compatibility path and still owns audio,
-STT/TTS, control messages, and default JPEG video.
+STT/TTS, control messages, and fallback JPEG video.
 
 ### Route wiring
 
@@ -210,8 +211,8 @@ const useWebRtc = appConfig().videoIngest === "webrtc";
 if (useWebRtc) params.videoMode = "webrtc-h264";
 ```
 
-Default remains JPEG. Opt in with `?ingest=webrtc` or
-`VITE_VIDEO_INGEST=webrtc`.
+Default is WebRTC. Fall back to the legacy JPEG websocket path with
+`?ingest=jpeg` or `VITE_VIDEO_INGEST=jpeg`.
 
 ## Smoke + E2E coverage
 
@@ -267,11 +268,12 @@ Covered by task D once this migration is stable.
 1. **Land server WHIP handler + WS still default** — ship to prod
    behind the existing WS. No user impact.
 2. **Smoke WHIP job in CI** — validate server side in isolation.
-3. **Frontend flag default off** — opt in via `?ingest=webrtc` URL
-   param for internal testing.
+3. **Frontend flag default on** — use WebRTC unless `?ingest=jpeg` or
+   `VITE_VIDEO_INGEST=jpeg` is set.
 4. **Stress test** — run two concurrent hosts for 30 min each, watch
    CPU + crash metrics.
-5. **Flip default to WebRTC** — keep WS fallback code for a sprint.
+5. **Keep JPEG fallback for one sprint** — remove it after production
+   streams prove stable.
 6. **Decide whether audio moves later** — separate from this video
    migration.
 

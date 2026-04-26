@@ -689,3 +689,6 @@ until the company hires. Stay disciplined about what to take on.
   translated voice; captions fragment across platforms, CJK support is weak
   in legacy caption standards, and burn-in adds per-language video encode
   cost that fights 4K/30 quality. WebRTC ingest is the video priority.
+- `2026-04-26` — WebRTC ingest made the frontend default. Legacy JPEG
+  websocket video remains as an explicit fallback with `?ingest=jpeg` or
+  `VITE_VIDEO_INGEST=jpeg` while production streams are validated.

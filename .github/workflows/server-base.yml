@@ -19,6 +19,9 @@ concurrency:
   group: server-base-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-and-push:
     name: Build + push server base images → ECR
@@ -36,10 +39,10 @@ jobs:
       SERVER_RUNTIME_BASE_REPO: brivva/server-runtime-base
       SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-v1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
           aws-region: us-east-1
@@ -48,7 +51,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Verify ffmpeg-base image exists
         run: |
@@ -61,7 +64,7 @@ jobs:
             --output table
 
       - name: Build + push server-build-base
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: infra/server-build-base
           file: infra/server-build-base/Dockerfile
@@ -74,7 +77,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=server-build-base
 
       - name: Build + push server-runtime-base
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: infra/server-runtime-base
           file: infra/server-runtime-base/Dockerfile
