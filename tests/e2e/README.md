@@ -39,8 +39,20 @@ it to pre-render the fixture MP3 on startup).
 ## Local run
 
 ```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  -t brivva-smoke-ffmpeg-base:local \
+  -f infra/ffmpeg-base/Dockerfile infra/ffmpeg-base
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  -t brivva-smoke-server:local \
+  --build-arg FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local \
+  -f server-rs/Dockerfile .
 cd tests/e2e
-docker compose -f compose.e2e.yml up --build -d
+docker compose -f compose.e2e.yml build workers-stub soniox-stub elevenlabs-stub
+docker compose -f compose.e2e.yml up --no-build -d
 SERVER_URL=http://localhost:3000 \
 WS_URL=ws://localhost:3000/api/session \
 RTMP_URL=rtmp://localhost:1935/live/smoke-ja \

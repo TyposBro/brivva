@@ -68,13 +68,8 @@ jobs:
   deploy-fargate:
     name: Fargate → us-east-1
     needs: gate
-    # Native arm64 runner. Before 2026-04-20, this ran on ubuntu-latest
-    # (amd64) with BuildKit QEMU-emulating the arm64 ffmpeg compile; that
-    # took 2+hr per deploy. On ubuntu-24.04-arm: every step is native, no
-    # QEMU, cargo-zigbuild becomes an effective no-op (host==target), and
-    # the ffmpeg stage is now a tiny pull of a prebuilt image instead of
-    # a full source build.
-    runs-on: ubuntu-24.04-arm
+    # Build and run x86_64 so production ffmpeg behavior matches Ubuntu dev.
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
@@ -103,8 +98,26 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
-      # Native arm64 build — runner, Rust target, ffmpeg base, final
-      # image all share linux/arm64 so BuildKit never invokes QEMU.
+      # Ensure the pinned ffmpeg base tag exists as amd64 before server-rs
+      # pulls it. This avoids racing the separate ffmpeg-base workflow and
+      # replaces any old ARM-only tag left from the previous deploy shape.
+      - name: Build and push ffmpeg-base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/ffmpeg-base
+          file: infra/ffmpeg-base/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+            ${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:latest
+          cache-from: type=gha,scope=ffmpeg-base
+          cache-to: type=gha,mode=max,scope=ffmpeg-base
+
+      # Native amd64 build — runner, Rust target, ffmpeg base, final
+      # image all share linux/amd64 so BuildKit never invokes QEMU.
       # cargo-zigbuild still works (treats host==target as a no-op
       # cross-compile) so the Dockerfile stays unchanged in that shape.
       #
@@ -120,7 +133,7 @@ jobs:
         with:
           context: .
           file: server-rs/Dockerfile
-          platforms: linux/arm64
+          platforms: linux/amd64
           push: true
           build-args: |
             FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
@@ -149,6 +162,10 @@ jobs:
               | {family, networkMode, taskRoleArn, executionRoleArn,
                  containerDefinitions, volumes, placementConstraints,
                  requiresCompatibilities, cpu, memory, runtimePlatform, ephemeralStorage}
+              | .runtimePlatform = {
+                  operatingSystemFamily: "LINUX",
+                  cpuArchitecture: "X86_64"
+                }
               | with_entries(select(.value != null))
             ' > taskdef.json
           REV=$(aws ecs register-task-definition \

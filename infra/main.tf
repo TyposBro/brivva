@@ -45,7 +45,7 @@ resource "aws_ecr_lifecycle_policy" "server" {
   })
 }
 
-# Prebuilt ffmpeg arm64 image with --enable-librtmp, referenced by
+# Prebuilt ffmpeg amd64 image with --enable-librtmp, referenced by
 # server-rs/Dockerfile's `ffmpeg-builder` stage. Decouples the 2+hr
 # ffmpeg source build from every deploy — rebuilt only when the
 # FFMPEG_VERSION pin or the infra/ffmpeg-base/Dockerfile changes.
@@ -265,10 +265,10 @@ resource "aws_ecs_task_definition" "app" {
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.exec.arn
 
-  # Fargate Graviton (ARM64): native build on Apple Silicon → no QEMU, faster builds + ~20% cheaper.
+  # x86_64 Fargate keeps production ffmpeg behavior aligned with Ubuntu dev.
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = "ARM64"
+    cpu_architecture        = "X86_64"
   }
 
   # Ephemeral shared volume for cloudflared config + creds handoff from init container.

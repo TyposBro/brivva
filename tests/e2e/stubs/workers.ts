@@ -19,6 +19,7 @@ const bundle = {
     target_langs: "[\"ja\"]",
     status: "created",
     live_session_id: null,
+    voice_preset: "cloned",
     created_at: Math.floor(Date.now() / 1000),
   },
   streams: [
@@ -42,6 +43,7 @@ const bundle = {
     user_id: "smoke-user",
     elevenlabs_voice_id: "smoke-eleven-voice",
     name: "Smoke Voice",
+    source_lang: "en",
     created_at: Math.floor(Date.now() / 1000),
   },
 };

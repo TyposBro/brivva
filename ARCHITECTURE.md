@@ -6,7 +6,7 @@ Everything on Fargate.
 
 ```
 ┌─────────────────────┐       ┌─────────────────────────────────┐
-│ Cloudflare Pages    │       │ Fargate task (us-east-1, ARM64) │
+│ Cloudflare Pages    │       │ Fargate task (us-east-1, x86_64)│
 │ brivva.pages.dev    │──────▶│ brivva.spiko.uz (via cloudflared)│
 │ React SPA (Vite)    │  WSS  │                                 │
 └─────────────────────┘  HTTPS│  • server-rs (Rust)             │
@@ -46,7 +46,7 @@ Split: **Workers + D1 for state**, **Fargate for media path only**.
 │                     │                     │ JWT
 │                     │                     ▼
 │                     │ WSS+JWT ┌──────────────────────────────┐
-│                     │────────▶│ Fargate (us-east-1, ARM64)   │
+│                     │────────▶│ Fargate (us-east-1, x86_64)  │
 │                     │         │ brivva.spiko.uz              │
 └─────────────────────┘         │  • Verify JWT on WS connect  │
                                 │  • WS ingest                 │
@@ -102,7 +102,7 @@ Shared secret rotation: generate new secret in both Workers secrets and AWS Secr
 
 ### Phase 1 — ship what we have (today)
 
-- ✅ Terraform infra (Fargate ARM64, cloudflared tunnel, ECR)
+- ✅ Terraform infra (Fargate x86_64, cloudflared tunnel, ECR)
 - ✅ `server-rs` deployed, tunnel reachable at `https://brivva.spiko.uz/`
 - ⬜ Wire Soniox v4 STT client (replace legacy stt-wrapper call site)
 - ⬜ Deploy frontend to Cloudflare Pages (`brivva.pages.dev`) pointing at Fargate backend

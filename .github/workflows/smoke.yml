@@ -30,10 +30,36 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build ffmpeg base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/ffmpeg-base
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: brivva-smoke-ffmpeg-base:local
+          cache-from: type=gha,scope=smoke-ffmpeg-base
+          cache-to: type=gha,mode=max,scope=smoke-ffmpeg-base
+
+      - name: build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server-rs/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: brivva-smoke-server:local
+          build-args: FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local
+          cache-from: type=gha,scope=smoke-server
+          cache-to: type=gha,mode=max,scope=smoke-server
+
       - name: build + start stack
         working-directory: tests/e2e
         run: |
-          docker compose -f compose.e2e.yml up --build -d
+          docker compose -f compose.e2e.yml build workers-stub soniox-stub elevenlabs-stub
+          docker compose -f compose.e2e.yml up --no-build -d
           docker compose -f compose.e2e.yml ps
 
       - name: run smoke driver

@@ -1,4 +1,4 @@
-# Prebuilt ffmpeg arm64 base image — with --enable-librtmp + --enable-openssl.
+# Prebuilt ffmpeg amd64 base image — with --enable-librtmp + --enable-openssl.
 #
 # Why this image exists:
 #   server-rs/Dockerfile used to build ffmpeg from source in the deploy
@@ -13,7 +13,7 @@
 #   path that pushes cleanly. See docs/runbook.md §2b.
 #
 # Build + push (from the repo root):
-#   docker build --platform linux/arm64 \
+#   docker build --platform linux/amd64 \
 #     -t <ECR_REGISTRY>/brivva/ffmpeg-base:6.1.2-librtmp \
 #     -f infra/ffmpeg-base/Dockerfile infra/ffmpeg-base
 #   docker push <ECR_REGISTRY>/brivva/ffmpeg-base:6.1.2-librtmp

@@ -99,8 +99,14 @@ done
 # ELEVENLABS_API_KEY) takes the Workers-authoritative value. That way
 # even if the two files drift, the cross-service signing stays aligned.
 if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
-  fail "workers/.dev.vars is missing — copy from .dev.vars.example + fill in secrets"
-  exit 2
+  if [ -f "${REPO_ROOT}/workers/.dev.vars.example" ]; then
+    warn "workers/.dev.vars missing; creating it from .dev.vars.example"
+    cp "${REPO_ROOT}/workers/.dev.vars.example" "${REPO_ROOT}/workers/.dev.vars"
+    warn "real OAuth, Grip, and TTS calls still need secrets filled in workers/.dev.vars"
+  else
+    fail "workers/.dev.vars is missing and .dev.vars.example was not found"
+    exit 2
+  fi
 fi
 set -a   # export every var sourced
 if [ -f "${REPO_ROOT}/.env.local" ]; then

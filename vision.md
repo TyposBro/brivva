@@ -617,10 +617,10 @@ until the company hires. Stay disciplined about what to take on.
     unique index `streams(session_id, lang, platform)` to block
     duplicate-ffmpeg-spawn on concurrent add-stream.
   - `60bb215` ffmpeg-base prebuilt ECR image: `infra/ffmpeg-base/`
-    + `.github/workflows/ffmpeg-base.yml` on native arm64 runner.
+    + `.github/workflows/ffmpeg-base.yml` on native amd64 runner.
     Server-rs Dockerfile now `COPY --from=ffmpeg-base` instead of
     recompiling from source each deploy (was 2hr QEMU amd64, now
-    ~10min native arm). IAM trust policy widened AWS-side, first
+    native amd64). IAM trust policy widened AWS-side, first
     manual workflow_dispatch run succeeded 2026-04-20.
   - `db63713` Tasks 21/20/23: §0.6 pre-merge CI gate
     (`.github/workflows/pre-merge-gate.yml` + 4 delta-check

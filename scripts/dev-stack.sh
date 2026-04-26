@@ -73,9 +73,40 @@ for port in "$SERVER_PORT" "$WORKERS_PORT"; do
 done
 
 # ── Boot ─────────────────────────────────────────────────────
+if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
+  if [ -f "${REPO_ROOT}/workers/.dev.vars.example" ]; then
+    warn "workers/.dev.vars missing; creating it from .dev.vars.example"
+    cp "${REPO_ROOT}/workers/.dev.vars.example" "${REPO_ROOT}/workers/.dev.vars"
+    warn "real OAuth, Grip, and TTS calls still need secrets filled in workers/.dev.vars"
+  else
+    fail "workers/.dev.vars is missing and .dev.vars.example was not found"
+    exit 2
+  fi
+fi
+
+set -a
+if [ -f "${REPO_ROOT}/.env.local" ]; then
+  # shellcheck source=/dev/null
+  . "${REPO_ROOT}/.env.local"
+fi
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/workers/.dev.vars"
+set +a
+export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
+
 info "starting server-rs → ${LOG_DIR}/server-rs.log"
 ( cd "${REPO_ROOT}/server-rs" && cargo run ) >"${LOG_DIR}/server-rs.log" 2>&1 &
 SERVER_PID=$!
+
+info "applying D1 migrations (local) → ${LOG_DIR}/migrations.log"
+( cd "${REPO_ROOT}/workers" && bun wrangler d1 migrations apply brivva --local ) \
+  >"${LOG_DIR}/migrations.log" 2>&1
+if [ $? -ne 0 ]; then
+  fail "D1 migrations failed — see ${LOG_DIR}/migrations.log"
+  tail -n 30 "${LOG_DIR}/migrations.log" | sed 's/^/  /'
+  exit 2
+fi
+pass "D1 migrations up to date"
 
 info "starting workers → ${LOG_DIR}/workers.log"
 ( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \

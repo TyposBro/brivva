@@ -15,7 +15,7 @@ workflow from `deploy.yml`.
 Re-runs `ci.yml` as a gate, then three parallel deploys:
 1. **Workers → brivva-api** via `wrangler deploy` + `migrate:prod`
 2. **Pages → brivva.pages.dev** via `wrangler pages deploy dist --branch=main` (Pages production alias)
-3. **Fargate → us-east-1** via `docker buildx` (arm64) + `ecs update-service --force-new-deployment` + `services-stable` wait + tunnel smoke test
+3. **Fargate → us-east-1** via `docker buildx` (amd64) + `ecs update-service --force-new-deployment` + `services-stable` wait + tunnel smoke test
 
 Manual re-deploy available via the Actions tab (`workflow_dispatch`).
 

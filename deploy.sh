@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build server-rs image → push to ECR → force new ECS deployment.
+# Build server-rs image → push to ECR → register task def → deploy ECS.
 # Infra (cluster, service, task def, secrets) is owned by terraform — see infra/.
 # Run `terraform -chdir=infra apply` first.
 
@@ -10,6 +10,9 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 CLUSTER="${CLUSTER:-brivva}"
 SERVICE="${SERVICE:-brivva}"
 PROJECT="${PROJECT:-brivva}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.1}"
+TASK_FAMILY="${TASK_FAMILY:-$PROJECT}"
+ECS_CONTAINER="${ECS_CONTAINER:-server-rs}"
 
 # Resolve account + ECR base. Prefer terraform output, fall back to STS.
 cd "$(dirname "$0")"
@@ -49,23 +52,68 @@ if [[ "$SKIP_BUILD" == false ]]; then
     aws ecr get-login-password --region "$AWS_REGION" \
         | docker login --username AWS --password-stdin "$ECR_BASE"
 
-    # Fargate Graviton (ARM64) = native build on Apple Silicon, no QEMU.
-    PLATFORM="linux/arm64"
-    IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
+    # Keep Fargate on x86_64 so production ffmpeg behavior matches Ubuntu dev.
+    PLATFORM="linux/amd64"
+    SHA="$(git rev-parse HEAD)"
+    IMAGE="$ECR_BASE/$PROJECT/server-rs:$SHA"
+    LATEST_IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
+    FFMPEG_BASE_IMAGE="${FFMPEG_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-base:${FFMPEG_VERSION}-librtmp}"
+
+    echo "==> Building ffmpeg-base ($PLATFORM) → $FFMPEG_BASE_IMAGE"
+    docker buildx build --platform "$PLATFORM" \
+        -t "$FFMPEG_BASE_IMAGE" \
+        -t "$ECR_BASE/$PROJECT/ffmpeg-base:latest" \
+        --build-arg "FFMPEG_VERSION=$FFMPEG_VERSION" \
+        -f infra/ffmpeg-base/Dockerfile --push infra/ffmpeg-base
 
     echo "==> Building server-rs ($PLATFORM) → $IMAGE"
     docker buildx build --platform "$PLATFORM" \
         -t "$IMAGE" \
+        -t "$LATEST_IMAGE" \
+        --build-arg "FFMPEG_BASE_IMAGE=$FFMPEG_BASE_IMAGE" \
         -f server-rs/Dockerfile --push .
+else
+    IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
 fi
 
-# ── Roll deployment ───────────────────────────────────────
-echo "==> Forcing new deployment on $CLUSTER/$SERVICE"
+# ── Register task definition + roll deployment ─────────────
+echo "==> Registering X86_64 task definition for $TASK_FAMILY"
+TASK_DEF_JSON="$(mktemp)"
+trap 'rm -f "$TASK_DEF_JSON"' EXIT
+
+aws ecs describe-task-definition \
+    --region "$AWS_REGION" \
+    --task-definition "$TASK_FAMILY" \
+    --query 'taskDefinition' \
+    --output json \
+  | jq --arg IMG "$IMAGE" --arg C "$ECS_CONTAINER" '
+      .containerDefinitions |= map(
+        if .name == $C then .image = $IMG else . end
+      )
+      | {family, networkMode, taskRoleArn, executionRoleArn,
+         containerDefinitions, volumes, placementConstraints,
+         requiresCompatibilities, cpu, memory, runtimePlatform, ephemeralStorage}
+      | .runtimePlatform = {
+          operatingSystemFamily: "LINUX",
+          cpuArchitecture: "X86_64"
+        }
+      | with_entries(select(.value != null))
+    ' \
+  > "$TASK_DEF_JSON"
+
+TASK_DEF_ARN="$(aws ecs register-task-definition \
+    --region "$AWS_REGION" \
+    --cli-input-json "file://$TASK_DEF_JSON" \
+    --query 'taskDefinition.taskDefinitionArn' \
+    --output text)"
+echo "    $TASK_DEF_ARN"
+
+echo "==> Updating $CLUSTER/$SERVICE"
 aws ecs update-service \
     --region "$AWS_REGION" \
     --cluster "$CLUSTER" \
     --service "$SERVICE" \
-    --force-new-deployment \
+    --task-definition "$TASK_DEF_ARN" \
     --query 'service.taskDefinition' \
     --output text
 

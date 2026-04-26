@@ -1,6 +1,6 @@
 name: ffmpeg-base
 
-# Prebuilds the arm64 ffmpeg image with --enable-librtmp and pushes to
+# Prebuilds the amd64 ffmpeg image with --enable-librtmp and pushes to
 # ECR. Downstream `server-rs/Dockerfile` COPYs the binary out instead of
 # compiling ffmpeg on every deploy (which was a 2+hr QEMU build on the
 # amd64 runner; 2026-04-20 incident).
@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build-and-push:
     name: Build + push ffmpeg-base → ECR
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
@@ -57,14 +57,13 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
-      # Native arm64 runner means no QEMU — the ffmpeg build runs at full
-      # speed (~8-12 min) instead of the 2hr QEMU-emulated path.
+      # Build amd64 so ffmpeg behavior matches Ubuntu dev and x86_64 Fargate.
       - name: Build + push
         uses: docker/build-push-action@v6
         with:
           context: infra/ffmpeg-base
           file: infra/ffmpeg-base/Dockerfile
-          platforms: linux/arm64
+          platforms: linux/amd64
           push: true
           build-args: |
             FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}

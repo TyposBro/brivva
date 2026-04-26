@@ -11,7 +11,7 @@ output "ecr_server_url" {
 }
 
 output "ecr_ffmpeg_base_url" {
-  description = "Repo URL for the prebuilt arm64 ffmpeg base image. Pass as FFMPEG_BASE_IMAGE build-arg to server-rs/Dockerfile."
+  description = "Repo URL for the prebuilt amd64 ffmpeg base image. Pass as FFMPEG_BASE_IMAGE build-arg to server-rs/Dockerfile."
   value       = aws_ecr_repository.ffmpeg_base.repository_url
 }
 
