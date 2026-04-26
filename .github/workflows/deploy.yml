@@ -140,8 +140,8 @@ jobs:
       # the custom FFmpeg binary. Rebuild those through server-base.yml
       # only when the pinned tags or Dockerfiles change.
       #
-      # GitHub Actions cache keeps warm builds fast: cargo-chef's deps
-      # layer is reused unless Cargo.lock changes.
+      # Keep both GitHub Actions and ECR registry caches. The registry cache
+      # makes warm cargo-chef layers durable even if the GitHub cache misses.
       - name: Build and push server-rs
         uses: docker/build-push-action@v6
         with:
@@ -155,8 +155,12 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
-          cache-from: type=gha,scope=server-rs
-          cache-to: type=gha,mode=max,scope=server-rs
+          cache-from: |
+            type=gha,scope=server-rs
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=server-rs
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
       # Register an immutable task-def revision pinning image:<sha>.
       # Enables rollback to a prior revision via ./scripts/rollback.sh.

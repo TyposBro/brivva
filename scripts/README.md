@@ -81,7 +81,9 @@ Builds and pushes the amd64 `server-rs` image locally, then registers and
 deploys a new ECS task definition. It reuses the pinned prebuilt
 `ffmpeg-base`, `server-build-base`, and `server-runtime-base` images by
 default so normal deploys do not rebuild FFmpeg, reinstall Rust tooling, or
-reinstall runtime fonts/libraries.
+reinstall runtime fonts/libraries. The server image build also writes a
+registry-backed BuildKit cache to `server-rs:buildcache` so cargo-chef
+dependency layers survive GitHub cache misses.
 
 ```bash
 ./deploy.sh                       # build server-rs, deploy ECS

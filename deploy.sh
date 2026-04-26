@@ -128,6 +128,8 @@ if [[ "$SKIP_BUILD" == false ]]; then
         -t "$LATEST_IMAGE" \
         --build-arg "SERVER_BUILD_BASE_IMAGE=$SERVER_BUILD_BASE_IMAGE" \
         --build-arg "SERVER_RUNTIME_BASE_IMAGE=$SERVER_RUNTIME_BASE_IMAGE" \
+        --cache-from "type=registry,ref=$ECR_BASE/$PROJECT/server-rs:buildcache" \
+        --cache-to "type=registry,ref=$ECR_BASE/$PROJECT/server-rs:buildcache,mode=max,image-manifest=true,oci-mediatypes=true" \
         -f server-rs/Dockerfile --push .
 else
     IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
