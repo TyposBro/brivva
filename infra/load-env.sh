@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 ENV_FILE="../.env.local"
 DEV_VARS="../workers/.dev.vars"
 
-if [[ ! -f "$ENV_FILE" && ! -f "$DEV_VARS" ]]; then
+if [[ ! -f "$ENV_FILE" && ! -f "$DEV_VARS" && "${BRIVVA_INFISICAL:-}" != "1" ]]; then
     echo "ERROR: neither $ENV_FILE nor $DEV_VARS exists"
     exit 1
 fi
