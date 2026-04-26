@@ -64,7 +64,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: infra/server-build-base
-          file: Dockerfile
+          file: infra/server-build-base/Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
@@ -77,7 +77,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: infra/server-runtime-base
-          file: Dockerfile
+          file: infra/server-runtime-base/Dockerfile
           platforms: linux/amd64
           push: true
           build-args: |

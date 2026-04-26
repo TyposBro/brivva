@@ -39,7 +39,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: infra/ffmpeg-base
-          file: Dockerfile
+          file: infra/ffmpeg-base/Dockerfile
           platforms: linux/amd64
           load: true
           tags: brivva-smoke-ffmpeg-base:local
@@ -50,7 +50,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: infra/server-build-base
-          file: Dockerfile
+          file: infra/server-build-base/Dockerfile
           platforms: linux/amd64
           load: true
           tags: brivva-smoke-server-build-base:local
@@ -61,7 +61,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: infra/server-runtime-base
-          file: Dockerfile
+          file: infra/server-runtime-base/Dockerfile
           platforms: linux/amd64
           load: true
           tags: brivva-smoke-server-runtime-base:local
