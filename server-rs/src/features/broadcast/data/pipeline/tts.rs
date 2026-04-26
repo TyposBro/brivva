@@ -385,8 +385,8 @@ struct NotifyCompleteArgs<'a> {
 fn notify_host_tts_complete(args: NotifyCompleteArgs<'_>) {
     let Some(live_session) = args.handle.sessions.get(&args.handle.id) else {
         // §0.5.4: session torn down between TTS completion and the
-        // notify step. The host won't see TtsEnd/VideoEnd, so log the
-        // skipped notification explicitly.
+        // notify step. The host won't see TtsEnd/VideoEnd — log so a
+        // dangling caption on the FE is explainable.
         tracing::info!(
             live_session_id = %args.handle.id,
             utterance_id = args.utterance_id,

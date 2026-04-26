@@ -1,9 +1,10 @@
 //! Per-stream video + audio drain loops.
 //!
-//! These run on their own OS threads. They pull live host media from buffers
-//! and feed it to the FFmpeg child — video straight to stdin at 30 fps, audio
-//! to a FIFO at 20 ms ticks mixed with translated TTS whenever that TTS is
-//! available.
+//! These run on their own OS threads. They pull aged frames/chunks out of
+//! the stream's delay buffers and feed them to the FFmpeg child — video
+//! straight to stdin at 30 fps by repeating the latest browser JPEG when
+//! necessary, audio to a FIFO at 20 ms ticks mixed with the translated TTS
+//! queue.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -29,10 +30,6 @@ const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// Audio: 1764 bytes = 44.1 kHz × 20 ms × s16le mono.
 const AUDIO_BYTES_PER_TICK: usize = 1764;
-/// H.264 is already compressed, so repeating frames is not safe. If the
-/// browser/CPU falls behind, keep the freshest small backlog and drop stale
-/// access units instead of bursting old frames and making playback run fast.
-const H264_READY_BACKLOG_CAP: usize = 3;
 
 type TimedChunk = (Instant, Vec<u8>);
 
@@ -105,59 +102,6 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     );
 }
 
-pub(super) fn video_copy_drain_loop(ctx: VideoDrainCtx) {
-    let VideoDrainCtx {
-        stream_id,
-        video_buf,
-        mut stdin,
-        delay,
-        stop,
-        last_write_ms,
-        metrics,
-    } = ctx;
-    let mut chunk_count: u64 = 0;
-    let mut ready_queue: VecDeque<Vec<u8>> = VecDeque::new();
-    let mut next_tick = Instant::now() + FRAME_INTERVAL;
-
-    eprintln!(
-        "[VIDEO:{}] h264 drain started (30 fps, delay={}ms)",
-        stream_id,
-        delay.as_millis()
-    );
-
-    while !stop.load(Ordering::Acquire) {
-        let actual = wait_video_tick(&mut next_tick);
-        for chunk in drain_ready_chunks(&video_buf, actual, delay) {
-            ready_queue.push_back(chunk);
-        }
-        while ready_queue.len() > H264_READY_BACKLOG_CAP {
-            ready_queue.pop_front();
-        }
-        let Some(chunk) = ready_queue.pop_front() else {
-            continue;
-        };
-        let n = chunk.len() as u64;
-        if stdin.write_all(&chunk).is_err() {
-            if !stop.load(Ordering::Acquire) {
-                eprintln!("[VIDEO:{}] h264 write error, exiting", stream_id);
-            }
-            drop(stdin);
-            return;
-        }
-        chunk_count += 1;
-        last_write_ms.store(now_unix_ms(), Ordering::Release);
-        if let Some(m) = &metrics {
-            m.record_bytes_out(n);
-        }
-    }
-
-    drop(stdin);
-    eprintln!(
-        "[VIDEO:{}] h264 copy drain exited after {} chunks",
-        stream_id, chunk_count
-    );
-}
-
 fn wait_video_tick(next_tick: &mut Instant) -> Instant {
     let now = Instant::now();
     if *next_tick > now {
@@ -184,24 +128,6 @@ fn drain_ready_frame(
         }
     }
     latest
-}
-
-fn drain_ready_chunks(
-    video_buf: &StdMutex<VecDeque<TimedChunk>>,
-    now: Instant,
-    delay: Duration,
-) -> Vec<Vec<u8>> {
-    let mut buf = video_buf.lock().unwrap();
-    let mut ready = Vec::new();
-    while let Some((ts, _)) = buf.front() {
-        if *ts + delay <= now {
-            let (_, chunk) = buf.pop_front().unwrap();
-            ready.push(chunk);
-        } else {
-            break;
-        }
-    }
-    ready
 }
 
 // ── Audio ─────────────────────────────────────────────────

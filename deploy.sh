@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sync prod secrets → build server-rs image → push to ECR → register task def → deploy ECS.
+# Build server-rs image → push to ECR → register task def → deploy ECS.
 # Infra (cluster, service, task def, secrets) is owned by terraform — see infra/.
 # Run `terraform -chdir=infra apply` first.
 
@@ -30,15 +30,13 @@ ECR_BASE="${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 # ── Parse args ────────────────────────────────────────────
 SKIP_BUILD=false
-SKIP_SECRET_SYNC=false
 BUILD_FFMPEG_BASE=false
 BUILD_SERVER_BASES=false
 
 usage() {
-    echo "Usage: $0 [--skip-build] [--skip-secret-sync] [--build-ffmpeg-base] [--build-server-bases]"
+    echo "Usage: $0 [--skip-build] [--build-ffmpeg-base] [--build-server-bases]"
     echo ""
     echo "  --skip-build          Skip Docker build, deploy server-rs:latest"
-    echo "  --skip-secret-sync    Do not sync Infisical prod to AWS/Cloudflare before deploy"
     echo "  --build-ffmpeg-base   Rebuild and push the pinned ffmpeg-base image"
     echo "  --build-server-bases  Rebuild and push server build/runtime base images"
     echo ""
@@ -50,7 +48,6 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-build) SKIP_BUILD=true; shift ;;
-        --skip-secret-sync) SKIP_SECRET_SYNC=true; shift ;;
         --build-ffmpeg-base) BUILD_FFMPEG_BASE=true; shift ;;
         --build-server-bases) BUILD_SERVER_BASES=true; shift ;;
         -h|--help) usage ;;
@@ -61,20 +58,6 @@ done
 if [[ "$SKIP_BUILD" == true && ( "$BUILD_FFMPEG_BASE" == true || "$BUILD_SERVER_BASES" == true ) ]]; then
     echo "--skip-build cannot be combined with base image rebuild flags" >&2
     exit 1
-fi
-
-# ── Sync secrets from Infisical ─────────────────────────────
-if [[ "$SKIP_SECRET_SYNC" == false ]]; then
-    if ! command -v infisical >/dev/null 2>&1; then
-        echo "infisical CLI not found; install it or pass --skip-secret-sync" >&2
-        exit 1
-    fi
-
-    echo "==> Syncing Infisical prod → AWS Secrets Manager"
-    ./scripts/sync-infisical-prod-aws.sh
-
-    echo "==> Syncing Infisical prod → Cloudflare Workers secrets"
-    ./scripts/sync-infisical-prod-workers.sh
 fi
 
 # ── Build & Push ──────────────────────────────────────────

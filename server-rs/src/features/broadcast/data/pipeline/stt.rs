@@ -35,7 +35,7 @@ pub async fn start_stt_pipelines(session: PipelineSession, audio_rx: mpsc::Recei
     if session.config.soniox_api_key.is_empty() {
         tracing::warn!(
             session_id = %session.handle.id,
-            "SONIOX_API_KEY not set — STT pipeline disabled; translations will not fire"
+            "SONIOX_API_KEY not set — STT pipeline disabled; captions + translations will not fire"
         );
         return;
     }

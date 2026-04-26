@@ -7,8 +7,6 @@ import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
 import { useWebcam } from "./use-webcam";
 import { useVoiceClone } from "./use-voice-clone";
-import { appConfig } from "../../../core/config/app-config";
-import { WebRtcVideoIngest } from "./webrtc-video-ingest";
 
 export type { UtteranceTiming };
 export type { HostStatus, HostUtterance } from "./reducer";
@@ -24,13 +22,10 @@ export function useHostSession() {
 
   const audio = useRef(new AudioPipeline());
   const socket = useRef(new SessionSocket());
-  const webRtcVideo = useRef(new WebRtcVideoIngest());
   const activeSessionIdRef = useRef<string | null>(null);
   const activeUserIdRef = useRef<string | null>(null);
-  const activeSourceLangRef = useRef<string>("en");
-  const activeTokenRef = useRef<string | null>(null);
 
-  const { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming, getStream } = useWebcam(
+  const { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming } = useWebcam(
     (msg) => socket.current.sendJson(msg),
     () => socket.current.isOpen,
   );
@@ -66,7 +61,6 @@ export function useHostSession() {
 
   const stopRecording = () => {
     audio.current.stop();
-    webRtcVideo.current.stop();
     stopFrameStreaming();
     dispatch({ type: "recording_stopped" });
   };
@@ -97,15 +91,12 @@ export function useHostSession() {
     startWebcam();
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
-    activeSourceLangRef.current = opts.sourceLang ?? "en";
 
     const token = await fetchAuthToken();
     if (!token) return;
-    activeTokenRef.current = token;
 
     const params: Record<string, string> = { sourceLang: opts.sourceLang ?? "en", token };
     if (opts.sessionId) params.sessionId = opts.sessionId;
-    if (appConfig().videoIngest === "webrtc") params.videoMode = "webrtc-h264";
     socket.current.connect(params, {
       onOpen: () => dispatch({ type: "connected" }),
       onMessage: (msg) => handleMessage(msg),
@@ -119,38 +110,13 @@ export function useHostSession() {
   const startRecording = async () => {
     if (!socket.current.isOpen) return;
     const analyser = await audio.current.start((buf) => socket.current.sendAudio(buf));
-    if (appConfig().videoIngest === "webrtc") {
-      const stream = getStream();
-      const token = activeTokenRef.current;
-      if (!stream || !token) {
-        dispatch({ type: "error", message: "WebRTC video ingest could not start" });
-        audio.current.stop();
-        return;
-      }
-      try {
-        await webRtcVideo.current.start({
-          stream,
-          token,
-          sessionId: activeSessionIdRef.current ?? undefined,
-          sourceLang: activeSourceLangRef.current,
-        });
-      } catch (e) {
-        dispatch({
-          type: "error",
-          message: e instanceof Error ? `WebRTC video failed: ${e.message}` : "WebRTC video failed",
-        });
-        audio.current.stop();
-        return;
-      }
-    }
     dispatch({ type: "recording_started", analyser });
-    if (appConfig().videoIngest !== "webrtc") startFrameStreaming();
+    startFrameStreaming();
   };
 
   const closeSession = () => {
     socket.current.sendJson({ type: "host:end" });
     socket.current.close();
-    webRtcVideo.current.stop();
     stopRecording();
     stopFrameStreaming();
     stopWebcam();

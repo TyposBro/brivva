@@ -5,9 +5,6 @@ on:
     branches: [prod]
   workflow_dispatch: # manual re-deploy from the Actions tab
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 concurrency:
   group: deploy-prod
   cancel-in-progress: false # serialize deploys — don't cancel a mid-flight one
@@ -24,23 +21,13 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
       - run: bun install --frozen-lockfile
-
-      - name: install Infisical CLI
-        run: npm install -g @infisical/cli
-
-      - name: sync Infisical prod → Workers secrets
-        run: bun run infisical:sync:workers:prod
-        env:
-          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       # wrangler reads CLOUDFLARE_API_TOKEN from env. The token must have
       # Workers Scripts: Edit + D1 Edit for the brivva account.
@@ -61,7 +48,7 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -78,58 +65,102 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-  server-image:
-    name: Server image → ECR
-    needs: gate
-    uses: ./.github/workflows/server-image.yml
-    secrets: inherit
-    permissions:
-      id-token: write
-      contents: read
-      actions: write
-
   deploy-fargate:
     name: Fargate → us-east-1
-    needs: [gate, server-image]
-    # Deploy x86_64 task definitions so production ffmpeg behavior matches
-    # Ubuntu dev and the prebuilt amd64 server image.
+    needs: gate
+    # Build and run x86_64 so production ffmpeg behavior matches Ubuntu dev.
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+      actions: write   # required for docker/build-push-action cache-to=type=gha
     env:
       ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
       ECR_REPO: brivva/server-rs
+      FFMPEG_BASE_REPO: brivva/ffmpeg-base
+      FFMPEG_VERSION: "7.1.1"
+      SERVER_BUILD_BASE_REPO: brivva/server-build-base
+      SERVER_BUILD_BASE_TAG: rust-1.88-slim-zigbuild-v1
+      SERVER_RUNTIME_BASE_REPO: brivva/server-runtime-base
+      SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-v1
       ECS_CLUSTER: brivva
       ECS_SERVICE: brivva
       ECS_CONTAINER: server-rs
       TASK_FAMILY: brivva
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
           aws-region: us-east-1
 
-      - name: install Infisical CLI
-        run: npm install -g @infisical/cli
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: sync Infisical prod → AWS Secrets Manager
-        run: ./scripts/sync-infisical-prod-aws.sh
-        env:
-          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Verify server image exists
+      # ffmpeg-base changes rarely and is built by ffmpeg-base.yml or
+      # `./deploy.sh --build-ffmpeg-base`. Normal deploys only verify the
+      # pinned ECR tag exists, then server-rs pulls it during its Docker build.
+      - name: Verify ffmpeg-base image exists
         run: |
           set -euo pipefail
           aws ecr describe-images \
             --region us-east-1 \
-            --repository-name "${ECR_REPO}" \
-            --image-ids imageTag="${GITHUB_SHA}" \
+            --repository-name "${FFMPEG_BASE_REPO}" \
+            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
             --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
             --output table
+
+      - name: Verify server base images exist
+        run: |
+          set -euo pipefail
+          for image in \
+            "${SERVER_BUILD_BASE_REPO}:${SERVER_BUILD_BASE_TAG}" \
+            "${SERVER_RUNTIME_BASE_REPO}:${SERVER_RUNTIME_BASE_TAG}"
+          do
+            repo="${image%:*}"
+            tag="${image##*:}"
+            aws ecr describe-images \
+              --region us-east-1 \
+              --repository-name "$repo" \
+              --image-ids imageTag="$tag" \
+              --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+              --output table
+          done
+
+      # Native amd64 build — runner, Rust target, ffmpeg base, final
+      # image all share linux/amd64 so BuildKit never invokes QEMU.
+      #
+      # SERVER_BUILD_BASE_IMAGE pins Rust/cargo-zigbuild tooling.
+      # SERVER_RUNTIME_BASE_IMAGE pins Debian runtime libs, CJK fonts, and
+      # the custom FFmpeg binary. Rebuild those through server-base.yml
+      # only when the pinned tags or Dockerfiles change.
+      #
+      # Keep both GitHub Actions and ECR registry caches. The registry cache
+      # makes warm cargo-chef layers durable even if the GitHub cache misses.
+      - name: Build and push server-rs
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server-rs/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            SERVER_BUILD_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.SERVER_BUILD_BASE_REPO }}:${{ env.SERVER_BUILD_BASE_TAG }}
+            SERVER_RUNTIME_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:${{ env.SERVER_RUNTIME_BASE_TAG }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
+          cache-from: |
+            type=gha,scope=server-rs
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=server-rs
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
       # Register an immutable task-def revision pinning image:<sha>.
       # Enables rollback to a prior revision via ./scripts/rollback.sh.

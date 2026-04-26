@@ -35,8 +35,8 @@ pub struct SonioxResponse {
     /// strict `Option<String>` deserializer rejected every `408`/`429`/etc.
     /// response, which made `parse_soniox_response` return `None` and the
     /// processor loop treated those errors as "no usable response, keep going"
-    /// rather than tearing down the pipeline, so translated speech never
-    /// followed.
+    /// rather than tearing down the pipeline. Burn-in captions never appeared
+    /// because every translation utterance died in this swallowed-error path.
     #[serde(default, deserialize_with = "deserialize_error_code")]
     pub error_code: Option<String>,
     #[serde(default)]
@@ -290,7 +290,7 @@ mod tests {
         // to deserialize into `Option<String>` strictly, which made every
         // such response fail parse and disappear silently. The processor
         // then never tore down the pipeline on Soniox errors and translation
-        // utterances stalled forever.
+        // utterances stalled forever — burn-in captions never followed.
         let resp: SonioxResponse =
             serde_json::from_str(fixtures::ERROR_408_TIMEOUT).expect("parses");
         assert_eq!(resp.error_code.as_deref(), Some("408"));

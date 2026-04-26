@@ -8,8 +8,6 @@ import { _setAppConfig } from "../core/config/app-config";
 _setAppConfig({
   workersApiBase: "http://test.invalid",
   mediaWsBase: "ws://test.invalid",
-  mediaHttpBase: "http://test.invalid",
-  videoIngest: "jpeg",
 });
 
 afterEach(() => {

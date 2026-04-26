@@ -86,20 +86,6 @@ docker compose -f "$COMPOSE_FILE" exec -T server \
 echo "==> Running media pipeline smoke"
 (
   cd "$REPO_ROOT/tests/e2e"
-  bun install --frozen-lockfile
-  bunx playwright install chromium
-
-  RTMP_URL=rtmp://localhost:1935/live/h264-copy-smoke \
-    bun run smoke:h264-copy
-
-  SERVER_URL=http://localhost:3000 \
-  WS_URL=ws://localhost:3000/api/session \
-  RTMP_URL=rtmp://localhost:1935/live/smoke-ja \
-  JWT_SECRET=smoke-jwt-secret \
-  SESSION_ID=SMOKEWEBRTC001 \
-  USER_ID=smoke-user \
-    bun run smoke:webrtc-h264
-
   SERVER_URL=http://localhost:3000 \
   WS_URL=ws://localhost:3000/api/session \
   RTMP_URL=rtmp://localhost:1935/live/smoke-ja \
@@ -107,10 +93,6 @@ echo "==> Running media pipeline smoke"
   SESSION_ID=SMOKE001 \
   USER_ID=smoke-user \
     bun run smoke
-
-  docker compose -f "$COMPOSE_FILE" logs server > /tmp/brivva-smoke-server.log
-  docker compose -f "$COMPOSE_FILE" logs rtmp > /tmp/brivva-smoke-rtmp.log
-  bun run assert:media-logs /tmp/brivva-smoke-server.log /tmp/brivva-smoke-rtmp.log
 )
 
 echo "==> Prod-parity local smoke passed"

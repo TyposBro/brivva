@@ -31,9 +31,6 @@ concurrency:
   group: ffmpeg-base-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   build-and-push:
     name: Build + push ffmpeg-base → ECR
@@ -46,10 +43,10 @@ jobs:
       ECR_REPO: brivva/ffmpeg-base
       FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version || '7.1.1' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
           aws-region: us-east-1
@@ -58,11 +55,11 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
       # Build amd64 so ffmpeg behavior matches Ubuntu dev and x86_64 Fargate.
       - name: Build + push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: infra/ffmpeg-base
           file: infra/ffmpeg-base/Dockerfile

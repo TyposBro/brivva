@@ -28,24 +28,6 @@ variable "broadcast_delay_ms" {
   default     = 5000
 }
 
-variable "webrtc_udp_port_min" {
-  description = "First UDP port Fargate may bind for WebRTC ICE media."
-  type        = number
-  default     = 50000
-}
-
-variable "webrtc_udp_port_max" {
-  description = "Last UDP port Fargate may bind for WebRTC ICE media."
-  type        = number
-  default     = 50100
-}
-
-variable "webrtc_stun_urls" {
-  description = "Comma-separated STUN URLs used by server-rs to gather public ICE candidates."
-  type        = string
-  default     = "stun:stun.l.google.com:19302"
-}
-
 variable "task_cpu" {
   description = <<-EOT
     Fargate CPU units (1024 = 1 vCPU). Default 8192 = 8 vCPU.
@@ -70,18 +52,53 @@ variable "log_retention_days" {
   default = 7
 }
 
-# ── Runtime secrets are synced from Infisical, not Terraform ──
+# ── Secrets (sensitive, provided via terraform.tfvars from load-env.sh) ──
 
-variable "enable_cloudflared" {
-  description = "Enable the cloudflared sidecar. TUNNEL_CREDS must exist in AWS Secrets Manager, synced from Infisical."
-  type        = bool
-  default     = true
+variable "soniox_api_key" {
+  type      = string
+  sensitive = true
+}
+
+variable "elevenlabs_api_key" {
+  type      = string
+  sensitive = true
+}
+
+variable "google_client_id" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+variable "google_client_secret" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+variable "tunnel_creds" {
+  description = "Cloudflared tunnel credentials JSON (as a string). If empty, cloudflared sidecar is disabled."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "tunnel_id" {
-  description = "Cloudflared tunnel UUID. Required when enable_cloudflared is true."
+  description = "Cloudflared tunnel UUID. Required if tunnel_creds is set."
   type        = string
   default     = ""
+}
+
+variable "jwt_secret" {
+  description = "HS256 secret shared with brivva-api Worker for JWT verification."
+  type        = string
+  sensitive   = true
+}
+
+variable "internal_secret" {
+  description = "Shared secret for Fargate→Workers /internal/* HTTP calls."
+  type        = string
+  sensitive   = true
 }
 
 variable "workers_api_url" {

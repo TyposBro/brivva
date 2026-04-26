@@ -17,7 +17,6 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { assertRtmpStreams, type ProbeStream } from "./media-assertions";
 
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:3000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:3000/api/session";
@@ -205,6 +204,8 @@ async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSigna
 }
 
 // ── ffprobe assertion ────────────────────────────────────
+type ProbeStream = { codec_type: string; codec_name?: string };
+
 function probeRtmp(url: string): ProbeStream[] {
   const result = spawnSync(
     "ffprobe",
@@ -250,7 +251,13 @@ async function main() {
   const video = streams.find((s) => s.codec_type === "video");
 
   console.log("[driver] streams:", streams);
-  assertRtmpStreams(streams, "media pipeline smoke");
+
+  const missing: string[] = [];
+  if (!audio) missing.push("audio");
+  if (!video) missing.push("video");
+  if (missing.length) {
+    throw new Error(`smoke FAIL — missing tracks: ${missing.join(", ")}`);
+  }
 
   console.log(`[driver] smoke OK — audio=${audio?.codec_name} video=${video?.codec_name}`);
 }

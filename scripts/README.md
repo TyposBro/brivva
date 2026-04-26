@@ -77,8 +77,7 @@ See [`docs/runbook.md`](../docs/runbook.md) §Rollback. Short version:
 
 ### `../deploy.sh` — local ECR/ECS deploy
 
-Syncs Infisical `prod` to AWS Secrets Manager and Cloudflare Workers secrets,
-builds and pushes the amd64 `server-rs` image locally, then registers and
+Builds and pushes the amd64 `server-rs` image locally, then registers and
 deploys a new ECS task definition. It reuses the pinned prebuilt
 `ffmpeg-base`, `server-build-base`, and `server-runtime-base` images by
 default so normal deploys do not rebuild FFmpeg, reinstall Rust tooling, or
@@ -91,7 +90,6 @@ dependency layers survive GitHub cache misses.
 ./deploy.sh --build-ffmpeg-base    # rebuild ffmpeg-base first, then server-rs
 ./deploy.sh --build-server-bases   # rebuild server build/runtime bases first
 ./deploy.sh --skip-build           # deploy current server-rs:latest
-./deploy.sh --skip-secret-sync     # deploy without syncing Infisical first
 ```
 
 ### `install-hooks.sh` — point git at versioned hooks

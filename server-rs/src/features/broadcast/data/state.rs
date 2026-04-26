@@ -24,11 +24,6 @@ pub struct BroadcastState {
     pub force_default_voice: bool,
     /// Kill-switch: downgrade rtmps:// to rtmp:// at FFmpeg spawn. See runbook.
     pub force_rtmp_not_rtmps: bool,
-    /// WebRTC ICE/SRTP UDP port range. Must match the task security group.
-    pub webrtc_udp_port_min: u16,
-    pub webrtc_udp_port_max: u16,
-    /// STUN URLs used by the server peer to gather public candidates.
-    pub webrtc_stun_urls: Vec<String>,
 }
 
 impl BroadcastState {
@@ -44,9 +39,6 @@ impl BroadcastState {
             elevenlabs_base_url: String::new(),
             force_default_voice: false,
             force_rtmp_not_rtmps: false,
-            webrtc_udp_port_min: 50_000,
-            webrtc_udp_port_max: 50_100,
-            webrtc_stun_urls: vec!["stun:stun.l.google.com:19302".into()],
         }
     }
 }
@@ -73,9 +65,6 @@ mod tests {
         assert!(s.elevenlabs_base_url.is_empty());
         assert!(!s.force_default_voice);
         assert!(!s.force_rtmp_not_rtmps);
-        assert_eq!(s.webrtc_udp_port_min, 50_000);
-        assert_eq!(s.webrtc_udp_port_max, 50_100);
-        assert_eq!(s.webrtc_stun_urls, ["stun:stun.l.google.com:19302"]);
         assert!(s.live_sessions.is_empty());
     }
 

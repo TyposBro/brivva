@@ -1,6 +1,6 @@
 # Brivva Tech — Product Vision & May 10 Roadmap
 
-Last updated: 2026-04-26 (WebRTC-first video plan; captions removed from product scope)
+Last updated: 2026-04-20 (evening — deploy shipped, Grip+YouTube e2e green)
 Owner: Aziz (tech) + Simon (sales) + MJ (client acquisition)
 First live show: `2026-05-10`
 
@@ -167,8 +167,8 @@ export const STREAM_DEFAULTS = {
 The destination language dropdown includes an explicit **"Passthrough
 (source)"** option (wire code `"pass"`). Picking it tells Fargate to
 bypass STT + translate + TTS entirely for that stream — host audio and
-video RTMP'd through at `host_gain = 1.0`, no ElevenLabs calls, no
-billing for output minutes (the stream never
+video RTMP'd through at `host_gain = 1.0`, no caption overlay, no
+ElevenLabs calls, no billing for output minutes (the stream never
 produces translated output).
 
 Source-lang-equals-target-lang is the *implicit* passthrough path
@@ -243,36 +243,6 @@ API endpoints:
 - `POST /api/sessions/:id/quote` → `{ output_minutes, cost_usd, rate_usd }`
 - `GET /api/sessions/:id/summary` → live or final metrics rollup
 
-### 6. No Captions Or Subtitles
-
-Brivva's product is **translated voice**, not translated text. Do not add
-native captions, closed captions, burned-in subtitles, or platform-specific
-caption integrations to the product roadmap unless a paying B2B customer
-explicitly demands it and accepts the tradeoffs.
-
-Reasoning:
-- The premium experience target is smooth 4K/30 video with natural cloned
-  speech. Caption overlays compete with that goal because burned-in text
-  forces extra per-language video rendering and encoding.
-- Platform support is uneven. YouTube supports live captions, AWS IVS supports
-  caption ingest, but TikTok/Instagram public RTMP support is unclear or
-  unavailable. Grip still needs platform-side confirmation.
-- CJK languages are the core launch use case, and legacy caption standards
-  are a poor fit. CEA-608 cannot represent Korean/Chinese/Japanese; CEA-708
-  support depends on the platform/player and is not reliable enough to anchor
-  the product.
-- Native captions would create a fragmented UX: some destinations get
-  selectable captions, others require burn-in, and multi-language caption
-  support is often limited to one track. That complexity does not improve the
-  core promise: shoppers hear the creator in their own language.
-
-Implementation direction:
-- Prioritize WebRTC video ingest so the browser sends real encoded video
-  instead of JPEG frames over WebSocket.
-- Keep RTMP outputs focused on video + translated/cloned audio.
-- If a platform or customer later requires text, treat it as a separate
-  paid/enterprise feature, not part of May 10 or the default product.
-
 ---
 
 ## What's In Scope For May 10
@@ -322,7 +292,7 @@ the fix recipe documented inline.
 | Priority | Gap | Rule | Status | Evidence |
 |---|---|---|---|---|
 | **P1a** | Real-response fixtures for every vendor (ElevenLabs, Stripe, YouTube, Google OAuth, Grip). | §0.5.1 | **LANDED 2026-04-20.** 14 fixture JSONs under `workers/tests/fixtures/<vendor>/`; 15 roundtrip tests in `workers/tests/fixture-roundtrip.test.ts` drive each through the real client deserializer. Hand-crafted pending real capture, provenance marked per vendor README. | `workers/tests/fixture-roundtrip.test.ts`, `workers/tests/fixtures/{elevenlabs,stripe,youtube,google-oauth,grip}/` |
-| **P1b** | Silent paths emit zero structured logs. STT reconnect skip, workers credential/OAuth fallbacks, frontend JSON.parse catches — all silent. | §0.5.4 | **LANDED 2026-04-20.** Every silent `continue` / try_send drop / catch-fallback in the STT pipeline, workers orchestration, and frontend session pages now emits structured `tracing::warn!` / `console.warn` with `session_id` / `tag` / `error` context. | `server-rs/src/features/broadcast/data/pipeline/{stt,stt_response,stt_transport}.rs`, `server-rs/src/features/broadcast/data/session_ws/messages.rs`, `workers/src/{orchestration/app.ts,features/billing/stripe-webhook.ts}`, `frontend/src/features/broadcast/presentation/{session-setup-page,session-page,onboarding-page,dashboard-page}.tsx` |
+| **P1b** | Silent paths emit zero structured logs. STT reconnect skip, caption-token filter, workers credential/OAuth fallbacks, frontend JSON.parse catches — all silent. | §0.5.4 | **LANDED 2026-04-20.** Every silent `continue` / try_send drop / catch-fallback in the STT pipeline, workers orchestration, and frontend session pages now emits structured `tracing::warn!` / `console.warn` with `session_id` / `tag` / `error` context. | `server-rs/src/features/broadcast/data/pipeline/{stt,stt_response,stt_transport}.rs`, `server-rs/src/features/broadcast/data/session_ws/messages.rs`, `workers/src/{orchestration/app.ts,features/billing/stripe-webhook.ts}`, `frontend/src/features/broadcast/presentation/{session-setup-page,session-page,onboarding-page,dashboard-page}.tsx` |
 | **P2a** | WS lifecycle matrix — missing crash→restart + concurrent start×2. | §0.5.2 | **PARTIAL 2026-04-20.** `ws_abrupt_drop_without_host_end_cleans_live_session` passes (crash-drop recovery). `concurrent_connects_for_same_session_converge_to_single_live_session` is `#[ignore]`'d — it exposes a real race in `handle_host`: `evict_stale_live_sessions` runs BEFORE `live_sessions.insert`, so two parallel handlers can both observe an empty map and both insert. **Fix (post-May-10):** add a per-session_id `tokio::sync::Mutex` to `BroadcastState`, acquire before eviction, hold through insert. Deferred because FE never fires concurrent connects by design; sequential stop→start (the actual 2026-04-20 incident shape) is covered. | `server-rs/tests/e2e_live_session_lifecycle.rs` |
 | **P2b** | Multi-step integration chains (create → mid-flight mutation → background loop handles transition). | §0.5.3 | **LANDED 2026-04-20.** `workers/tests/multi-step-integration.test.ts` chains create → add-stream → go-live → mid-live add-stream → two metrics PATCHes → soft-end → post-end metrics → final usage rollup. Covers the exact race shape behind the 2026-04-20 triad. | `workers/tests/multi-step-integration.test.ts` |
 | **P3** | E2E voice-clone cross-lingual chain — proves UI → Workers half of the invariant even though the TTS wire body stays a server-rs integration concern. | §0.2 (voice-clone row = Unit + Integration + e2e) | **LANDED 2026-04-20.** `frontend/e2e/voice-clone-crosslingual.e2e.ts` — Korean-enrolled voice + Japanese destination asserts source_lang + target_langs in the POST /api/sessions payload without tripping the mismatch banner; a second test proves the banner RE-engages when the voice is re-recorded in a new language. | `frontend/e2e/voice-clone-crosslingual.e2e.ts` |
@@ -343,7 +313,7 @@ blocker but a Phase 2 blocker.
   fixtures for Soniox + YouTube + Grip. Prompt in
   `docs/may10-agent-tasks.md` Task 16. Each per-vendor README has exact
   capture steps. Stripe deferred until pricing lands.
-- Convert `tts.rs` + `ffmpeg/{mod,drain}.rs` `eprintln!` calls
+- Convert `tts.rs` + `ffmpeg/{mod,drain,caption}.rs` `eprintln!` calls
   to `tracing::*` for structured logging. Not silent paths — they emit —
   but the rule requires structured output. Out of scope for the
   silent-path pass; batch into a separate observability cleanup.
@@ -391,9 +361,6 @@ Explicitly deferred. Do not let these creep in.
 - **Terraform S3 state cutover** — scheduled post-May-10 (infrastructure prepped, disabled pending drift resolution)
 - **Naver OAuth / Apple Sign-In** — Google only until demand proves otherwise
 - **Instagram integration** — Grip + TikTok + YouTube cover the primary market
-- **Captions / subtitles** — removed from product scope. Brivva sells natural
-  translated voice, not text overlays. Reconsider only as a paid enterprise
-  request.
 - **Mobile apps** — web-only for launch
 - **Per-language pricing** — flat `$1.50/min` across all languages for launch
 - **Incorporation details** — Brivva Tech entity formation (34% equity push) is parallel, not blocking
@@ -543,7 +510,7 @@ before rehearsal.
 | Tech / CTO | Aziz | All engineering, infra, ops, on-call | full-time |
 | Sales lead | Simon | B2B clients, pricing, demos | weekday business hours |
 | Client acquisition + Korean test voice | MJ | Deal closing, account management, stand-in host for dry runs (native Korean) | always available |
-| Japanese-language QA | Yuni | Native-JP review of translation + voice quality. Validated 2026-04-20 En→Ja demo quality. | on-demand |
+| Japanese-language QA | Yuni | Native-JP review of translation + subtitle quality. Validated 2026-04-20 En→Ja demo ("No issue with Japanese language, they even attached the subtitles"). | on-demand |
 | First live show host | Gitae | Broadcast talent, Korean | weekends |
 | Future show hosts | Yuna, others TBD | Broadcast talent | TBD |
 | Videographer | TBD per show | Studio setup for live | per-show |
@@ -588,7 +555,7 @@ until the company hires. Stay disciplined about what to take on.
   post-launch.
 - `2026-04-20` — Testing-debt audit vs `claude.md` §0. Five gaps
   surfaced: no real-response fixtures (§0.5.1), silent-path logs
-  missing in STT pipeline (§0.5.4), WS lifecycle matrix
+  missing in STT/caption pipeline (§0.5.4), WS lifecycle matrix
   missing crash/restart + concurrent-start rows (§0.5.2), multi-step
   integration chains thin (§0.5.3), voice-clone e2e split across
   files (§0.2). P1 gaps are the exact class that shipped the April
@@ -676,7 +643,8 @@ until the company hires. Stay disciplined about what to take on.
   with MJ).
 - `2026-04-20` (evening) — Aziz shared En→Ja YouTube demo in Brivva
   WhatsApp group. Yuni (native JP, new QA resource) approved quality
-  for the Japanese output. Simon asked for Korean next. Aziz committed publicly
+  ("No issue with Japanese language, they even attached the
+  subtitles"). Simon asked for Korean next. Aziz committed publicly
   to: (a) "ultimate test" = En source → Ko+Zh+Ja targets
   simultaneously → Grip+TikTok+YouTube simultaneously, cloning own
   voice, (b) Phase 2 scope of SEA langs + multi-speaker support +
@@ -684,11 +652,3 @@ until the company hires. Stay disciplined about what to take on.
   clients without Aziz in the loop. Added Yuni to Collaborators table,
   moved admin panel + multi-speaker from "Not In Scope" to new
   "Committed Phase 2" table, wrote the ultimate-test brief into Week 2.
-- `2026-04-26` — Captions/subtitles removed from product scope. Rationale:
-  Brivva's core premium experience is smooth video plus natural cloned
-  translated voice; captions fragment across platforms, CJK support is weak
-  in legacy caption standards, and burn-in adds per-language video encode
-  cost that fights 4K/30 quality. WebRTC ingest is the video priority.
-- `2026-04-26` — WebRTC ingest made the frontend default. Legacy JPEG
-  websocket video remains as an explicit fallback with `?ingest=jpeg` or
-  `VITE_VIDEO_INGEST=jpeg` while production streams are validated.

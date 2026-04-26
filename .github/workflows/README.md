@@ -12,20 +12,12 @@ workflow from `deploy.yml`.
 
 ### `deploy.yml` — runs on push to `prod`
 `main` is the dev trunk. To ship: merge `main → prod` and push `prod`.
-Re-runs `ci.yml` as a gate, ensures the immutable server image for the
-commit exists in ECR, then deploys:
+Re-runs `ci.yml` as a gate, then three parallel deploys:
 1. **Workers → brivva-api** via `wrangler deploy` + `migrate:prod`
 2. **Pages → brivva.pages.dev** via `wrangler pages deploy dist --branch=main` (Pages production alias)
-3. **Fargate → us-east-1** via the prebuilt `brivva/server-rs:<git-sha>` image, task-definition registration, `services-stable` wait, and tunnel smoke test
+3. **Fargate → us-east-1** via a prebuilt amd64 ffmpeg base, `docker buildx` server image build, task-definition registration, `services-stable` wait, and tunnel smoke test
 
 Manual re-deploy available via the Actions tab (`workflow_dispatch`).
-
-### `server-image.yml` — server application image
-Builds and pushes the amd64 `brivva/server-rs:<git-sha>` image. Pushes to
-`main` prebuild the image, so the later `prod` deploy usually only verifies
-that the tag exists and registers an ECS task definition. If the image is
-missing, the reusable workflow builds it once with the GitHub Actions and
-ECR registry caches.
 
 ### `smoke.yml` — nightly + PR gate
 End-to-end media pipeline smoke. Runs nightly (09:00 UTC) and on PRs that
@@ -53,18 +45,47 @@ Set these in the repo's **Settings → Secrets and variables → Actions**:
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | Workers + Pages + D1 | Cloudflare dashboard → My Profile → API Tokens → Create Token. Permissions: `Account: Workers Scripts: Edit`, `Account: Cloudflare Pages: Edit`, `Account: D1: Edit`. |
 | `CLOUDFLARE_ACCOUNT_ID` | same | Cloudflare dashboard → Workers & Pages → right sidebar. |
-| `AWS_ACCOUNT` | Fargate | 12-digit account number. GitHub Actions assumes `arn:aws:iam::<AWS_ACCOUNT>:role/github-actions-deploy` via OIDC. |
-| `INFISICAL_TOKEN` | Workers + Fargate secret sync | Infisical service token or machine-identity token with read access to the `brivva` project `prod` environment. |
+| `AWS_ACCESS_KEY_ID` | Fargate | IAM user with ECR push + ECS update-service permissions. See policy below. |
+| `AWS_SECRET_ACCESS_KEY` | same | (paired with the access key id) |
+| `AWS_ACCOUNT` | same | 12-digit account number (used to build the ECR registry URL). |
 
-### Minimum AWS IAM permissions
+### Minimum AWS IAM policy
 
-The `github-actions-deploy` role needs ECR read/write for `brivva/*`,
-ECS task-definition registration and service update/describe, IAM
-`PassRole` for the task roles, `secretsmanager:UpdateSecret` on
-`brivva/env-*` for Infisical prod sync, and CloudWatch/log read access used
-by smoke/debug steps. Do not use long-lived AWS access keys for Actions.
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:*:repository/brivva/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
+      ],
+      "Resource": "arn:aws:ecs:us-east-1:*:service/brivva/brivva"
+    }
+  ]
+}
+```
+
+Attach this policy to a fresh IAM user `brivva-ci`, generate an access key, and
+drop the key pair into the GitHub secrets above. **Do not** reuse the root
+credentials — rotate to an IAM user before enabling this workflow.
 
 ## Skipping deploy for a push
 
 Add `[skip deploy]` or `[skip ci]` to the commit message. Or push to a branch
-other than `prod` (deploys only trigger on `prod`).
+other than `main` (deploys only trigger on `main`).

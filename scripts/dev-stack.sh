@@ -44,7 +44,6 @@ fail()  { echo "${RED}✗ $*${NC}"; }
 
 SERVER_PID=""
 WORKERS_PID=""
-WORKERS_ENV_FILE=""
 
 cleanup() {
   local rc=$?
@@ -60,7 +59,6 @@ cleanup() {
   sleep 1
   lsof -ti :"$SERVER_PORT"  2>/dev/null | xargs kill -9 2>/dev/null || true
   lsof -ti :"$WORKERS_PORT" 2>/dev/null | xargs kill -9 2>/dev/null || true
-  [ -n "$WORKERS_ENV_FILE" ] && rm -f "$WORKERS_ENV_FILE"
 }
 trap cleanup EXIT INT TERM
 
@@ -75,17 +73,7 @@ for port in "$SERVER_PORT" "$WORKERS_PORT"; do
 done
 
 # ── Boot ─────────────────────────────────────────────────────
-if [ "${BRIVVA_INFISICAL:-}" = "1" ]; then
-  WORKERS_ENV_FILE="$(mktemp)"
-  for key in \
-    FRONTEND_URL OAUTH_REDIRECT_URI GOOGLE_SIGNIN_REDIRECT_URI \
-    ELEVENLABS_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET JWT_SECRET \
-    INTERNAL_SECRET GRIP_ACCESS_KEY GRIP_SECRET_KEY STRIPE_WEBHOOK_SECRET \
-    DEV_AUTH_BYPASS; do
-    value="${!key:-}"
-    [ -n "$value" ] && printf '%s=%s\n' "$key" "$value" >> "$WORKERS_ENV_FILE"
-  done
-elif [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
+if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
   if [ -f "${REPO_ROOT}/workers/.dev.vars.example" ]; then
     warn "workers/.dev.vars missing; creating it from .dev.vars.example"
     cp "${REPO_ROOT}/workers/.dev.vars.example" "${REPO_ROOT}/workers/.dev.vars"
@@ -96,16 +84,14 @@ elif [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
   fi
 fi
 
-if [ "${BRIVVA_INFISICAL:-}" != "1" ]; then
-  set -a
-  if [ -f "${REPO_ROOT}/.env.local" ]; then
-    # shellcheck source=/dev/null
-    . "${REPO_ROOT}/.env.local"
-  fi
+set -a
+if [ -f "${REPO_ROOT}/.env.local" ]; then
   # shellcheck source=/dev/null
-  . "${REPO_ROOT}/workers/.dev.vars"
-  set +a
+  . "${REPO_ROOT}/.env.local"
 fi
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/workers/.dev.vars"
+set +a
 export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
 
 info "starting server-rs → ${LOG_DIR}/server-rs.log"
@@ -123,13 +109,8 @@ fi
 pass "D1 migrations up to date"
 
 info "starting workers → ${LOG_DIR}/workers.log"
-if [ -n "$WORKERS_ENV_FILE" ]; then
-  ( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" --env-file "$WORKERS_ENV_FILE" ) \
-    >"${LOG_DIR}/workers.log" 2>&1 &
-else
-  ( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \
-    >"${LOG_DIR}/workers.log" 2>&1 &
-fi
+( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \
+  >"${LOG_DIR}/workers.log" 2>&1 &
 WORKERS_PID=$!
 
 # ── Wait for health ──────────────────────────────────────────

@@ -14,7 +14,7 @@ data "aws_subnets" "default" {
 locals {
   account_id         = data.aws_caller_identity.current.account_id
   ecr_base           = "${local.account_id}.dkr.ecr.${var.region}.amazonaws.com"
-  enable_cloudflared = var.enable_cloudflared && length(var.tunnel_id) > 0
+  enable_cloudflared = nonsensitive(length(var.tunnel_creds) > 0) && length(var.tunnel_id) > 0
   ecr_server         = aws_ecr_repository.server.repository_url
   secret_arn         = aws_secretsmanager_secret.env.arn
 }
@@ -93,7 +93,7 @@ resource "aws_ecr_lifecycle_policy" "server_build_base" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 5 base images"
+      description  = "Keep last 5 build base images — rebuilds are rare"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
@@ -119,7 +119,7 @@ resource "aws_ecr_lifecycle_policy" "server_runtime_base" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 5 base images"
+      description  = "Keep last 5 runtime base images — rebuilds are rare"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
@@ -147,18 +147,14 @@ resource "aws_secretsmanager_secret" "env" {
 resource "aws_secretsmanager_secret_version" "env" {
   secret_id = aws_secretsmanager_secret.env.id
   secret_string = jsonencode({
-    SONIOX_API_KEY       = ""
-    ELEVENLABS_API_KEY   = ""
-    GOOGLE_CLIENT_ID     = ""
-    GOOGLE_CLIENT_SECRET = ""
-    TUNNEL_CREDS         = ""
-    JWT_SECRET           = ""
-    INTERNAL_SECRET      = ""
+    SONIOX_API_KEY       = var.soniox_api_key
+    ELEVENLABS_API_KEY   = var.elevenlabs_api_key
+    GOOGLE_CLIENT_ID     = var.google_client_id
+    GOOGLE_CLIENT_SECRET = var.google_client_secret
+    TUNNEL_CREDS         = var.tunnel_creds
+    JWT_SECRET           = var.jwt_secret
+    INTERNAL_SECRET      = var.internal_secret
   })
-
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
 }
 
 # ── IAM ────────────────────────────────────────────────────
@@ -194,21 +190,13 @@ resource "aws_iam_role_policy" "secrets_read" {
 }
 
 # ── Security group (Fargate task) ──────────────────────────
-# HTTP ingress stays private to cloudflared. WebRTC media needs direct UDP
-# because Cloudflare Tunnel only carries the WHIP HTTP signaling path.
+# No public ingress — cloudflared sidecar connects outbound only.
+# If you swap to ALB ingress, add inbound 3000 here.
 
 resource "aws_security_group" "task" {
   name        = "${var.project}-task"
   description = "Egress-only for Fargate task (cloudflared handles ingress)."
   vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description = "WebRTC ICE/SRTP media"
-    from_port   = var.webrtc_udp_port_min
-    to_port     = var.webrtc_udp_port_max
-    protocol    = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -246,9 +234,6 @@ locals {
       { name = "BROADCAST_DELAY_MS", value = tostring(var.broadcast_delay_ms) },
       { name = "FRONTEND_URL", value = var.frontend_url },
       { name = "WORKERS_API_URL", value = var.workers_api_url },
-      { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = tostring(var.webrtc_udp_port_min) },
-      { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = tostring(var.webrtc_udp_port_max) },
-      { name = "BRIVVA_WEBRTC_STUN_URLS", value = var.webrtc_stun_urls },
     ]
     secrets = [
       { name = "SONIOX_API_KEY", valueFrom = "${local.secret_arn}:SONIOX_API_KEY::" },

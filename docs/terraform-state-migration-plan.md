@@ -1,34 +1,96 @@
 # Terraform state → S3 backend migration plan
 
-Status: **migrated to S3 backend on Apr 26, 2026**.
+Status: **infrastructure provisioned, backend disabled until drift resolved**.
 
 ## What's Already Done (Apr 19)
 
 1. **S3 bucket `brivva-tf-state`** — us-east-1, versioning + SSE-AES256 + all public-access blocked.
 2. **DynamoDB table `brivva-tf-locks`** — us-east-1, pay-per-request, single-key `LockID` schema.
-3. **Backend block in `infra/versions.tf`** — enabled.
+3. **Backend block in `infra/versions.tf`** — present but commented out.
 
-## Migration Completed
+## What's Blocking Full Cutover
 
-On Apr 26, 2026, live AWS resources were imported into a fresh local
-OpenTofu state, `tofu plan -var-file=terraform.tfvars` returned
-`No changes`, and the reconciled state was migrated to the S3 backend
-`s3://brivva-tf-state/brivva/terraform.tfstate` with DynamoDB locking.
+**State-vs-cloud drift.** The committed `infra/terraform.tfstate` was stale
+relative to live AWS resources. Running `tofu init -migrate-state` copied
+the stale state to S3 successfully, but `tofu plan` against that state
+reports **12 resources to add, 1 to change** — meaning AWS already has 12
+resources the committed state never knew about. Recent commits like
+`f62bd76 "Add CloudWatch dashboard + alarms via terraform"` and
+`242057d "Enable ECS Container Insights"` produced resources that were
+apparently applied locally but the resulting state was never committed.
 
-## Drift Resolution History
+If someone un-comments the backend block and runs `tofu apply`, at best
+it fails with "resource already exists" errors, at worst it creates
+duplicates of the CloudWatch + SNS alarm stack.
 
-The following resource groups were imported before backend cutover:
+## Drift Resolution (do before enabling backend)
 
-- ECR repositories and lifecycle policies.
-- CloudWatch log group, metric filters, alarms, and dashboard.
-- Secrets Manager secret and current secret version.
-- ECS cluster, task definition, service, and task security group.
-- ECS execution IAM role, attachment, and inline secret-read policy.
-- SNS alarm topic.
+Run these in `infra/`:
 
-Optional future hardening: purge any historically committed state from git
-history. This requires `git filter-repo`, rewrites history, and should be
-coordinated with anyone with a clone:
+1. **Confirm drift surface**:
+
+   ```bash
+   tofu init                                           # local backend
+   tofu plan -var-file=terraform.tfvars > /tmp/plan.txt
+   ```
+
+   Read the plan carefully. Identify each "+ resource" block — these are
+   resources your code declares but state does not know exist.
+
+2. **Import real resources into state** (example for the SNS alarm topic):
+
+   ```bash
+   tofu import -var-file=terraform.tfvars \
+     'aws_sns_topic.alarms[0]' \
+     arn:aws:sns:us-east-1:132593557399:brivva-alarms
+   ```
+
+   Repeat for every drifted resource. Find each real ARN via AWS console
+   or `aws ... describe` commands. The 12 listed by `tofu plan` are a
+   good worklist.
+
+3. **Refresh-only pass** once imports are done:
+
+   ```bash
+   tofu plan -var-file=terraform.tfvars -refresh-only
+   tofu apply -var-file=terraform.tfvars -refresh-only
+   ```
+
+   This pulls in the real attribute values without changing cloud.
+
+4. **Regular plan should be clean now**:
+
+   ```bash
+   tofu plan -var-file=terraform.tfvars
+   ```
+
+   Expect `0 to add, 0 to change, 0 to destroy`. If not, continue
+   importing.
+
+## Cutover (after drift = 0)
+
+5. **Uncomment backend block** in `infra/versions.tf`.
+6. **`tofu init -migrate-state`** — OpenTofu will prompt, accept yes. State
+   uploads to S3.
+7. **`tofu plan`** — must still show `0 changes`. If it doesn't, rollback
+   (re-comment backend, `tofu init -reconfigure`).
+8. **Remove committed state files from git**:
+
+   ```bash
+   git rm infra/terraform.tfstate infra/terraform.tfstate.backup
+   ```
+
+9. **Update `infra/.gitignore`**:
+
+   ```
+   .terraform/
+   terraform.tfstate
+   terraform.tfstate.backup
+   ```
+
+10. **Optional — purge committed secret ARNs from git history** (requires
+    `git filter-repo`, rewrites history, coordinate with anyone with a
+    clone):
 
     ```bash
     git filter-repo --path infra/terraform.tfstate --invert-paths
@@ -37,11 +99,12 @@ coordinated with anyone with a clone:
 
 ## Rollback (if anything goes sideways)
 
-The S3 backend is authoritative. If S3 state ever gets corrupted, the
-DynamoDB lock gets stuck, or OpenTofu refuses to read back:
+Backend is disabled right now, so local state remains authoritative.
+If S3 state ever gets corrupted, the DynamoDB lock stuck, or Terraform
+refuses to read back:
 
 ```bash
-# re-comment backend in versions.tf
+# re-comment backend in versions.tf (already done)
 tofu init -reconfigure
 
 # if needed, overwrite local state from a known good backup

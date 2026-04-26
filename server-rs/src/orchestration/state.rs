@@ -23,8 +23,5 @@ pub fn broadcast_state() -> BroadcastState {
         elevenlabs_base_url: cfg.elevenlabs_base_url.clone(),
         force_default_voice: cfg.force_default_voice,
         force_rtmp_not_rtmps: cfg.force_rtmp_not_rtmps,
-        webrtc_udp_port_min: cfg.webrtc_udp_port_min,
-        webrtc_udp_port_max: cfg.webrtc_udp_port_max,
-        webrtc_stun_urls: cfg.webrtc_stun_urls.clone(),
     }
 }

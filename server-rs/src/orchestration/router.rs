@@ -1,8 +1,5 @@
-use crate::features::broadcast::data::{BroadcastState, session_ws_handler, whip_session_handler};
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use crate::features::broadcast::data::{BroadcastState, session_ws_handler};
+use axum::{Router, routing::get};
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn build_app(state: BroadcastState) -> Router {
@@ -19,7 +16,6 @@ pub fn build_app(state: BroadcastState) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/api/session", get(session_ws_handler))
         .route("/api/room", get(session_ws_handler))
-        .route("/whip/session", post(whip_session_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -77,21 +73,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn whip_route_is_registered_and_requires_auth() {
-        let app = build_app(BroadcastState::new());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/whip/session")
-                    .body(Body::from("v=0\r\n"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

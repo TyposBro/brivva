@@ -13,12 +13,6 @@
   "scripts": {
     "contracts:generate": "bun run --cwd workers openapi:export && bun run --cwd frontend openapi:generate && bun run --cwd contracts gen:rust",
     "contracts:gen-rust": "bun run --cwd contracts gen:rust",
-    "dev:infisical": "infisical run --env=dev -- bash -lc 'BRIVVA_INFISICAL=1 ./scripts/dev-all.sh'",
-    "dev:infisical:watch": "infisical run --env=dev --watch -- bash -lc 'BRIVVA_INFISICAL=1 ./scripts/dev-all.sh'",
-    "dev:infisical:smoke": "infisical run --env=dev -- bash -lc 'BRIVVA_INFISICAL=1 ./scripts/dev-stack.sh'",
-    "infisical:export:workers": "infisical export --env=dev --format=dotenv > workers/.dev.vars",
-    "infisical:sync:aws:prod": "./scripts/sync-infisical-prod-aws.sh",
-    "infisical:sync:workers:prod": "./scripts/sync-infisical-prod-workers.sh",
     "install:all": "bun install",
     "test:frontend": "bun run --cwd frontend test",
     "test:workers": "bun run --cwd workers test",

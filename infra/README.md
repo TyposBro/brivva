@@ -26,18 +26,13 @@ brew install opentofu
 # 2. Configure AWS creds for an account with admin-ish perms
 aws configure   # or: set -x AWS_PROFILE brivva
 
-# 3. Generate non-secret Terraform overrides from Infisical prod
+# 3. Load secrets from ../.env.local → terraform.tfvars (gitignored)
 cd infra
-infisical run --env=prod -- ./load-env.sh
+./load-env.sh
 
 # 4. Init + apply
 tofu init
 tofu apply
-
-# 5. Fill AWS Secrets Manager from Infisical, then restart tasks
-cd ..
-bun run infisical:sync:aws:prod
-./deploy.sh --skip-build
 ```
 
 Outputs include `ecr_server_url`, `account_id`, etc.
@@ -68,17 +63,17 @@ The SQL lives in [workers/ops/live-session-id-migration.sql](../workers/ops/live
 
 ## Rotate secrets
 
-Edit Infisical `prod`, then sync targets:
+Edit `../.env.local`, then:
 
-```bash
-bun run infisical:sync:aws:prod
-bun run infisical:sync:workers:prod
-./deploy.sh --skip-build   # restart ECS tasks to pick up changed AWS secret values
+```fish
+cd infra
+./load-env.sh
+tofu apply          # updates secret value
+cd ..
+./deploy.sh --skip-build   # restart tasks to pick up new values
 ```
 
 Tasks fetch secrets at container start — they don't hot-reload.
-Terraform owns the Secrets Manager container and IAM permissions only. It ignores
-secret value drift; Infisical owns secret values.
 
 ## Sizing
 
@@ -120,24 +115,6 @@ task_memory = "16384"  # 16 GB
 Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html). Common pairs: 1024/2048, 2048/4096, 4096/8192, 8192/16384.
 
 Apply changes: `tofu apply`, then `./deploy.sh --skip-build` to roll tasks.
-
-## WebRTC UDP ingress
-
-Cloudflare Tunnel still handles HTTPS and the WHIP signaling endpoint
-(`/whip/session`), but WebRTC media itself uses ICE/SRTP over UDP. The
-Fargate task therefore exposes a narrow UDP range directly on its public
-task ENI:
-
-```hcl
-webrtc_udp_port_min = 50000
-webrtc_udp_port_max = 50100
-webrtc_stun_urls    = "stun:stun.l.google.com:19302"
-```
-
-Terraform opens only that UDP range in the task security group and injects
-the same values into `server-rs` as `BRIVVA_WEBRTC_*` env vars. If direct
-Fargate UDP is unreliable in production, the next step is a TURN relay or
-UDP NLB, not widening the security group.
 
 ## Horizontal scale (many concurrent rooms)
 
@@ -256,9 +233,7 @@ Local backend for now (`terraform.tfstate` in this dir, gitignored). Migrate to 
 
 ## Cloudflared
 
-Sidecar enabled iff `enable_cloudflared = true` and `tunnel_id` is non-empty.
-`TUNNEL_CREDS` must exist in AWS Secrets Manager via Infisical sync. Without
-the sidecar, the task has no ingress — add an ALB or disable only intentionally.
+Sidecar auto-enabled iff both `tunnel_creds` AND `tunnel_id` are non-empty. Without them, the task has no ingress — add an ALB or populate the vars.
 
 **Named tunnels are persistent.** Same `TUNNEL_CREDS` + `TUNNEL_ID` rejoin the same tunnel after every task restart. Hostname→tunnel route lives in Cloudflare DNS, not regenerated.
 
