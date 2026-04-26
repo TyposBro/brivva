@@ -34,3 +34,4 @@ AGENTS.md
 CLAUDE.md
 CODEX.md
 GEMINI.md
+*.agent-memory.bak.*

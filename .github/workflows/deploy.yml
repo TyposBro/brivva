@@ -98,33 +98,28 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
-      # Ensure the pinned ffmpeg base tag exists as amd64 before server-rs
-      # pulls it. This avoids racing the separate ffmpeg-base workflow and
-      # replaces any old ARM-only tag left from the previous deploy shape.
-      - name: Build and push ffmpeg-base
-        uses: docker/build-push-action@v6
-        with:
-          context: infra/ffmpeg-base
-          file: infra/ffmpeg-base/Dockerfile
-          platforms: linux/amd64
-          push: true
-          build-args: |
-            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
-            ${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:latest
-          cache-from: type=gha,scope=ffmpeg-base
-          cache-to: type=gha,mode=max,scope=ffmpeg-base
+      # ffmpeg-base changes rarely and is built by ffmpeg-base.yml or
+      # `./deploy.sh --build-ffmpeg-base`. Normal deploys only verify the
+      # pinned ECR tag exists, then server-rs pulls it during its Docker build.
+      - name: Verify ffmpeg-base image exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --region us-east-1 \
+            --repository-name "${FFMPEG_BASE_REPO}" \
+            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
+            --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+            --output table
 
       # Native amd64 build — runner, Rust target, ffmpeg base, final
       # image all share linux/amd64 so BuildKit never invokes QEMU.
       # cargo-zigbuild still works (treats host==target as a no-op
       # cross-compile) so the Dockerfile stays unchanged in that shape.
       #
-      # FFMPEG_BASE_IMAGE pins the ffmpeg binary to whatever was last
-      # published by `ffmpeg-base.yml`. Bump FFMPEG_VERSION above +
-      # re-run that workflow to ship a new ffmpeg; deploy.yml picks it
-      # up automatically on the next run.
+      # FFMPEG_BASE_IMAGE pins the ffmpeg binary to the prebuilt image.
+      # Bump FFMPEG_VERSION above + re-run ffmpeg-base.yml or
+      # deploy.sh --build-ffmpeg-base to ship a new ffmpeg; deploy.yml
+      # picks it up automatically on the next run.
       #
       # GitHub Actions cache keeps warm builds fast: cargo-chef's deps
       # layer is reused unless Cargo.lock changes.

@@ -15,13 +15,19 @@ workflow from `deploy.yml`.
 Re-runs `ci.yml` as a gate, then three parallel deploys:
 1. **Workers → brivva-api** via `wrangler deploy` + `migrate:prod`
 2. **Pages → brivva.pages.dev** via `wrangler pages deploy dist --branch=main` (Pages production alias)
-3. **Fargate → us-east-1** via `docker buildx` (amd64) + `ecs update-service --force-new-deployment` + `services-stable` wait + tunnel smoke test
+3. **Fargate → us-east-1** via a prebuilt amd64 ffmpeg base, `docker buildx` server image build, task-definition registration, `services-stable` wait, and tunnel smoke test
 
 Manual re-deploy available via the Actions tab (`workflow_dispatch`).
 
 ### `smoke.yml` — nightly + PR gate
 End-to-end media pipeline smoke. Runs nightly (09:00 UTC) and on PRs that
 touch `server-rs/**` or `tests/e2e/**`. See `tests/e2e/README.md`.
+
+### `ffmpeg-base.yml` — custom FFmpeg image
+Builds and pushes the amd64 `brivva/ffmpeg-base:<version>-librtmp` image.
+Normal deploys reuse this pinned image instead of rebuilding FFmpeg every
+time. Re-run this workflow, or run `./deploy.sh --build-ffmpeg-base`, only
+when `infra/ffmpeg-base/**` or `FFMPEG_VERSION` changes.
 
 ## Required secrets
 

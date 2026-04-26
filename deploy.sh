@@ -28,23 +28,31 @@ ECR_BASE="${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 # ── Parse args ────────────────────────────────────────────
 SKIP_BUILD=false
+BUILD_FFMPEG_BASE=false
 
 usage() {
-    echo "Usage: $0 [--skip-build]"
+    echo "Usage: $0 [--skip-build] [--build-ffmpeg-base]"
     echo ""
-    echo "  --skip-build    Skip Docker build, just force a new ECS deployment"
+    echo "  --skip-build          Skip Docker build, deploy server-rs:latest"
+    echo "  --build-ffmpeg-base   Rebuild and push the pinned ffmpeg-base image"
     echo ""
-    echo "Env overrides: AWS_REGION, AWS_ACCOUNT, CLUSTER, SERVICE, PROJECT"
+    echo "Env overrides: AWS_REGION, AWS_ACCOUNT, CLUSTER, SERVICE, PROJECT, FFMPEG_VERSION"
     exit 1
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-build) SKIP_BUILD=true; shift ;;
+        --build-ffmpeg-base) BUILD_FFMPEG_BASE=true; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown arg: $1"; usage ;;
     esac
 done
+
+if [[ "$SKIP_BUILD" == true && "$BUILD_FFMPEG_BASE" == true ]]; then
+    echo "--skip-build and --build-ffmpeg-base cannot be combined" >&2
+    exit 1
+fi
 
 # ── Build & Push ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
@@ -59,12 +67,22 @@ if [[ "$SKIP_BUILD" == false ]]; then
     LATEST_IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
     FFMPEG_BASE_IMAGE="${FFMPEG_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-base:${FFMPEG_VERSION}-librtmp}"
 
-    echo "==> Building ffmpeg-base ($PLATFORM) → $FFMPEG_BASE_IMAGE"
-    docker buildx build --platform "$PLATFORM" \
-        -t "$FFMPEG_BASE_IMAGE" \
-        -t "$ECR_BASE/$PROJECT/ffmpeg-base:latest" \
-        --build-arg "FFMPEG_VERSION=$FFMPEG_VERSION" \
-        -f infra/ffmpeg-base/Dockerfile --push infra/ffmpeg-base
+    if [[ "$BUILD_FFMPEG_BASE" == true ]]; then
+        echo "==> Building ffmpeg-base ($PLATFORM) → $FFMPEG_BASE_IMAGE"
+        docker buildx build --platform "$PLATFORM" \
+            -t "$FFMPEG_BASE_IMAGE" \
+            -t "$ECR_BASE/$PROJECT/ffmpeg-base:latest" \
+            --build-arg "FFMPEG_VERSION=$FFMPEG_VERSION" \
+            -f infra/ffmpeg-base/Dockerfile --push infra/ffmpeg-base
+    else
+        echo "==> Verifying ffmpeg-base exists → $FFMPEG_BASE_IMAGE"
+        aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$PROJECT/ffmpeg-base" \
+            --image-ids "imageTag=${FFMPEG_VERSION}-librtmp" \
+            --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+            --output table
+    fi
 
     echo "==> Building server-rs ($PLATFORM) → $IMAGE"
     docker buildx build --platform "$PLATFORM" \

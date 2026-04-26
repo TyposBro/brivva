@@ -75,6 +75,18 @@ See [`docs/runbook.md`](../docs/runbook.md) §Rollback. Short version:
 ./scripts/rollback.sh 12         # roll to brivva:12
 ```
 
+### `../deploy.sh` — local ECR/ECS deploy
+
+Builds and pushes the amd64 `server-rs` image locally, then registers and
+deploys a new ECS task definition. It reuses the pinned prebuilt
+`ffmpeg-base` image by default so normal deploys do not rebuild FFmpeg.
+
+```bash
+./deploy.sh                       # build server-rs, deploy ECS
+./deploy.sh --build-ffmpeg-base    # rebuild ffmpeg-base first, then server-rs
+./deploy.sh --skip-build           # deploy current server-rs:latest
+```
+
 ### `install-hooks.sh` — point git at versioned hooks
 
 Sets `core.hooksPath = scripts/git-hooks`. Run once per clone. See
