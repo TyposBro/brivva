@@ -2,8 +2,9 @@
 //!
 //! These run on their own OS threads. They pull aged frames/chunks out of
 //! the stream's delay buffers and feed them to the FFmpeg child — video
-//! straight to stdin at 30 fps, audio to a FIFO at 20 ms ticks mixed with
-//! the translated TTS queue.
+//! straight to stdin at 30 fps by repeating the latest browser JPEG when
+//! necessary, audio to a FIFO at 20 ms ticks mixed with the translated TTS
+//! queue.
 
 use std::collections::VecDeque;
 use std::io::Write;

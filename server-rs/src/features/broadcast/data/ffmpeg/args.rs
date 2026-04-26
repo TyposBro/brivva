@@ -29,9 +29,9 @@ pub(super) fn build_ffmpeg_args(
         "-f".into(),
         "image2pipe".into(),
         // Force mjpeg on stdin so ffmpeg does not block on codec auto-detection
-        // before the host has sent a first JPEG. The driver sends JPEGs every
-        // 2s, and image2pipe would otherwise fail probe with
-        // "Could not find codec parameters" and exit.
+        // before the host has sent a first JPEG. The browser sends JPEG frames
+        // over the session WebSocket, and image2pipe would otherwise fail probe
+        // with "Could not find codec parameters" and exit.
         "-vcodec".into(),
         "mjpeg".into(),
         "-framerate".into(),
