@@ -60,8 +60,9 @@ Set these in the repo's **Settings → Secrets and variables → Actions**:
 
 The `github-actions-deploy` role needs ECR read/write for `brivva/*`,
 ECS task-definition registration and service update/describe, IAM
-`PassRole` for the task roles, and CloudWatch/log read access used by
-smoke/debug steps. Do not use long-lived AWS access keys for Actions.
+`PassRole` for the task roles, `secretsmanager:UpdateSecret` on
+`brivva/env-*` for Infisical prod sync, and CloudWatch/log read access used
+by smoke/debug steps. Do not use long-lived AWS access keys for Actions.
 
 ## Skipping deploy for a push
 
