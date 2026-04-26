@@ -79,6 +79,10 @@ jobs:
       ECR_REPO: brivva/server-rs
       FFMPEG_BASE_REPO: brivva/ffmpeg-base
       FFMPEG_VERSION: "7.1.1"
+      SERVER_BUILD_BASE_REPO: brivva/server-build-base
+      SERVER_BUILD_BASE_TAG: rust-1.88-slim-zigbuild-v1
+      SERVER_RUNTIME_BASE_REPO: brivva/server-runtime-base
+      SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-v1
       ECS_CLUSTER: brivva
       ECS_SERVICE: brivva
       ECS_CONTAINER: server-rs
@@ -111,15 +115,30 @@ jobs:
             --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
             --output table
 
+      - name: Verify server base images exist
+        run: |
+          set -euo pipefail
+          for image in \
+            "${SERVER_BUILD_BASE_REPO}:${SERVER_BUILD_BASE_TAG}" \
+            "${SERVER_RUNTIME_BASE_REPO}:${SERVER_RUNTIME_BASE_TAG}"
+          do
+            repo="${image%:*}"
+            tag="${image##*:}"
+            aws ecr describe-images \
+              --region us-east-1 \
+              --repository-name "$repo" \
+              --image-ids imageTag="$tag" \
+              --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+              --output table
+          done
+
       # Native amd64 build — runner, Rust target, ffmpeg base, final
       # image all share linux/amd64 so BuildKit never invokes QEMU.
-      # cargo-zigbuild still works (treats host==target as a no-op
-      # cross-compile) so the Dockerfile stays unchanged in that shape.
       #
-      # FFMPEG_BASE_IMAGE pins the ffmpeg binary to the prebuilt image.
-      # Bump FFMPEG_VERSION above + re-run ffmpeg-base.yml or
-      # deploy.sh --build-ffmpeg-base to ship a new ffmpeg; deploy.yml
-      # picks it up automatically on the next run.
+      # SERVER_BUILD_BASE_IMAGE pins Rust/cargo-zigbuild tooling.
+      # SERVER_RUNTIME_BASE_IMAGE pins Debian runtime libs, CJK fonts, and
+      # the custom FFmpeg binary. Rebuild those through server-base.yml
+      # only when the pinned tags or Dockerfiles change.
       #
       # GitHub Actions cache keeps warm builds fast: cargo-chef's deps
       # layer is reused unless Cargo.lock changes.
@@ -131,7 +150,8 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+            SERVER_BUILD_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.SERVER_BUILD_BASE_REPO }}:${{ env.SERVER_BUILD_BASE_TAG }}
+            SERVER_RUNTIME_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:${{ env.SERVER_RUNTIME_BASE_TAG }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest

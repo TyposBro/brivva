@@ -45,10 +45,10 @@ resource "aws_ecr_lifecycle_policy" "server" {
   })
 }
 
-# Prebuilt ffmpeg amd64 image with --enable-librtmp, referenced by
-# server-rs/Dockerfile's `ffmpeg-builder` stage. Decouples the 2+hr
-# ffmpeg source build from every deploy — rebuilt only when the
-# FFMPEG_VERSION pin or the infra/ffmpeg-base/Dockerfile changes.
+# Prebuilt ffmpeg amd64 image with --enable-librtmp, referenced by the
+# server-runtime-base image. Decouples the 2+hr ffmpeg source build from
+# every deploy — rebuilt only when the FFMPEG_VERSION pin or
+# infra/ffmpeg-base/Dockerfile changes.
 resource "aws_ecr_repository" "ffmpeg_base" {
   name = "${var.project}/ffmpeg-base"
   # MUTABLE so the CI workflow can advance `latest` to the newest build.
@@ -67,6 +67,59 @@ resource "aws_ecr_lifecycle_policy" "ffmpeg_base" {
     rules = [{
       rulePriority = 1
       description  = "Keep last 5 versioned images — rebuilds are rare"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 5
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+# Prebuilt Rust build toolchain for server-rs Docker builds. Keeps normal
+# deploys from reinstalling cargo-chef, cargo-zigbuild, ziglang, and C
+# build dependencies every time the GitHub Actions cache is cold.
+resource "aws_ecr_repository" "server_build_base" {
+  name                 = "${var.project}/server-build-base"
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "server_build_base" {
+  repository = aws_ecr_repository.server_build_base.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 5 build base images — rebuilds are rare"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 5
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+# Prebuilt runtime foundation for server-rs. Contains Debian runtime libs,
+# CJK fonts, and the custom ffmpeg/ffprobe binaries copied from ffmpeg-base.
+resource "aws_ecr_repository" "server_runtime_base" {
+  name                 = "${var.project}/server-runtime-base"
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "server_runtime_base" {
+  repository = aws_ecr_repository.server_runtime_base.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 5 runtime base images — rebuilds are rare"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"

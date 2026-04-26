@@ -79,11 +79,14 @@ See [`docs/runbook.md`](../docs/runbook.md) §Rollback. Short version:
 
 Builds and pushes the amd64 `server-rs` image locally, then registers and
 deploys a new ECS task definition. It reuses the pinned prebuilt
-`ffmpeg-base` image by default so normal deploys do not rebuild FFmpeg.
+`ffmpeg-base`, `server-build-base`, and `server-runtime-base` images by
+default so normal deploys do not rebuild FFmpeg, reinstall Rust tooling, or
+reinstall runtime fonts/libraries.
 
 ```bash
 ./deploy.sh                       # build server-rs, deploy ECS
 ./deploy.sh --build-ffmpeg-base    # rebuild ffmpeg-base first, then server-rs
+./deploy.sh --build-server-bases   # rebuild server build/runtime bases first
 ./deploy.sh --skip-build           # deploy current server-rs:latest
 ```
 

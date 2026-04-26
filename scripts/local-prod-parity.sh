@@ -44,12 +44,28 @@ if [[ "$SKIP_BUILD" == false ]]; then
     -t brivva-smoke-ffmpeg-base:local \
     -f infra/ffmpeg-base/Dockerfile infra/ffmpeg-base
 
+  echo "==> Building prod-parity server-build-base (linux/amd64)"
+  docker buildx build \
+    --platform linux/amd64 \
+    --load \
+    -t brivva-smoke-server-build-base:local \
+    -f infra/server-build-base/Dockerfile infra/server-build-base
+
+  echo "==> Building prod-parity server-runtime-base (linux/amd64)"
+  docker buildx build \
+    --platform linux/amd64 \
+    --load \
+    -t brivva-smoke-server-runtime-base:local \
+    --build-arg FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local \
+    -f infra/server-runtime-base/Dockerfile infra/server-runtime-base
+
   echo "==> Building prod-parity server-rs (linux/amd64)"
   docker buildx build \
     --platform linux/amd64 \
     --load \
     -t brivva-smoke-server:local \
-    --build-arg FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local \
+    --build-arg SERVER_BUILD_BASE_IMAGE=brivva-smoke-server-build-base:local \
+    --build-arg SERVER_RUNTIME_BASE_IMAGE=brivva-smoke-server-runtime-base:local \
     -f server-rs/Dockerfile .
 fi
 

@@ -8,6 +8,9 @@ on:
   pull_request:
     paths:
       - "server-rs/**"
+      - "infra/ffmpeg-base/**"
+      - "infra/server-build-base/**"
+      - "infra/server-runtime-base/**"
       - "tests/e2e/**"
       - ".github/workflows/smoke.yml"
 
@@ -43,6 +46,29 @@ jobs:
           cache-from: type=gha,scope=smoke-ffmpeg-base
           cache-to: type=gha,mode=max,scope=smoke-ffmpeg-base
 
+      - name: build server build base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/server-build-base
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: brivva-smoke-server-build-base:local
+          cache-from: type=gha,scope=smoke-server-build-base
+          cache-to: type=gha,mode=max,scope=smoke-server-build-base
+
+      - name: build server runtime base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/server-runtime-base
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: brivva-smoke-server-runtime-base:local
+          build-args: FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local
+          cache-from: type=gha,scope=smoke-server-runtime-base
+          cache-to: type=gha,mode=max,scope=smoke-server-runtime-base
+
       - name: build server image
         uses: docker/build-push-action@v6
         with:
@@ -51,7 +77,9 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: brivva-smoke-server:local
-          build-args: FFMPEG_BASE_IMAGE=brivva-smoke-ffmpeg-base:local
+          build-args: |
+            SERVER_BUILD_BASE_IMAGE=brivva-smoke-server-build-base:local
+            SERVER_RUNTIME_BASE_IMAGE=brivva-smoke-server-runtime-base:local
           cache-from: type=gha,scope=smoke-server
           cache-to: type=gha,mode=max,scope=smoke-server
 

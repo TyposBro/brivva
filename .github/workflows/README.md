@@ -29,6 +29,14 @@ Normal deploys reuse this pinned image instead of rebuilding FFmpeg every
 time. Re-run this workflow, or run `./deploy.sh --build-ffmpeg-base`, only
 when `infra/ffmpeg-base/**` or `FFMPEG_VERSION` changes.
 
+### `server-base.yml` — server build/runtime foundations
+Builds and pushes the amd64 `server-build-base` and `server-runtime-base`
+images. Normal deploys reuse these pinned images so they do not reinstall
+Rust build tooling, Debian runtime libraries, subtitle fonts, or FFmpeg.
+Re-run this workflow, or run `./deploy.sh --build-server-bases`, when
+`infra/server-build-base/**`, `infra/server-runtime-base/**`, or the pinned
+base tags change.
+
 ## Required secrets
 
 Set these in the repo's **Settings → Secrets and variables → Actions**:

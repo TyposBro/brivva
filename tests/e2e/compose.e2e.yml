@@ -44,7 +44,8 @@ services:
       context: ../..
       dockerfile: server-rs/Dockerfile
       args:
-        FFMPEG_BASE_IMAGE: brivva-smoke-ffmpeg-base:local
+        SERVER_BUILD_BASE_IMAGE: brivva-smoke-server-build-base:local
+        SERVER_RUNTIME_BASE_IMAGE: brivva-smoke-server-runtime-base:local
     ports:
       - "3000:3000"
     environment:

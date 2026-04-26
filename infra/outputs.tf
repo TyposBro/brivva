@@ -11,8 +11,18 @@ output "ecr_server_url" {
 }
 
 output "ecr_ffmpeg_base_url" {
-  description = "Repo URL for the prebuilt amd64 ffmpeg base image. Pass as FFMPEG_BASE_IMAGE build-arg to server-rs/Dockerfile."
+  description = "Repo URL for the prebuilt amd64 ffmpeg base image used by server-runtime-base."
   value       = aws_ecr_repository.ffmpeg_base.repository_url
+}
+
+output "ecr_server_build_base_url" {
+  description = "Repo URL for the prebuilt amd64 server-rs build toolchain image."
+  value       = aws_ecr_repository.server_build_base.repository_url
+}
+
+output "ecr_server_runtime_base_url" {
+  description = "Repo URL for the prebuilt amd64 server-rs runtime foundation image."
+  value       = aws_ecr_repository.server_runtime_base.repository_url
 }
 
 output "secret_arn" {

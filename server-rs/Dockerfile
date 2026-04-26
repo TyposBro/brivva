@@ -1,37 +1,28 @@
-# ── Multi-stage cross-compile build for server-rs ────────────
-# Build natively on BUILDPLATFORM, cross-compile to x86_64-unknown-linux-gnu
-# via cargo-zigbuild when needed, runtime on linux/amd64 Fargate. Keeping
-# dev, CI, and Fargate on x86_64 avoids architecture-specific ffmpeg behavior.
-# cargo-chef keeps warm deps cached.
-
-# Global ARG — must be declared BEFORE the first FROM so it expands
-# inside the `FROM ${FFMPEG_BASE_IMAGE}` below. Any ARG defined after a
-# FROM is scoped to that stage only and leaves subsequent `FROM <ARG>`
-# lines empty, which is exactly how the first prod attempt failed (run
-# 24657046453: `ERROR: base name (${FFMPEG_BASE_IMAGE}) should not be
-# blank`).
+# ── Multi-stage build for server-rs ──────────────────────────
+# Build and run linux/amd64 so production ffmpeg behavior matches Ubuntu dev.
+# Expensive build/runtime foundations are prebuilt:
+#   - server-build-base: Rust + cargo-chef + cargo-zigbuild + ziglang
+#   - server-runtime-base: Debian runtime libs + CJK fonts + custom ffmpeg
 #
-# CI sets this in `.github/workflows/deploy.yml` as
-# `<ECR_REGISTRY>/brivva/ffmpeg-base:<FFMPEG_VERSION>-librtmp`. Local
-# builds must pass `--build-arg FFMPEG_BASE_IMAGE=...`; the default
-# string is intentionally invalid so an omitted arg fails fast at
-# `docker pull` with a clear image-not-found.
-ARG FFMPEG_BASE_IMAGE=brivva-ffmpeg-base-image-not-set-pass-build-arg:latest
+# Normal deploys should only run cargo-chef against dependency changes,
+# compile server-rs, and copy the resulting binary into the runtime base.
 
-FROM --platform=$BUILDPLATFORM rust:1.88-slim AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake build-essential libclang-dev python3 python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --break-system-packages ziglang \
-    && cargo install cargo-chef cargo-zigbuild --locked \
-    && rustup target add x86_64-unknown-linux-gnu
+ARG SERVER_BUILD_BASE_IMAGE=brivva-server-build-base-image-not-set-pass-build-arg:latest
+ARG SERVER_RUNTIME_BASE_IMAGE=brivva-server-runtime-base-image-not-set-pass-build-arg:latest
+
+FROM --platform=$BUILDPLATFORM ${SERVER_BUILD_BASE_IMAGE} AS chef
 WORKDIR /app
 
 # ── planner: extract dep recipe without building ─────────────
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY server-rs/Cargo.toml server-rs/Cargo.toml
-COPY server-rs/src server-rs/src
+# Cargo needs target files to parse the package, but the dependency recipe
+# should not change when application source changes. Keep dummy targets here
+# so the expensive `cargo chef cook` layer keys only on manifests/lockfile.
+RUN mkdir -p server-rs/src \
+    && printf 'fn main() {}\n' > server-rs/src/main.rs \
+    && printf '\n' > server-rs/src/lib.rs
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── builder: cook deps (cached), cross-compile app ───────────
@@ -46,62 +37,8 @@ COPY server-rs/src server-rs/src
 RUN cargo zigbuild --release --target x86_64-unknown-linux-gnu \
     --manifest-path server-rs/Cargo.toml --bin server-rs
 
-# ── ffmpeg-builder: pull prebuilt amd64 ffmpeg (with --enable-librtmp) ─
-# Previously this stage compiled ffmpeg from source. Under QEMU emulation
-# on an amd64 runner that took 2+ hours per push (2026-04-20 incident).
-# The build now lives in `infra/ffmpeg-base/Dockerfile` + is published by
-# `.github/workflows/ffmpeg-base.yml` as an ECR image; this stage just
-# COPYs the binary out, taking the full ffmpeg work out of the critical
-# deploy path.
-#
-# librtmp is still non-negotiable (AWS IVS rejects ffmpeg's native RTMP
-# impl after ~3 frames). The runtime `ffmpeg -version | grep enable-librtmp`
-# check below still fires so a mistagged base image can't ship silently.
-#
-# FFMPEG_BASE_IMAGE is declared as a global ARG at the top of this file
-# — see the comment block next to that declaration for the why.
-FROM ${FFMPEG_BASE_IMAGE} AS ffmpeg-builder
-
 # ── runtime: amd64 slim debian with ffmpeg + subtitle fonts ──
-FROM debian:bookworm-slim
-
-# Runtime shared libs ffmpeg links against, minus the dev/build toolchain.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        fontconfig \
-        fonts-dejavu-core \
-        fonts-noto-cjk \
-        libx264-164 \
-        libx265-199 \
-        libmp3lame0 \
-        libopus0 \
-        librtmp1 \
-        libssl3 \
-        libfreetype6 \
-        libfontconfig1 \
-        libass9 \
-        libharfbuzz0b \
-    && fc-cache -f \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
-
-# Runtime re-verify — catches any weird case where the binary was
-# replaced/corrupted between stages. Logs at image start (cheap).
-RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
-    || (echo "CRITICAL: runtime ffmpeg lacks librtmp"; exit 1)
-
-# drawtext filter is required for subtitle burn-in on every
-# translation target. FFmpeg 6.1+ silently omits drawtext unless
-# libharfbuzz is linked. This check catches a broken ffmpeg-base
-# rebuild (2026-04-20 incident) before it reaches a live session.
-RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q drawtext \
-    || { \
-         echo "CRITICAL: runtime ffmpeg lacks drawtext filter — subtitle burn-in will crash every stream"; \
-         /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -i draw || echo "(no 'draw' matches at all)"; \
-         exit 1; \
-       }
+FROM ${SERVER_RUNTIME_BASE_IMAGE}
 
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/server-rs /usr/local/bin/server-rs
 

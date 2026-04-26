@@ -1,0 +1,106 @@
+name: server-base
+
+# Prebuilds the heavy Docker foundations used by server-rs deploys:
+# - server-build-base: Rust + cargo-chef + cargo-zigbuild + ziglang
+# - server-runtime-base: Debian runtime libs + CJK fonts + custom FFmpeg
+#
+# Normal deploys verify these tags exist and then only compile server-rs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [prod, main]
+    paths:
+      - "infra/server-build-base/**"
+      - "infra/server-runtime-base/**"
+      - ".github/workflows/server-base.yml"
+
+concurrency:
+  group: server-base-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build + push server base images → ECR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      actions: write
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.us-east-1.amazonaws.com
+      FFMPEG_BASE_REPO: brivva/ffmpeg-base
+      FFMPEG_VERSION: "7.1.1"
+      SERVER_BUILD_BASE_REPO: brivva/server-build-base
+      SERVER_BUILD_BASE_TAG: rust-1.88-slim-zigbuild-v1
+      SERVER_RUNTIME_BASE_REPO: brivva/server-runtime-base
+      SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-v1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify ffmpeg-base image exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --region us-east-1 \
+            --repository-name "${FFMPEG_BASE_REPO}" \
+            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
+            --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+            --output table
+
+      - name: Build + push server-build-base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/server-build-base
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.SERVER_BUILD_BASE_REPO }}:${{ env.SERVER_BUILD_BASE_TAG }}
+            ${{ env.ECR_REGISTRY }}/${{ env.SERVER_BUILD_BASE_REPO }}:latest
+          cache-from: type=gha,scope=server-build-base
+          cache-to: type=gha,mode=max,scope=server-build-base
+
+      - name: Build + push server-runtime-base
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/server-runtime-base
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:${{ env.SERVER_RUNTIME_BASE_TAG }}
+            ${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:latest
+          cache-from: type=gha,scope=server-runtime-base
+          cache-to: type=gha,mode=max,scope=server-runtime-base
+
+      - name: Verify published manifests
+        run: |
+          set -euo pipefail
+          for image in \
+            "${SERVER_BUILD_BASE_REPO}:${SERVER_BUILD_BASE_TAG}" \
+            "${SERVER_RUNTIME_BASE_REPO}:${SERVER_RUNTIME_BASE_TAG}"
+          do
+            repo="${image%:*}"
+            tag="${image##*:}"
+            aws ecr describe-images \
+              --region us-east-1 \
+              --repository-name "$repo" \
+              --image-ids imageTag="$tag" \
+              --query 'imageDetails[0].{digest:imageDigest,size:imageSizeInBytes,pushed:imagePushedAt}' \
+              --output table
+          done
