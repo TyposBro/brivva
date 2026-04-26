@@ -28,6 +28,24 @@ variable "broadcast_delay_ms" {
   default     = 5000
 }
 
+variable "webrtc_udp_port_min" {
+  description = "First UDP port Fargate may bind for WebRTC ICE media."
+  type        = number
+  default     = 50000
+}
+
+variable "webrtc_udp_port_max" {
+  description = "Last UDP port Fargate may bind for WebRTC ICE media."
+  type        = number
+  default     = 50100
+}
+
+variable "webrtc_stun_urls" {
+  description = "Comma-separated STUN URLs used by server-rs to gather public ICE candidates."
+  type        = string
+  default     = "stun:stun.l.google.com:19302"
+}
+
 variable "task_cpu" {
   description = <<-EOT
     Fargate CPU units (1024 = 1 vCPU). Default 8192 = 8 vCPU.

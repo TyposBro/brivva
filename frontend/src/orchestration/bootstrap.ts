@@ -23,6 +23,8 @@ export function bootstrap(): void {
   _setAppConfig({
     workersApiBase,
     mediaWsBase: mediaHttp.replace(/^http/, "ws"),
+    mediaHttpBase: mediaHttp,
+    videoIngest: resolveVideoIngest(),
   });
 
   configureAuth({
@@ -32,4 +34,10 @@ export function bootstrap(): void {
     },
   });
   loadPersistedUser();
+}
+
+function resolveVideoIngest(): "jpeg" | "webrtc" {
+  const fromUrl = new URLSearchParams(window.location.search).get("ingest");
+  const raw = fromUrl ?? import.meta.env.VITE_VIDEO_INGEST;
+  return raw === "webrtc" ? "webrtc" : "jpeg";
 }

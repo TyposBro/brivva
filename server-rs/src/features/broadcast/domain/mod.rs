@@ -122,6 +122,8 @@ pub struct SessionQuery {
     pub session_id: Option<String>,
     /// JWT issued by Workers. Verified in `session_ws_handler`.
     pub token: Option<String>,
+    #[serde(rename = "videoMode")]
+    pub video_mode: Option<String>,
 }
 
 // ── Pipeline Configuration ────────────────────────────────
@@ -200,6 +202,8 @@ pub struct LiveSession {
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
     pub rtmp_manager: Option<crate::features::broadcast::data::ffmpeg::SharedRtmpManager>,
+    /// Host video ingest format selected when RTMP FFmpeg children spawn.
+    pub video_input_mode: crate::features::broadcast::data::ffmpeg::VideoInputMode,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
     /// Upstream-service config injected from orchestration at session start.
@@ -234,6 +238,7 @@ impl LiveSession {
             voice_preset: VoicePreset::Female,
             session_id,
             rtmp_manager: None,
+            video_input_mode: crate::features::broadcast::data::ffmpeg::VideoInputMode::Mjpeg,
             rtmp_langs: Vec::new(),
             pipeline_config,
             metrics: None,

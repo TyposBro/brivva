@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::auth;
+use crate::features::broadcast::data::ffmpeg::VideoInputMode;
 use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::domain::{Lang, LiveSession, PipelineConfig, SessionQuery};
@@ -62,6 +63,7 @@ async fn handle_host_socket(socket: WebSocket, state: BroadcastState, query: Ses
         user_id: claims.sub,
         source_lang,
         session_id: query.session_id,
+        query_video_mode: query.video_mode,
     })
     .await;
 }
@@ -101,6 +103,7 @@ struct HostSocket {
     user_id: String,
     source_lang: Lang,
     session_id: Option<String>,
+    query_video_mode: Option<String>,
 }
 
 async fn handle_host(mut socket: HostSocket) {
@@ -119,6 +122,10 @@ async fn handle_host(mut socket: HostSocket) {
         socket.session_id.clone(),
         pipeline_config_from(&socket.state),
     );
+    live_session.video_input_mode = match socket.query_video_mode.as_deref() {
+        Some("webrtc-h264") => VideoInputMode::H264AnnexB,
+        _ => VideoInputMode::Mjpeg,
+    };
     live_session.host_tx = Some(host_tx);
 
     let ffmpeg_monitor_stop = Arc::new(AtomicBool::new(false));

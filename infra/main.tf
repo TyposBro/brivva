@@ -93,7 +93,7 @@ resource "aws_ecr_lifecycle_policy" "server_build_base" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 5 build base images — rebuilds are rare"
+      description  = "Keep last 5 base images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
@@ -119,7 +119,7 @@ resource "aws_ecr_lifecycle_policy" "server_runtime_base" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 5 runtime base images — rebuilds are rare"
+      description  = "Keep last 5 base images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
@@ -190,13 +190,21 @@ resource "aws_iam_role_policy" "secrets_read" {
 }
 
 # ── Security group (Fargate task) ──────────────────────────
-# No public ingress — cloudflared sidecar connects outbound only.
-# If you swap to ALB ingress, add inbound 3000 here.
+# HTTP ingress stays private to cloudflared. WebRTC media needs direct UDP
+# because Cloudflare Tunnel only carries the WHIP HTTP signaling path.
 
 resource "aws_security_group" "task" {
   name        = "${var.project}-task"
   description = "Egress-only for Fargate task (cloudflared handles ingress)."
   vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "WebRTC ICE/SRTP media"
+    from_port   = var.webrtc_udp_port_min
+    to_port     = var.webrtc_udp_port_max
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     from_port   = 0
@@ -234,6 +242,9 @@ locals {
       { name = "BROADCAST_DELAY_MS", value = tostring(var.broadcast_delay_ms) },
       { name = "FRONTEND_URL", value = var.frontend_url },
       { name = "WORKERS_API_URL", value = var.workers_api_url },
+      { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = tostring(var.webrtc_udp_port_min) },
+      { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = tostring(var.webrtc_udp_port_max) },
+      { name = "BRIVVA_WEBRTC_STUN_URLS", value = var.webrtc_stun_urls },
     ]
     secrets = [
       { name = "SONIOX_API_KEY", valueFrom = "${local.secret_arn}:SONIOX_API_KEY::" },

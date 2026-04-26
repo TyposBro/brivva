@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 const SONIOX_WS_URL_DEFAULT: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 const ELEVENLABS_BASE_URL_DEFAULT: &str = "https://api.elevenlabs.io";
+const WEBRTC_UDP_PORT_MIN_DEFAULT: u16 = 50_000;
+const WEBRTC_UDP_PORT_MAX_DEFAULT: u16 = 50_100;
+const WEBRTC_STUN_URLS_DEFAULT: &str = "stun:stun.l.google.com:19302";
 
 pub struct AppConfig {
     pub jwt_secret: String,
@@ -27,6 +30,11 @@ pub struct AppConfig {
     /// platform's TLS stack is flaking. Only usable on platforms that accept
     /// unsecured RTMP. See `docs/runbook.md`.
     pub force_rtmp_not_rtmps: bool,
+    /// Bounded UDP range used by WebRTC ICE so prod security groups can be
+    /// narrow instead of opening all ephemeral ports.
+    pub webrtc_udp_port_min: u16,
+    pub webrtc_udp_port_max: u16,
+    pub webrtc_stun_urls: Vec<String>,
 }
 
 impl AppConfig {
@@ -45,6 +53,9 @@ impl AppConfig {
                 .to_string(),
             force_default_voice: env_flag("BRIVVA_FALLBACK_TO_DEFAULT_VOICE"),
             force_rtmp_not_rtmps: env_flag("BRIVVA_FORCE_RTMP_NOT_RTMPS"),
+            webrtc_udp_port_min: env_u16("BRIVVA_WEBRTC_UDP_PORT_MIN", WEBRTC_UDP_PORT_MIN_DEFAULT),
+            webrtc_udp_port_max: env_u16("BRIVVA_WEBRTC_UDP_PORT_MAX", WEBRTC_UDP_PORT_MAX_DEFAULT),
+            webrtc_stun_urls: env_list("BRIVVA_WEBRTC_STUN_URLS", WEBRTC_STUN_URLS_DEFAULT),
         })
     }
 }
@@ -63,6 +74,22 @@ fn env_flag(key: &str) -> bool {
         ),
         Err(_) => false,
     }
+}
+
+fn env_u16(key: &str, default: u16) -> u16 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
+fn env_list(key: &str, default: &str) -> Vec<String> {
+    env_or_default(key, default)
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -87,6 +114,9 @@ mod tests {
                 "SONIOX_WS_URL",
                 "ELEVENLABS_API_KEY",
                 "ELEVENLABS_BASE_URL",
+                "BRIVVA_WEBRTC_UDP_PORT_MIN",
+                "BRIVVA_WEBRTC_UDP_PORT_MAX",
+                "BRIVVA_WEBRTC_STUN_URLS",
             ] {
                 std::env::remove_var(key);
             }
@@ -95,6 +125,9 @@ mod tests {
         let cfg = AppConfig::from_env();
         assert_eq!(cfg.soniox_ws_url, SONIOX_WS_URL_DEFAULT);
         assert_eq!(cfg.elevenlabs_base_url, ELEVENLABS_BASE_URL_DEFAULT);
+        assert_eq!(cfg.webrtc_udp_port_min, WEBRTC_UDP_PORT_MIN_DEFAULT);
+        assert_eq!(cfg.webrtc_udp_port_max, WEBRTC_UDP_PORT_MAX_DEFAULT);
+        assert_eq!(cfg.webrtc_stun_urls, [WEBRTC_STUN_URLS_DEFAULT]);
         assert!(cfg.jwt_secret.is_empty());
     }
 
@@ -168,6 +201,12 @@ mod tests {
             std::env::set_var("ELEVENLABS_BASE_URL", "https://el");
             std::env::set_var("BRIVVA_FALLBACK_TO_DEFAULT_VOICE", "yes");
             std::env::set_var("BRIVVA_FORCE_RTMP_NOT_RTMPS", "on");
+            std::env::set_var("BRIVVA_WEBRTC_UDP_PORT_MIN", "51000");
+            std::env::set_var("BRIVVA_WEBRTC_UDP_PORT_MAX", "51010");
+            std::env::set_var(
+                "BRIVVA_WEBRTC_STUN_URLS",
+                "stun:one.example:19302, stun:two.example:19302",
+            );
         }
 
         let cfg = AppConfig::from_env();
@@ -179,6 +218,12 @@ mod tests {
         assert_eq!(cfg.elevenlabs_base_url, "https://el");
         assert!(cfg.force_default_voice);
         assert!(cfg.force_rtmp_not_rtmps);
+        assert_eq!(cfg.webrtc_udp_port_min, 51_000);
+        assert_eq!(cfg.webrtc_udp_port_max, 51_010);
+        assert_eq!(
+            cfg.webrtc_stun_urls,
+            ["stun:one.example:19302", "stun:two.example:19302"]
+        );
 
         unsafe {
             for key in [
@@ -190,6 +235,9 @@ mod tests {
                 "ELEVENLABS_BASE_URL",
                 "BRIVVA_FALLBACK_TO_DEFAULT_VOICE",
                 "BRIVVA_FORCE_RTMP_NOT_RTMPS",
+                "BRIVVA_WEBRTC_UDP_PORT_MIN",
+                "BRIVVA_WEBRTC_UDP_PORT_MAX",
+                "BRIVVA_WEBRTC_STUN_URLS",
             ] {
                 std::env::remove_var(key);
             }

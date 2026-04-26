@@ -116,6 +116,24 @@ Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/lates
 
 Apply changes: `tofu apply`, then `./deploy.sh --skip-build` to roll tasks.
 
+## WebRTC UDP ingress
+
+Cloudflare Tunnel still handles HTTPS and the WHIP signaling endpoint
+(`/whip/session`), but WebRTC media itself uses ICE/SRTP over UDP. The
+Fargate task therefore exposes a narrow UDP range directly on its public
+task ENI:
+
+```hcl
+webrtc_udp_port_min = 50000
+webrtc_udp_port_max = 50100
+webrtc_stun_urls    = "stun:stun.l.google.com:19302"
+```
+
+Terraform opens only that UDP range in the task security group and injects
+the same values into `server-rs` as `BRIVVA_WEBRTC_*` env vars. If direct
+Fargate UDP is unreliable in production, the next step is a TURN relay or
+UDP NLB, not widening the security group.
+
 ## Horizontal scale (many concurrent rooms)
 
 A **single task handles a single host session well** but not many. The pipeline holds per-host state (ffmpeg child procs, SQLite row locks, WS connections, ElevenLabs voice clone id). Scale **horizontally** — one task per room, not a fatter task.

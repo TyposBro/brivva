@@ -304,11 +304,6 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
             None,
             crate::features::broadcast::domain::VoicePreset::Female,
         ));
-    let rtmp_manager = handle
-        .sessions
-        .get(&handle.id)
-        .and_then(|session| session.rtmp_manager.clone());
-
     if let Some(live_session) = handle.sessions.get(&handle.id) {
         live_session.send_to_host(to_ws(&ServerMsg::Translation {
             text: committed.to_string(),
@@ -316,32 +311,6 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
             target_lang: target_lang.to_string(),
             translate_ms: 0,
         }));
-    }
-
-    if let Some(manager) = rtmp_manager {
-        let lang = target_lang.to_string();
-        let text = committed.to_string();
-        // Log the dispatch BEFORE the spawn so operators can correlate a
-        // missing on-screen caption with whether the translation pipeline
-        // even reached this point. Without it, "no caption" was previously
-        // indistinguishable from "STT errored out and emit_translation
-        // never ran" — which is exactly what happened in the 2026-04-20
-        // production session (Soniox 408s parsed as `None`).
-        tracing::info!(
-            target_lang = %lang,
-            utterance_id,
-            char_count = text.chars().count(),
-            "dispatching translated text to caption + tts pipeline"
-        );
-        tokio::spawn(async move {
-            manager.lock().await.push_caption(&lang, text);
-        });
-    } else {
-        tracing::warn!(
-            target_lang = %target_lang,
-            utterance_id,
-            "translation produced but session has no rtmp_manager — captions will not burn in"
-        );
     }
 
     dispatch_tts_to_worker(DispatchTtsArgs {
@@ -741,12 +710,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_translation_sends_translation_message_and_triggers_push_caption_when_manager_present()
-     {
+    async fn emit_translation_sends_translation_message_when_manager_present() {
         use crate::features::broadcast::data::ffmpeg::RtmpManager;
 
         let (sessions, mut rx) = session_with_host_tx("room");
-        // Attach an empty RtmpManager so the push_caption branch is exercised.
         {
             let mut session = sessions.get_mut("room").unwrap();
             session.rtmp_manager = Some(Arc::new(tokio::sync::Mutex::new(RtmpManager::new())));
@@ -768,61 +735,6 @@ mod tests {
             }
         }
         assert!(saw_translation);
-    }
-
-    #[tokio::test]
-    async fn emit_translation_writes_translated_text_to_drawtext_textfile_on_disk() {
-        // INTEGRATION: drives the full chain `emit_translation` →
-        // `RtmpManager::push_caption` → `CaptionState` → atomic textfile
-        // write. This is the closest unit-test-shaped reproduction of the
-        // burn-in path that ffmpeg's drawtext filter consumes via reload=1.
-        // Pre-fix the entire chain ran but had zero observability and no
-        // disk-level assertion in CI, so a regression would land silently
-        // and the operator would only notice during a live Grip session.
-        use crate::features::broadcast::data::ffmpeg::RtmpManager;
-
-        let (sessions, _rx) = session_with_host_tx("room-disk");
-        let mut manager = RtmpManager::new();
-        let stream_id = format!("emittest-{}", std::process::id());
-        let textfile_path = manager.insert_test_target_stream(&stream_id, "ja");
-        let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
-        {
-            let mut session = sessions.get_mut("room-disk").unwrap();
-            session.rtmp_manager = Some(shared_mgr.clone());
-        }
-        let handle = LiveSessionHandle::new("room-disk".into(), sessions);
-
-        super::emit_translation(super::EmitTranslationArgs {
-            committed: "翻訳テスト",
-            utterance_id: 7,
-            target_lang: &Lang::Ja,
-            handle: &handle,
-        })
-        .await;
-
-        // emit_translation spawns push_caption fan-out on a background task
-        // that locks the manager, then CaptionState writes via its own task.
-        // Both are sub-millisecond paths — 500 ms is generous.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        let mut on_disk = String::new();
-        while std::time::Instant::now() < deadline {
-            on_disk = std::fs::read_to_string(&textfile_path).unwrap_or_default();
-            if on_disk == "翻訳テスト" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert_eq!(
-            on_disk, "翻訳テスト",
-            "drawtext textfile must contain the translated text within 500 ms"
-        );
-
-        // Cleanup: remove textfile + drop manager streams to shutdown writer.
-        {
-            let mut mgr = shared_mgr.lock().await;
-            mgr.stop_all().await;
-        }
-        let _ = std::fs::remove_file(&textfile_path);
     }
 
     #[tokio::test]

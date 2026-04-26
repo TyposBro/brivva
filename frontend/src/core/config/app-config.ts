@@ -13,6 +13,10 @@ export interface AppConfig {
   workersApiBase: string;
   /** WebSocket URL for the Fargate media server (ws:// or wss://). */
   mediaWsBase: string;
+  /** HTTP URL for the Fargate media server (http:// or https://). */
+  mediaHttpBase: string;
+  /** Host video ingest path. JPEG is the compatibility fallback. */
+  videoIngest: "jpeg" | "webrtc";
 }
 
 let current: AppConfig | null = null;

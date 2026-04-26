@@ -72,7 +72,9 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     if bundle.streams.is_empty() {
         return;
     }
-    let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
+    let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new_with_video_input(
+        live_session.video_input_mode,
+    );
     manager.set_metrics(metrics);
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
@@ -103,7 +105,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         }
         // User explicitly picked "Passthrough (source)" on this destination.
         // The pipeline MUST skip STT/translate/TTS: host audio RTMP'd raw at
-        // full gain, no caption overlay. We implement it via the same
+        // full gain. We implement it via the same
         // `is_source=true` switch target-lang streams already use, and carry
         // a dedicated `passthrough` flag so downstream code can distinguish
         // "user chose passthrough" from "stream's lang happens to equal
@@ -217,7 +219,7 @@ mod tests {
         // Future-proofing: a new lang code lands in D1 before the server is
         // redeployed. Lang::from_str returns None, is_source=false, no
         // passthrough. The stream still starts (the FFmpeg layer accepts
-        // arbitrary lang strings for caption/metrics labeling).
+        // arbitrary lang strings for metrics labeling).
         let flags = resolve_stream_flags("th", &Lang::En, 0.2);
         assert!(!flags.passthrough);
         assert!(!flags.is_source);

@@ -2,6 +2,8 @@ import { useCallback, useRef } from "react";
 
 const HOST_VIDEO_MAX_WIDTH = 1280;
 const HOST_VIDEO_MAX_HEIGHT = 720;
+const HOST_CAMERA_IDEAL_WIDTH = 3840;
+const HOST_CAMERA_IDEAL_HEIGHT = 2160;
 const HOST_VIDEO_FPS = 15;
 const HOST_VIDEO_INTERVAL_MS = Math.round(1000 / HOST_VIDEO_FPS);
 const HOST_VIDEO_JPEG_QUALITY = 0.72;
@@ -25,8 +27,8 @@ export function useWebcam(sendFrameJson: (msg: { type: "face:frame"; data: strin
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: HOST_VIDEO_MAX_WIDTH, max: HOST_VIDEO_MAX_WIDTH },
-          height: { ideal: HOST_VIDEO_MAX_HEIGHT, max: HOST_VIDEO_MAX_HEIGHT },
+          width: { ideal: HOST_CAMERA_IDEAL_WIDTH, max: HOST_CAMERA_IDEAL_WIDTH },
+          height: { ideal: HOST_CAMERA_IDEAL_HEIGHT, max: HOST_CAMERA_IDEAL_HEIGHT },
           frameRate: { ideal: 30, max: 30 },
           facingMode: "user",
         },
@@ -90,7 +92,9 @@ export function useWebcam(sendFrameJson: (msg: { type: "face:frame"; data: strin
     frameIntervalRef.current = setInterval(captureAndSendFrame, HOST_VIDEO_INTERVAL_MS);
   }, [captureAndSendFrame, stopFrameStreaming]);
 
-  return { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming };
+  const getStream = useCallback(() => streamRef.current, []);
+
+  return { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming, getStream };
 }
 
 function fitVideoFrame(sourceWidth: number, sourceHeight: number): { width: number; height: number } {

@@ -102,6 +102,54 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     );
 }
 
+pub(super) fn video_copy_drain_loop(ctx: VideoDrainCtx) {
+    let VideoDrainCtx {
+        stream_id,
+        video_buf,
+        mut stdin,
+        delay,
+        stop,
+        last_write_ms,
+        metrics,
+    } = ctx;
+    let mut chunk_count: u64 = 0;
+
+    eprintln!(
+        "[VIDEO:{}] h264 copy drain started (delay={}ms)",
+        stream_id,
+        delay.as_millis()
+    );
+
+    while !stop.load(Ordering::Acquire) {
+        let ready = drain_ready_chunks(&video_buf, Instant::now(), delay);
+        if ready.is_empty() {
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        for chunk in ready {
+            let n = chunk.len() as u64;
+            if stdin.write_all(&chunk).is_err() {
+                if !stop.load(Ordering::Acquire) {
+                    eprintln!("[VIDEO:{}] h264 write error, exiting", stream_id);
+                }
+                drop(stdin);
+                return;
+            }
+            chunk_count += 1;
+            last_write_ms.store(now_unix_ms(), Ordering::Release);
+            if let Some(m) = &metrics {
+                m.record_bytes_out(n);
+            }
+        }
+    }
+
+    drop(stdin);
+    eprintln!(
+        "[VIDEO:{}] h264 copy drain exited after {} chunks",
+        stream_id, chunk_count
+    );
+}
+
 fn wait_video_tick(next_tick: &mut Instant) -> Instant {
     let now = Instant::now();
     if *next_tick > now {
@@ -128,6 +176,24 @@ fn drain_ready_frame(
         }
     }
     latest
+}
+
+fn drain_ready_chunks(
+    video_buf: &StdMutex<VecDeque<TimedChunk>>,
+    now: Instant,
+    delay: Duration,
+) -> Vec<Vec<u8>> {
+    let mut buf = video_buf.lock().unwrap();
+    let mut ready = Vec::new();
+    while let Some((ts, _)) = buf.front() {
+        if *ts + delay <= now {
+            let (_, chunk) = buf.pop_front().unwrap();
+            ready.push(chunk);
+        } else {
+            break;
+        }
+    }
+    ready
 }
 
 // ── Audio ─────────────────────────────────────────────────
