@@ -26,6 +26,11 @@ pub(super) async fn teardown_session(args: TeardownArgs<'_>) {
         let mut mgr = manager.lock().await;
         mgr.stop_all().await;
     }
+    if let Some(peer) = live_session.webrtc_peer
+        && let Err(e) = peer.close().await
+    {
+        tracing::debug!(error = %e, "webrtc peer close failed during teardown");
+    }
     if let Some(sid) = live_session.session_id {
         let workers_for_end = workers_api.clone();
         tokio::spawn(async move {

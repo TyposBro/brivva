@@ -12,6 +12,8 @@
 #   SERVER_PORT=3000     server-rs listen port (must match wrangler binding)
 #   WORKERS_PORT=8787    wrangler dev port
 #   BOOT_TIMEOUT=60      seconds to wait for /health
+#   INFISICAL_ENV=dev    Infisical environment to inject at runtime
+#   INFISICAL_PATH=/     Infisical secret path to inject at runtime
 #
 # Exit codes:
 #   0 — smoke passed
@@ -24,9 +26,23 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${REPO_ROOT}/.dev-logs"
 mkdir -p "$LOG_DIR"
 
+if [ "${BRIVVA_INFISICAL_WRAPPED:-0}" != "1" ]; then
+  if ! command -v infisical >/dev/null 2>&1; then
+    echo "infisical CLI not found; install/login first" >&2
+    exit 2
+  fi
+  export BRIVVA_INFISICAL_WRAPPED=1
+  infisical_args=(run --env="${INFISICAL_ENV:-dev}" --path="${INFISICAL_PATH:-/}")
+  if [ -f "${REPO_ROOT}/.infisical.json" ]; then
+    infisical_args+=(--project-config-dir "$REPO_ROOT")
+  fi
+  exec infisical "${infisical_args[@]}" -- "$0" "$@"
+fi
+
 SERVER_PORT="${SERVER_PORT:-3000}"
 WORKERS_PORT="${WORKERS_PORT:-8787}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
 KEEP=0
 [ "${1:-}" = "--keep" ] && KEEP=1
@@ -44,6 +60,7 @@ fail()  { echo "${RED}✗ $*${NC}"; }
 
 SERVER_PID=""
 WORKERS_PID=""
+WORKERS_ENV_FILE=""
 
 cleanup() {
   local rc=$?
@@ -55,6 +72,7 @@ cleanup() {
   info "tearing down dev stack"
   [ -n "$SERVER_PID" ]  && kill "$SERVER_PID"  2>/dev/null || true
   [ -n "$WORKERS_PID" ] && kill "$WORKERS_PID" 2>/dev/null || true
+  [ -n "$WORKERS_ENV_FILE" ] && rm -f "$WORKERS_ENV_FILE"
   # Give them a moment to flush logs, then hard-kill any stragglers on our ports.
   sleep 1
   lsof -ti :"$SERVER_PORT"  2>/dev/null | xargs kill -9 2>/dev/null || true
@@ -72,27 +90,32 @@ for port in "$SERVER_PORT" "$WORKERS_PORT"; do
   fi
 done
 
-# ── Boot ─────────────────────────────────────────────────────
-if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
-  if [ -f "${REPO_ROOT}/workers/.dev.vars.example" ]; then
-    warn "workers/.dev.vars missing; creating it from .dev.vars.example"
-    cp "${REPO_ROOT}/workers/.dev.vars.example" "${REPO_ROOT}/workers/.dev.vars"
-    warn "real OAuth, Grip, and TTS calls still need secrets filled in workers/.dev.vars"
-  else
-    fail "workers/.dev.vars is missing and .dev.vars.example was not found"
-    exit 2
-  fi
-fi
-
-set -a
-if [ -f "${REPO_ROOT}/.env.local" ]; then
-  # shellcheck source=/dev/null
-  . "${REPO_ROOT}/.env.local"
-fi
-# shellcheck source=/dev/null
-. "${REPO_ROOT}/workers/.dev.vars"
-set +a
+# ── Runtime secrets: Infisical env → server-rs env + temp Wrangler env ──
 export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
+export FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
+export OAUTH_REDIRECT_URI="http://localhost:${WORKERS_PORT}/auth/youtube/callback"
+export GOOGLE_SIGNIN_REDIRECT_URI="http://localhost:${WORKERS_PORT}/auth/google/callback"
+
+dotenv_line() {
+  local key="$1"
+  local value="${!key-}"
+  [ -z "$value" ] && return 0
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "$key" "$value"
+}
+
+WORKERS_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/brivva-workers.XXXXXX.env")"
+chmod 600 "$WORKERS_ENV_FILE"
+for key in \
+  FRONTEND_URL OAUTH_REDIRECT_URI GOOGLE_SIGNIN_REDIRECT_URI \
+  ELEVENLABS_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
+  JWT_SECRET INTERNAL_SECRET GRIP_ACCESS_KEY GRIP_SECRET_KEY STRIPE_WEBHOOK_SECRET
+do
+  dotenv_line "$key" >> "$WORKERS_ENV_FILE"
+done
+
+# ── Boot ─────────────────────────────────────────────────────
 
 info "starting server-rs → ${LOG_DIR}/server-rs.log"
 ( cd "${REPO_ROOT}/server-rs" && cargo run ) >"${LOG_DIR}/server-rs.log" 2>&1 &
@@ -109,7 +132,7 @@ fi
 pass "D1 migrations up to date"
 
 info "starting workers → ${LOG_DIR}/workers.log"
-( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \
+( cd "${REPO_ROOT}/workers" && bun wrangler dev --env-file "$WORKERS_ENV_FILE" --port "$WORKERS_PORT" ) \
   >"${LOG_DIR}/workers.log" 2>&1 &
 WORKERS_PID=$!
 

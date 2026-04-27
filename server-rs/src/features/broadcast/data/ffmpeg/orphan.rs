@@ -40,7 +40,7 @@ pub fn kill_orphan_ffmpeg() {
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && (name.starts_with("brivva_audio_") || name.starts_with("brivva_caption_"))
+                && (name.starts_with("brivva_audio_") || name.starts_with("brivva_video_"))
             {
                 let _ = std::fs::remove_file(entry.path());
                 stale_files += 1;

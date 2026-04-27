@@ -18,14 +18,30 @@ export type { HostStatus, HostUtterance } from "./reducer";
 // than the inline definition.
 export function useHostSession() {
   const [state, dispatch] = useReducer(hostReducer, INITIAL_STATE);
-  const { timings, startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize, reset: resetTimings } = useTimings();
+  const {
+    timings,
+    startTimer,
+    markInterim,
+    recordStt,
+    recordTranslate,
+    recordTts,
+    finalize,
+    reset: resetTimings,
+  } = useTimings();
 
   const audio = useRef(new AudioPipeline());
   const socket = useRef(new SessionSocket());
   const activeSessionIdRef = useRef<string | null>(null);
   const activeUserIdRef = useRef<string | null>(null);
 
-  const { videoRef, startWebcam, stopWebcam, startFrameStreaming, stopFrameStreaming } = useWebcam(
+  const {
+    videoRef,
+    startWebcam,
+    stopWebcam,
+    startFrameStreaming,
+    stopFrameStreaming,
+    handleWebRtcMessage,
+  } = useWebcam(
     (msg) => socket.current.sendJson(msg),
     () => socket.current.isOpen,
   );
@@ -56,7 +72,14 @@ export function useHostSession() {
   const handleMessage = createMessageHandler(
     dispatch,
     () => activeTargetLangsRef.current,
-    { startTimer, markInterim, recordStt, recordTranslate, recordTts, finalize },
+    {
+      startTimer,
+      markInterim,
+      recordStt,
+      recordTranslate,
+      recordTts,
+      finalize,
+    },
   );
 
   const stopRecording = () => {
@@ -71,7 +94,10 @@ export function useHostSession() {
     } catch (e) {
       dispatch({
         type: "error",
-        message: e instanceof Error ? `Auth token fetch failed: ${e.message}` : "Auth failed",
+        message:
+          e instanceof Error
+            ? `Auth token fetch failed: ${e.message}`
+            : "Auth failed",
       });
       return null;
     }
@@ -95,11 +121,17 @@ export function useHostSession() {
     const token = await fetchAuthToken();
     if (!token) return;
 
-    const params: Record<string, string> = { sourceLang: opts.sourceLang ?? "en", token };
+    const params: Record<string, string> = {
+      sourceLang: opts.sourceLang ?? "en",
+      token,
+    };
     if (opts.sessionId) params.sessionId = opts.sessionId;
     socket.current.connect(params, {
       onOpen: () => dispatch({ type: "connected" }),
-      onMessage: (msg) => handleMessage(msg),
+      onMessage: (msg) => {
+        if (handleWebRtcMessage(msg)) return;
+        handleMessage(msg);
+      },
       onClose: () => {
         stopRecording();
         dispatch({ type: "disconnected" });
@@ -109,9 +141,11 @@ export function useHostSession() {
 
   const startRecording = async () => {
     if (!socket.current.isOpen) return;
-    const analyser = await audio.current.start((buf) => socket.current.sendAudio(buf));
+    const analyser = await audio.current.start((buf) =>
+      socket.current.sendAudio(buf),
+    );
     dispatch({ type: "recording_started", analyser });
-    startFrameStreaming();
+    await startFrameStreaming();
   };
 
   const closeSession = () => {
@@ -123,10 +157,20 @@ export function useHostSession() {
   };
 
   return {
-    ...state, timings, videoRef,
-    connectSession, startRecording, stopRecording, closeSession,
-    startVoiceRecording, stopVoiceRecording, skipVoiceSetup,
-    voiceElapsedSec, voiceIsRecording, voiceMinSec, voiceMaxSec,
+    ...state,
+    timings,
+    videoRef,
+    connectSession,
+    startRecording,
+    stopRecording,
+    closeSession,
+    startVoiceRecording,
+    stopVoiceRecording,
+    skipVoiceSetup,
+    voiceElapsedSec,
+    voiceIsRecording,
+    voiceMinSec,
+    voiceMaxSec,
     setActiveTargetLangs,
   };
 }

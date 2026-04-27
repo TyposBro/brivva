@@ -25,6 +25,7 @@ mod ids;
 mod messages;
 mod rtmp;
 mod teardown;
+mod webrtc;
 
 pub use active_voice_refresh::refresh_active_voice_once;
 pub use bootstrap::{StreamPreflight, preflight_streams};

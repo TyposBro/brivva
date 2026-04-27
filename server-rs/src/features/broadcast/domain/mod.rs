@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use webrtc::peer_connection::RTCPeerConnection;
 
 pub use metrics::SessionMetrics;
 
 // Fargate is host-only. There are no guest WebSockets — all translated
 // audio leaves the server via RTMP to streaming platforms. The WS exists
-// solely to (a) accept host audio/video uplink, (b) feed per-utterance
-// progress + errors back to the host UI.
+// to accept host audio/control, signal host WebRTC video, and feed
+// per-utterance progress + errors back to the host UI.
 
 // ── Language ──────────────────────────────────────────────
 
@@ -200,6 +201,9 @@ pub struct LiveSession {
     pub session_id: Option<String>,
     /// FFmpeg RTMP manager for streaming to platforms
     pub rtmp_manager: Option<crate::features::broadcast::data::ffmpeg::SharedRtmpManager>,
+    /// Host WebRTC peer carrying encoded camera video into Fargate. Stored so
+    /// the peer connection remains alive until session teardown.
+    pub webrtc_peer: Option<Arc<RTCPeerConnection>>,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
     /// Upstream-service config injected from orchestration at session start.
@@ -234,6 +238,7 @@ impl LiveSession {
             voice_preset: VoicePreset::Female,
             session_id,
             rtmp_manager: None,
+            webrtc_peer: None,
             rtmp_langs: Vec::new(),
             pipeline_config,
             metrics: None,

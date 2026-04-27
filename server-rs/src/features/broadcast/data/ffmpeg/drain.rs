@@ -1,10 +1,9 @@
 //! Per-stream video + audio drain loops.
 //!
-//! These run on their own OS threads. They pull aged frames/chunks out of
-//! the stream's delay buffers and feed them to the FFmpeg child — video
-//! straight to stdin at 30 fps by repeating the latest browser JPEG when
-//! necessary, audio to a FIFO at 20 ms ticks mixed with the translated TTS
-//! queue.
+//! These run on their own OS threads. They pull aged chunks out of each
+//! stream's delay buffers and feed them to FFmpeg: depacketized WebRTC H.264
+//! Annex-B bytes over stdin, audio to a FIFO at 20 ms ticks mixed with
+//! translated TTS.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -24,21 +23,19 @@ fn now_unix_ms() -> i64 {
 use super::mixer::{apply_gain, mix_pcm_s16le};
 use crate::features::broadcast::domain::SessionMetrics;
 
-/// Video: 33.33 ms per frame at 30 fps.
-const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_333);
 /// Audio: 20 ms per tick.
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// Audio: 1764 bytes = 44.1 kHz × 20 ms × s16le mono.
 const AUDIO_BYTES_PER_TICK: usize = 1764;
 
-type TimedChunk = (Instant, Vec<u8>);
+pub(super) type TimedChunk = (Instant, Vec<u8>);
 
 // ── Video ─────────────────────────────────────────────────
 
 pub(super) struct VideoDrainCtx {
     pub stream_id: String,
-    pub video_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    pub stdin: std::process::ChildStdin,
+    pub h264_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
+    pub video_stdin: std::process::ChildStdin,
     pub delay: Duration,
     pub stop: Arc<AtomicBool>,
     /// Unix-ms wall clock updated after each successful write. Health monitor
@@ -50,44 +47,36 @@ pub(super) struct VideoDrainCtx {
 pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     let VideoDrainCtx {
         stream_id,
-        video_buf,
-        mut stdin,
+        h264_buf,
+        mut video_stdin,
         delay,
         stop,
         last_write_ms,
         metrics,
     } = ctx;
-    let mut last_frame: Option<Vec<u8>> = None;
-    let mut tick_count: u64 = 0;
-    let mut next_tick = Instant::now() + FRAME_INTERVAL;
+    let mut chunk_count: u64 = 0;
 
     eprintln!(
-        "[VIDEO:{}] drain started (30 fps, delay={}ms)",
+        "[VIDEO:{}] H.264 pipe drain started (delay={}ms)",
         stream_id,
         delay.as_millis()
     );
 
     while !stop.load(Ordering::Acquire) {
-        let actual = wait_video_tick(&mut next_tick);
-        tick_count += 1;
-
-        let ready = drain_ready_frame(&video_buf, actual, delay);
-        let to_write = match ready {
-            Some(f) => {
-                last_frame = Some(f.clone());
-                Some(f)
-            }
-            None => last_frame.clone(),
-        };
-
-        if let Some(f) = to_write {
-            let n = f.len() as u64;
-            if stdin.write_all(&f).is_err() {
+        let ready = drain_ready_h264(&h264_buf, Instant::now(), delay);
+        if ready.is_empty() {
+            thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        for chunk in ready {
+            let n = chunk.len() as u64;
+            if video_stdin.write_all(&chunk).is_err() {
                 if !stop.load(Ordering::Acquire) {
-                    eprintln!("[VIDEO:{}] write error, exiting", stream_id);
+                    eprintln!("[VIDEO:{}] H.264 pipe write error, exiting", stream_id);
                 }
-                break;
+                return;
             }
+            chunk_count += 1;
             last_write_ms.store(now_unix_ms(), Ordering::Release);
             if let Some(m) = &metrics {
                 m.record_bytes_out(n);
@@ -95,39 +84,29 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
         }
     }
 
-    drop(stdin);
+    let _ = video_stdin.flush();
     eprintln!(
-        "[VIDEO:{}] drain exited after {} ticks",
-        stream_id, tick_count
+        "[VIDEO:{}] H.264 pipe drain exited after {} chunks",
+        stream_id, chunk_count
     );
 }
 
-fn wait_video_tick(next_tick: &mut Instant) -> Instant {
-    let now = Instant::now();
-    if *next_tick > now {
-        thread::sleep(*next_tick - now);
-    }
-    let actual = Instant::now();
-    *next_tick += FRAME_INTERVAL;
-    actual
-}
-
-fn drain_ready_frame(
-    video_buf: &StdMutex<VecDeque<TimedChunk>>,
+fn drain_ready_h264(
+    h264_buf: &StdMutex<VecDeque<TimedChunk>>,
     now: Instant,
     delay: Duration,
-) -> Option<Vec<u8>> {
-    let mut buf = video_buf.lock().unwrap();
-    let mut latest: Option<Vec<u8>> = None;
+) -> Vec<Vec<u8>> {
+    let mut buf = h264_buf.lock().unwrap();
+    let mut ready = Vec::new();
     while let Some((ts, _)) = buf.front() {
         if *ts + delay <= now {
-            let (_, f) = buf.pop_front().unwrap();
-            latest = Some(f);
+            let (_, packet) = buf.pop_front().unwrap();
+            ready.push(packet);
         } else {
             break;
         }
     }
-    latest
+    ready
 }
 
 // ── Audio ─────────────────────────────────────────────────
@@ -445,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_ready_frame_returns_most_recent_aged_frame() {
+    fn drain_ready_h264_returns_all_aged_chunks() {
         let buf = Arc::new(StdMutex::new(VecDeque::new()));
         let now = Instant::now();
         let delay = Duration::from_millis(100);
@@ -455,21 +434,21 @@ mod tests {
             b.push_back((now - Duration::from_millis(200), vec![2]));
             b.push_back((now + Duration::from_millis(500), vec![3]));
         }
-        let result = drain_ready_frame(&buf, now, delay);
-        assert_eq!(result, Some(vec![2]));
+        let result = drain_ready_h264(&buf, now, delay);
+        assert_eq!(result, vec![vec![1], vec![2]]);
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn drain_ready_frame_returns_none_when_nothing_has_aged() {
+    fn drain_ready_h264_returns_empty_when_nothing_has_aged() {
         let buf = Arc::new(StdMutex::new(VecDeque::new()));
         let now = Instant::now();
         {
             let mut b = buf.lock().unwrap();
             b.push_back((now + Duration::from_millis(10), vec![1]));
         }
-        let result = drain_ready_frame(&buf, now, Duration::from_millis(100));
-        assert_eq!(result, None);
+        let result = drain_ready_h264(&buf, now, Duration::from_millis(100));
+        assert!(result.is_empty());
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
@@ -502,14 +481,6 @@ mod tests {
         let actual = wait_audio_tick(&mut next);
         assert!(actual >= start);
         assert_eq!(next - start, Duration::from_millis(1) + AUDIO_TICK);
-    }
-
-    #[test]
-    fn wait_video_tick_advances_next_tick_by_one_frame_interval() {
-        let start = Instant::now();
-        let mut next = start + Duration::from_nanos(1);
-        wait_video_tick(&mut next);
-        assert_eq!(next - start, Duration::from_nanos(1) + FRAME_INTERVAL);
     }
 
     #[test]
@@ -592,59 +563,18 @@ mod tests {
     }
 
     #[test]
-    fn video_drain_loop_exits_when_stdin_write_fails() {
-        // Spawn a short-lived child, take its stdin, let it exit so writes
-        // fail immediately. The drain loop must detect the broken pipe and
-        // exit without hanging.
-        use std::process::Command;
-        use std::process::Stdio;
-        let mut child = Command::new("sh")
-            .args(["-c", "exit 0"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+    fn video_drain_loop_exits_when_stop_flag_preset() {
+        let mut child = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
             .spawn()
-            .expect("spawn short-lived child");
-        let stdin = child.stdin.take().expect("stdin piped");
-        // Wait for child to exit so write fails reliably.
-        let _ = child.wait();
-
-        let buf: Arc<StdMutex<VecDeque<TimedChunk>>> = Arc::new(StdMutex::new(VecDeque::new()));
-        // Push a frame so the loop has something to write on the first tick.
-        buf.lock()
-            .unwrap()
-            .push_back((Instant::now() - Duration::from_secs(1), vec![1, 2, 3]));
-
-        let ctx = VideoDrainCtx {
-            stream_id: "sid".into(),
-            video_buf: buf,
-            stdin,
-            delay: Duration::from_millis(0),
-            stop: Arc::new(AtomicBool::new(false)),
-            last_write_ms: Arc::new(AtomicI64::new(0)),
-            metrics: None,
-        };
-        video_drain_loop(ctx);
-    }
-
-    #[test]
-    fn video_drain_loop_exits_immediately_when_stop_flag_preset() {
-        use std::process::Command;
-        use std::process::Stdio;
-        let mut child = Command::new("sh")
-            .args(["-c", "sleep 1"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleeping child");
+            .unwrap();
         let stdin = child.stdin.take().unwrap();
-
-        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        let buf: Arc<StdMutex<VecDeque<TimedChunk>>> = Arc::new(StdMutex::new(VecDeque::new()));
         let ctx = VideoDrainCtx {
             stream_id: "sid".into(),
-            video_buf: buf,
-            stdin,
+            h264_buf: buf,
+            video_stdin: stdin,
             delay: Duration::from_millis(0),
             stop: Arc::new(AtomicBool::new(true)),
             last_write_ms: Arc::new(AtomicI64::new(0)),
@@ -653,5 +583,41 @@ mod tests {
         video_drain_loop(ctx);
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn video_drain_loop_writes_ready_h264_chunk_to_pipe() {
+        let path = std::env::temp_dir().join(format!(
+            "brivva_video_pipe_test_{}.h264",
+            std::process::id()
+        ));
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat > {}", path.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        buf.lock()
+            .unwrap()
+            .push_back((Instant::now() - Duration::from_secs(1), vec![1, 2, 3]));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ctx = VideoDrainCtx {
+            stream_id: "sid".into(),
+            h264_buf: buf,
+            video_stdin: stdin,
+            delay: Duration::from_millis(0),
+            stop: stop.clone(),
+            last_write_ms: Arc::new(AtomicI64::new(0)),
+            metrics: None,
+        };
+        let handle = thread::spawn(move || video_drain_loop(ctx));
+        thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+        let _ = child.wait();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
+        let _ = std::fs::remove_file(&path);
     }
 }

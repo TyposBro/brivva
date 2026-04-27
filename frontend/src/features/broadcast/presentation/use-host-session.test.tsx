@@ -34,66 +34,104 @@ type SockInst = {
   fireClose: () => void;
 };
 
-const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } = vi.hoisted(() => {
-  const pipelineInstances: PipeInst[] = [];
-  const socketInstances: SockInst[] = [];
+const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } =
+  vi.hoisted(() => {
+    const pipelineInstances: PipeInst[] = [];
+    const socketInstances: SockInst[] = [];
 
-  class FakePipeline {
-    started = false;
-    stopped = false;
-    onAudio: ((b: ArrayBuffer) => void) | null = null;
-    constructor() { pipelineInstances.push(this); }
-    async start(onAudio: (b: ArrayBuffer) => void) {
-      this.started = true;
-      this.onAudio = onAudio;
-      return { fftSize: 512 } as unknown as AnalyserNode;
+    class FakePipeline {
+      started = false;
+      stopped = false;
+      onAudio: ((b: ArrayBuffer) => void) | null = null;
+      constructor() {
+        pipelineInstances.push(this);
+      }
+      async start(onAudio: (b: ArrayBuffer) => void) {
+        this.started = true;
+        this.onAudio = onAudio;
+        return { fftSize: 512 } as unknown as AnalyserNode;
+      }
+      stop() {
+        this.stopped = true;
+      }
     }
-    stop() { this.stopped = true; }
-  }
 
-  class FakeSocket {
-    callbacks: Callbacks | null = null;
-    params: Record<string, string> | null = null;
-    sent: unknown[] = [];
-    audio: ArrayBuffer[] = [];
-    _open = false;
-    constructor() { socketInstances.push(this); }
-    connect(params: Record<string, string>, cbs: Callbacks) {
-      this.params = params;
-      this.callbacks = cbs;
+    class FakeSocket {
+      callbacks: Callbacks | null = null;
+      params: Record<string, string> | null = null;
+      sent: unknown[] = [];
+      audio: ArrayBuffer[] = [];
+      _open = false;
+      constructor() {
+        socketInstances.push(this);
+      }
+      connect(params: Record<string, string>, cbs: Callbacks) {
+        this.params = params;
+        this.callbacks = cbs;
+      }
+      get isOpen() {
+        return this._open;
+      }
+      fireOpen() {
+        this._open = true;
+        this.callbacks?.onOpen?.();
+      }
+      fireMessage(m: unknown) {
+        this.callbacks?.onMessage(m);
+      }
+      fireClose() {
+        this._open = false;
+        this.callbacks?.onClose();
+      }
+      sendJson(m: unknown) {
+        this.sent.push(m);
+      }
+      sendAudio(b: ArrayBuffer) {
+        this.audio.push(b);
+      }
+      close() {
+        this._open = false;
+      }
     }
-    get isOpen() { return this._open; }
-    fireOpen() { this._open = true; this.callbacks?.onOpen?.(); }
-    fireMessage(m: unknown) { this.callbacks?.onMessage(m); }
-    fireClose() { this._open = false; this.callbacks?.onClose(); }
-    sendJson(m: unknown) { this.sent.push(m); }
-    sendAudio(b: ArrayBuffer) { this.audio.push(b); }
-    close() { this._open = false; }
-  }
 
-  return { pipelineInstances, socketInstances, FakePipeline, FakeSocket };
-});
+    return { pipelineInstances, socketInstances, FakePipeline, FakeSocket };
+  });
 
-vi.mock("../../../shared/audio/audio-pipeline", () => ({ AudioPipeline: FakePipeline }));
-vi.mock("../../../shared/networking/session-socket", () => ({ SessionSocket: FakeSocket }));
+vi.mock("../../../shared/audio/audio-pipeline", () => ({
+  AudioPipeline: FakePipeline,
+}));
+vi.mock("../../../shared/networking/session-socket", () => ({
+  SessionSocket: FakeSocket,
+}));
 
 import * as api from "../data/api-client";
 import { ensureFreshToken } from "../../../shared/auth/auth-store";
 import { useHostSession } from "./use-host-session";
 
-const mockedEnsureFreshToken = ensureFreshToken as unknown as ReturnType<typeof vi.fn>;
-const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<typeof vi.fn>;
+const mockedEnsureFreshToken = ensureFreshToken as unknown as ReturnType<
+  typeof vi.fn
+>;
+const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<
+  typeof vi.fn
+>;
 
 function installMedia() {
-  const track = { stop: vi.fn() };
-  const stream = { getTracks: () => [track] } as unknown as MediaStream;
+  const track = { kind: "video", stop: vi.fn() };
+  const stream = {
+    getTracks: () => [track],
+    getVideoTracks: () => [track],
+  } as unknown as MediaStream;
   Object.defineProperty(globalThis.navigator, "mediaDevices", {
     configurable: true,
     value: { getUserMedia: vi.fn(async () => stream) },
   });
 
   class FakeScriptProcessorNode {
-    onaudioprocess: ((event: { inputBuffer: { getChannelData: () => Float32Array } }) => void) | null = null;
+    onaudioprocess:
+      | ((event: {
+          inputBuffer: { getChannelData: () => Float32Array };
+        }) => void)
+      | null = null;
     connect() {}
     disconnect() {}
   }
@@ -105,14 +143,50 @@ function installMedia() {
 
   class FakeAudioContext {
     destination = {};
-    createMediaStreamSource() { return new FakeMediaStreamSourceNode(); }
-    createScriptProcessor() { return new FakeScriptProcessorNode(); }
-    close() { return Promise.resolve(); }
+    createMediaStreamSource() {
+      return new FakeMediaStreamSourceNode();
+    }
+    createScriptProcessor() {
+      return new FakeScriptProcessorNode();
+    }
+    close() {
+      return Promise.resolve();
+    }
   }
 
   Object.defineProperty(globalThis, "AudioContext", {
     configurable: true,
     value: FakeAudioContext,
+  });
+
+  class FakeRTCPeerConnection extends EventTarget {
+    localDescription: RTCSessionDescriptionInit | null = null;
+    iceGatheringState: RTCIceGatheringState = "complete";
+    addTrack() {
+      return { track, getParameters: () => ({ encodings: [] }) };
+    }
+    getTransceivers() {
+      return [];
+    }
+    getSenders() {
+      return [];
+    }
+    async createOffer() {
+      return { type: "offer" as const, sdp: "offer-sdp" };
+    }
+    async setLocalDescription(desc: RTCSessionDescriptionInit) {
+      this.localDescription = desc;
+    }
+    async setRemoteDescription() {}
+    close() {}
+  }
+  Object.defineProperty(globalThis, "RTCPeerConnection", {
+    configurable: true,
+    value: FakeRTCPeerConnection,
+  });
+  Object.defineProperty(globalThis, "RTCRtpSender", {
+    configurable: true,
+    value: { getCapabilities: vi.fn(() => ({ codecs: [] })) },
   });
 }
 
@@ -148,14 +222,20 @@ describe("useHostSession", () => {
     const { result } = renderHook(() => useHostSession());
 
     await act(async () => {
-      await result.current.connectSession({ userId: "u1", sessionId: "s1", sourceLang: "en" });
+      await result.current.connectSession({
+        userId: "u1",
+        sessionId: "s1",
+        sourceLang: "en",
+      });
     });
 
     expect(mockedEnsureFreshToken).toHaveBeenCalledTimes(1);
     const connected = socketInstances.filter((s) => s.callbacks);
     expect(connected).toHaveLength(1);
     expect(connected[0].params).toMatchObject({
-      sourceLang: "en", token: "tok_1", sessionId: "s1",
+      sourceLang: "en",
+      token: "tok_1",
+      sessionId: "s1",
     });
     expect(result.current.status).toBe("creating");
 
@@ -178,7 +258,9 @@ describe("useHostSession", () => {
   it("skipVoiceSetup → ready", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
     expect(result.current.status).toBe("ready");
@@ -187,7 +269,13 @@ describe("useHostSession", () => {
   it("stopVoiceRecording clones through Workers for the active session", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     mockedCloneSessionVoice.mockResolvedValueOnce({
-      voice: { id: "v1", user_id: "u1", elevenlabs_voice_id: "el1", name: "n", created_at: 1 },
+      voice: {
+        id: "v1",
+        user_id: "u1",
+        elevenlabs_voice_id: "el1",
+        name: "n",
+        created_at: 1,
+      },
     });
     const { result } = renderHook(() => useHostSession());
 
@@ -215,7 +303,9 @@ describe("useHostSession", () => {
 
   it("startRecording bails silently if socket not open (sad)", async () => {
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
     expect(result.current.status).toBe("idle");
     expect(pipelineInstances.every((p) => !p.started)).toBe(true);
   });
@@ -223,11 +313,15 @@ describe("useHostSession", () => {
   it("startRecording when open → pipeline starts, status=recording, audio forwarded", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
 
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
     expect(result.current.status).toBe("recording");
     expect(result.current.analyser).not.toBeNull();
 
@@ -235,15 +329,23 @@ describe("useHostSession", () => {
     const buf = new ArrayBuffer(8);
     pipe.onAudio!(buf);
     expect(socketInstances[0].audio).toEqual([buf]);
+    expect(socketInstances[0].sent).toContainEqual({
+      type: "webrtc:offer",
+      sdp: "offer-sdp",
+    });
   });
 
   it("stopRecording → pipeline stop + status=ready", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
     act(() => result.current.stopRecording());
     expect(result.current.status).toBe("ready");
     expect(pipelineInstances[0].stopped).toBe(true);
@@ -254,20 +356,39 @@ describe("useHostSession", () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
     act(() => result.current.setActiveTargetLangs(["ja"]));
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
 
     const s = socketInstances[0];
     act(() => s.fireMessage({ type: "interim", transcript: "hel" }));
     expect(result.current.liveTranscript).toBe("hel");
 
-    act(() => s.fireMessage({ type: "final", utteranceId: 1, transcript: "hello", sttMs: 200 }));
+    act(() =>
+      s.fireMessage({
+        type: "final",
+        utteranceId: 1,
+        transcript: "hello",
+        sttMs: 200,
+      }),
+    );
     expect(result.current.liveTranscript).toBe("");
     expect(result.current.utterances).toEqual([{ id: 1, transcript: "hello" }]);
 
-    act(() => s.fireMessage({ type: "translation", utteranceId: 1, targetLang: "ja", text: "こ", translateMs: 120 }));
+    act(() =>
+      s.fireMessage({
+        type: "translation",
+        utteranceId: 1,
+        targetLang: "ja",
+        text: "こ",
+        translateMs: 120,
+      }),
+    );
     expect(result.current.translations.ja).toEqual({ id: 1, text: "こ" });
 
     act(() => s.fireMessage({ type: "tts_end", utteranceId: 1, ttsMs: 300 }));
@@ -283,10 +404,14 @@ describe("useHostSession", () => {
   it("WS disconnect mid-recording → status=disconnected, pipeline stopped (sad)", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
 
     act(() => socketInstances[0].fireClose());
     expect(result.current.status).toBe("disconnected");
@@ -296,29 +421,42 @@ describe("useHostSession", () => {
   it("error message → error field populated, status unchanged (sad)", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
-    act(() => socketInstances[0].fireMessage({ type: "error", message: "backend blew up" }));
+    act(() =>
+      socketInstances[0].fireMessage({
+        type: "error",
+        message: "backend blew up",
+      }),
+    );
     expect(result.current.error).toBe("backend blew up");
   });
 
   it("closeSession sends host:end + closes WS + stops pipeline", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     act(() => result.current.skipVoiceSetup());
-    await act(async () => { await result.current.startRecording(); });
+    await act(async () => {
+      await result.current.startRecording();
+    });
 
     act(() => result.current.closeSession());
-    expect(socketInstances[0].sent[0]).toEqual({ type: "host:end" });
+    expect(socketInstances[0].sent).toContainEqual({ type: "host:end" });
     expect(pipelineInstances[0].stopped).toBe(true);
   });
 
   it("unknown msg.type ignored (sad: forward compat)", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());
-    await act(async () => { await result.current.connectSession({ userId: "u1" }); });
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
     act(() => socketInstances[0].fireOpen());
     const before = { ...result.current };
     act(() => socketInstances[0].fireMessage({ type: "future_event_xyz" }));

@@ -139,20 +139,20 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             "kill-switch BRIVVA_FALLBACK_TO_DEFAULT_VOICE: forced default voice over selected clone"
         );
     }
-    let voice_id = resolved.voice_id;
-    let is_cloned = resolved.is_cloned;
+    let mut voice_id = resolved.voice_id;
+    let mut is_cloned = resolved.is_cloned;
     // Unified on eleven_flash_v2_5 for both cloned + default paths. Flash v2.5
     // supports Instant Voice Cloning with `language_code` in the request body
     // (commit cd5943f), so cross-lingual cloned synthesis is routed through
     // the same low-latency model used for default voices — critical for live
     // streaming where eleven_multilingual_v2 adds noticeable TTFB.
     let model_id = "eleven_flash_v2_5";
-    let url = format!(
+    let mut url = format!(
         "{}/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
         base_url, &voice_id
     );
 
-    let audio_buffer = match fetch_tts_audio(FetchTtsArgs {
+    let mut audio_buffer = match fetch_tts_audio(FetchTtsArgs {
         url: &url,
         api_key: &api_key,
         text: &req.text,
@@ -164,6 +164,48 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     })
     .await
     {
+        TtsFetchResult::Audio(buf) => Some(buf),
+        TtsFetchResult::VoiceNotFound if is_cloned => None,
+        TtsFetchResult::VoiceNotFound | TtsFetchResult::NoAudio => {
+            emit_tts_drop(&req, &tts_deadline);
+            return;
+        }
+    };
+
+    if audio_buffer.is_none() && is_cloned {
+        let fallback = default_voice(&req.target_lang, VoicePreset::Female);
+        tracing::warn!(
+            live_session_id = %req.handle.id,
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            failed_voice_id = %voice_id,
+            fallback_voice_id = %fallback.voice_id,
+            "cloned TTS failed; retrying with default voice"
+        );
+        voice_id = fallback.voice_id;
+        is_cloned = false;
+        url = format!(
+            "{}/v1/text-to-speech/{}/stream?output_format=mp3_44100_128",
+            base_url, &voice_id
+        );
+        audio_buffer = match fetch_tts_audio(FetchTtsArgs {
+            url: &url,
+            api_key: &api_key,
+            text: &req.text,
+            model_id,
+            is_cloned,
+            lang: &req.target_lang,
+            enrollment_lang: None,
+            deadline: tts_deadline,
+        })
+        .await
+        {
+            TtsFetchResult::Audio(buf) => Some(buf),
+            TtsFetchResult::VoiceNotFound | TtsFetchResult::NoAudio => None,
+        };
+    }
+
+    let audio_buffer = match audio_buffer {
         Some(buf) => buf,
         None => {
             // §0.5.4: fetch_tts_audio already logged the specific reason
@@ -202,6 +244,15 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         duration_ms = tts_ms,
         deadline_ms = tts_deadline.as_millis() as u64,
         "tts complete"
+    );
+}
+
+fn emit_tts_drop(req: &TtsRequest, _tts_deadline: &Duration) {
+    tracing::warn!(
+        live_session_id = %req.handle.id,
+        utterance_id = req.utterance_id,
+        target_lang = %req.target_lang,
+        "tts dispatch produced no audio — utterance dropped"
     );
 }
 
@@ -256,7 +307,13 @@ pub fn build_tts_request_body(
     }
 }
 
-async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
+enum TtsFetchResult {
+    Audio(Vec<u8>),
+    VoiceNotFound,
+    NoAudio,
+}
+
+async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
     let FetchTtsArgs {
         url,
         api_key,
@@ -306,12 +363,17 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
+                let voice_not_found =
+                    status == reqwest::StatusCode::NOT_FOUND && body.contains("voice_not_found");
                 tracing::warn!(
                     target_lang = %lang,
                     status = %status,
                     body_preview = %body.chars().take(200).collect::<String>(),
                     "tts elevenlabs non-2xx response"
                 );
+                if voice_not_found {
+                    return TtsFetchResult::VoiceNotFound;
+                }
             }
             Err(error) => tracing::warn!(
                 target_lang = %lang,
@@ -320,20 +382,25 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> Option<Vec<u8>> {
             ),
         }
 
-        audio_buffer
+        if audio_buffer.is_empty() {
+            TtsFetchResult::NoAudio
+        } else {
+            TtsFetchResult::Audio(audio_buffer)
+        }
     })
     .await;
 
     match tts_result {
-        Ok(buffer) if !buffer.is_empty() => Some(buffer),
-        Ok(_) => None,
+        Ok(TtsFetchResult::Audio(buffer)) => TtsFetchResult::Audio(buffer),
+        Ok(TtsFetchResult::VoiceNotFound) => TtsFetchResult::VoiceNotFound,
+        Ok(TtsFetchResult::NoAudio) => TtsFetchResult::NoAudio,
         Err(_) => {
             tracing::warn!(
                 target_lang = %lang,
                 deadline_ms = deadline.as_millis() as u64,
                 "tts elevenlabs request timed out"
             );
-            None
+            TtsFetchResult::NoAudio
         }
     }
 }
@@ -386,7 +453,7 @@ fn notify_host_tts_complete(args: NotifyCompleteArgs<'_>) {
     let Some(live_session) = args.handle.sessions.get(&args.handle.id) else {
         // §0.5.4: session torn down between TTS completion and the
         // notify step. The host won't see TtsEnd/VideoEnd — log so a
-        // dangling caption on the FE is explainable.
+        // dangling UI state is explainable.
         tracing::info!(
             live_session_id = %args.handle.id,
             utterance_id = args.utterance_id,

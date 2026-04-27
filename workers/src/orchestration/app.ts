@@ -154,7 +154,13 @@ app.post("/api/voices", async (c) => {
       } catch (e) {
         console.warn(`[voices] failed to delete prior ElevenLabs voice: ${String(e)}`);
       }
-      await db.deleteVoiceRow(c.env.DB, prior.id);
+      try {
+        await db.deleteVoiceRow(c.env.DB, prior.id);
+      } catch (e) {
+        // Historical sessions can FK this voice. Re-cloning must still work;
+        // leaving a stale local row is safer than failing POST /api/voices.
+        console.warn(`[voices] failed to delete prior local voice row: ${String(e)}`);
+      }
     }
   }
 

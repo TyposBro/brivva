@@ -148,18 +148,12 @@ async fn websocket_forwards_binary_and_text_without_panicking_before_host_end() 
         ))
         .await
         .expect("send unknown text");
-    // Exercise the face:frame branch — base64 decode should succeed but
-    // rtmp_manager is absent so the path ends with a noop.
-    let face_frame = format!(
-        "{{\"type\":\"face:frame\",\"data\":\"{}\"}}",
-        "Zm9v" // "foo"
-    );
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            face_frame.into(),
+            "{\"type\":\"webrtc:offer\",\"sdp\":\"not real sdp\"}".into(),
         ))
         .await
-        .expect("send face frame");
+        .expect("send invalid webrtc offer");
 
     // Send an invalid JSON text — json parse fails, branch returns early.
     socket

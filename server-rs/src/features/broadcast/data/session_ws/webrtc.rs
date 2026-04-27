@@ -1,0 +1,229 @@
+use std::sync::Arc;
+
+use axum::extract::ws::Message;
+use serde::Deserialize;
+use webrtc::api::APIBuilder;
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::{MIME_TYPE_H264, MediaEngine};
+use webrtc::error::Result as WebRtcResult;
+use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::rtp::codecs::h264::{H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE, STAPA_NALU_TYPE};
+use webrtc::rtp::packet::Packet;
+use webrtc::rtp::packetizer::Depacketizer;
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc::track::track_remote::TrackRemote;
+
+use crate::features::broadcast::domain::LiveSessions;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct WebRtcOffer {
+    pub sdp: String,
+}
+
+pub(super) async fn handle_webrtc_offer(
+    offer: WebRtcOffer,
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+) {
+    match accept_webrtc_video(offer, live_sessions, live_session_id).await {
+        Ok(peer) => {
+            if let Some(mut session) = live_sessions.get_mut(live_session_id) {
+                session.webrtc_peer = Some(peer);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                live_session_id = %live_session_id,
+                error = %error,
+                "webrtc offer rejected"
+            );
+        }
+    }
+}
+
+async fn accept_webrtc_video(
+    offer: WebRtcOffer,
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+) -> WebRtcResult<Arc<RTCPeerConnection>> {
+    let mut media = MediaEngine::default();
+    media.register_default_codecs()?;
+    let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    let api = APIBuilder::new()
+        .with_media_engine(media)
+        .with_interceptor_registry(registry)
+        .build();
+    let peer = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
+
+    wire_video_track(
+        peer.clone(),
+        live_sessions.clone(),
+        live_session_id.to_string(),
+    );
+
+    let remote = RTCSessionDescription::offer(offer.sdp)?;
+    peer.set_remote_description(remote).await?;
+    let answer = peer.create_answer(None).await?;
+    let mut gathering_complete = peer.gathering_complete_promise().await;
+    peer.set_local_description(answer).await?;
+    let _ = gathering_complete.recv().await;
+
+    if let Some(desc) = peer.local_description().await
+        && let Some(session) = live_sessions.get(live_session_id)
+    {
+        session.send_to_host(Message::Text(
+            serde_json::json!({
+                "type": "webrtc:answer",
+                "sdp": desc.sdp,
+            })
+            .to_string()
+            .into(),
+        ));
+    }
+
+    Ok(peer)
+}
+
+fn wire_video_track(
+    peer: Arc<RTCPeerConnection>,
+    live_sessions: LiveSessions,
+    live_session_id: String,
+) {
+    peer.on_track(Box::new(move |track, _, _| {
+        let live_sessions = live_sessions.clone();
+        let live_session_id = live_session_id.clone();
+        Box::pin(async move {
+            if track.kind() != RTPCodecType::Video {
+                return;
+            }
+            let codec = track.codec();
+            if codec.capability.mime_type != MIME_TYPE_H264 {
+                tracing::warn!(
+                    live_session_id = %live_session_id,
+                    mime_type = %codec.capability.mime_type,
+                    "webrtc video track ignored: RTMP copy path requires H.264"
+                );
+                return;
+            }
+            forward_track_rtp(track, live_sessions, live_session_id).await;
+        })
+    }));
+}
+
+async fn forward_track_rtp(
+    track: Arc<TrackRemote>,
+    live_sessions: LiveSessions,
+    live_session_id: String,
+) {
+    tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
+    let mut depacketizer = H264AnnexBDepacketizer::default();
+    while let Ok((packet, _)) = track.read_rtp().await {
+        let Some(annex_b) = depacketizer.depacketize(&packet) else {
+            continue;
+        };
+        let manager = live_sessions
+            .get(&live_session_id)
+            .and_then(|session| session.rtmp_manager.clone());
+        let Some(manager) = manager else {
+            break;
+        };
+        manager.lock().await.push_video_h264(&annex_b);
+    }
+    tracing::info!(live_session_id = %live_session_id, "webrtc video track ended");
+}
+
+#[derive(Default)]
+struct H264AnnexBDepacketizer {
+    inner: H264Packet,
+    has_parameter_set: bool,
+}
+
+impl H264AnnexBDepacketizer {
+    fn depacketize(&mut self, packet: &Packet) -> Option<Vec<u8>> {
+        if packet.payload.is_empty() {
+            return None;
+        }
+        if !self.has_parameter_set {
+            self.has_parameter_set = payload_has_sps(&packet.payload);
+            if !self.has_parameter_set {
+                return None;
+            }
+        }
+        match self.inner.depacketize(&packet.payload) {
+            Ok(bytes) if !bytes.is_empty() => Some(bytes.to_vec()),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(error = %error, "webrtc H.264 depacketize failed");
+                None
+            }
+        }
+    }
+}
+
+fn payload_has_sps(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+    match payload[0] & NALU_TYPE_BITMASK {
+        SPS_NALU_TYPE => true,
+        STAPA_NALU_TYPE => stap_a_has_sps(payload),
+        _ => false,
+    }
+}
+
+fn stap_a_has_sps(payload: &[u8]) -> bool {
+    let mut offset = 1usize;
+    while offset + 2 <= payload.len() {
+        let nalu_len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+        offset += 2;
+        if offset + nalu_len > payload.len() {
+            return false;
+        }
+        if nalu_len > 0 && (payload[offset] & NALU_TYPE_BITMASK) == SPS_NALU_TYPE {
+            return true;
+        }
+        offset += nalu_len;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webrtc::rtp::header::Header;
+
+    #[test]
+    fn payload_has_sps_detects_single_nalu_sps() {
+        assert!(payload_has_sps(&[0x67, 1, 2, 3]));
+        assert!(!payload_has_sps(&[0x65, 1, 2, 3]));
+    }
+
+    #[test]
+    fn payload_has_sps_detects_stap_a_sps() {
+        let payload = [
+            24, // STAP-A
+            0, 3, 0x67, 1, 2, 0, 2, 0x68, 3,
+        ];
+        assert!(payload_has_sps(&payload));
+    }
+
+    #[test]
+    fn depacketizer_waits_for_parameter_set_then_outputs_annex_b() {
+        let mut depacketizer = H264AnnexBDepacketizer::default();
+        let idr = Packet {
+            header: Header::default(),
+            payload: vec![0x65, 1, 2, 3].into(),
+        };
+        assert!(depacketizer.depacketize(&idr).is_none());
+
+        let sps = Packet {
+            header: Header::default(),
+            payload: vec![0x67, 1, 2, 3].into(),
+        };
+        let out = depacketizer.depacketize(&sps).expect("sps output");
+        assert!(out.starts_with(&[0, 0, 0, 1, 0x67]));
+    }
+}

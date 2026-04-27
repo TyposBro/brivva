@@ -4,6 +4,8 @@ use tokio::sync::mpsc;
 use crate::features::broadcast::data::pipeline;
 use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
 
+use super::webrtc::{WebRtcOffer, handle_webrtc_offer};
+
 pub(super) struct BinaryArgs<'a> {
     pub data: Vec<u8>,
     pub live_sessions: &'a LiveSessions,
@@ -83,23 +85,14 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
     let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
-    // Face video: push directly to FFmpeg. No preview, no guest broadcast.
-    if let Some("face:frame") = json.get("type").and_then(|v| v.as_str())
-        && let Some(data) = json.get("data").and_then(|v| v.as_str())
-    {
-        push_face_frame(live_sessions, live_session_id, data).await;
+    if let Some("webrtc:offer") = json.get("type").and_then(|v| v.as_str()) {
+        match serde_json::from_value::<WebRtcOffer>(json) {
+            Ok(offer) => handle_webrtc_offer(offer, live_sessions, live_session_id).await,
+            Err(error) => tracing::warn!(
+                live_session_id = %live_session_id,
+                error = %error,
+                "invalid webrtc offer"
+            ),
+        }
     }
-}
-
-async fn push_face_frame(live_sessions: &LiveSessions, live_session_id: &str, data: &str) {
-    let rtmp_mgr = live_sessions
-        .get(live_session_id)
-        .and_then(|r| r.rtmp_manager.clone());
-    let Some(mgr) = rtmp_mgr else { return };
-    use base64::Engine;
-    let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-        return;
-    };
-    let locked = mgr.lock().await;
-    locked.push_video_frame(&jpeg_bytes);
 }

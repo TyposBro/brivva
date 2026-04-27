@@ -1,9 +1,11 @@
-//! FFmpeg RTMP muxer: per-stream delayed host media mixed with translated TTS.
+//! FFmpeg RTMP muxer: per-stream delayed WebRTC video mixed with translated TTS.
 //!
 //! Model: every RTMP output stream has an independent `delay_ms`. Host audio
-//! and video are fanned out to every stream's delay buffer the instant they
-//! arrive. Each stream's drain threads emit media only after it has aged by
-//! the stream's configured delay, mixing in any queued TTS PCM at emit time.
+//! and depacketized H.264 Annex-B video are fanned out to every stream's delay
+//! buffer the instant they arrive. Each stream's drain threads emit media only
+//! after it has aged by the stream's configured delay, mixing in any queued TTS
+//! PCM at emit time. Video is copied by FFmpeg; the server no longer JPEG-
+//! decodes or re-encodes frames, and no localhost UDP hop can drop RTP.
 //!
 //! Why this is simpler than the previous utterance-timestamp scheduler:
 //! - No global clock, no `BROADCAST_DELAY_MS` env.
@@ -14,7 +16,6 @@
 //!   Fargate reads via the session bundle.
 
 mod args;
-mod caption;
 mod drain;
 mod mixer;
 mod orphan;
@@ -23,7 +24,6 @@ pub use args::drain_stderr_lines;
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
 use args::build_ffmpeg_args;
-use caption::CaptionState;
 use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
 use crate::features::broadcast::domain::SessionMetrics;
@@ -41,8 +41,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Cap the host audio delay buffer per stream at ~20 s of samples.
 /// (Prevents unbounded growth if the drain thread falls behind.)
 const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
-/// Cap the host video buffer at ~20 s of frames @ 30 fps.
-const HOST_VIDEO_CAP_FRAMES: usize = 20 * 30;
+/// Cap depacketized H.264 chunks per stream. Dropping old chunks can still
+/// create visible gaps, but this path no longer uses localhost UDP, so overflow
+/// should only happen if FFmpeg/RTMP is truly slower than real time.
+const HOST_VIDEO_H264_CAP_CHUNKS: usize = 120_000;
 /// Cap the TTS queue at 60 s of PCM. Oldest bytes are dropped on overflow so
 /// the translated speech stays fresh rather than falling further behind.
 /// Raised from 5 s in April 2026: a single 291-char Korean utterance renders
@@ -76,7 +78,7 @@ type TimedChunk = (Instant, Vec<u8>);
 
 pub(crate) struct StreamBuffers {
     audio: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    video: Arc<StdMutex<VecDeque<TimedChunk>>>,
+    video_h264: Arc<StdMutex<VecDeque<TimedChunk>>>,
     tts: Arc<StdMutex<VecDeque<u8>>>,
 }
 
@@ -84,7 +86,7 @@ impl StreamBuffers {
     fn new() -> Self {
         Self {
             audio: Arc::new(StdMutex::new(VecDeque::new())),
-            video: Arc::new(StdMutex::new(VecDeque::new())),
+            video_h264: Arc::new(StdMutex::new(VecDeque::new())),
             tts: Arc::new(StdMutex::new(VecDeque::new())),
         }
     }
@@ -95,6 +97,7 @@ struct RtmpStream {
     video_handle: Option<thread::JoinHandle<()>>,
     audio_handle: Option<thread::JoinHandle<()>>,
     audio_fifo: String,
+
     lang: String,
     rtmp_url: String,
     delay: Duration,
@@ -108,7 +111,6 @@ struct RtmpStream {
     /// from "stream's lang coincidentally equals source_lang".
     passthrough: bool,
     buffers: StreamBuffers,
-    caption: Option<CaptionState>,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
     /// Unix-ms wall clock of the most recent successful FFmpeg-stdin write
@@ -117,11 +119,6 @@ struct RtmpStream {
     last_write_ms: Arc<AtomicI64>,
 }
 
-/// Per-stream burn-in caption state. Source streams don't have one (nothing
-/// to burn in — they're the host's own audio). Target streams get a textfile
-/// that drawtext reads with `reload=1`; writes are rate-limited via a tokio
-/// task so a fresh translation always gets at least MIN_CAPTION_DWELL_MS on
-/// screen before being replaced.
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
     /// Optional billing counters. `None` in unit tests / paths that don't
@@ -207,8 +204,8 @@ impl RtmpManager {
     ///
     /// `host_gain` is the multiplier applied to the delayed host audio before
     /// mixing with translated TTS (1.0 for source streams, typically 0.2 for
-    /// ducked target streams). `passthrough` streams always spawn with
-    /// `is_source=true` semantics and gain pinned at 1.0.
+    /// ducked target streams). Video arrives separately as encoded WebRTC RTP
+    /// and is copied to RTMP by FFmpeg.
     pub fn start_stream(&mut self, args: StartStreamArgs<'_>) -> Result<(), String> {
         self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.stream_id.to_string(),
@@ -233,13 +230,18 @@ impl RtmpManager {
         Ok(())
     }
 
-    /// Push a host video frame (JPEG) into every stream's delay buffer.
-    pub fn push_video_frame(&self, jpeg_bytes: &[u8]) {
+    /// Push one depacketized Annex-B H.264 chunk into every stream's delay
+    /// buffer. FFmpeg receives these bytes through stdin, avoiding the old
+    /// localhost UDP RTP bridge that dropped 4K bursts and corrupted frames.
+    pub fn push_video_h264(&self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
         let now = Instant::now();
         for stream in self.streams.values() {
-            let mut buf = stream.buffers.video.lock().unwrap();
-            buf.push_back((now, jpeg_bytes.to_vec()));
-            while buf.len() > HOST_VIDEO_CAP_FRAMES {
+            let mut buf = stream.buffers.video_h264.lock().unwrap();
+            buf.push_back((now, chunk.to_vec()));
+            while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
                 buf.pop_front();
             }
         }
@@ -299,82 +301,6 @@ impl RtmpManager {
                 }
             }
         }
-    }
-
-    /// Test-only: register a target-language stream wired to a real
-    /// `CaptionState` textfile but with no FFmpeg child. Lets cross-module
-    /// integration tests exercise `push_caption` end-to-end (translation →
-    /// disk) without spawning FFmpeg. Returns the textfile path so callers
-    /// can read it back to verify burn-in delivery.
-    ///
-    /// The stub child is a short-lived `sh -c "exit 0"`; drain/health
-    /// monitor code paths are not exercised here. Caller is responsible for
-    /// removing the textfile on test cleanup.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn insert_test_target_stream(&mut self, stream_id: &str, lang: &str) -> String {
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn shell child");
-        let _ = child.wait();
-        let cap = CaptionState::spawn(stream_id);
-        let path = cap.path.clone();
-        self.streams.insert(
-            stream_id.to_string(),
-            RtmpStream {
-                child,
-                video_handle: Some(thread::spawn(|| {})),
-                audio_handle: Some(thread::spawn(|| {})),
-                audio_fifo: format!("/tmp/brivva_audio_fake_{stream_id}"),
-                lang: lang.to_string(),
-                rtmp_url: "rtmp://fake".into(),
-                delay: Duration::from_millis(1000),
-                is_source: false,
-                host_gain: 0.2,
-                passthrough: false,
-                buffers: StreamBuffers::new(),
-                caption: Some(cap),
-                stop_flag: Arc::new(AtomicBool::new(false)),
-                restart_count: 0,
-                last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
-            },
-        );
-        path
-    }
-
-    /// Update the burn-in caption for a target-language stream. Write is
-    /// rate-limited to MIN_CAPTION_DWELL_MS so each line gets read time.
-    /// Source + passthrough streams have no caption track — this is a no-op
-    /// for them (no translation text to burn in).
-    pub fn push_caption(&self, lang: &str, text: String) {
-        let mut delivered = 0usize;
-        let mut skipped = 0usize;
-        for stream in self.streams.values() {
-            if stream.lang == lang
-                && !stream.is_source
-                && !stream.passthrough
-                && let Some(cap) = &stream.caption
-            {
-                cap.push(&text);
-                delivered += 1;
-            } else if stream.lang == lang {
-                skipped += 1;
-            }
-        }
-        // Without this log line, the operator has no way to tell whether a
-        // missing burn-in caption is the writer's fault, the consumer's
-        // fault, or a stream-flag classification bug. `delivered=0` with
-        // `skipped>0` is the smoking gun for the latter.
-        tracing::debug!(
-            lang = %lang,
-            char_count = text.chars().count(),
-            delivered,
-            skipped_same_lang = skipped,
-            "push_caption fan-out"
-        );
     }
 
     /// Kill FFmpeg children that have gone silent (no drain writes in
@@ -465,11 +391,7 @@ impl RtmpManager {
                 let _ = old.child.kill();
                 let _ = old.child.wait();
                 let _ = std::fs::remove_file(&old.audio_fifo);
-                // Captions get reborn by spawn_stream_inner — tear down the old one.
-                if let Some(mut cap) = old.caption.take() {
-                    let _ = std::fs::remove_file(&cap.path);
-                    cap.shutdown();
-                }
+
                 result.push((
                     id,
                     old.lang,
@@ -529,40 +451,12 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        // Target streams get a burn-in caption textfile + drawtext filter.
-        // Source + passthrough streams skip both (no translation to display).
-        let caption = if args.is_source || args.passthrough {
-            None
-        } else {
-            Some(CaptionState::spawn(&args.stream_id))
-        };
-
-        let ffmpeg_args = build_ffmpeg_args(
-            &audio_fifo,
-            caption.as_ref().map(|c| c.path.as_str()),
-            &args.rtmp_url,
-            Some(args.lang.as_str()),
+        let ffmpeg_args = build_ffmpeg_args(&audio_fifo, &args.rtmp_url);
+        tracing::info!(
+            stream_id = %args.stream_id,
+            lang = %args.lang,
+            "ffmpeg spawn: WebRTC H.264 pipe video copy enabled"
         );
-        // Surface whether the drawtext burn-in filter is attached to this
-        // stream's ffmpeg invocation. Caption visibility regressions live in
-        // exactly two places: this attach decision (`is_source||passthrough`
-        // wrongly true), or `push_caption` not delivering. Logging the path
-        // here closes the gap in the operator's mental model.
-        match &caption {
-            Some(c) => tracing::info!(
-                stream_id = %args.stream_id,
-                lang = %args.lang,
-                caption_path = %c.path,
-                "ffmpeg spawn: drawtext burn-in attached"
-            ),
-            None => tracing::info!(
-                stream_id = %args.stream_id,
-                lang = %args.lang,
-                is_source = args.is_source,
-                passthrough = args.passthrough,
-                "ffmpeg spawn: no drawtext (source/passthrough stream)"
-            ),
-        }
 
         let mut child = std::process::Command::new("ffmpeg")
             .args(&ffmpeg_args)
@@ -600,7 +494,6 @@ impl RtmpManager {
             }
         }
 
-        let stdin = child.stdin.take().ok_or("No FFmpeg stdin")?;
         let buffers = args.existing_buffers.unwrap_or_else(StreamBuffers::new);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let delay = Duration::from_millis(args.delay_ms);
@@ -609,8 +502,13 @@ impl RtmpManager {
         // write their first tick.
         let last_write_ms = Arc::new(AtomicI64::new(now_unix_ms()));
 
+        let video_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "FFmpeg video stdin unavailable".to_string())?;
+
         // Video drain
-        let v_buf = buffers.video.clone();
+        let v_buf = buffers.video_h264.clone();
         let v_stop = stop_flag.clone();
         let v_sid = args.stream_id.clone();
         let v_last = last_write_ms.clone();
@@ -620,8 +518,8 @@ impl RtmpManager {
             .spawn(move || {
                 video_drain_loop(VideoDrainCtx {
                     stream_id: v_sid,
-                    video_buf: v_buf,
-                    stdin,
+                    h264_buf: v_buf,
+                    video_stdin,
                     delay,
                     stop: v_stop,
                     last_write_ms: v_last,
@@ -662,7 +560,6 @@ impl RtmpManager {
                 host_gain: args.host_gain,
                 passthrough: args.passthrough,
                 buffers,
-                caption,
                 stop_flag,
                 restart_count: 0,
                 last_write_ms,
@@ -713,10 +610,6 @@ impl RtmpManager {
                 }
             }
             let _ = std::fs::remove_file(&stream.audio_fifo);
-            if let Some(mut cap) = stream.caption.take() {
-                let _ = std::fs::remove_file(&cap.path);
-                cap.shutdown();
-            }
         }
     }
 }

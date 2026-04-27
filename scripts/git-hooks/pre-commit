@@ -6,6 +6,7 @@
 # you're doing, but understand which guardrail you're ignoring.
 #
 # Checks:
+#   0. No commits during 10:00–18:00 Korea time (KST / Asia/Seoul)
 #   1. No committed secrets (AWS keys, private keys, Stripe/OpenAI/Anthropic keys)
 #   2. No .env* files (except .env.example)
 #   3. No terraform state files
@@ -33,6 +34,16 @@ warn() {
 ok() {
   echo "${GREEN}pre-commit OK:${NC} $1"
 }
+
+# ── 0. Commit quiet hours (Korea time) ──────────────────────
+# No commits during office hours. Use --no-verify only for an explicit
+# same-turn emergency override; otherwise stage/test now, commit later.
+KST_HOUR=$(TZ=Asia/Seoul date +%H)
+KST_TIME=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')
+if [ "$KST_HOUR" -ge 10 ] && [ "$KST_HOUR" -lt 18 ]; then
+  fail "commits are blocked from 10:00 to 18:00 KST (now: $KST_TIME). Stage/test now; commit after 18:00 KST."
+fi
+ok "commit window allowed (KST now: $KST_TIME)"
 
 # List of staged files (added/modified, not deleted).
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR)

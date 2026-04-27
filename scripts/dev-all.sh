@@ -17,6 +17,8 @@
 #   WORKERS_PORT=8787    wrangler dev port
 #   FRONTEND_PORT=5173   vite port
 #   BOOT_TIMEOUT=60      seconds to wait for server-rs /health + workers /
+#   INFISICAL_ENV=dev    Infisical environment to inject at runtime
+#   INFISICAL_PATH=/     Infisical secret path to inject at runtime
 #
 # What this does NOT do:
 #   - Run smoke-test (use ./scripts/dev-stack.sh for that; boots server-rs +
@@ -40,6 +42,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${REPO_ROOT}/.dev-logs"
 mkdir -p "$LOG_DIR"
 
+if [ "${BRIVVA_INFISICAL_WRAPPED:-0}" != "1" ]; then
+  if ! command -v infisical >/dev/null 2>&1; then
+    echo "infisical CLI not found; install/login first" >&2
+    exit 2
+  fi
+  export BRIVVA_INFISICAL_WRAPPED=1
+  infisical_args=(run --env="${INFISICAL_ENV:-dev}" --path="${INFISICAL_PATH:-/}")
+  if [ -f "${REPO_ROOT}/.infisical.json" ]; then
+    infisical_args+=(--project-config-dir "$REPO_ROOT")
+  fi
+  exec infisical "${infisical_args[@]}" -- "$0" "$@"
+fi
+
 SERVER_PORT="${SERVER_PORT:-3000}"
 WORKERS_PORT="${WORKERS_PORT:-8787}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
@@ -60,6 +75,7 @@ fail()  { echo "${RED}✗ $*${NC}"; }
 SERVER_PID=""
 WORKERS_PID=""
 FRONTEND_PID=""
+WORKERS_ENV_FILE=""
 
 cleanup() {
   info ""
@@ -67,6 +83,7 @@ cleanup() {
   [ -n "$SERVER_PID" ]   && kill "$SERVER_PID"   2>/dev/null || true
   [ -n "$WORKERS_PID" ]  && kill "$WORKERS_PID"  2>/dev/null || true
   [ -n "$FRONTEND_PID" ] && kill "$FRONTEND_PID" 2>/dev/null || true
+  [ -n "$WORKERS_ENV_FILE" ] && rm -f "$WORKERS_ENV_FILE"
   sleep 1
   for port in "$SERVER_PORT" "$WORKERS_PORT" "$FRONTEND_PORT"; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
@@ -84,39 +101,30 @@ for port in "$SERVER_PORT" "$WORKERS_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
-# ── Shared secrets: bridge .env.local + .dev.vars to server-rs env ──
-#
-# Two files on disk, different historical audiences:
-#   - `.env.local` (repo root) — server-rs historical home. Has SONIOX_API_KEY,
-#     STT/TTS/TRANSLATE keys, TUNNEL_*, and duplicates of JWT/INTERNAL.
-#   - `workers/.dev.vars` — Workers canonical source for wrangler dev.
-#
-# Workers signs JWTs with JWT_SECRET and talks to server-rs via INTERNAL_SECRET.
-# server-rs has to read the SAME values or WS handshakes + internal POSTs fail.
-#
-# Source order matters: `.env.local` first (seeds server-rs-only keys),
-# then `.dev.vars` LAST so any overlap (JWT_SECRET, INTERNAL_SECRET,
-# ELEVENLABS_API_KEY) takes the Workers-authoritative value. That way
-# even if the two files drift, the cross-service signing stays aligned.
-if [ ! -f "${REPO_ROOT}/workers/.dev.vars" ]; then
-  if [ -f "${REPO_ROOT}/workers/.dev.vars.example" ]; then
-    warn "workers/.dev.vars missing; creating it from .dev.vars.example"
-    cp "${REPO_ROOT}/workers/.dev.vars.example" "${REPO_ROOT}/workers/.dev.vars"
-    warn "real OAuth, Grip, and TTS calls still need secrets filled in workers/.dev.vars"
-  else
-    fail "workers/.dev.vars is missing and .dev.vars.example was not found"
-    exit 2
-  fi
-fi
-set -a   # export every var sourced
-if [ -f "${REPO_ROOT}/.env.local" ]; then
-  # shellcheck source=/dev/null
-  . "${REPO_ROOT}/.env.local"
-fi
-# shellcheck source=/dev/null
-. "${REPO_ROOT}/workers/.dev.vars"
-set +a
+# ── Runtime secrets: Infisical env → server-rs env + temp Wrangler env ──
 export WORKERS_API_URL="http://localhost:${WORKERS_PORT}"
+export FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
+export OAUTH_REDIRECT_URI="http://localhost:${WORKERS_PORT}/auth/youtube/callback"
+export GOOGLE_SIGNIN_REDIRECT_URI="http://localhost:${WORKERS_PORT}/auth/google/callback"
+
+dotenv_line() {
+  local key="$1"
+  local value="${!key-}"
+  [ -z "$value" ] && return 0
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "$key" "$value"
+}
+
+WORKERS_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/brivva-workers.XXXXXX.env")"
+chmod 600 "$WORKERS_ENV_FILE"
+for key in \
+  FRONTEND_URL OAUTH_REDIRECT_URI GOOGLE_SIGNIN_REDIRECT_URI \
+  ELEVENLABS_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
+  JWT_SECRET INTERNAL_SECRET GRIP_ACCESS_KEY GRIP_SECRET_KEY STRIPE_WEBHOOK_SECRET
+do
+  dotenv_line "$key" >> "$WORKERS_ENV_FILE"
+done
 
 # ── Boot server-rs ──────────────────────────────────────────
 info "[server-rs] starting → ${LOG_DIR}/server-rs.log"
@@ -141,7 +149,7 @@ pass "D1 migrations up to date"
 
 # ── Boot workers ────────────────────────────────────────────
 info "[workers] starting → ${LOG_DIR}/workers.log"
-( cd "${REPO_ROOT}/workers" && bun wrangler dev --port "$WORKERS_PORT" ) \
+( cd "${REPO_ROOT}/workers" && bun wrangler dev --env-file "$WORKERS_ENV_FILE" --port "$WORKERS_PORT" ) \
   >"${LOG_DIR}/workers.log" 2>&1 &
 WORKERS_PID=$!
 
@@ -182,7 +190,10 @@ fi
 
 # ── Boot vite ───────────────────────────────────────────────
 info "[frontend] starting → ${LOG_DIR}/frontend.log"
-( cd "${REPO_ROOT}/frontend" && bun run dev -- --port "$FRONTEND_PORT" --strictPort ) \
+( cd "${REPO_ROOT}/frontend" && \
+  VITE_API_URL="http://localhost:${WORKERS_PORT}" \
+  VITE_WORKER_URL="http://localhost:${SERVER_PORT}" \
+  bun run dev -- --port "$FRONTEND_PORT" --strictPort ) \
   >"${LOG_DIR}/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 

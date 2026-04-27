@@ -18,6 +18,7 @@ clone. Safe to re-run.
 
 Runs on every `git commit`. Blocks on violation.
 
+- Commit quiet-hours guard: blocks commits from 10:00–18:00 KST (Asia/Seoul)
 - Secret scan (AWS keys, private keys, Stripe / OpenAI / Anthropic keys)
 - `.env*` file guard (only `.env.example` allowed)
 - Terraform state file guard (see `docs/terraform-state-migration-plan.md`)
