@@ -123,6 +123,7 @@ function isWebRtcAnswer(msg: unknown): msg is WebRtcAnswer {
 }
 
 async function preferHighQuality(sender: RTCRtpSender) {
+  if (!sender.setParameters) return;
   const params = sender.getParameters();
   params.encodings = [
     {
