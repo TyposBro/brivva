@@ -190,13 +190,23 @@ resource "aws_iam_role_policy" "secrets_read" {
 }
 
 # ── Security group (Fargate task) ──────────────────────────
-# No public ingress — cloudflared sidecar connects outbound only.
-# If you swap to ALB ingress, add inbound 3000 here.
+# HTTP ingress is via cloudflared. WebRTC media is not HTTP/WebSocket; the
+# browser and Fargate peer need direct ICE/UDP connectivity. server-rs pins ICE
+# UDP sockets to 40000-40100 and advertises server-reflexive candidates via
+# STUN, so expose only that bounded range.
 
 resource "aws_security_group" "task" {
   name        = "${var.project}-task"
   description = "Egress-only for Fargate task (cloudflared handles ingress)."
   vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "WebRTC ICE UDP media from host browsers"
+    from_port   = 40000
+    to_port     = 40100
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     from_port   = 0

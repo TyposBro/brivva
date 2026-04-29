@@ -3,12 +3,15 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::Message;
 use serde::Deserialize;
+use ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_H264, MediaEngine};
 use webrtc::error::Result as WebRtcResult;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp::codecs::h264::{H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE, STAPA_NALU_TYPE};
@@ -53,11 +56,17 @@ async fn accept_webrtc_video(
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    let mut settings = SettingEngine::default();
+    settings.set_udp_network(UDPNetwork::Ephemeral(EphemeralUDP::new(
+        webrtc_udp_port_min(),
+        webrtc_udp_port_max(),
+    )?));
     let api = APIBuilder::new()
         .with_media_engine(media)
         .with_interceptor_registry(registry)
+        .with_setting_engine(settings)
         .build();
-    let peer = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
+    let peer = Arc::new(api.new_peer_connection(webrtc_config()).await?);
 
     wire_video_track(
         peer.clone(),
@@ -86,6 +95,31 @@ async fn accept_webrtc_video(
     }
 
     Ok(peer)
+}
+
+fn webrtc_config() -> RTCConfiguration {
+    RTCConfiguration {
+        ice_servers: vec![RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn webrtc_udp_port_min() -> u16 {
+    read_port_env("BRIVVA_WEBRTC_UDP_PORT_MIN", 40_000)
+}
+
+fn webrtc_udp_port_max() -> u16 {
+    read_port_env("BRIVVA_WEBRTC_UDP_PORT_MAX", 40_100)
+}
+
+fn read_port_env(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(default)
 }
 
 fn wire_video_track(

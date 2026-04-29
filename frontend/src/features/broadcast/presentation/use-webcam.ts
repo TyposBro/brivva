@@ -68,7 +68,9 @@ export function useWebcam(
   const startFrameStreaming = useCallback(async () => {
     if (!isSocketOpen() || !streamRef.current || peerRef.current) return;
 
-    const peer = new RTCPeerConnection();
+    const peer = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
     peerRef.current = peer;
 
     // Use the camera track directly for production-quality browser WebRTC.
