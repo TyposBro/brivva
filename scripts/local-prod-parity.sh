@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and run the media pipeline in the same container shape as Fargate:
-# linux/amd64 server-rs image + source-built ffmpeg-base with librtmp/drawtext.
+# linux/amd64 server-rs image + source-built native-RTMP ffmpeg-base with drawtext.
 
 set -euo pipefail
 
@@ -77,7 +77,11 @@ docker compose -f "$COMPOSE_FILE" up --no-build -d
 
 echo "==> Verifying runtime ffmpeg invariants inside server container"
 docker compose -f "$COMPOSE_FILE" exec -T server \
-  sh -c '/usr/local/bin/ffmpeg -version | grep -q "enable-librtmp"'
+  sh -c '/usr/local/bin/ffmpeg -version | grep -q "enable-openssl"'
+docker compose -f "$COMPOSE_FILE" exec -T server \
+  sh -c '! /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp"'
+docker compose -f "$COMPOSE_FILE" exec -T server \
+  sh -c '/usr/local/bin/ffmpeg -hide_banner -protocols 2>&1 | grep -q "rtmps"'
 docker compose -f "$COMPOSE_FILE" exec -T server \
   sh -c '/usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q "drawtext"'
 docker compose -f "$COMPOSE_FILE" exec -T server \

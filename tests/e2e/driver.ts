@@ -79,7 +79,7 @@ function generateSineFrame(freqHz: number, phase: number): { pcm: Buffer; nextPh
   return { pcm: buf, nextPhase: p % (2 * Math.PI) };
 }
 
-function ensureH264Nals(): Buffer[] {
+function ensureH264AccessUnits(): Buffer[] {
   if (!existsSync(H264_PATH)) {
     const result = spawnSync(
       "ffmpeg",
@@ -102,14 +102,32 @@ function ensureH264Nals(): Buffer[] {
     );
     if (result.status !== 0) throw new Error("failed to generate smoke H.264 fixture");
   }
-  return splitAnnexBNals(readFileSync(H264_PATH));
+  return splitAnnexBAccessUnits(readFileSync(H264_PATH));
+}
+
+function annexBStartCodeLength(data: Buffer, offset: number): number {
+  if (data[offset] === 0 && data[offset + 1] === 0 && data[offset + 2] === 1) return 3;
+  if (data[offset] === 0 && data[offset + 1] === 0 && data[offset + 2] === 0 && data[offset + 3] === 1) return 4;
+  throw new Error("invalid Annex-B start code offset");
+}
+
+function h264NalType(nal: Buffer): number {
+  const startCodeLength = annexBStartCodeLength(nal, 0);
+  return nal[startCodeLength] & 0x1f;
 }
 
 function splitAnnexBNals(data: Buffer): Buffer[] {
   const starts: number[] = [];
-  for (let i = 0; i < data.length - 3; i++) {
-    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) starts.push(i);
-    else if (i < data.length - 4 && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) starts.push(i);
+  for (let i = 0; i < data.length - 3;) {
+    if (i < data.length - 4 && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
+      starts.push(i);
+      i += 4;
+    } else if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      starts.push(i);
+      i += 3;
+    } else {
+      i += 1;
+    }
   }
   const nals: Buffer[] = [];
   for (let i = 0; i < starts.length; i++) {
@@ -118,6 +136,36 @@ function splitAnnexBNals(data: Buffer): Buffer[] {
   }
   if (nals.length === 0) throw new Error("generated smoke H.264 fixture has no Annex-B NALs");
   return nals;
+}
+
+function splitAnnexBAccessUnits(data: Buffer): Buffer[] {
+  const nals = splitAnnexBNals(data);
+  const accessUnits: Buffer[] = [];
+  let pending: Buffer[] = [];
+  let pendingHasVcl = false;
+
+  for (const nal of nals) {
+    const nalType = h264NalType(nal);
+    const isVcl = nalType >= 1 && nalType <= 5;
+
+    // The old smoke driver sent one NAL every 33ms. A single video frame often
+    // contains SPS/PPS/SEI plus a slice NAL, so that accidentally throttled the
+    // containerized FFmpeg path to ~5fps and made RTMP probing flaky. Send one
+    // complete access unit per video tick instead: non-VCL headers are grouped
+    // with the following slice, and each new VCL starts a new frame.
+    if (isVcl && pendingHasVcl) {
+      accessUnits.push(Buffer.concat(pending));
+      pending = [];
+      pendingHasVcl = false;
+    }
+
+    pending.push(nal);
+    if (isVcl) pendingHasVcl = true;
+  }
+
+  if (pending.length > 0) accessUnits.push(Buffer.concat(pending));
+  if (accessUnits.length === 0) throw new Error("generated smoke H.264 fixture has no access units");
+  return accessUnits;
 }
 
 // ── Health wait ──────────────────────────────────────────
@@ -167,7 +215,7 @@ async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSigna
 
     ws.addEventListener("open", () => {
       console.log("[driver] WS open, streaming for", STREAM_DURATION_MS, "ms");
-      const h264Nals = ensureH264Nals();
+      const h264AccessUnits = ensureH264AccessUnits();
       let h264Index = 0;
 
       audioTimer = setInterval(() => {
@@ -179,10 +227,10 @@ async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSigna
 
       videoTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        const nal = h264Nals[h264Index++ % h264Nals.length];
+        const accessUnit = h264AccessUnits[h264Index++ % h264AccessUnits.length];
         ws.send(JSON.stringify({
           type: "debug:h264_annexb",
-          data: nal.toString("base64"),
+          data: accessUnit.toString("base64"),
         }));
       }, VIDEO_FRAME_MS);
 

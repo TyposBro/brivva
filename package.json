@@ -21,6 +21,8 @@
     "deploy:frontend": "bun run --cwd frontend deploy",
     "deploy:workers": "bun run --cwd workers deploy && bun run --cwd workers migrate:prod",
     "deploy:server": "./deploy.sh",
-    "test:e2e:auto": "./scripts/test-e2e-auto.sh"
+    "test:e2e:auto": "./scripts/test-e2e-auto.sh",
+    "test:e2e:prod-parity": "./scripts/local-prod-parity.sh",
+    "test:e2e:release": "./scripts/local-prod-parity.sh && ./scripts/test-e2e-auto.sh"
   }
 }

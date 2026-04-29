@@ -507,7 +507,12 @@ impl RtmpManager {
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
-            "ffmpeg spawn: WebRTC H.264 pipe video copy enabled"
+            input_fps = self.video_profile.input_fps,
+            output_fps = self.video_profile.output_fps,
+            max_width = self.video_profile.max_width,
+            max_height = self.video_profile.max_height,
+            bitrate_kbps = self.video_profile.bitrate_kbps,
+            "ffmpeg spawn: WebRTC H.264 pipe re-encode enabled"
         );
 
         let mut child = std::process::Command::new("ffmpeg")
