@@ -98,11 +98,23 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
             ),
         },
         Some("client:media_stats") => {
+            let stats = json
+                .get("stats")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             tracing::info!(
                 live_session_id = %live_session_id,
-                stats = %json.get("stats").cloned().unwrap_or(serde_json::Value::Null),
+                stats = %stats,
                 "client media stats"
             );
+            for alert in media_quality_alerts(&stats) {
+                tracing::warn!(
+                    live_session_id = %live_session_id,
+                    alert = %alert,
+                    stats = %stats,
+                    "client media quality contract warning"
+                );
+            }
         }
         Some("debug:h264_annexb") if accepts_debug_h264() => {
             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
@@ -120,6 +132,74 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
     }
 }
 
+fn media_quality_alerts(stats: &serde_json::Value) -> Vec<String> {
+    let mut alerts = Vec::new();
+    push_track_quality_alerts(&mut alerts, stats, "sourceTrack", "capture");
+    push_track_quality_alerts(&mut alerts, stats, "uplinkTrack", "uplink");
+
+    if let Some(fps) = number_at(stats, &["cfr", "framesPerSecond"]) {
+        push_fps_alert(&mut alerts, "cfr", fps);
+    }
+    if let Some(fps) = number_at(stats, &["outboundVideo", "framesPerSecond"]) {
+        push_fps_alert(&mut alerts, "outbound", fps);
+    }
+    if let (Some(width), Some(height)) = (
+        number_at(stats, &["outboundVideo", "frameWidth"]),
+        number_at(stats, &["outboundVideo", "frameHeight"]),
+    ) {
+        push_resolution_alert(&mut alerts, "outbound", width, height);
+    }
+    if let Some(reason) = stats
+        .pointer("/outboundVideo/qualityLimitationReason")
+        .and_then(|v| v.as_str())
+        .filter(|reason| !reason.is_empty() && *reason != "none")
+    {
+        alerts.push(format!("outbound quality limited: {reason}"));
+    }
+    alerts
+}
+
+fn push_track_quality_alerts(
+    alerts: &mut Vec<String>,
+    stats: &serde_json::Value,
+    key: &str,
+    label: &str,
+) {
+    if let (Some(width), Some(height)) = (
+        number_at(stats, &[key, "width"]),
+        number_at(stats, &[key, "height"]),
+    ) {
+        push_resolution_alert(alerts, label, width, height);
+    }
+    if let Some(fps) = number_at(stats, &[key, "frameRate"]) {
+        push_fps_alert(alerts, label, fps);
+    }
+}
+
+fn push_resolution_alert(alerts: &mut Vec<String>, label: &str, width: f64, height: f64) {
+    if width < 1920.0 || height < 1080.0 {
+        alerts.push(format!(
+            "{label} below 1080p floor: {}x{}",
+            width.round() as u32,
+            height.round() as u32
+        ));
+    }
+}
+
+fn push_fps_alert(alerts: &mut Vec<String>, label: &str, fps: f64) {
+    if fps < 29.0 {
+        alerts.push(format!("{label} below 30fps floor: {fps:.1}fps"));
+    }
+}
+
+fn number_at(stats: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    let mut value = stats;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    value.as_f64()
+}
+
 fn accepts_debug_h264() -> bool {
     matches!(
         std::env::var("BRIVVA_ACCEPT_DEBUG_H264").as_deref(),
@@ -133,5 +213,52 @@ async fn push_debug_h264(live_sessions: &LiveSessions, live_session_id: &str, h2
         .and_then(|r| r.rtmp_manager.clone());
     if let Some(mgr) = rtmp_mgr {
         mgr.lock().await.push_video_h264_at(&h264, Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn media_quality_alerts_warns_when_below_1080p30_floor() {
+        let stats = json!({
+            "sourceTrack": { "width": 1280, "height": 720, "frameRate": 24 },
+            "uplinkTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
+            "cfr": { "framesPerSecond": 28.4 },
+            "outboundVideo": {
+                "frameWidth": 1280,
+                "frameHeight": 720,
+                "framesPerSecond": 17,
+                "qualityLimitationReason": "cpu"
+            }
+        });
+
+        let alerts = media_quality_alerts(&stats);
+
+        assert!(alerts.contains(&"capture below 1080p floor: 1280x720".to_string()));
+        assert!(alerts.contains(&"capture below 30fps floor: 24.0fps".to_string()));
+        assert!(alerts.contains(&"cfr below 30fps floor: 28.4fps".to_string()));
+        assert!(alerts.contains(&"outbound below 1080p floor: 1280x720".to_string()));
+        assert!(alerts.contains(&"outbound below 30fps floor: 17.0fps".to_string()));
+        assert!(alerts.contains(&"outbound quality limited: cpu".to_string()));
+    }
+
+    #[test]
+    fn media_quality_alerts_accepts_1080p30_and_quality_none() {
+        let stats = json!({
+            "sourceTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
+            "uplinkTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
+            "cfr": { "framesPerSecond": 30 },
+            "outboundVideo": {
+                "frameWidth": 1920,
+                "frameHeight": 1080,
+                "framesPerSecond": 29.8,
+                "qualityLimitationReason": "none"
+            }
+        });
+
+        assert!(media_quality_alerts(&stats).is_empty());
     }
 }

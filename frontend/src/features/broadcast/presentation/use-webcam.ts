@@ -1,9 +1,12 @@
 import { useCallback, useRef } from "react";
 
-const HOST_VIDEO_MAX_WIDTH = 1920;
-const HOST_VIDEO_MAX_HEIGHT = 1080;
-const HOST_VIDEO_FPS = 30;
-const HOST_VIDEO_MAX_BITRATE_BPS = 6_000_000;
+const HOST_VIDEO_MIN_WIDTH = 1920;
+const HOST_VIDEO_MIN_HEIGHT = 1080;
+const HOST_VIDEO_IDEAL_WIDTH = 3840;
+const HOST_VIDEO_IDEAL_HEIGHT = 2160;
+const HOST_VIDEO_MIN_FPS = 30;
+const HOST_VIDEO_IDEAL_FPS = 60;
+const HOST_VIDEO_MAX_BITRATE_BPS = 35_000_000;
 
 type VideoProfile = {
   width: number;
@@ -56,9 +59,9 @@ export function useWebcam(
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: HOST_VIDEO_MAX_WIDTH },
-          height: { ideal: HOST_VIDEO_MAX_HEIGHT },
-          frameRate: { ideal: HOST_VIDEO_FPS },
+          width: { min: HOST_VIDEO_MIN_WIDTH, ideal: HOST_VIDEO_IDEAL_WIDTH },
+          height: { min: HOST_VIDEO_MIN_HEIGHT, ideal: HOST_VIDEO_IDEAL_HEIGHT },
+          frameRate: { min: HOST_VIDEO_MIN_FPS, ideal: HOST_VIDEO_IDEAL_FPS },
           facingMode: "user",
         },
       });
@@ -157,9 +160,9 @@ export function useWebcam(
 function readVideoProfile(stream: MediaStream | null): VideoProfile {
   const track = stream?.getVideoTracks()[0];
   const settings = typeof track?.getSettings === "function" ? track.getSettings() : undefined;
-  const width = Math.round(Number(settings?.width) || HOST_VIDEO_MAX_WIDTH);
-  const height = Math.round(Number(settings?.height) || HOST_VIDEO_MAX_HEIGHT);
-  const fps = Math.round(Number(settings?.frameRate) || HOST_VIDEO_FPS);
+  const width = Math.round(Number(settings?.width) || HOST_VIDEO_MIN_WIDTH);
+  const height = Math.round(Number(settings?.height) || HOST_VIDEO_MIN_HEIGHT);
+  const fps = Math.round(Number(settings?.frameRate) || HOST_VIDEO_MIN_FPS);
   return { width, height, fps };
 }
 
@@ -296,7 +299,7 @@ async function preferHighQuality(sender: RTCRtpSender) {
     {
       ...(params.encodings?.[0] ?? {}),
       maxBitrate: HOST_VIDEO_MAX_BITRATE_BPS,
-      maxFramerate: HOST_VIDEO_FPS,
+      maxFramerate: HOST_VIDEO_IDEAL_FPS,
       scaleResolutionDownBy: 1,
     },
   ];
