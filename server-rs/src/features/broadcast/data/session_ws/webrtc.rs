@@ -14,7 +14,10 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::rtp::codecs::h264::{H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE, STAPA_NALU_TYPE};
+use webrtc::rtp::codecs::h264::{
+    FU_END_BITMASK, FU_START_BITMASK, FUA_NALU_TYPE, H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE,
+    STAPA_NALU_TYPE,
+};
 use webrtc::rtp::packet::Packet;
 use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
@@ -238,6 +241,9 @@ impl VideoRtpClock {
 struct H264AnnexBDepacketizer {
     inner: H264Packet,
     has_parameter_set: bool,
+    active_fu_a: bool,
+    last_sequence_number: Option<u16>,
+    access_unit: Vec<u8>,
 }
 
 impl H264AnnexBDepacketizer {
@@ -245,20 +251,75 @@ impl H264AnnexBDepacketizer {
         if packet.payload.is_empty() {
             return None;
         }
+
+        if let Some(last) = self.last_sequence_number
+            && packet.header.sequence_number != last.wrapping_add(1)
+        {
+            self.reset_after_loss();
+        }
+        self.last_sequence_number = Some(packet.header.sequence_number);
+
+        let nalu_type = packet.payload[0] & NALU_TYPE_BITMASK;
+        if nalu_type == FUA_NALU_TYPE && !self.accept_fu_a_fragment(&packet.payload) {
+            return None;
+        }
+
         if !self.has_parameter_set {
             self.has_parameter_set = payload_has_sps(&packet.payload);
             if !self.has_parameter_set {
                 return None;
             }
         }
+
         match self.inner.depacketize(&packet.payload) {
-            Ok(bytes) if !bytes.is_empty() => Some(bytes.to_vec()),
+            Ok(bytes) if !bytes.is_empty() => self.push_depacketized(packet.header.marker, &bytes),
             Ok(_) => None,
             Err(error) => {
                 tracing::debug!(error = %error, "webrtc H.264 depacketize failed");
+                self.reset_after_loss();
                 None
             }
         }
+    }
+
+    fn accept_fu_a_fragment(&mut self, payload: &[u8]) -> bool {
+        if payload.len() < 2 {
+            return false;
+        }
+        let is_start = (payload[1] & FU_START_BITMASK) != 0;
+        let is_end = (payload[1] & FU_END_BITMASK) != 0;
+
+        // The rtp crate buffers FU-A payload bytes even if the first packet we
+        // see is a middle fragment. After packet loss/restart that produces a
+        // syntactically Annex-B-looking NAL with corrupt slice data, which was
+        // exactly what prod YouTube tests showed (`mb_type ... too large`,
+        // `error while decoding MB ...`). Drop middle/end fragments until a
+        // clean FU-A start arrives.
+        if !is_start && !self.active_fu_a {
+            return false;
+        }
+        if is_start {
+            self.active_fu_a = true;
+        }
+        if is_end {
+            self.active_fu_a = false;
+        }
+        true
+    }
+
+    fn push_depacketized(&mut self, marker: bool, bytes: &[u8]) -> Option<Vec<u8>> {
+        self.access_unit.extend_from_slice(bytes);
+        if marker && !self.access_unit.is_empty() {
+            return Some(std::mem::take(&mut self.access_unit));
+        }
+        None
+    }
+
+    fn reset_after_loss(&mut self) {
+        self.inner = H264Packet::default();
+        self.has_parameter_set = false;
+        self.active_fu_a = false;
+        self.access_unit.clear();
     }
 }
 
@@ -318,19 +379,64 @@ mod tests {
     }
 
     #[test]
-    fn depacketizer_waits_for_parameter_set_then_outputs_annex_b() {
+    fn depacketizer_waits_for_parameter_set_then_outputs_annex_b_access_unit_on_marker() {
         let mut depacketizer = H264AnnexBDepacketizer::default();
         let idr = Packet {
-            header: Header::default(),
+            header: Header {
+                marker: true,
+                sequence_number: 1,
+                ..Default::default()
+            },
             payload: vec![0x65, 1, 2, 3].into(),
         };
         assert!(depacketizer.depacketize(&idr).is_none());
 
         let sps = Packet {
-            header: Header::default(),
+            header: Header {
+                marker: false,
+                sequence_number: 2,
+                ..Default::default()
+            },
             payload: vec![0x67, 1, 2, 3].into(),
         };
-        let out = depacketizer.depacketize(&sps).expect("sps output");
+        assert!(depacketizer.depacketize(&sps).is_none());
+
+        let idr_after_sps = Packet {
+            header: Header {
+                marker: true,
+                sequence_number: 3,
+                ..Default::default()
+            },
+            payload: vec![0x65, 4, 5, 6].into(),
+        };
+        let out = depacketizer
+            .depacketize(&idr_after_sps)
+            .expect("complete access unit");
         assert!(out.starts_with(&[0, 0, 0, 1, 0x67]));
+        assert!(out.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
+    }
+
+    #[test]
+    fn depacketizer_drops_fu_a_middle_fragment_after_loss() {
+        let mut depacketizer = H264AnnexBDepacketizer::default();
+        let sps = Packet {
+            header: Header {
+                sequence_number: 1,
+                marker: true,
+                ..Default::default()
+            },
+            payload: vec![0x67, 1, 2, 3].into(),
+        };
+        assert!(depacketizer.depacketize(&sps).is_some());
+
+        let mid_fu_a = Packet {
+            header: Header {
+                sequence_number: 10,
+                marker: false,
+                ..Default::default()
+            },
+            payload: vec![0x7c, 0x01, 9, 9, 9].into(),
+        };
+        assert!(depacketizer.depacketize(&mid_fu_a).is_none());
     }
 }
