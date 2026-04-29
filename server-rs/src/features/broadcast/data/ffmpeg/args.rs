@@ -262,14 +262,14 @@ impl FfmpegProgressMonitor {
                 self.consecutive_slow_ticks = 0;
             }
         }
-        if let Some(drop_frames) = self.drop_frames {
-            if drop_frames > self.last_drop_frames {
-                alerts.push(FfmpegProgressAlert::DroppedFrames {
-                    total: drop_frames,
-                    delta: drop_frames - self.last_drop_frames,
-                });
-                self.last_drop_frames = drop_frames;
-            }
+        if let Some(drop_frames) = self.drop_frames
+            && drop_frames > self.last_drop_frames
+        {
+            alerts.push(FfmpegProgressAlert::DroppedFrames {
+                total: drop_frames,
+                delta: drop_frames - self.last_drop_frames,
+            });
+            self.last_drop_frames = drop_frames;
         }
         alerts
     }

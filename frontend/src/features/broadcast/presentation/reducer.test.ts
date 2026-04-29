@@ -165,6 +165,22 @@ describe("hostReducer", () => {
     });
   });
 
+  describe("media diagnostics + connection issue", () => {
+    it("stores latest media diagnostics", () => {
+      const diagnostics = {
+        source: { width: 1280, height: 720, frameRate: 30 },
+        outbound: { frameWidth: 1280, frameHeight: 720, framesPerSecond: 30 },
+      };
+      const next = hostReducer(INITIAL_STATE, { type: "media_diagnostics", diagnostics });
+      expect(next.mediaDiagnostics).toBe(diagnostics);
+    });
+
+    it("stores connection issue message", () => {
+      const next = hostReducer(INITIAL_STATE, { type: "connection_issue", message: "ICE failed" });
+      expect(next.connectionIssue).toBe("ICE failed");
+    });
+  });
+
   describe("happy path full flow", () => {
     it("idle → creating → voice_setup → ready → recording → ready", () => {
       let s = INITIAL_STATE;
