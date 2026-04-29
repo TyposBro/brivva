@@ -129,13 +129,50 @@ where
 {
     for line in reader.lines() {
         match line {
-            Ok(l) => on_line(l),
+            Ok(l) => on_line(redact_rtmp_secrets(&l)),
             Err(e) => {
                 tracing::debug!(error = %e, "ffmpeg stderr reader ended");
                 break;
             }
         }
     }
+}
+
+pub fn redact_rtmp_secrets(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(pos) = rest.find("rtmp") {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+
+        let Some(scheme_len) = rest
+            .strip_prefix("rtmps://")
+            .map(|_| "rtmps://".len())
+            .or_else(|| rest.strip_prefix("rtmp://").map(|_| "rtmp://".len()))
+        else {
+            out.push_str("rtmp");
+            rest = &rest["rtmp".len()..];
+            continue;
+        };
+
+        let url_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ')' | ']' | '}'))
+            .unwrap_or(rest.len());
+        let url = &rest[..url_end];
+        let redacted = match url.rfind('/') {
+            Some(last_slash) if last_slash + 1 < url.len() && last_slash >= scheme_len => {
+                format!("{}<redacted>", &url[..=last_slash])
+            }
+            _ => url.to_string(),
+        };
+
+        out.push_str(&redacted);
+        rest = &rest[url_end..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -206,5 +243,27 @@ mod tests {
         assert!(joined.contains("-muxdelay 0"));
         assert!(joined.contains("-muxpreload 0"));
         assert!(joined.contains("-flush_packets 1"));
+    }
+
+    #[test]
+    fn redact_rtmp_secrets_hides_last_path_segment() {
+        let line = "Output #0 to 'rtmps://a.rtmps.youtube.com/live2/secret-key-123':";
+        let redacted = redact_rtmp_secrets(line);
+
+        assert_eq!(
+            redacted,
+            "Output #0 to 'rtmps://a.rtmps.youtube.com/live2/<redacted>':"
+        );
+        assert!(!redacted.contains("secret-key-123"));
+    }
+
+    #[test]
+    fn redact_rtmp_secrets_handles_multiple_urls() {
+        let line = "rtmp://one/app/key1 -> rtmps://two/live/key2";
+
+        assert_eq!(
+            redact_rtmp_secrets(line),
+            "rtmp://one/app/<redacted> -> rtmps://two/live/<redacted>"
+        );
     }
 }

@@ -5,7 +5,7 @@ import { ensureFreshToken } from "../../../shared/auth/auth-store";
 import { useTimings, type UtteranceTiming } from "./use-timings";
 import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
-import { useWebcam } from "./use-webcam";
+import { useWebcam, type ClientMediaStats } from "./use-webcam";
 import { useVoiceClone } from "./use-voice-clone";
 
 export type { UtteranceTiming };
@@ -44,6 +44,8 @@ export function useHostSession() {
   } = useWebcam(
     (msg) => socket.current.sendJson(msg),
     () => socket.current.isOpen,
+    (stats) => dispatch({ type: "media_diagnostics", diagnostics: toDiagnostics(stats) }),
+    (issue) => dispatch({ type: "connection_issue", message: issue.message }),
   );
 
   const voiceClone = useVoiceClone(
@@ -172,5 +174,23 @@ export function useHostSession() {
     voiceMinSec,
     voiceMaxSec,
     setActiveTargetLangs,
+  };
+}
+
+function toDiagnostics(stats: ClientMediaStats) {
+  const outbound = stats.outboundVideo ?? {};
+  return {
+    source: {
+      width: stats.sourceTrack?.width,
+      height: stats.sourceTrack?.height,
+      frameRate: stats.sourceTrack?.frameRate,
+    },
+    outbound: {
+      frameWidth: typeof outbound.frameWidth === "number" ? outbound.frameWidth : undefined,
+      frameHeight: typeof outbound.frameHeight === "number" ? outbound.frameHeight : undefined,
+      framesPerSecond: typeof outbound.framesPerSecond === "number" ? outbound.framesPerSecond : undefined,
+      framesSent: typeof outbound.framesSent === "number" ? outbound.framesSent : undefined,
+      qualityLimitationReason: outbound.qualityLimitationReason,
+    },
   };
 }

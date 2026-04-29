@@ -20,7 +20,7 @@ mod drain;
 mod mixer;
 mod orphan;
 
-pub use args::drain_stderr_lines;
+pub use args::{drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
 use args::build_ffmpeg_args;
@@ -220,7 +220,7 @@ impl RtmpManager {
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
-            rtmp_url = %args.rtmp_url,
+            rtmp_url = %redact_rtmp_secrets(args.rtmp_url),
             delay_ms = args.delay_ms,
             is_source = args.is_source,
             host_gain = args.host_gain,

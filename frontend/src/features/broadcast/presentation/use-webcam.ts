@@ -11,7 +11,7 @@ type WebRtcSignal =
 
 type WebRtcAnswer = { type: "webrtc:answer"; sdp: string };
 
-type ClientMediaStats = {
+export type ClientMediaStats = {
   userAgent: string;
   sourceTrack?: MediaTrackSettings;
   uplinkTrack?: MediaTrackSettings;
@@ -19,10 +19,18 @@ type ClientMediaStats = {
   outboundVideo?: Record<string, unknown>;
 };
 
+export type WebRtcConnectionIssue = {
+  layer: "webrtc";
+  state: RTCPeerConnectionState | RTCIceConnectionState;
+  message: string;
+};
+
 /** Webcam preview + WebRTC video uplink. Audio still uses the PCM WS path. */
 export function useWebcam(
   sendSignalJson: (msg: WebRtcSignal) => void,
   isSocketOpen: () => boolean,
+  onMediaStats?: (stats: ClientMediaStats) => void,
+  onConnectionIssue?: (issue: WebRtcConnectionIssue) => void,
 ) {
   const streamRef = useRef<MediaStream | null>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
@@ -72,6 +80,7 @@ export function useWebcam(
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
     peerRef.current = peer;
+    attachConnectionDiagnostics(peer, onConnectionIssue);
 
     // Use the camera track directly for production-quality browser WebRTC.
     // Canvas capture is timer-driven and Chromium throttles timers when the
@@ -102,8 +111,9 @@ export function useWebcam(
       sendSignalJson,
       intervalRef: statsIntervalRef,
       isSocketOpen,
+      onMediaStats,
     });
-  }, [isSocketOpen, sendSignalJson]);
+  }, [isSocketOpen, onConnectionIssue, onMediaStats, sendSignalJson]);
 
   const stopFrameStreaming = useCallback(() => {
     pendingLocalOfferRef.current = false;
@@ -161,12 +171,14 @@ type StartMediaStatsArgs = {
   sendSignalJson: (msg: WebRtcSignal) => void;
   intervalRef: React.MutableRefObject<number | null>;
   isSocketOpen: () => boolean;
+  onMediaStats?: (stats: ClientMediaStats) => void;
 };
 
 function startMediaStats(args: StartMediaStatsArgs) {
   stopMediaStats(args.intervalRef);
   args.intervalRef.current = window.setInterval(() => {
     void collectMediaStats(args).then((stats) => {
+      args.onMediaStats?.(stats);
       if (args.isSocketOpen()) {
         args.sendSignalJson({ type: "client:media_stats", stats });
       }
@@ -210,6 +222,30 @@ async function collectOutboundVideoStats(
     }
   }
   return undefined;
+}
+
+
+function attachConnectionDiagnostics(
+  peer: RTCPeerConnection,
+  onConnectionIssue?: (issue: WebRtcConnectionIssue) => void,
+) {
+  const report = (state: RTCPeerConnectionState | RTCIceConnectionState) => {
+    if (!["disconnected", "failed", "closed"].includes(state)) return;
+    onConnectionIssue?.({
+      layer: "webrtc",
+      state,
+      message:
+        state === "disconnected"
+          ? "WebRTC media temporarily disconnected. Keep the tab visible and network stable."
+          : "WebRTC media connection failed. End this stream and create a fresh session before going live again.",
+    });
+  };
+  peer.addEventListener("iceconnectionstatechange", () =>
+    report(peer.iceConnectionState),
+  );
+  peer.addEventListener("connectionstatechange", () =>
+    report(peer.connectionState),
+  );
 }
 
 function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {

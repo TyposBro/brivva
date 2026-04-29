@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useHostSession } from "./use-host-session";
+import type { MediaDiagnostics } from "./reducer";
 import { AudioRecorder } from "./audio-recorder";
 import { LatencyDashboard } from "./latency-dashboard";
 import { VoiceSetupCard } from "./voice-setup-card";
@@ -36,6 +37,8 @@ export function BroadcastView({
     analyser,
     error,
     timings,
+    mediaDiagnostics,
+    connectionIssue,
     videoRef,
     connectSession,
     startRecording,
@@ -137,8 +140,20 @@ export function BroadcastView({
           </div>
         )}
 
+        {connectionIssue && (
+          <div className="bg-error-container/20 text-error px-4 py-3 rounded-lg font-label text-sm space-y-1">
+            <p className="font-bold">Media connection problem</p>
+            <p>{connectionIssue}</p>
+            <p className="text-xs text-on-surface-variant">
+              For launch tests, use desktop Chrome/Brave, keep the tab visible, and avoid Wi‑Fi/LTE handoffs.
+            </p>
+          </div>
+        )}
+
         {status === "disconnected" && (
-          <div className="text-on-surface-variant font-label">Disconnected.</div>
+          <div className="bg-surface-container-low text-on-surface-variant font-label rounded-lg px-4 py-3">
+            Disconnected. End this run and create a fresh session before going live again.
+          </div>
         )}
 
         {isReady && streams.length > 0 && (
@@ -186,6 +201,10 @@ export function BroadcastView({
           </span>
         </div>
 
+        {isReady && mediaDiagnostics && (
+          <MediaDiagnosticsPanel diagnostics={mediaDiagnostics} />
+        )}
+
         {isReady && (
           <AudioRecorder
             isRecording={isRecording}
@@ -218,6 +237,36 @@ export function BroadcastView({
 
         <LatencyDashboard timings={timings} />
       </main>
+    </div>
+  );
+}
+
+
+function MediaDiagnosticsPanel({
+  diagnostics,
+}: {
+  diagnostics: MediaDiagnostics;
+}) {
+  const src = diagnostics.source;
+  const out = diagnostics.outbound;
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-label">
+      <div className="bg-surface-container-low rounded-xl px-4 py-3">
+        <p className="text-on-surface font-bold mb-1">Browser capture</p>
+        <p className="text-on-surface-variant">
+          {src?.width ?? "?"}×{src?.height ?? "?"} @ {src?.frameRate ?? "?"}fps
+        </p>
+      </div>
+      <div className="bg-surface-container-low rounded-xl px-4 py-3">
+        <p className="text-on-surface font-bold mb-1">WebRTC outbound</p>
+        <p className="text-on-surface-variant">
+          {out?.frameWidth ?? "?"}×{out?.frameHeight ?? "?"} @ {out?.framesPerSecond ?? "?"}fps
+          {typeof out?.framesSent === "number" ? ` · ${out.framesSent} frames` : ""}
+        </p>
+        {out?.qualityLimitationReason !== undefined && out.qualityLimitationReason !== "none" && (
+          <p className="text-warning mt-1">Limited by {String(out.qualityLimitationReason)}</p>
+        )}
+      </div>
     </div>
   );
 }

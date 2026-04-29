@@ -131,6 +131,7 @@ fn drain_next_h264_live(
     // video. Emitting all of it makes viewers see fast-forward video until the
     // pipe catches up. For live streaming, stale video is worse than dropped
     // video: drop old chunks until the next emit is close to wall clock.
+    let mut dropped_stale = false;
     while buf.len() > 1 {
         let Some((ts, _)) = buf.front() else { break };
         let target_ts = *ts + delay;
@@ -138,6 +139,24 @@ fn drain_next_h264_live(
             break;
         }
         buf.pop_front();
+        dropped_stale = true;
+    }
+
+    // After a stale-drop event, resuming in the middle of an H.264 GOP can
+    // feed FFmpeg P/B slices whose SPS/PPS/IDR reference frame was just
+    // discarded. When possible, skip forward to the next due IDR/keyframe so
+    // the decoder restarts cleanly instead of logging non-existing PPS errors
+    // and producing corrupted frames. If no IDR is available yet, keep the last
+    // chunk rather than emptying the live buffer; the next keyframe will be
+    // preferred as soon as it arrives.
+    if dropped_stale {
+        while buf.len() > 1 {
+            let Some((ts, packet)) = buf.front() else { break };
+            if *ts + delay > now || h264_annexb_contains_idr(packet) {
+                break;
+            }
+            buf.pop_front();
+        }
     }
 
     let (ts, _) = buf.front()?;
@@ -147,6 +166,27 @@ fn drain_next_h264_live(
     } else {
         None
     }
+}
+
+
+fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < packet.len() {
+        let start_len = if packet[i..].starts_with(&[0, 0, 1]) {
+            3
+        } else if packet[i..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            i += 1;
+            continue;
+        };
+        let nal_idx = i + start_len;
+        if nal_idx < packet.len() && packet[nal_idx] & 0x1f == 5 {
+            return true;
+        }
+        i = nal_idx.saturating_add(1);
+    }
+    false
 }
 
 // ── Audio ─────────────────────────────────────────────────
@@ -543,12 +583,39 @@ mod tests {
             let mut b = buf.lock().unwrap();
             b.push_back((now - Duration::from_millis(2_000), vec![1]));
             b.push_back((now - Duration::from_millis(1_000), vec![2]));
-            b.push_back((now - Duration::from_millis(150), vec![3]));
+            b.push_back((now - Duration::from_millis(150), vec![0, 0, 1, 5]));
             b.push_back((now + Duration::from_millis(500), vec![4]));
         }
         let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
-        assert_eq!(result, Some(vec![3]));
+        assert_eq!(result, Some(vec![0, 0, 1, 5]));
         assert_eq!(buf.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn drain_next_h264_live_prefers_idr_after_stale_drop() {
+        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        let now = Instant::now();
+        let delay = Duration::from_millis(100);
+        let p_slice = vec![0, 0, 1, 1, 0xaa];
+        let idr = vec![0, 0, 0, 1, 5, 0xbb];
+        {
+            let mut b = buf.lock().unwrap();
+            b.push_back((now - Duration::from_millis(2_000), vec![9]));
+            b.push_back((now - Duration::from_millis(150), p_slice));
+            b.push_back((now - Duration::from_millis(140), idr.clone()));
+            b.push_back((now + Duration::from_millis(500), vec![4]));
+        }
+
+        let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
+
+        assert_eq!(result, Some(idr));
+    }
+
+    #[test]
+    fn h264_annexb_contains_idr_detects_three_and_four_byte_start_codes() {
+        assert!(h264_annexb_contains_idr(&[0, 0, 1, 5, 1]));
+        assert!(h264_annexb_contains_idr(&[9, 0, 0, 0, 1, 0x65, 1]));
+        assert!(!h264_annexb_contains_idr(&[0, 0, 1, 1, 1]));
     }
 
     #[test]

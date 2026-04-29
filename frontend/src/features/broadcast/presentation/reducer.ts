@@ -9,6 +9,11 @@ export type HostStatus =
 
 export type HostUtterance = { id: number; transcript: string };
 
+export interface MediaDiagnostics {
+  source?: { width?: number; height?: number; frameRate?: number };
+  outbound?: { frameWidth?: number; frameHeight?: number; framesPerSecond?: number; framesSent?: number; qualityLimitationReason?: unknown };
+}
+
 export interface HostState {
   status: HostStatus;
   liveTranscript: string;
@@ -17,6 +22,8 @@ export interface HostState {
   analyser: AnalyserNode | null;
   error: string | null;
   voiceReady: boolean;
+  mediaDiagnostics: MediaDiagnostics | null;
+  connectionIssue: string | null;
 }
 
 export type HostAction =
@@ -31,7 +38,9 @@ export type HostAction =
   | { type: "disconnected" }
   | { type: "voice_cloning" }
   | { type: "voice_ready" }
-  | { type: "skip_voice_setup" };
+  | { type: "skip_voice_setup" }
+  | { type: "media_diagnostics"; diagnostics: MediaDiagnostics }
+  | { type: "connection_issue"; message: string };
 
 export const INITIAL_STATE: HostState = {
   status: "idle",
@@ -41,6 +50,8 @@ export const INITIAL_STATE: HostState = {
   analyser: null,
   error: null,
   voiceReady: false,
+  mediaDiagnostics: null,
+  connectionIssue: null,
 };
 
 export function hostReducer(state: HostState, action: HostAction): HostState {
@@ -77,7 +88,7 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
       return { ...state, error: action.message };
 
     case "recording_started":
-      return { ...state, status: "recording", analyser: action.analyser };
+      return { ...state, status: "recording", analyser: action.analyser, connectionIssue: null };
 
     case "recording_stopped":
       return {
@@ -97,5 +108,11 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
 
     case "skip_voice_setup":
       return { ...state, status: "ready" };
+
+    case "media_diagnostics":
+      return { ...state, mediaDiagnostics: action.diagnostics };
+
+    case "connection_issue":
+      return { ...state, connectionIssue: action.message };
   }
 }

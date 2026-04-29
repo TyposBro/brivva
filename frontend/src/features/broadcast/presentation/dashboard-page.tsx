@@ -80,6 +80,11 @@ function destinationError(
   return null;
 }
 
+function isLikelyMobileHost(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
 function DashboardInner() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -108,6 +113,7 @@ function DashboardInner() {
   // even though the FE's reactive state didn't catch it (stale voice cache
   // after a race). Forces the banner on so the host has a path forward.
   const [postMismatch, setPostMismatch] = useState(false);
+  const mobileHostWarning = isLikelyMobileHost();
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -681,6 +687,13 @@ function DashboardInner() {
               </select>
               <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-on-surface-variant pointer-events-none" />
             </div>
+          </div>
+        )}
+
+        {mobileHostWarning && (
+          <div className="rounded-xl bg-warning-container/20 px-4 py-3 text-xs font-label text-on-surface-variant">
+            <span className="font-bold text-on-surface">Desktop recommended for hosting.</span>{" "}
+            Mobile browsers may pause camera/mic when backgrounded, locked, or switching networks.
           </div>
         )}
 
