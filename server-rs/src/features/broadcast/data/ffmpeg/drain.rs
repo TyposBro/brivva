@@ -32,6 +32,11 @@ const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// dropped until the output is near-live again.
 const VIDEO_MAX_LAG: Duration = Duration::from_millis(250);
 const AUDIO_MAX_LAG: Duration = Duration::from_millis(250);
+/// Ready-host audio can normally exceed one 20ms tick because browsers send
+/// microphone PCM in larger chunks (ScriptProcessor 4096 frames ≈93ms). Only
+/// cap when it grows beyond the live-lag budget; capping to one tick chops most
+/// original audio and makes it sound like low-FPS/stuttered speech.
+const AUDIO_MAX_READY_TICKS: usize = 13;
 
 pub(super) type TimedChunk = (Instant, Vec<u8>);
 
@@ -368,10 +373,12 @@ fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
 }
 
 fn cap_ready_audio_to_live(ready_host: &mut Vec<u8>) {
-    // Keep at most one tick buffered. If a write stall let multiple ticks
-    // accumulate, drop the oldest bytes and continue from the freshest audio.
-    if ready_host.len() > AUDIO_BYTES_PER_TICK {
-        let keep_from = ready_host.len() - AUDIO_BYTES_PER_TICK;
+    // Browser mic chunks are often ~93ms, so keeping only one 20ms tick causes
+    // regular audio loss. Keep up to ~250ms and only shed oldest audio when a
+    // real write stall lets ready_host exceed the live lag budget.
+    let max_ready_bytes = AUDIO_BYTES_PER_TICK * AUDIO_MAX_READY_TICKS;
+    if ready_host.len() > max_ready_bytes {
+        let keep_from = ready_host.len() - max_ready_bytes;
         ready_host.drain(..keep_from);
     }
 }
@@ -611,11 +618,21 @@ mod tests {
     }
 
     #[test]
-    fn cap_ready_audio_to_live_keeps_latest_tick_only() {
-        let mut ready = vec![1u8; AUDIO_BYTES_PER_TICK * 2];
-        ready.extend(vec![2u8; AUDIO_BYTES_PER_TICK]);
+    fn cap_ready_audio_to_live_preserves_normal_browser_audio_chunk() {
+        // ScriptProcessor 4096 frames at s16le mono ≈93ms = 8192 bytes. This
+        // must survive intact; otherwise original host audio sounds choppy.
+        let mut ready = vec![1u8; 8192];
         cap_ready_audio_to_live(&mut ready);
-        assert_eq!(ready, vec![2u8; AUDIO_BYTES_PER_TICK]);
+        assert_eq!(ready, vec![1u8; 8192]);
+    }
+
+    #[test]
+    fn cap_ready_audio_to_live_drops_only_when_ready_exceeds_live_budget() {
+        let max_ready_bytes = AUDIO_BYTES_PER_TICK * AUDIO_MAX_READY_TICKS;
+        let mut ready = vec![1u8; AUDIO_BYTES_PER_TICK * 2];
+        ready.extend(vec![2u8; max_ready_bytes]);
+        cap_ready_audio_to_live(&mut ready);
+        assert_eq!(ready, vec![2u8; max_ready_bytes]);
     }
 
     #[test]
