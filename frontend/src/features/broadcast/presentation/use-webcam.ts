@@ -155,7 +155,8 @@ export function useWebcam(
 
 
 function readVideoProfile(stream: MediaStream | null): VideoProfile {
-  const settings = stream?.getVideoTracks()[0]?.getSettings();
+  const track = stream?.getVideoTracks()[0];
+  const settings = typeof track?.getSettings === "function" ? track.getSettings() : undefined;
   const width = Math.round(Number(settings?.width) || HOST_VIDEO_MAX_WIDTH);
   const height = Math.round(Number(settings?.height) || HOST_VIDEO_MAX_HEIGHT);
   const fps = Math.round(Number(settings?.frameRate) || HOST_VIDEO_FPS);

@@ -332,6 +332,7 @@ describe("useHostSession", () => {
     expect(socketInstances[0].sent).toContainEqual({
       type: "webrtc:offer",
       sdp: "offer-sdp",
+      videoProfile: { width: 1920, height: 1080, fps: 30 },
     });
   });
 
