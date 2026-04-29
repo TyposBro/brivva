@@ -37,8 +37,13 @@ const AUDIO_MAX_LAG: Duration = Duration::from_millis(250);
 /// cap when it grows beyond the live-lag budget; capping to one tick chops most
 /// original audio and makes it sound like low-FPS/stuttered speech.
 const AUDIO_MAX_READY_TICKS: usize = 13;
+/// Audio drain must never wait longer than one output tick on a full FFmpeg
+/// FIFO. If the muxer is blocked, skip the current 20 ms slice and let the
+/// next tick continue on wall clock instead of accumulating seconds of stale
+/// audio that later replays late.
+const AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(18);
 
-pub(super) type TimedChunk = (Instant, Vec<u8>);
+pub(super) type TimedChunk = (Instant, Arc<[u8]>);
 
 // ── Video ─────────────────────────────────────────────────
 
@@ -123,7 +128,7 @@ fn drain_next_h264_live(
     now: Instant,
     delay: Duration,
     max_lag: Duration,
-) -> Option<Vec<u8>> {
+) -> Option<Arc<[u8]>> {
     let mut buf = h264_buf.lock().unwrap();
     let live_cutoff = now.checked_sub(max_lag).unwrap_or(now);
 
@@ -229,6 +234,7 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
     let mut ready_host: Vec<u8> = Vec::with_capacity(AUDIO_BYTES_PER_TICK * 4);
     let mut tick_count: u64 = 0;
     let mut fifo_would_blocks: u64 = 0;
+    let mut fifo_skipped_ticks: u64 = 0;
     let mut last_stats = Instant::now();
     let mut next_tick = Instant::now() + AUDIO_TICK;
 
@@ -247,13 +253,14 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             let host_buffered_chunks = host_buf.lock().unwrap().len();
             let tts_buffered_bytes = tts_queue.lock().unwrap().len();
             eprintln!(
-                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} fifo_would_blocks={}",
+                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} fifo_would_blocks={} fifo_skipped_ticks={}",
                 stream_id,
                 tick_count,
                 host_buffered_chunks,
                 ready_host.len(),
                 tts_buffered_bytes,
-                fifo_would_blocks
+                fifo_would_blocks,
+                fifo_skipped_ticks
             );
             last_stats = actual;
         }
@@ -298,6 +305,19 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
                     m.record_bytes_out(n);
                 }
             }
+            FifoWrite::Backpressured {
+                would_blocks,
+                elapsed,
+            } => {
+                fifo_would_blocks += would_blocks;
+                fifo_skipped_ticks += 1;
+                eprintln!(
+                    "[AUDIO:{}] fifo write skipped live tick would_blocks={} elapsed_ms={}",
+                    stream_id,
+                    would_blocks,
+                    elapsed.as_millis()
+                );
+            }
             FifoWrite::Stopped => break,
             FifoWrite::Err => {
                 if !stop.load(Ordering::Acquire) {
@@ -340,20 +360,33 @@ fn open_audio_fifo(path: &str, stream_id: &str, stop: &AtomicBool) -> Option<std
 }
 
 enum FifoWrite {
-    Ok { would_blocks: u64 },
+    Ok {
+        would_blocks: u64,
+    },
+    Backpressured {
+        would_blocks: u64,
+        elapsed: Duration,
+    },
     Stopped,
     Err,
 }
 
-/// Write all bytes to a non-blocking FIFO. On WouldBlock, sleeps briefly and
-/// rechecks `stop` so the drain thread reacts to shutdown within ~1ms even if
-/// the FIFO buffer is full. Returns `Stopped` if the flag flips mid-write.
+/// Write one live audio tick to a non-blocking FIFO. On WouldBlock, retry only
+/// inside the current 20 ms media-clock budget. A blocked muxer must drop/skips
+/// live ticks, not hold this thread and replay stale audio later.
 fn fifo_write_nonblocking(fifo: &mut std::fs::File, bytes: &[u8], stop: &AtomicBool) -> FifoWrite {
+    let started = Instant::now();
     let mut written = 0usize;
     let mut would_blocks = 0u64;
     while written < bytes.len() {
         if stop.load(Ordering::Acquire) {
             return FifoWrite::Stopped;
+        }
+        if started.elapsed() >= AUDIO_FIFO_WRITE_BUDGET {
+            return FifoWrite::Backpressured {
+                would_blocks,
+                elapsed: started.elapsed(),
+            };
         }
         match fifo.write(&bytes[written..]) {
             Ok(0) => return FifoWrite::Err,
@@ -472,6 +505,10 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
 
+    fn chunk(bytes: Vec<u8>) -> Arc<[u8]> {
+        Arc::from(bytes)
+    }
+
     #[test]
     fn take_tick_sample_drains_full_buffer_and_pads_with_zeros() {
         let mut ready = vec![1u8; 100];
@@ -567,11 +604,11 @@ mod tests {
         let delay = Duration::from_millis(100);
         {
             let mut b = buf.lock().unwrap();
-            b.push_back((now - Duration::from_millis(120), vec![1]));
-            b.push_back((now + Duration::from_millis(500), vec![2]));
+            b.push_back((now - Duration::from_millis(120), chunk(vec![1])));
+            b.push_back((now + Duration::from_millis(500), chunk(vec![2])));
         }
         let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
-        assert_eq!(result, Some(vec![1]));
+        assert_eq!(result, Some(chunk(vec![1])));
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
@@ -582,13 +619,13 @@ mod tests {
         let delay = Duration::from_millis(100);
         {
             let mut b = buf.lock().unwrap();
-            b.push_back((now - Duration::from_millis(2_000), vec![1]));
-            b.push_back((now - Duration::from_millis(1_000), vec![2]));
-            b.push_back((now - Duration::from_millis(150), vec![0, 0, 1, 5]));
-            b.push_back((now + Duration::from_millis(500), vec![4]));
+            b.push_back((now - Duration::from_millis(2_000), chunk(vec![1])));
+            b.push_back((now - Duration::from_millis(1_000), chunk(vec![2])));
+            b.push_back((now - Duration::from_millis(150), chunk(vec![0, 0, 1, 5])));
+            b.push_back((now + Duration::from_millis(500), chunk(vec![4])));
         }
         let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
-        assert_eq!(result, Some(vec![0, 0, 1, 5]));
+        assert_eq!(result, Some(chunk(vec![0, 0, 1, 5])));
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
@@ -601,15 +638,15 @@ mod tests {
         let idr = vec![0, 0, 0, 1, 5, 0xbb];
         {
             let mut b = buf.lock().unwrap();
-            b.push_back((now - Duration::from_millis(2_000), vec![9]));
-            b.push_back((now - Duration::from_millis(150), p_slice));
-            b.push_back((now - Duration::from_millis(140), idr.clone()));
-            b.push_back((now + Duration::from_millis(500), vec![4]));
+            b.push_back((now - Duration::from_millis(2_000), chunk(vec![9])));
+            b.push_back((now - Duration::from_millis(150), chunk(p_slice)));
+            b.push_back((now - Duration::from_millis(140), chunk(idr.clone())));
+            b.push_back((now + Duration::from_millis(500), chunk(vec![4])));
         }
 
         let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
 
-        assert_eq!(result, Some(idr));
+        assert_eq!(result, Some(chunk(idr.to_vec())));
     }
 
     #[test]
@@ -625,7 +662,7 @@ mod tests {
         let now = Instant::now();
         {
             let mut b = buf.lock().unwrap();
-            b.push_back((now + Duration::from_millis(10), vec![1]));
+            b.push_back((now + Duration::from_millis(10), chunk(vec![1])));
         }
         let result = drain_next_h264_live(
             &buf,
@@ -644,8 +681,8 @@ mod tests {
         let delay = Duration::from_millis(100);
         {
             let mut b = host_buf.lock().unwrap();
-            b.push_back((now - Duration::from_millis(150), vec![0xbb]));
-            b.push_back((now + Duration::from_millis(50), vec![0xcc]));
+            b.push_back((now - Duration::from_millis(150), chunk(vec![0xbb])));
+            b.push_back((now + Duration::from_millis(50), chunk(vec![0xcc])));
         }
         let mut ready = Vec::new();
         drain_aged_host_audio(DrainHostArgs {
@@ -666,10 +703,10 @@ mod tests {
         let delay = Duration::from_millis(100);
         {
             let mut b = host_buf.lock().unwrap();
-            b.push_back((now - Duration::from_millis(2_000), vec![0xaa]));
-            b.push_back((now - Duration::from_millis(1_000), vec![0xbb]));
-            b.push_back((now - Duration::from_millis(150), vec![0xcc]));
-            b.push_back((now + Duration::from_millis(50), vec![0xdd]));
+            b.push_back((now - Duration::from_millis(2_000), chunk(vec![0xaa])));
+            b.push_back((now - Duration::from_millis(1_000), chunk(vec![0xbb])));
+            b.push_back((now - Duration::from_millis(150), chunk(vec![0xcc])));
+            b.push_back((now + Duration::from_millis(50), chunk(vec![0xdd])));
         }
         let mut ready = Vec::new();
         drain_aged_host_audio(DrainHostArgs {
@@ -826,9 +863,10 @@ mod tests {
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let buf = Arc::new(StdMutex::new(VecDeque::new()));
-        buf.lock()
-            .unwrap()
-            .push_back((Instant::now() - Duration::from_secs(1), vec![1, 2, 3]));
+        buf.lock().unwrap().push_back((
+            Instant::now() - Duration::from_secs(1),
+            chunk(vec![1, 2, 3]),
+        ));
         let stop = Arc::new(AtomicBool::new(false));
         let ctx = VideoDrainCtx {
             stream_id: "sid".into(),

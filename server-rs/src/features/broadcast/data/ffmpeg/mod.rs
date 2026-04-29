@@ -75,7 +75,7 @@ fn now_unix_ms() -> i64 {
 
 /// Timestamped chunk of host media. The tuple is (received_at, bytes). A chunk
 /// becomes eligible for emission at `received_at + stream.delay`.
-type TimedChunk = (Instant, Vec<u8>);
+type TimedChunk = (Instant, Arc<[u8]>);
 
 pub(crate) struct StreamBuffers {
     audio: Arc<StdMutex<VecDeque<TimedChunk>>>,
@@ -281,9 +281,10 @@ impl RtmpManager {
         if chunk.is_empty() {
             return;
         }
+        let shared_chunk: Arc<[u8]> = Arc::from(chunk);
         for stream in self.streams.values() {
             let mut buf = stream.buffers.video_h264.lock().unwrap();
-            buf.push_back((captured_at, chunk.to_vec()));
+            buf.push_back((captured_at, shared_chunk.clone()));
             while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
                 buf.pop_front();
             }
@@ -296,9 +297,10 @@ impl RtmpManager {
             return;
         }
         let now = Instant::now();
+        let shared_pcm: Arc<[u8]> = Arc::from(pcm);
         for stream in self.streams.values() {
             let mut buf = stream.buffers.audio.lock().unwrap();
-            buf.push_back((now, pcm.to_vec()));
+            buf.push_back((now, shared_pcm.clone()));
             // Cap total bytes across queued chunks.
             let mut total: usize = buf.iter().map(|(_, b)| b.len()).sum();
             while total > HOST_AUDIO_CAP_BYTES {
