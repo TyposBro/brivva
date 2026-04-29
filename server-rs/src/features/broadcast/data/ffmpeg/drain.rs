@@ -151,7 +151,9 @@ fn drain_next_h264_live(
     // preferred as soon as it arrives.
     if dropped_stale {
         while buf.len() > 1 {
-            let Some((ts, packet)) = buf.front() else { break };
+            let Some((ts, packet)) = buf.front() else {
+                break;
+            };
             if *ts + delay > now || h264_annexb_contains_idr(packet) {
                 break;
             }
@@ -167,7 +169,6 @@ fn drain_next_h264_live(
         None
     }
 }
-
 
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
     let mut i = 0;

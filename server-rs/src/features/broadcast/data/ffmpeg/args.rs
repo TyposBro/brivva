@@ -195,6 +195,98 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct FfmpegProgressSnapshot {
+    pub fps: Option<f64>,
+    pub speed: Option<f64>,
+    pub dup_frames: Option<u64>,
+    pub drop_frames: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum FfmpegProgressAlert {
+    SlowEncode { speed: f64, consecutive_ticks: u32 },
+    DroppedFrames { total: u64, delta: u64 },
+}
+
+#[derive(Debug, Default)]
+pub(super) struct FfmpegProgressMonitor {
+    fps: Option<f64>,
+    speed: Option<f64>,
+    dup_frames: Option<u64>,
+    drop_frames: Option<u64>,
+    last_drop_frames: u64,
+    consecutive_slow_ticks: u32,
+}
+
+impl FfmpegProgressMonitor {
+    const SLOW_SPEED_THRESHOLD: f64 = 0.95;
+    const SLOW_SPEED_ALERT_TICKS: u32 = 5;
+
+    pub(super) fn ingest_line(&mut self, line: &str) -> Vec<FfmpegProgressAlert> {
+        let Some((key, value)) = line.split_once('=') else {
+            return Vec::new();
+        };
+        match key {
+            "fps" => self.fps = parse_progress_f64(value),
+            "speed" => self.speed = parse_speed(value),
+            "dup_frames" => self.dup_frames = value.parse::<u64>().ok(),
+            "drop_frames" => self.drop_frames = value.parse::<u64>().ok(),
+            "progress" => return self.finish_tick(),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    pub(super) fn snapshot(&self) -> FfmpegProgressSnapshot {
+        FfmpegProgressSnapshot {
+            fps: self.fps,
+            speed: self.speed,
+            dup_frames: self.dup_frames,
+            drop_frames: self.drop_frames,
+        }
+    }
+
+    fn finish_tick(&mut self) -> Vec<FfmpegProgressAlert> {
+        let mut alerts = Vec::new();
+        if let Some(speed) = self.speed {
+            if speed < Self::SLOW_SPEED_THRESHOLD {
+                self.consecutive_slow_ticks += 1;
+                if self.consecutive_slow_ticks >= Self::SLOW_SPEED_ALERT_TICKS {
+                    alerts.push(FfmpegProgressAlert::SlowEncode {
+                        speed,
+                        consecutive_ticks: self.consecutive_slow_ticks,
+                    });
+                }
+            } else {
+                self.consecutive_slow_ticks = 0;
+            }
+        }
+        if let Some(drop_frames) = self.drop_frames {
+            if drop_frames > self.last_drop_frames {
+                alerts.push(FfmpegProgressAlert::DroppedFrames {
+                    total: drop_frames,
+                    delta: drop_frames - self.last_drop_frames,
+                });
+                self.last_drop_frames = drop_frames;
+            }
+        }
+        alerts
+    }
+}
+
+fn parse_speed(value: &str) -> Option<f64> {
+    parse_progress_f64(value.trim_end_matches('x'))
+}
+
+fn parse_progress_f64(value: &str) -> Option<f64> {
+    let value = value.trim();
+    if value == "N/A" {
+        return None;
+    }
+    value.parse::<f64>().ok()
+}
+
 pub fn redact_rtmp_secrets(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -244,7 +336,9 @@ mod tests {
         assert!(joined.contains("-progress pipe:2 -stats_period 1"));
         assert!(joined.contains("-f h264"));
         assert!(joined.contains("-r 30 -i pipe:0"));
-        assert!(joined.contains("-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"));
+        assert!(joined.contains(
+            "-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        ));
         assert!(joined.contains("-c:v libx264"));
         assert!(joined.contains("-preset ultrafast"));
         assert!(joined.contains("-tune zerolatency"));
@@ -277,7 +371,10 @@ mod tests {
     #[test]
     fn build_ffmpeg_args_raises_input_thread_queues() {
         let args = build_ffmpeg_args("/tmp/fifo", "rtmp://x");
-        let queue_flags = args.iter().filter(|s| s.as_str() == "-thread_queue_size").count();
+        let queue_flags = args
+            .iter()
+            .filter(|s| s.as_str() == "-thread_queue_size")
+            .count();
         assert_eq!(queue_flags, 2, "one queue per input");
         for (i, arg) in args.iter().enumerate() {
             if arg == "-thread_queue_size" {
@@ -334,6 +431,57 @@ mod tests {
         assert!(joined.contains("fps=15,scale='min(1280,iw)':'min(720,ih)'"));
         assert!(joined.contains("-g 30 -keyint_min 30"));
         assert!(joined.contains("-b:v 1400k"));
+    }
+
+    #[test]
+    fn ffmpeg_progress_monitor_alerts_after_sustained_slow_speed() {
+        let mut monitor = FfmpegProgressMonitor::default();
+        let mut alerts = Vec::new();
+        for _ in 0..4 {
+            monitor.ingest_line("speed=0.83x");
+            alerts.extend(monitor.ingest_line("progress=continue"));
+        }
+        assert!(alerts.is_empty());
+
+        monitor.ingest_line("speed=0.84x");
+        alerts.extend(monitor.ingest_line("progress=continue"));
+
+        assert_eq!(
+            alerts,
+            vec![FfmpegProgressAlert::SlowEncode {
+                speed: 0.84,
+                consecutive_ticks: 5,
+            }]
+        );
+    }
+
+    #[test]
+    fn ffmpeg_progress_monitor_resets_slow_speed_after_recovery() {
+        let mut monitor = FfmpegProgressMonitor::default();
+        for _ in 0..4 {
+            monitor.ingest_line("speed=0.80x");
+            monitor.ingest_line("progress=continue");
+        }
+        monitor.ingest_line("speed=1.01x");
+        assert!(monitor.ingest_line("progress=continue").is_empty());
+
+        monitor.ingest_line("speed=0.80x");
+        assert!(monitor.ingest_line("progress=continue").is_empty());
+    }
+
+    #[test]
+    fn ffmpeg_progress_monitor_alerts_when_drop_frames_increase() {
+        let mut monitor = FfmpegProgressMonitor::default();
+        monitor.ingest_line("drop_frames=2");
+        assert_eq!(
+            monitor.ingest_line("progress=continue"),
+            vec![FfmpegProgressAlert::DroppedFrames { total: 2, delta: 2 }]
+        );
+        monitor.ingest_line("drop_frames=5");
+        assert_eq!(
+            monitor.ingest_line("progress=continue"),
+            vec![FfmpegProgressAlert::DroppedFrames { total: 5, delta: 3 }]
+        );
     }
 
     #[test]

@@ -2,16 +2,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::Message;
-use serde::Deserialize;
 use ice::udp_network::{EphemeralUDP, UDPNetwork};
+use serde::Deserialize;
 use webrtc::api::APIBuilder;
-use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_H264, MediaEngine};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::error::Result as WebRtcResult;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp::codecs::h264::{H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE, STAPA_NALU_TYPE};
@@ -108,13 +108,14 @@ async fn accept_webrtc_video(
     Ok(peer)
 }
 
-
 async fn apply_video_profile(
     offer: &WebRtcOffer,
     live_sessions: &LiveSessions,
     live_session_id: &str,
 ) {
-    let Some(client) = &offer.video_profile else { return };
+    let Some(client) = &offer.video_profile else {
+        return;
+    };
     let width = client.width.unwrap_or(1920).clamp(320, 3840);
     let height = client.height.unwrap_or(1080).clamp(180, 2160);
     let fps = client.fps.unwrap_or(30).clamp(10, 60);
@@ -208,7 +209,10 @@ async fn forward_track_rtp(
         let Some(manager) = manager else {
             break;
         };
-        manager.lock().await.push_video_h264_at(&annex_b, captured_at);
+        manager
+            .lock()
+            .await
+            .push_video_h264_at(&annex_b, captured_at);
     }
     tracing::info!(live_session_id = %live_session_id, "webrtc video track ended");
 }

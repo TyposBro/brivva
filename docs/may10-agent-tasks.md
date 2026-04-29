@@ -5,7 +5,7 @@ from `vision.md`. Each prompt briefs a cold agent with enough context to
 act without reading this document.
 
 **Generated:** 2026-04-20
-**Last reconciled with codebase:** 2026-04-20 evening
+**Last reconciled with codebase:** 2026-04-29
 **Source:** `vision.md` §"Round 2 Remaining" + §"Testing Debt" + §"Priority Stack"
 
 Tasks map to `vision.md` table rows by number. See priority table there
@@ -24,7 +24,8 @@ for full context.
 | 8 — `wrangler secret put GOOGLE_*` | ✅ verified | all 7 required secrets present on prod Workers |
 | 10 — Accent-bug fix | ✅ verified | user-confirmed |
 | 17 — §0.5.4 silent-path log **infra** | ✅ shipped | `03b36d1` — wired + 44-row audit checklist + runner script |
-| 17 — §0.5.4 30-min **verification run** | ⏳ pending | human: `bash scripts/post-merge-log-audit.sh` |
+| 17 — §0.5.4 silent-path log **runtime alerts** | ✅ shipped | launch media hardening — FFmpeg idle/crash + slow encode/drop-frame warnings |
+| 17 — §0.5.4 30-min **verification run** | ⏳ pending | human: `bash scripts/post-merge-log-audit.sh` against real live session |
 | 16 — §0.5.1 capture **scripts** | ✅ shipped | `03b36d1` — Soniox + YouTube scripts |
 | 16 — §0.5.1 real-capture **runs** | ⏳ pending | human: needs real creds + live audio |
 | 19 — §0.5.3 multi-step chain | ✅ shipped | `03b36d1` + migration 0010 unique index |
@@ -33,7 +34,7 @@ for full context.
 | 23 — demo cruft removal | ✅ shipped | `db63713` |
 | ffmpeg-base prebuilt ECR | ✅ shipped | `60bb215` — first build run 2026-04-20 (manual dispatch after IAM trust fix) |
 
-Prompts below are preserved for history. Skip any row marked ✅.
+Prompts below are preserved for history only. Code TODOs already marked ✅ are not active work. Active remaining items in this file are human/ops verification only: the 30-minute log audit and real Soniox/YouTube fixture captures.
 
 ---
 

@@ -20,6 +20,7 @@ mod drain;
 mod mixer;
 mod orphan;
 
+use args::{FfmpegProgressAlert, FfmpegProgressMonitor};
 pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
@@ -487,7 +488,8 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        let ffmpeg_args = build_ffmpeg_args_with_profile(&audio_fifo, &args.rtmp_url, self.video_profile);
+        let ffmpeg_args =
+            build_ffmpeg_args_with_profile(&audio_fifo, &args.rtmp_url, self.video_profile);
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
@@ -514,7 +516,40 @@ impl RtmpManager {
             let lang_for_log = args.lang.clone();
             let thread_name = format!("stderr-drain-{}", args.stream_id);
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
+                let mut progress = FfmpegProgressMonitor::default();
                 drain_stderr_lines(BufReader::new(stderr), |line| {
+                    for alert in progress.ingest_line(&line) {
+                        match alert {
+                            FfmpegProgressAlert::SlowEncode {
+                                speed,
+                                consecutive_ticks,
+                            } => {
+                                let snapshot = progress.snapshot();
+                                tracing::warn!(
+                                    stream_id = %sid_for_log,
+                                    lang = %lang_for_log,
+                                    speed,
+                                    consecutive_ticks,
+                                    fps = snapshot.fps,
+                                    dup_frames = snapshot.dup_frames,
+                                    drop_frames = snapshot.drop_frames,
+                                    "ffmpeg encode below realtime"
+                                );
+                            }
+                            FfmpegProgressAlert::DroppedFrames { total, delta } => {
+                                let snapshot = progress.snapshot();
+                                tracing::warn!(
+                                    stream_id = %sid_for_log,
+                                    lang = %lang_for_log,
+                                    total_drop_frames = total,
+                                    delta_drop_frames = delta,
+                                    speed = snapshot.speed,
+                                    fps = snapshot.fps,
+                                    "ffmpeg output dropped frames"
+                                );
+                            }
+                        }
+                    }
                     tracing::warn!(
                         stream_id = %sid_for_log,
                         lang = %lang_for_log,
