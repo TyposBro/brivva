@@ -20,6 +20,7 @@
     "typecheck:workers": "bun run --cwd workers typecheck",
     "deploy:frontend": "bun run --cwd frontend deploy",
     "deploy:workers": "bun run --cwd workers deploy && bun run --cwd workers migrate:prod",
-    "deploy:server": "./deploy.sh"
+    "deploy:server": "./deploy.sh",
+    "test:e2e:auto": "./scripts/test-e2e-auto.sh"
   }
 }

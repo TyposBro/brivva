@@ -112,17 +112,15 @@ validate_lang --instagram "$E2E_INSTAGRAM_LANG"
 validate_lang --tiktok "$E2E_TIKTOK_LANG"
 
 # ── Preconditions ─────────────────────────────────────────
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "ERROR: $ENV_FILE missing." >&2
-  echo "  cp tests/e2e/.env.example tests/e2e/.env" >&2
-  echo "  # then fill in destination credentials" >&2
-  exit 1
-fi
+# tests/e2e/.env is optional when credentials are supplied by the caller
+# (scripts/test-e2e-auto.sh does this for its local RTMP default). Keep
+# supporting the file for real Grip/YouTube credentials.
 
 if [[ ! -f "$FIXTURE_VIDEO" || ! -f "$FIXTURE_AUDIO" ]]; then
-  echo "ERROR: fake-cam.y4m / fake-mic.wav missing." >&2
-  echo "  see tests/e2e/fixtures/README.md to regenerate" >&2
-  exit 1
+  echo "WARN: fake-cam.y4m / fake-mic.wav missing." >&2
+  echo "  Chromium will still use --use-fake-device-for-media-stream," >&2
+  echo "  but file-backed fake media needs tests/e2e/fixtures/README.md" >&2
+  echo "  or scripts/test-e2e-auto.sh to generate fixtures." >&2
 fi
 
 FRONTEND_URL="${BRIVVA_DEV_FRONTEND_URL:-http://localhost:5173}"
@@ -140,8 +138,10 @@ fi
 
 # ── Source .env, layer e2e config on top ──────────────────
 set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
 # Fail fast for any destination flag whose creds are missing — easier
 # than discovering the placeholder mid-test.
 require_creds() {

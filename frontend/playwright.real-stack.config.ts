@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +26,18 @@ const FIXTURE_AUDIO = path.join(REPO_ROOT, "tests/e2e/fixtures/fake-mic.wav");
 const FRONTEND_URL =
   process.env.BRIVVA_DEV_FRONTEND_URL ?? "http://localhost:5173";
 
+const chromiumMediaArgs = [
+  "--use-fake-device-for-media-stream",
+  "--use-fake-ui-for-media-stream",
+  "--autoplay-policy=no-user-gesture-required",
+];
+if (fs.existsSync(FIXTURE_VIDEO)) {
+  chromiumMediaArgs.push(`--use-file-for-fake-video-capture=${FIXTURE_VIDEO}`);
+}
+if (fs.existsSync(FIXTURE_AUDIO)) {
+  chromiumMediaArgs.push(`--use-file-for-fake-audio-capture=${FIXTURE_AUDIO}`);
+}
+
 export default defineConfig({
   testDir: "./e2e",
   // Real-stack tests only. All other *.e2e.ts files rely on the mock
@@ -46,13 +59,7 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
     launchOptions: {
-      args: [
-        "--use-fake-device-for-media-stream",
-        "--use-fake-ui-for-media-stream",
-        "--autoplay-policy=no-user-gesture-required",
-        `--use-file-for-fake-video-capture=${FIXTURE_VIDEO}`,
-        `--use-file-for-fake-audio-capture=${FIXTURE_AUDIO}`,
-      ],
+      args: chromiumMediaArgs,
     },
   },
   projects: [
