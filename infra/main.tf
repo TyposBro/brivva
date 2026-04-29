@@ -45,14 +45,14 @@ resource "aws_ecr_lifecycle_policy" "server" {
   })
 }
 
-# Prebuilt ffmpeg amd64 image with --enable-librtmp, referenced by the
+# Prebuilt ffmpeg amd64 image with native RTMP/RTMPS, referenced by the
 # server-runtime-base image. Decouples the 2+hr ffmpeg source build from
 # every deploy — rebuilt only when the FFMPEG_VERSION pin or
 # infra/ffmpeg-base/Dockerfile changes.
 resource "aws_ecr_repository" "ffmpeg_base" {
   name = "${var.project}/ffmpeg-base"
   # MUTABLE so the CI workflow can advance `latest` to the newest build.
-  # The version-suffixed tag (e.g. `6.1.2-librtmp`) is treated as
+  # The version-suffixed tag (e.g. `7.1.1-native-rtmp`) is treated as
   # immutable-by-convention: bump FFMPEG_VERSION rather than rebuilding
   # over an existing tag.
   image_tag_mutability = "MUTABLE"

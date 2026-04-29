@@ -1,4 +1,4 @@
-# Prebuilt ffmpeg amd64 base image — with --enable-librtmp + --enable-openssl.
+# Prebuilt ffmpeg amd64 base image — native RTMP/RTMPS with --enable-openssl.
 #
 # Why this image exists:
 #   server-rs/Dockerfile used to build ffmpeg from source in the deploy
@@ -6,20 +6,19 @@
 #   per push (observed 2026-04-20). This image pre-bakes the ffmpeg binary
 #   once per FFMPEG_VERSION bump so every server-rs build is a fast COPY.
 #
-# librtmp is non-negotiable:
-#   AWS IVS (Grip's ingest) silently rejects ffmpeg's native RTMP
-#   implementation — accepts handshake, never sends Publish.Start, closes
-#   the socket at ~frame 3. librtmp (same library OBS uses) is the only
-#   path that pushes cleanly. See docs/runbook.md §2b.
+# Native RTMP/RTMPS is the supported path now:
+#   Debian bookworm's librtmp 2.4 has caused AWS IVS/RTMPS handshake
+#   failures. FFmpeg's native TLS-backed RTMP implementation is kept by
+#   default; we explicitly enable OpenSSL and verify RTMPS protocol support.
 #
 # Build + push (from the repo root):
 #   docker build --platform linux/amd64 \
-#     -t <ECR_REGISTRY>/brivva/ffmpeg-base:6.1.2-librtmp \
+#     -t <ECR_REGISTRY>/brivva/ffmpeg-base:7.1.1-native-rtmp \
 #     -f infra/ffmpeg-base/Dockerfile infra/ffmpeg-base
-#   docker push <ECR_REGISTRY>/brivva/ffmpeg-base:6.1.2-librtmp
+#   docker push <ECR_REGISTRY>/brivva/ffmpeg-base:7.1.1-native-rtmp
 #
 # Tag convention:
-#   <ffmpeg-version>-librtmp   — primary, immutable pin
+#   <ffmpeg-version>-native-rtmp — primary, immutable pin
 #   latest                     — convenience pointer, not used in prod
 #
 # The CI workflow in .github/workflows/ffmpeg-base.yml automates the above
@@ -32,7 +31,7 @@ ARG FFMPEG_VERSION=7.1.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential yasm nasm pkg-config curl xz-utils ca-certificates \
         libx264-dev libx265-dev libmp3lame-dev libopus-dev \
-        librtmp-dev libssl-dev \
+        libssl-dev \
         libfreetype-dev libfontconfig-dev libass-dev libharfbuzz-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,7 +44,6 @@ RUN ./configure \
         --enable-gpl \
         --enable-nonfree \
         --enable-openssl \
-        --enable-librtmp \
         --enable-libx264 \
         --enable-libx265 \
         --enable-libmp3lame \
@@ -59,8 +57,10 @@ RUN ./configure \
     && make -j"$(nproc)" \
     && make install
 
-RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
-    || (echo "CRITICAL: ffmpeg built without --enable-librtmp — IVS pushes will silently fail (docs/runbook.md §2b)"; exit 1)
+RUN /usr/local/bin/ffmpeg -version | grep -q "enable-openssl" \
+    || (echo "CRITICAL: ffmpeg built without --enable-openssl — RTMPS publishing will fail"; exit 1)
+RUN /usr/local/bin/ffmpeg -hide_banner -protocols 2>&1 | grep -q "rtmps" \
+    || (echo "CRITICAL: ffmpeg lacks native rtmps protocol"; exit 1)
 
 # FFmpeg 6.1+ silently omits the `drawtext` filter when libharfbuzz is
 # not detected at configure time, even if --enable-libfreetype succeeds.
@@ -78,15 +78,12 @@ RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q drawtext \
        }
 
 # Final image is minimal: just the ffmpeg + ffprobe binaries. The server-rs
-# runtime stage copies these out; the runtime-side .so deps (librtmp1,
-# libssl3, libx264/5, libass, fonts) are apt-installed there, not here.
+# runtime stage copies these out; runtime-side .so deps (libssl3, libx264/5,
+# libass, fonts) are apt-installed there, not here.
 #
-# No post-COPY `ffmpeg -version` check here — this stage lacks the
-# runtime .so libs (libass.so.9 etc.), so executing ffmpeg would fail
-# even for a healthy binary. The build-stage verify above catches any
-# librtmp regression at compile time, and `server-rs/Dockerfile` re-runs
-# the same check after its own COPY in an image that has the runtime
-# deps installed.
+# No post-COPY `ffmpeg -version` check here — this stage lacks the runtime
+# .so libs (libass.so.9 etc.), so executing ffmpeg would fail even for a
+# healthy binary. The build-stage verify above catches RTMPS/OpenSSL support.
 FROM debian:bookworm-slim
 
 COPY --from=build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg

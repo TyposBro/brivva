@@ -21,19 +21,15 @@ for supplying the complete `rtmp_url` with port and `stream_key` separately;
 FFmpeg's `rtmps` protocol is `rtmp` over TLS — same muxer (`-f flv`), same
 publish path.
 
-**CRITICAL** (verified 2026-04-20): FFmpeg MUST be compiled with
-`--enable-librtmp --enable-openssl`. Debian's apt `ffmpeg` package and
-Homebrew's default bottle use the native RTMP implementation, which AWS
-IVS (Grip's backend) silently rejects — publish cuts at frame 3 with no
-`Publish.Start` ack and no stderr error. librtmp (via rtmpdump) is what
-OBS uses and is what IVS fingerprints against.
+**CRITICAL**: FFmpeg MUST use native RTMP/RTMPS with OpenSSL. The production
+base image is built from source with `--enable-openssl`; CI asserts both
+`ffmpeg -version | grep enable-openssl` and `ffmpeg -protocols | grep rtmps`.
+Do not install or require Debian bookworm `librtmp`/rtmpdump in the runtime image.
 
-The Dockerfile therefore uses a multi-stage build that compiles ffmpeg
-6.1.2 from source with `--enable-librtmp --enable-openssl --enable-libx264
---enable-libx265 --enable-libmp3lame --enable-libopus --enable-libfreetype
---enable-libfontconfig --enable-libass`. CI asserts
-`ffmpeg -version | grep enable-librtmp` to prevent silent regression on
-base-image bump.
+The Dockerfile therefore uses a multi-stage build that compiles ffmpeg from
+source with `--enable-openssl --enable-libx264 --enable-libx265
+--enable-libmp3lame --enable-libopus --enable-libfreetype
+--enable-libfontconfig --enable-libass`.
 
 Flags that matter for Grip:
 
@@ -104,7 +100,7 @@ If the spec covers the operations the paste-cred path reverse-engineers
 (provision broadcast, fetch stream key, start, end, health), most of the
 workarounds in this file retire post-May-10. Migration is gated behind
 `BRIVVA_GRIP_USE_LEGACY` kill-switch so paste-cred remains instant
-rollback. Not on the May 10 critical path — current paste-cred + librtmp
+rollback. Not on the May 10 critical path — current paste-cred + native RTMP
 flow is working e2e.
 
 See `docs/may10-agent-tasks.md` Task 15 for the evaluation prompt.
@@ -113,7 +109,7 @@ See `docs/may10-agent-tasks.md` Task 15 for the evaluation prompt.
 
 - Live handshake against `live.grip.fans:443` from Fargate: **working**.
   600 frames pushed in 20s, broadcast flipped to `방송중` on Grip's end.
-  This required ffmpeg compiled with librtmp — see above.
+  This required ffmpeg compiled with native RTMP — see above.
 - YouTube + Grip e2e in prod: **working**. Test users invited via Gmail
   through WhatsApp group. TikTok integration is the next target.
 

@@ -34,7 +34,7 @@ jobs:
       SERVER_BUILD_BASE_REPO: brivva/server-build-base
       SERVER_BUILD_BASE_TAG: rust-1.88-slim-zigbuild-v1
       SERVER_RUNTIME_BASE_REPO: brivva/server-runtime-base
-      SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-v1
+      SERVER_RUNTIME_BASE_TAG: bookworm-ffmpeg-7.1.1-native-rtmp-v1
     steps:
       - uses: actions/checkout@v4
 
@@ -50,15 +50,23 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Verify ffmpeg-base image exists
+      - name: Wait for ffmpeg-base image
         run: |
           set -euo pipefail
-          aws ecr describe-images \
-            --region us-east-1 \
-            --repository-name "${FFMPEG_BASE_REPO}" \
-            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
-            --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
-            --output table
+          for attempt in {1..30}; do
+            if aws ecr describe-images \
+              --region us-east-1 \
+              --repository-name "${FFMPEG_BASE_REPO}" \
+              --image-ids imageTag="${FFMPEG_VERSION}-native-rtmp" \
+              --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
+              --output table; then
+              exit 0
+            fi
+            echo "ffmpeg-base ${FFMPEG_VERSION}-native-rtmp not visible yet (attempt ${attempt}/30); waiting..."
+            sleep 60
+          done
+          echo "Timed out waiting for ffmpeg-base ${FFMPEG_VERSION}-native-rtmp"
+          exit 1
 
       - name: Build + push server-build-base
         uses: docker/build-push-action@v6
@@ -81,7 +89,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+            FFMPEG_BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.FFMPEG_BASE_REPO }}:${{ env.FFMPEG_VERSION }}-native-rtmp
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:${{ env.SERVER_RUNTIME_BASE_TAG }}
             ${{ env.ECR_REGISTRY }}/${{ env.SERVER_RUNTIME_BASE_REPO }}:latest

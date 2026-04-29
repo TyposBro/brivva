@@ -1,6 +1,6 @@
 name: ffmpeg-base
 
-# Prebuilds the amd64 ffmpeg image with --enable-librtmp and pushes to
+# Prebuilds the amd64 ffmpeg image with native RTMP/RTMPS and pushes to
 # ECR. Downstream `server-rs/Dockerfile` COPYs the binary out instead of
 # compiling ffmpeg on every deploy (which was a 2+hr QEMU build on the
 # amd64 runner; 2026-04-20 incident).
@@ -10,7 +10,7 @@ name: ffmpeg-base
 #   - manual via workflow_dispatch
 #
 # The image is content-addressed by the FFMPEG_VERSION input (default
-# 7.1.1) plus the `-librtmp` suffix. Never overwrite a version tag in
+# 7.1.1) plus the `-native-rtmp` suffix. Never overwrite a version tag in
 # place — bump FFMPEG_VERSION when the underlying ffmpeg changes so
 # every downstream server-rs image pins a known binary.
 
@@ -68,7 +68,7 @@ jobs:
           build-args: |
             FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.FFMPEG_VERSION }}-librtmp
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.FFMPEG_VERSION }}-native-rtmp
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
           cache-from: type=gha,scope=ffmpeg-base
           cache-to: type=gha,mode=max,scope=ffmpeg-base
@@ -79,6 +79,6 @@ jobs:
           aws ecr describe-images \
             --region us-east-1 \
             --repository-name "${ECR_REPO}" \
-            --image-ids imageTag="${FFMPEG_VERSION}-librtmp" \
+            --image-ids imageTag="${FFMPEG_VERSION}-native-rtmp" \
             --query 'imageDetails[0].{digest:imageDigest,size:imageSizeInBytes,pushed:imagePushedAt}' \
             --output table

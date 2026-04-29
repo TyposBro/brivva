@@ -24,7 +24,7 @@ End-to-end media pipeline smoke. Runs nightly (09:00 UTC) and on PRs that
 touch `server-rs/**` or `tests/e2e/**`. See `tests/e2e/README.md`.
 
 ### `ffmpeg-base.yml` — custom FFmpeg image
-Builds and pushes the amd64 `brivva/ffmpeg-base:<version>-librtmp` image.
+Builds and pushes the amd64 `brivva/ffmpeg-base:<version>-native-rtmp` image.
 Normal deploys reuse this pinned image instead of rebuilding FFmpeg every
 time. Re-run this workflow, or run `./deploy.sh --build-ffmpeg-base`, only
 when `infra/ffmpeg-base/**` or `FFMPEG_VERSION` changes.

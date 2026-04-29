@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx265-199 \
         libmp3lame0 \
         libopus0 \
-        librtmp1 \
         libssl3 \
         libfreetype6 \
         libfontconfig1 \
@@ -27,8 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ffmpeg-base /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-base /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
-RUN /usr/local/bin/ffmpeg -version | grep -q "enable-librtmp" \
-    || (echo "CRITICAL: runtime ffmpeg lacks librtmp"; exit 1)
+RUN /usr/local/bin/ffmpeg -version | grep -q "enable-openssl" \
+    || (echo "CRITICAL: runtime ffmpeg lacks OpenSSL support for RTMPS"; exit 1)
+RUN /usr/local/bin/ffmpeg -hide_banner -protocols 2>&1 | grep -q "rtmps" \
+    || (echo "CRITICAL: runtime ffmpeg lacks native rtmps protocol"; exit 1)
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q drawtext \
     || { \

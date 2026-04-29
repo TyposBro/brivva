@@ -63,34 +63,23 @@ exits within ~1 second. Idle-detector SIGKILLs the child ~25s later.
 Grip broadcast sits at `송출 대기중` forever. **No RTMP error in stderr.**
 Repro-able with a plain ffmpeg CLI push to the same IVS URL.
 
-Root cause: **ffmpeg's native RTMP implementation is incompatible with
-AWS IVS ingest** (Grip runs on IVS). IVS accepts TCP+TLS+RTMP handshake
-+ publish command, but never sends `onStatus NetStream.Publish.Start`
-because the AMF metadata ffmpeg-native sends doesn't satisfy IVS's
-client fingerprinting. The socket stays open for a few seconds then
-IVS closes it server-side. ffmpeg doesn't surface this as an error.
+Current invariant: **use FFmpeg native RTMP/RTMPS with OpenSSL; do not
+link Debian bookworm `librtmp`/rtmpdump into the production binary.**
+The production base image is tagged `<ffmpeg-version>-native-rtmp`, built
+from source with `--enable-openssl`, and CI verifies both:
 
-**Only fix that works: ffmpeg built with `--enable-librtmp`** (the
-library OBS uses). Verified 2026-04-20 — librtmp backend pushed 600
-frames in 20s cleanly, broadcast flipped to `방송중`. Native backend
-truncates at frame 3 every time, regardless of encoder preset, profile,
-or stream key freshness.
+1. `ffmpeg -version | grep -q enable-openssl`
+2. `ffmpeg -hide_banner -protocols | grep -q rtmps`
 
 Triage (30 seconds):
-1. `ffmpeg -version | grep -o "enable-librtmp"` — must print the flag. If empty, that's the bug.
-2. Debian bookworm's `apt-get install ffmpeg` does **not** include librtmp. macOS `brew install ffmpeg` core formula also doesn't.
-3. Confirm with a ffmpeg CLI push using testsrc + sine to the same IVS URL — if it fails at 3 frames with librtmp missing, the fix is the same fix for server-rs.
+1. Confirm the running image is based on `brivva/ffmpeg-base:<version>-native-rtmp`.
+2. Confirm the two checks above pass inside the runtime image.
+3. Confirm with a ffmpeg CLI push using testsrc + sine to the same IVS URL.
 
-Fix (local dev, macOS):
-```
-brew uninstall --ignore-dependencies ffmpeg
-brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-openssl --with-rtmpdump --build-from-source
-```
-
-Fix (prod, Fargate): `server-rs/Dockerfile` must compile ffmpeg from
-source with `--enable-librtmp --enable-openssl`. Runtime image needs
-`librtmp1` + the source-built binary. Integration test should guard:
-`ffmpeg -version | grep -q enable-librtmp` at container build time.
+Fix (prod, Fargate): rebuild `ffmpeg-base`, then `server-runtime-base`,
+then deploy server-rs. The runtime image needs the source-built
+OpenSSL-enabled binary plus its shared library deps; it must not install
+`librtmp1` or check for `enable-librtmp`.
 
 Non-fixes (tried, none work):
 - Changing encoder preset (veryfast, ultrafast), profile (main, constrained baseline)
