@@ -1,20 +1,34 @@
 import { useCallback, useRef } from "react";
 
-const HOST_VIDEO_MAX_WIDTH = 3840;
-const HOST_VIDEO_MAX_HEIGHT = 2160;
+const HOST_VIDEO_MAX_WIDTH = 1920;
+const HOST_VIDEO_MAX_HEIGHT = 1080;
 const HOST_VIDEO_FPS = 30;
-const HOST_VIDEO_MAX_BITRATE_BPS = 35_000_000;
+const HOST_VIDEO_MAX_BITRATE_BPS = 6_000_000;
+
+type WebRtcSignal =
+  | { type: "webrtc:offer"; sdp: string }
+  | { type: "client:media_stats"; stats: ClientMediaStats };
 
 type WebRtcAnswer = { type: "webrtc:answer"; sdp: string };
 
+type ClientMediaStats = {
+  userAgent: string;
+  sourceTrack?: MediaTrackSettings;
+  uplinkTrack?: MediaTrackSettings;
+  cfr?: { framesDrawn: number; framesPerSecond: number };
+  outboundVideo?: Record<string, unknown>;
+};
+
 /** Webcam preview + WebRTC video uplink. Audio still uses the PCM WS path. */
 export function useWebcam(
-  sendSignalJson: (msg: { type: "webrtc:offer"; sdp: string }) => void,
+  sendSignalJson: (msg: WebRtcSignal) => void,
   isSocketOpen: () => boolean,
 ) {
   const streamRef = useRef<MediaStream | null>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
+  const cfrUplinkRef = useRef<CfrUplink | null>(null);
+  const statsIntervalRef = useRef<number | null>(null);
   const pendingLocalOfferRef = useRef(false);
 
   const videoRef = useCallback((el: HTMLVideoElement | null) => {
@@ -45,6 +59,8 @@ export function useWebcam(
 
   const stopWebcam = useCallback(() => {
     stopPeer(peerRef);
+    stopMediaStats(statsIntervalRef);
+    stopCfrUplink(cfrUplinkRef);
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   }, []);
@@ -55,9 +71,18 @@ export function useWebcam(
     const peer = new RTCPeerConnection();
     peerRef.current = peer;
 
-    for (const track of streamRef.current.getVideoTracks()) {
-      track.contentHint = "detail";
-      const sender = peer.addTrack(track, streamRef.current);
+    // Use the camera track directly for production-quality browser WebRTC.
+    // Canvas capture is timer-driven and Chromium throttles timers when the
+    // Brivva tab is backgrounded (e.g. while watching YouTube Studio), which
+    // collapsed the uplink to ~1fps in real tests. Source getSettings() shows
+    // the camera can provide 30fps, so preserve that native track here.
+    stopCfrUplink(cfrUplinkRef);
+    cfrUplinkRef.current = null;
+    const uplinkStream = streamRef.current;
+
+    for (const track of uplinkStream.getVideoTracks()) {
+      track.contentHint = "motion";
+      const sender = peer.addTrack(track, uplinkStream);
       await preferHighQuality(sender);
       preferH264(peer);
     }
@@ -68,11 +93,21 @@ export function useWebcam(
     await waitForIceGatheringComplete(peer);
     if (!isSocketOpen() || !peer.localDescription) return;
     sendSignalJson({ type: "webrtc:offer", sdp: peer.localDescription.sdp });
+    startMediaStats({
+      peer,
+      sourceStream: streamRef.current,
+      cfrUplink: cfrUplinkRef.current,
+      sendSignalJson,
+      intervalRef: statsIntervalRef,
+      isSocketOpen,
+    });
   }, [isSocketOpen, sendSignalJson]);
 
   const stopFrameStreaming = useCallback(() => {
     pendingLocalOfferRef.current = false;
     stopPeer(peerRef);
+    stopMediaStats(statsIntervalRef);
+    stopCfrUplink(cfrUplinkRef);
   }, []);
 
   const handleWebRtcMessage = useCallback((msg: unknown): boolean => {
@@ -96,9 +131,83 @@ export function useWebcam(
   };
 }
 
+type CfrUplink = {
+  stream: MediaStream;
+  getStats: () => { framesDrawn: number; framesPerSecond: number };
+  stop: () => void;
+};
+
 function stopPeer(ref: React.MutableRefObject<RTCPeerConnection | null>) {
   ref.current?.close();
   ref.current = null;
+}
+
+function stopCfrUplink(ref: React.MutableRefObject<CfrUplink | null>) {
+  ref.current?.stop();
+  ref.current = null;
+}
+
+function stopMediaStats(ref: React.MutableRefObject<number | null>) {
+  if (ref.current !== null) window.clearInterval(ref.current);
+  ref.current = null;
+}
+
+type StartMediaStatsArgs = {
+  peer: RTCPeerConnection;
+  sourceStream: MediaStream | null;
+  cfrUplink: CfrUplink | null;
+  sendSignalJson: (msg: WebRtcSignal) => void;
+  intervalRef: React.MutableRefObject<number | null>;
+  isSocketOpen: () => boolean;
+};
+
+function startMediaStats(args: StartMediaStatsArgs) {
+  stopMediaStats(args.intervalRef);
+  args.intervalRef.current = window.setInterval(() => {
+    void collectMediaStats(args).then((stats) => {
+      if (args.isSocketOpen()) {
+        args.sendSignalJson({ type: "client:media_stats", stats });
+      }
+      console.info("brivva media stats", stats);
+    });
+  }, 2000);
+}
+
+async function collectMediaStats(args: StartMediaStatsArgs): Promise<ClientMediaStats> {
+  const sourceTrack = args.sourceStream?.getVideoTracks()[0]?.getSettings();
+  const uplinkTrack = args.cfrUplink?.stream.getVideoTracks()[0]?.getSettings();
+  const outboundVideo = await collectOutboundVideoStats(args.peer);
+  return {
+    userAgent: navigator.userAgent,
+    sourceTrack,
+    uplinkTrack,
+    cfr: args.cfrUplink?.getStats(),
+    outboundVideo,
+  };
+}
+
+async function collectOutboundVideoStats(
+  peer: RTCPeerConnection,
+): Promise<Record<string, unknown> | undefined> {
+  const stats = await peer.getStats?.();
+  if (!stats) return undefined;
+  for (const report of stats.values()) {
+    if (report.type === "outbound-rtp" && report.kind === "video") {
+      return {
+        framesEncoded: report.framesEncoded,
+        framesPerSecond: report.framesPerSecond,
+        framesSent: report.framesSent,
+        frameWidth: report.frameWidth,
+        frameHeight: report.frameHeight,
+        qualityLimitationReason: report.qualityLimitationReason,
+        qualityLimitationDurations: report.qualityLimitationDurations,
+        encoderImplementation: report.encoderImplementation,
+        targetBitrate: report.targetBitrate,
+        totalEncodeTime: report.totalEncodeTime,
+      };
+    }
+  }
+  return undefined;
 }
 
 function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
@@ -147,7 +256,7 @@ function preferH264(peer: RTCPeerConnection | null) {
   if (!transceiver || !capabilities?.codecs || !transceiver.setCodecPreferences)
     return;
   const h264 = capabilities.codecs.filter(
-    (c) => c.mimeType.toLowerCase() === "video/h264",
+    (c) => c.mimeType.toLowerCase() === "video/h264" && !/packetization-mode=0/i.test(c.sdpFmtpLine ?? ""),
   );
   if (h264.length > 0) transceiver.setCodecPreferences(h264);
 }

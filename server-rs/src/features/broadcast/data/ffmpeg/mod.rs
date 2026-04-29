@@ -234,13 +234,19 @@ impl RtmpManager {
     /// buffer. FFmpeg receives these bytes through stdin, avoiding the old
     /// localhost UDP RTP bridge that dropped 4K bursts and corrupted frames.
     pub fn push_video_h264(&self, chunk: &[u8]) {
+        self.push_video_h264_at(chunk, Instant::now());
+    }
+
+    /// Push H.264 using the source media clock, not wall-clock arrival. WebRTC
+    /// packets can arrive in bursts; using arrival time makes RTMP speed up and
+    /// then buffer. RTP timestamps preserve the browser capture cadence.
+    pub fn push_video_h264_at(&self, chunk: &[u8], captured_at: Instant) {
         if chunk.is_empty() {
             return;
         }
-        let now = Instant::now();
         for stream in self.streams.values() {
             let mut buf = stream.buffers.video_h264.lock().unwrap();
-            buf.push_back((now, chunk.to_vec()));
+            buf.push_back((captured_at, chunk.to_vec()));
             while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
                 buf.pop_front();
             }

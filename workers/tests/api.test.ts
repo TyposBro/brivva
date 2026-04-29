@@ -1425,7 +1425,7 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
     expect(res.status).toBe(400);
   });
 
-  it("clones through Workers, persists the voice, and links it to the session (happy)", async () => {
+  it("clones through Workers, persists the voice, links it to the session, and marks it active (happy)", async () => {
     installFetchStub([
       {
         match: /api\.elevenlabs\.io\/v1\/voices\/add/,
@@ -1473,6 +1473,22 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
       session: { voice_id: string | null };
     };
     expect(linkedSession.session.voice_id).toBe(body.voice.id);
+
+    // Live TTS does not read session.voice_id directly; /internal/sessions
+    // joins the clone through users.active_voice_id so a setup-page re-record
+    // must flip the active pointer too.
+    const userRes = await call("/api/user?user_id=u-session-voice");
+    const user = (await userRes.json()) as { active_voice_id: string | null };
+    expect(user.active_voice_id).toBe(body.voice.id);
+
+    const bundleRes = await call(`/internal/sessions/${created.session.id}`, {
+      headers: { "X-Internal-Secret": env.INTERNAL_SECRET },
+    });
+    const bundle = (await bundleRes.json()) as {
+      voice: { id: string; elevenlabs_voice_id: string } | null;
+    };
+    expect(bundle.voice?.id).toBe(body.voice.id);
+    expect(bundle.voice?.elevenlabs_voice_id).toBe("el-session-voice-123");
   });
 
   it("rejects voice samples shorter than 30 seconds (sad)", async () => {
@@ -2472,7 +2488,7 @@ describe("POST /api/user/complete-onboarding", () => {
 });
 
 describe("POST /api/voices upsert behaviour", () => {
-  it("deletes prior ElevenLabs voice + row before creating a new one (happy)", async () => {
+  it("activates the replacement before deleting the prior ElevenLabs voice + row (happy)", async () => {
     const elCalls: Array<{ method: string; url: string }> = [];
     vi.stubGlobal(
       "fetch",
@@ -2539,6 +2555,9 @@ describe("POST /api/voices upsert behaviour", () => {
     expect(adds).toHaveLength(2);
     expect(deletes).toHaveLength(1);
     expect(deletes[0]!.url).toContain(firstVoice.elevenlabs_voice_id);
+    const addIndexes = elCalls.flatMap((x, i) => (/voices\/add/.test(x.url) ? [i] : []));
+    const deleteIdx = elCalls.findIndex((x) => x === deletes[0]);
+    expect(addIndexes[1]).toBeLessThan(deleteIdx);
 
     // Only the new voice remains + user's active_voice_id points at it.
     const list = await call("/api/voices?user_id=u-upsert");

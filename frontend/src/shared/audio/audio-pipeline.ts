@@ -19,7 +19,15 @@ export class AudioPipeline {
   }
 
   private captureMic(): Promise<MediaStream> {
-    return navigator.mediaDevices.getUserMedia({ audio: true });
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: SAMPLE_RATE,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
   }
 
   private createAnalyser(source: MediaStreamAudioSourceNode): AnalyserNode {

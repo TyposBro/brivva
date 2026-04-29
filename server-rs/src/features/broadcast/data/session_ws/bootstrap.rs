@@ -116,17 +116,22 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
         live_session_id.to_string(),
         ffmpeg_monitor_stop.clone(),
     );
-    // Watch for mid-session voice upserts. Workers computes the bundle's
-    // voice field from users.active_voice_id; this loop re-reads it and
-    // swaps live_session.selected_voice_id so the next TTS dispatch picks
-    // up the new clone without a session restart.
-    let _voice_refresher = spawn_active_voice_refresh(
-        workers_api.clone(),
-        sid.to_string(),
-        live_session_id.to_string(),
-        live_sessions,
-        ffmpeg_monitor_stop,
-    );
+    // Optional mid-session voice upsert watcher. It is useful only if a host
+    // re-records their voice while already live. Keep it off by default during
+    // live media work: the 5s poll adds local Workers load and is unnecessary
+    // for the normal launch flow where voice setup happens before Go Live.
+    if std::env::var("BRIVVA_ACTIVE_VOICE_REFRESH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let _voice_refresher = spawn_active_voice_refresh(
+            workers_api.clone(),
+            sid.to_string(),
+            live_session_id.to_string(),
+            live_sessions,
+            ffmpeg_monitor_stop,
+        );
+    }
     BootstrapOutcome::Continue
 }
 

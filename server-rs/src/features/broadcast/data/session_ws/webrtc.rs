@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::Message;
 use serde::Deserialize;
@@ -120,19 +121,38 @@ async fn forward_track_rtp(
 ) {
     tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
     let mut depacketizer = H264AnnexBDepacketizer::default();
+    let mut clock = VideoRtpClock::default();
     while let Ok((packet, _)) = track.read_rtp().await {
         let Some(annex_b) = depacketizer.depacketize(&packet) else {
             continue;
         };
+        let captured_at = clock.instant_for(packet.header.timestamp);
         let manager = live_sessions
             .get(&live_session_id)
             .and_then(|session| session.rtmp_manager.clone());
         let Some(manager) = manager else {
             break;
         };
-        manager.lock().await.push_video_h264(&annex_b);
+        manager.lock().await.push_video_h264_at(&annex_b, captured_at);
     }
     tracing::info!(live_session_id = %live_session_id, "webrtc video track ended");
+}
+
+#[derive(Default)]
+struct VideoRtpClock {
+    base_rtp_ts: Option<u32>,
+    base_instant: Option<Instant>,
+}
+
+impl VideoRtpClock {
+    const RTP_HZ: u64 = 90_000;
+
+    fn instant_for(&mut self, rtp_ts: u32) -> Instant {
+        let base_rtp_ts = *self.base_rtp_ts.get_or_insert(rtp_ts);
+        let base_instant = *self.base_instant.get_or_insert_with(Instant::now);
+        let delta_ticks = rtp_ts.wrapping_sub(base_rtp_ts) as u64;
+        base_instant + Duration::from_micros(delta_ticks.saturating_mul(1_000_000) / Self::RTP_HZ)
+    }
 }
 
 #[derive(Default)]
@@ -208,6 +228,14 @@ mod tests {
             0, 3, 0x67, 1, 2, 0, 2, 0x68, 3,
         ];
         assert!(payload_has_sps(&payload));
+    }
+
+    #[test]
+    fn video_rtp_clock_maps_90khz_ticks_to_wall_clock() {
+        let mut clock = VideoRtpClock::default();
+        let first = clock.instant_for(10_000);
+        let second = clock.instant_for(13_000);
+        assert_eq!(second.duration_since(first), Duration::from_micros(33_333));
     }
 
     #[test]

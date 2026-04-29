@@ -85,14 +85,22 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
     let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
-    if let Some("webrtc:offer") = json.get("type").and_then(|v| v.as_str()) {
-        match serde_json::from_value::<WebRtcOffer>(json) {
+    match json.get("type").and_then(|v| v.as_str()) {
+        Some("webrtc:offer") => match serde_json::from_value::<WebRtcOffer>(json) {
             Ok(offer) => handle_webrtc_offer(offer, live_sessions, live_session_id).await,
             Err(error) => tracing::warn!(
                 live_session_id = %live_session_id,
                 error = %error,
                 "invalid webrtc offer"
             ),
+        },
+        Some("client:media_stats") => {
+            tracing::info!(
+                live_session_id = %live_session_id,
+                stats = %json.get("stats").cloned().unwrap_or(serde_json::Value::Null),
+                "client media stats"
+            );
         }
+        _ => {}
     }
 }

@@ -143,27 +143,12 @@ app.post("/api/voices", async (c) => {
   }
 
   const user = await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
+  const prior = user.active_voice_id ? await db.getVoice(c.env.DB, user.active_voice_id) : null;
 
-  // Delete prior clone first — failure here shouldn't block a new clone
-  // (stale row is tolerable), but we try.
-  if (user.active_voice_id) {
-    const prior = await db.getVoice(c.env.DB, user.active_voice_id);
-    if (prior) {
-      try {
-        await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
-      } catch (e) {
-        console.warn(`[voices] failed to delete prior ElevenLabs voice: ${String(e)}`);
-      }
-      try {
-        await db.deleteVoiceRow(c.env.DB, prior.id);
-      } catch (e) {
-        // Historical sessions can FK this voice. Re-cloning must still work;
-        // leaving a stale local row is safer than failing POST /api/voices.
-        console.warn(`[voices] failed to delete prior local voice row: ${String(e)}`);
-      }
-    }
-  }
-
+  // Create + activate the replacement before deleting the old ElevenLabs
+  // voice. The media server joins TTS on users.active_voice_id and may still
+  // have the old clone cached mid-session; deleting first makes the next TTS
+  // request hit 404 and fall back to a default/random-sounding library voice.
   const { voice_id } = await el.cloneVoice(c.env.ELEVENLABS_API_KEY, {
     name: body.name,
     audioBase64: body.audio_base64,
@@ -176,6 +161,24 @@ app.post("/api/voices", async (c) => {
     sourceLang: body.source_lang ?? null,
   });
   await db.setActiveVoice(c.env.DB, body.user_id, voice.id);
+
+  // Best-effort cleanup after the new clone is active. Failure here must not
+  // roll back the replacement — stale local/remote rows are less harmful than
+  // pointing live TTS at a deleted voice.
+  if (prior) {
+    try {
+      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
+    } catch (e) {
+      console.warn(`[voices] failed to delete prior ElevenLabs voice: ${String(e)}`);
+    }
+    try {
+      await db.deleteVoiceRow(c.env.DB, prior.id);
+    } catch (e) {
+      // Historical sessions can FK this voice. Re-cloning must still work;
+      // leaving a stale local row is safer than failing POST /api/voices.
+      console.warn(`[voices] failed to delete prior local voice row: ${String(e)}`);
+    }
+  }
   return c.json(voice);
 });
 
@@ -590,6 +593,9 @@ app.post("/api/sessions/:id/voice", async (c) => {
     return c.json({ error: validation.error }, 400);
   }
 
+  const user = await db.getOrCreateUser(c.env.DB, body.user_id);
+  const prior = user.active_voice_id ? await db.getVoice(c.env.DB, user.active_voice_id) : null;
+
   const sourceLang = body.source_lang ?? session.source_lang;
   const voiceName = body.name?.trim() || `${session.title} Host Voice`;
   const { voice_id } = await el.cloneVoice(c.env.ELEVENLABS_API_KEY, {
@@ -603,8 +609,25 @@ app.post("/api/sessions/:id/voice", async (c) => {
     name: voiceName,
     sourceLang,
   });
+  await db.setActiveVoice(c.env.DB, body.user_id, voice.id);
   await db.updateSessionVoiceId(c.env.DB, params.id, voice.id);
   await db.updateSessionVoicePreset(c.env.DB, params.id, "cloned");
+
+  // /internal/sessions joins the live TTS voice from users.active_voice_id, not
+  // session.voice_id. Keep the active pointer in sync, then clean up the prior
+  // clone only after the new one is safely selected.
+  if (prior && prior.id !== voice.id) {
+    try {
+      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
+    } catch (e) {
+      console.warn(`[sessions/:id/voice] failed to delete prior ElevenLabs voice: ${String(e)}`);
+    }
+    try {
+      await db.deleteVoiceRow(c.env.DB, prior.id);
+    } catch (e) {
+      console.warn(`[sessions/:id/voice] failed to delete prior local voice row: ${String(e)}`);
+    }
+  }
   return c.json({ voice });
 });
 
