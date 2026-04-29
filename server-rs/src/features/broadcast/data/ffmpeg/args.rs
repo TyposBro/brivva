@@ -26,28 +26,20 @@ impl Default for VideoProfile {
 }
 
 impl VideoProfile {
-    pub fn from_capture(width: u32, height: u32, fps: u32) -> Self {
-        let fps = fps.clamp(30, 60);
-        let (max_width, max_height) = if width >= 3840 || height >= 2160 {
-            (3840, 2160)
-        } else if width >= 1920 || height >= 1080 {
-            (1920, 1080)
-        } else {
-            // 1080p30 is the production floor. If the browser reports a lower
-            // transient getSettings() value, keep the output contract at
-            // 1080p rather than silently downshifting the RTMP pipeline.
-            (1920, 1080)
-        };
-        let bitrate_kbps = match (max_width, max_height, fps) {
-            (3840, 2160, 50..=60) => 28_000,
-            (3840, 2160, _) => 18_000,
-            (1920, 1080, 50..=60) => 9_000,
-            (1920, 1080, _) => 6_000,
-            _ => 6_000,
-        };
+    pub fn from_capture(_width: u32, _height: u32, fps: u32) -> Self {
+        let input_fps = fps.clamp(30, 60);
+        // Launch-safe RTMP output is 1080p30. Browsers may capture 60fps (the
+        // latest Firefox/MacBook test did), but Fargate x264 1080p60 is too
+        // expensive and the H.264 copy path needs more work before YouTube can
+        // reliably start. Preserve the input cadence for demuxing, then output
+        // a stable 1080p30 stream.
+        let output_fps = 30;
+        let max_width = 1920;
+        let max_height = 1080;
+        let bitrate_kbps = 6_000;
         Self {
-            input_fps: fps,
-            output_fps: fps,
+            input_fps,
+            output_fps,
             max_width,
             max_height,
             bitrate_kbps,
@@ -113,17 +105,43 @@ pub(super) fn build_ffmpeg_args_with_profile(
         "0:v".into(),
         "-map".into(),
         "1:a".into(),
-        // The browser already hardware-encodes H.264 for WebRTC. Copy that
-        // elementary stream into the FLV/RTMP muxer instead of re-encoding in
-        // Fargate: the prod 1080p30 test proved libx264 `ultrafast` still ran
-        // below realtime (~0.8x), which backpressured audio and pulled browser
-        // outbound FPS down. `-r` before the raw H.264 input gives FFmpeg a
-        // constant input cadence for generated PTS; `copyts` keeps that clock
-        // stable through the muxer without spending CPU on pixels.
-        "-copyts".into(),
-        "-start_at_zero".into(),
+        // Own the output video clock for RTMP/YouTube. Copying browser H.264
+        // is cheaper, but live validation showed FFmpeg can restart mid-GOP
+        // and then receive slices before SPS/PPS ("non-existing PPS"), so
+        // YouTube never starts. Re-encode for the launch path; keep the
+        // lower-level drain/backpressure fixes and revisit copy once we can
+        // guarantee parameter sets/keyframes across restarts.
+        "-vf".into(),
+        format!(
+            "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+            profile.output_fps, profile.max_width, profile.max_height
+        ),
         "-c:v".into(),
-        "copy".into(),
+        "libx264".into(),
+        "-preset".into(),
+        "ultrafast".into(),
+        "-tune".into(),
+        "zerolatency".into(),
+        "-profile:v".into(),
+        "main".into(),
+        "-bf".into(),
+        "0".into(),
+        "-r".into(),
+        profile.output_fps.to_string(),
+        "-g".into(),
+        (profile.output_fps * 2).to_string(),
+        "-keyint_min".into(),
+        (profile.output_fps * 2).to_string(),
+        "-sc_threshold".into(),
+        "0".into(),
+        "-b:v".into(),
+        format!("{}k", profile.bitrate_kbps),
+        "-maxrate".into(),
+        format!("{}k", profile.maxrate_kbps),
+        "-bufsize".into(),
+        format!("{}k", profile.bufsize_kbps),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
         "-c:a".into(),
         "aac".into(),
         "-ac:a".into(),
@@ -305,17 +323,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_ffmpeg_args_copies_browser_h264_with_stable_clock() {
+    fn build_ffmpeg_args_reencodes_webrtc_h264_with_stable_clock() {
         let args = build_ffmpeg_args("/tmp/fifo_src", "rtmp://x/y");
         let joined = args.join(" ");
         assert!(joined.ends_with("rtmp://x/y"));
         assert!(joined.contains("-progress pipe:2 -stats_period 1"));
         assert!(joined.contains("-f h264"));
         assert!(joined.contains("-r 30 -i pipe:0"));
-        assert!(joined.contains("-copyts -start_at_zero -c:v copy"));
-        assert!(!joined.contains("-c:v libx264"));
-        assert!(!joined.contains("-vf fps="));
-        assert!(!joined.contains("-preset ultrafast"));
+        assert!(joined.contains(
+            "-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        ));
+        assert!(joined.contains("-c:v libx264"));
+        assert!(joined.contains("-preset ultrafast"));
+        assert!(joined.contains("-tune zerolatency"));
+        assert!(joined.contains("-bf 0"));
+        assert!(joined.contains("-b:v 3500k -maxrate 4500k -bufsize 9000k"));
+        assert!(joined.contains("-g 60"));
+        assert!(!joined.contains("-c:v copy"));
         assert!(!joined.contains("image2pipe"));
         assert!(!joined.contains("mjpeg"));
         assert!(!joined.contains("udp"));
@@ -370,13 +394,13 @@ mod tests {
     }
 
     #[test]
-    fn video_profile_preserves_4k60_when_available() {
+    fn video_profile_keeps_launch_rtmp_output_at_1080p30() {
         let profile = VideoProfile::from_capture(3840, 2160, 60);
         assert_eq!(profile.input_fps, 60);
-        assert_eq!(profile.output_fps, 60);
-        assert_eq!(profile.max_width, 3840);
-        assert_eq!(profile.max_height, 2160);
-        assert_eq!(profile.bitrate_kbps, 28_000);
+        assert_eq!(profile.output_fps, 30);
+        assert_eq!(profile.max_width, 1920);
+        assert_eq!(profile.max_height, 1080);
+        assert_eq!(profile.bitrate_kbps, 6_000);
     }
 
     #[test]
@@ -390,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn build_ffmpeg_args_uses_capture_clock_for_copy_profile() {
+    fn build_ffmpeg_args_uses_capture_clock_for_reencode_profile() {
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
             "rtmp://x/y",
@@ -398,9 +422,12 @@ mod tests {
         );
         let joined = args.join(" ");
         assert!(joined.contains("-r 60 -i pipe:0"));
-        assert!(joined.contains("-copyts -start_at_zero -c:v copy"));
-        assert!(!joined.contains("-b:v"));
-        assert!(!joined.contains("scale="));
+        assert!(joined.contains(
+            "-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        ));
+        assert!(joined.contains("-c:v libx264"));
+        assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
+        assert!(!joined.contains("-c:v copy"));
     }
 
     #[test]
