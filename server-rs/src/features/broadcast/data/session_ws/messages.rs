@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use std::time::Instant;
+
+use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::pipeline;
@@ -101,6 +104,34 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
                 "client media stats"
             );
         }
+        Some("debug:h264_annexb") if accepts_debug_h264() => {
+            if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                match base64::engine::general_purpose::STANDARD.decode(data) {
+                    Ok(h264) => push_debug_h264(live_sessions, live_session_id, h264).await,
+                    Err(error) => tracing::warn!(
+                        live_session_id = %live_session_id,
+                        error = %error,
+                        "invalid debug h264 payload"
+                    ),
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn accepts_debug_h264() -> bool {
+    matches!(
+        std::env::var("BRIVVA_ACCEPT_DEBUG_H264").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+async fn push_debug_h264(live_sessions: &LiveSessions, live_session_id: &str, h264: Vec<u8>) {
+    let rtmp_mgr = live_sessions
+        .get(live_session_id)
+        .and_then(|r| r.rtmp_manager.clone());
+    if let Some(mgr) = rtmp_mgr {
+        mgr.lock().await.push_video_h264_at(&h264, Instant::now());
     }
 }

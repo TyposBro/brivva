@@ -58,6 +58,7 @@ services:
       - SONIOX_API_KEY=smoke-soniox-key
       - ELEVENLABS_BASE_URL=http://elevenlabs-stub:9002
       - ELEVENLABS_API_KEY=smoke-eleven-key
+      - BRIVVA_ACCEPT_DEBUG_H264=1
     depends_on:
       - rtmp
       - workers-stub

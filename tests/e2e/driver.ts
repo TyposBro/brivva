@@ -5,7 +5,7 @@
 //   1. wait for server-rs /health
 //   2. mint HS256 JWT for smoke-user
 //   3. open WS to /api/session?session_id=SMOKE001
-//   4. for ~40s: push 20ms PCM sine frames + a JPEG every 2s
+//   4. for ~40s: push 20ms PCM sine frames + gated debug H.264 Annex-B NALs
 //   5. partway through streaming, ffprobe the translated RTMP output while
 //      the publisher is still alive (mediamtx unpublishes the path the
 //      moment the publisher disconnects, so post-close probing is racy)
@@ -16,7 +16,7 @@
 // Fails hard on any missing track. Intended for nightly CI + post-deploy.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:3000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:3000/api/session";
@@ -33,8 +33,8 @@ const PROBE_AT_MS = Number(process.env.PROBE_AT_MS ?? 20_000);
 const SAMPLE_RATE = 44_100;
 const FRAME_MS = 20;
 const SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_MS) / 1000;
-const JPEG_EVERY_MS = 2_000;
-const JPEG_PATH = "/tmp/smoke_frame.jpg";
+const VIDEO_FRAME_MS = 33;
+const H264_PATH = "/tmp/smoke_video.h264";
 
 // ── JWT (HS256) ──────────────────────────────────────────
 function b64url(input: string | Uint8Array): string {
@@ -79,23 +79,45 @@ function generateSineFrame(freqHz: number, phase: number): { pcm: Buffer; nextPh
   return { pcm: buf, nextPhase: p % (2 * Math.PI) };
 }
 
-function ensureJpeg(): Buffer {
-  if (existsSync(JPEG_PATH)) return readFileSync(JPEG_PATH);
-  const result = spawnSync(
-    "ffmpeg",
-    [
-      "-y",
-      "-f", "lavfi",
-      "-i", "color=c=blue:s=320x240:d=1",
-      "-frames:v", "1",
-      JPEG_PATH,
-    ],
-    { stdio: "inherit" },
-  );
-  if (result.status !== 0) {
-    writeFileSync(JPEG_PATH, Buffer.alloc(0));
+function ensureH264Nals(): Buffer[] {
+  if (!existsSync(H264_PATH)) {
+    const result = spawnSync(
+      "ffmpeg",
+      [
+        "-y",
+        "-f", "lavfi",
+        "-i", `testsrc2=size=320x240:rate=30:duration=${Math.ceil(STREAM_DURATION_MS / 1000) + 5}`,
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-g", "30",
+        "-keyint_min", "30",
+        "-sc_threshold", "0",
+        "-pix_fmt", "yuv420p",
+        "-f", "h264",
+        H264_PATH,
+      ],
+      { stdio: "inherit" },
+    );
+    if (result.status !== 0) throw new Error("failed to generate smoke H.264 fixture");
   }
-  return readFileSync(JPEG_PATH);
+  return splitAnnexBNals(readFileSync(H264_PATH));
+}
+
+function splitAnnexBNals(data: Buffer): Buffer[] {
+  const starts: number[] = [];
+  for (let i = 0; i < data.length - 3; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) starts.push(i);
+    else if (i < data.length - 4 && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) starts.push(i);
+  }
+  const nals: Buffer[] = [];
+  for (let i = 0; i < starts.length; i++) {
+    const end = starts[i + 1] ?? data.length;
+    nals.push(data.subarray(starts[i], end));
+  }
+  if (nals.length === 0) throw new Error("generated smoke H.264 fixture has no Annex-B NALs");
+  return nals;
 }
 
 // ── Health wait ──────────────────────────────────────────
@@ -132,20 +154,21 @@ async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSigna
     let probedStreams: ProbeStream[] = [];
     let probeError: string | null = null;
     let audioTimer: ReturnType<typeof setInterval> | null = null;
-    let jpegTimer: ReturnType<typeof setInterval> | null = null;
+    let videoTimer: ReturnType<typeof setInterval> | null = null;
     let stopTimer: ReturnType<typeof setTimeout> | null = null;
     let probeTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanup = () => {
       if (audioTimer) clearInterval(audioTimer);
-      if (jpegTimer) clearInterval(jpegTimer);
+      if (videoTimer) clearInterval(videoTimer);
       if (stopTimer) clearTimeout(stopTimer);
       if (probeTimer) clearTimeout(probeTimer);
     };
 
     ws.addEventListener("open", () => {
       console.log("[driver] WS open, streaming for", STREAM_DURATION_MS, "ms");
-      const jpeg = ensureJpeg();
+      const h264Nals = ensureH264Nals();
+      let h264Index = 0;
 
       audioTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
@@ -154,13 +177,14 @@ async function streamAudioVideo(wsUrl: string, rtmpUrl: string): Promise<WsSigna
         ws.send(pcm);
       }, FRAME_MS);
 
-      jpegTimer = setInterval(() => {
+      videoTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
+        const nal = h264Nals[h264Index++ % h264Nals.length];
         ws.send(JSON.stringify({
-          type: "face:frame",
-          data: jpeg.toString("base64"),
+          type: "debug:h264_annexb",
+          data: nal.toString("base64"),
         }));
-      }, JPEG_EVERY_MS);
+      }, VIDEO_FRAME_MS);
 
       probeTimer = setTimeout(() => {
         console.log(`[driver] probing RTMP mid-stream: ${rtmpUrl}`);
