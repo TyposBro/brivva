@@ -12,7 +12,7 @@ SERVICE="${SERVICE:-brivva}"
 PROJECT="${PROJECT:-brivva}"
 FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.1}"
 SERVER_BUILD_BASE_TAG="${SERVER_BUILD_BASE_TAG:-rust-1.88-slim-zigbuild-v1}"
-SERVER_RUNTIME_BASE_TAG="${SERVER_RUNTIME_BASE_TAG:-bookworm-ffmpeg-7.1.1-v1}"
+SERVER_RUNTIME_BASE_TAG="${SERVER_RUNTIME_BASE_TAG:-bookworm-ffmpeg-7.1.1-native-rtmp-v1}"
 TASK_FAMILY="${TASK_FAMILY:-$PROJECT}"
 ECS_CONTAINER="${ECS_CONTAINER:-server-rs}"
 
@@ -71,7 +71,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     SHA="$(git rev-parse HEAD)"
     IMAGE="$ECR_BASE/$PROJECT/server-rs:$SHA"
     LATEST_IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
-    FFMPEG_BASE_IMAGE="${FFMPEG_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-base:${FFMPEG_VERSION}-librtmp}"
+    FFMPEG_BASE_IMAGE="${FFMPEG_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-base:${FFMPEG_VERSION}-native-rtmp}"
     SERVER_BUILD_BASE_IMAGE="${SERVER_BUILD_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-build-base:${SERVER_BUILD_BASE_TAG}}"
     SERVER_RUNTIME_BASE_IMAGE="${SERVER_RUNTIME_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-runtime-base:${SERVER_RUNTIME_BASE_TAG}}"
 
@@ -87,7 +87,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
         aws ecr describe-images \
             --region "$AWS_REGION" \
             --repository-name "$PROJECT/ffmpeg-base" \
-            --image-ids "imageTag=${FFMPEG_VERSION}-librtmp" \
+            --image-ids "imageTag=${FFMPEG_VERSION}-native-rtmp" \
             --query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
             --output table
     fi
