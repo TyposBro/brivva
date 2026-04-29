@@ -20,11 +20,21 @@ use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_remote::TrackRemote;
 
+use crate::features::broadcast::data::ffmpeg::VideoProfile;
 use crate::features::broadcast::domain::LiveSessions;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct WebRtcOffer {
     pub sdp: String,
+    #[serde(rename = "videoProfile")]
+    pub video_profile: Option<ClientVideoProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ClientVideoProfile {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<u32>,
 }
 
 pub(super) async fn handle_webrtc_offer(
@@ -53,6 +63,7 @@ async fn accept_webrtc_video(
     live_sessions: &LiveSessions,
     live_session_id: &str,
 ) -> WebRtcResult<Arc<RTCPeerConnection>> {
+    apply_video_profile(&offer, live_sessions, live_session_id).await;
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media)?;
@@ -95,6 +106,36 @@ async fn accept_webrtc_video(
     }
 
     Ok(peer)
+}
+
+
+async fn apply_video_profile(
+    offer: &WebRtcOffer,
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+) {
+    let Some(client) = &offer.video_profile else { return };
+    let width = client.width.unwrap_or(1920).clamp(320, 3840);
+    let height = client.height.unwrap_or(1080).clamp(180, 2160);
+    let fps = client.fps.unwrap_or(30).clamp(10, 60);
+    let profile = VideoProfile::from_capture(width, height, fps);
+    let manager = live_sessions
+        .get(live_session_id)
+        .and_then(|session| session.rtmp_manager.clone());
+    if let Some(manager) = manager {
+        manager.lock().await.set_video_profile(profile);
+    }
+    tracing::info!(
+        live_session_id = %live_session_id,
+        capture_width = width,
+        capture_height = height,
+        capture_fps = fps,
+        input_fps = profile.input_fps,
+        output_fps = profile.output_fps,
+        output_width = profile.max_width,
+        output_height = profile.max_height,
+        "webrtc video profile applied"
+    );
 }
 
 fn webrtc_config() -> RTCConfiguration {

@@ -1,17 +1,71 @@
 use std::io::BufRead;
 
-/// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
-/// so tests can pin the command shape without spawning an FFmpeg child.
-pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String> {
-    let input_fps = std::env::var("BRIVVA_H264_INPUT_FPS")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|fps| (1..=60).contains(fps))
-        .unwrap_or(30);
-    build_ffmpeg_args_with_input_fps(audio_fifo, rtmp_url, input_fps)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoProfile {
+    pub input_fps: u32,
+    pub output_fps: u32,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub bitrate_kbps: u32,
+    pub maxrate_kbps: u32,
+    pub bufsize_kbps: u32,
 }
 
-fn build_ffmpeg_args_with_input_fps(audio_fifo: &str, rtmp_url: &str, input_fps: u32) -> Vec<String> {
+impl Default for VideoProfile {
+    fn default() -> Self {
+        Self {
+            input_fps: 30,
+            output_fps: 30,
+            max_width: 1920,
+            max_height: 1080,
+            bitrate_kbps: 3500,
+            maxrate_kbps: 4500,
+            bufsize_kbps: 9000,
+        }
+    }
+}
+
+impl VideoProfile {
+    pub fn from_capture(width: u32, height: u32, fps: u32) -> Self {
+        let fps = fps.clamp(10, 30);
+        let (max_width, max_height) = if width >= 1920 || height >= 1080 {
+            (1920, 1080)
+        } else if width >= 1280 || height >= 720 {
+            (1280, 720)
+        } else {
+            (width.max(640), height.max(360))
+        };
+        let bitrate_kbps = match (max_width, max_height, fps) {
+            (1920, 1080, 25..=30) => 3500,
+            (1920, 1080, _) => 2500,
+            (1280, 720, 25..=30) => 2200,
+            (1280, 720, _) => 1400,
+            _ => 1000,
+        };
+        Self {
+            input_fps: fps,
+            output_fps: fps,
+            max_width,
+            max_height,
+            bitrate_kbps,
+            maxrate_kbps: bitrate_kbps + 1000,
+            bufsize_kbps: (bitrate_kbps + 1000) * 2,
+        }
+    }
+}
+
+/// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
+/// so tests can pin the command shape without spawning an FFmpeg child.
+#[cfg(test)]
+pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String> {
+    build_ffmpeg_args_with_profile(audio_fifo, rtmp_url, VideoProfile::default())
+}
+
+pub(super) fn build_ffmpeg_args_with_profile(
+    audio_fifo: &str,
+    rtmp_url: &str,
+    profile: VideoProfile,
+) -> Vec<String> {
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".into(),
         "-loglevel".into(),
@@ -33,11 +87,11 @@ fn build_ffmpeg_args_with_input_fps(audio_fifo: &str, rtmp_url: &str, input_fps:
         "-f".into(),
         "h264".into(),
         // Raw H.264 is timestampless, so FFmpeg needs the expected input rate.
-        // Default to 30fps for the native camera WebRTC path. Override with
-        // BRIVVA_H264_INPUT_FPS=15 only for browsers/devices proven to send
-        // 15fps.
+        // The browser sends its actual capture profile before WebRTC starts;
+        // 720p15 cameras stay 15fps, while 4K/60 sources are normalized to
+        // Brivva's realtime 1080p30 ceiling.
         "-r".into(),
-        input_fps.to_string(),
+        profile.input_fps.to_string(),
         "-i".into(),
         "pipe:0".into(),
         "-thread_queue_size".into(),
@@ -64,7 +118,10 @@ fn build_ffmpeg_args_with_input_fps(audio_fifo: &str, rtmp_url: &str, input_fps:
         // YouTube buffers. Production should replace this with one shared
         // hardware/GPU encode, but the live path must be realtime now.
         "-vf".into(),
-        "fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease".into(),
+        format!(
+            "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+            profile.output_fps, profile.max_width, profile.max_height
+        ),
         "-c:v".into(),
         "libx264".into(),
         "-preset".into(),
@@ -76,19 +133,19 @@ fn build_ffmpeg_args_with_input_fps(audio_fifo: &str, rtmp_url: &str, input_fps:
         "-bf".into(),
         "0".into(),
         "-r".into(),
-        "30".into(),
+        profile.output_fps.to_string(),
         "-g".into(),
-        "60".into(),
+        (profile.output_fps * 2).to_string(),
         "-keyint_min".into(),
-        "60".into(),
+        (profile.output_fps * 2).to_string(),
         "-sc_threshold".into(),
         "0".into(),
         "-b:v".into(),
-        "3500k".into(),
+        format!("{}k", profile.bitrate_kbps),
         "-maxrate".into(),
-        "4500k".into(),
+        format!("{}k", profile.maxrate_kbps),
         "-bufsize".into(),
-        "9000k".into(),
+        format!("{}k", profile.bufsize_kbps),
         "-pix_fmt".into(),
         "yuv420p".into(),
         "-c:a".into(),
@@ -243,6 +300,40 @@ mod tests {
         assert!(joined.contains("-muxdelay 0"));
         assert!(joined.contains("-muxpreload 0"));
         assert!(joined.contains("-flush_packets 1"));
+    }
+
+    #[test]
+    fn video_profile_caps_4k60_to_1080p30() {
+        let profile = VideoProfile::from_capture(3840, 2160, 60);
+        assert_eq!(profile.input_fps, 30);
+        assert_eq!(profile.output_fps, 30);
+        assert_eq!(profile.max_width, 1920);
+        assert_eq!(profile.max_height, 1080);
+        assert_eq!(profile.bitrate_kbps, 3500);
+    }
+
+    #[test]
+    fn video_profile_preserves_720p15_shape() {
+        let profile = VideoProfile::from_capture(1280, 720, 15);
+        assert_eq!(profile.input_fps, 15);
+        assert_eq!(profile.output_fps, 15);
+        assert_eq!(profile.max_width, 1280);
+        assert_eq!(profile.max_height, 720);
+        assert_eq!(profile.bitrate_kbps, 1400);
+    }
+
+    #[test]
+    fn build_ffmpeg_args_uses_adaptive_video_profile() {
+        let args = build_ffmpeg_args_with_profile(
+            "/tmp/fifo",
+            "rtmp://x/y",
+            VideoProfile::from_capture(1280, 720, 15),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-r 15 -i pipe:0"));
+        assert!(joined.contains("fps=15,scale='min(1280,iw)':'min(720,ih)'"));
+        assert!(joined.contains("-g 30 -keyint_min 30"));
+        assert!(joined.contains("-b:v 1400k"));
     }
 
     #[test]

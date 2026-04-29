@@ -20,10 +20,10 @@ mod drain;
 mod mixer;
 mod orphan;
 
-pub use args::{drain_stderr_lines, redact_rtmp_secrets};
+pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
-use args::build_ffmpeg_args;
+use args::build_ffmpeg_args_with_profile;
 use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
 use crate::features::broadcast::domain::SessionMetrics;
@@ -121,6 +121,7 @@ struct RtmpStream {
 
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
+    video_profile: VideoProfile,
     /// Optional billing counters. `None` in unit tests / paths that don't
     /// care about metrics; `Some` when the session wires one via
     /// `set_metrics`. Cloned into each drain thread so increments stay
@@ -190,7 +191,36 @@ impl RtmpManager {
     pub fn new() -> Self {
         Self {
             streams: HashMap::new(),
+            video_profile: VideoProfile::default(),
             metrics: None,
+        }
+    }
+
+    pub fn set_video_profile(&mut self, profile: VideoProfile) {
+        if self.video_profile == profile {
+            return;
+        }
+        tracing::info!(
+            input_fps = profile.input_fps,
+            output_fps = profile.output_fps,
+            max_width = profile.max_width,
+            max_height = profile.max_height,
+            bitrate_kbps = profile.bitrate_kbps,
+            "ffmpeg video profile updated for host camera"
+        );
+        self.video_profile = profile;
+        for (id, stream) in &mut self.streams {
+            if stream.stop_flag.load(Ordering::Acquire) {
+                continue;
+            }
+            tracing::info!(
+                stream_id = %id,
+                lang = %stream.lang,
+                "ffmpeg restarting to apply host video profile"
+            );
+            if let Err(e) = stream.child.kill() {
+                tracing::warn!(stream_id = %id, error = %e, "ffmpeg profile-restart kill failed");
+            }
         }
     }
 
@@ -457,7 +487,7 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        let ffmpeg_args = build_ffmpeg_args(&audio_fifo, &args.rtmp_url);
+        let ffmpeg_args = build_ffmpeg_args_with_profile(&audio_fifo, &args.rtmp_url, self.video_profile);
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,

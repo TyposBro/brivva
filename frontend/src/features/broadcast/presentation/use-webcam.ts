@@ -5,8 +5,14 @@ const HOST_VIDEO_MAX_HEIGHT = 1080;
 const HOST_VIDEO_FPS = 30;
 const HOST_VIDEO_MAX_BITRATE_BPS = 6_000_000;
 
+type VideoProfile = {
+  width: number;
+  height: number;
+  fps: number;
+};
+
 type WebRtcSignal =
-  | { type: "webrtc:offer"; sdp: string }
+  | { type: "webrtc:offer"; sdp: string; videoProfile: VideoProfile }
   | { type: "client:media_stats"; stats: ClientMediaStats };
 
 type WebRtcAnswer = { type: "webrtc:answer"; sdp: string };
@@ -50,9 +56,9 @@ export function useWebcam(
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: HOST_VIDEO_MAX_WIDTH, max: HOST_VIDEO_MAX_WIDTH },
-          height: { ideal: HOST_VIDEO_MAX_HEIGHT, max: HOST_VIDEO_MAX_HEIGHT },
-          frameRate: { ideal: HOST_VIDEO_FPS, max: HOST_VIDEO_FPS },
+          width: { ideal: HOST_VIDEO_MAX_WIDTH },
+          height: { ideal: HOST_VIDEO_MAX_HEIGHT },
+          frameRate: { ideal: HOST_VIDEO_FPS },
           facingMode: "user",
         },
       });
@@ -103,7 +109,11 @@ export function useWebcam(
     pendingLocalOfferRef.current = true;
     await waitForIceGatheringComplete(peer);
     if (!isSocketOpen() || !peer.localDescription) return;
-    sendSignalJson({ type: "webrtc:offer", sdp: peer.localDescription.sdp });
+    sendSignalJson({
+      type: "webrtc:offer",
+      sdp: peer.localDescription.sdp,
+      videoProfile: readVideoProfile(streamRef.current),
+    });
     startMediaStats({
       peer,
       sourceStream: streamRef.current,
@@ -141,6 +151,15 @@ export function useWebcam(
     stopFrameStreaming,
     handleWebRtcMessage,
   };
+}
+
+
+function readVideoProfile(stream: MediaStream | null): VideoProfile {
+  const settings = stream?.getVideoTracks()[0]?.getSettings();
+  const width = Math.round(Number(settings?.width) || HOST_VIDEO_MAX_WIDTH);
+  const height = Math.round(Number(settings?.height) || HOST_VIDEO_MAX_HEIGHT);
+  const fps = Math.round(Number(settings?.frameRate) || HOST_VIDEO_FPS);
+  return { width, height, fps };
 }
 
 type CfrUplink = {
