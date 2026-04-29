@@ -140,9 +140,7 @@ fn drain_next_h264_live(
         buf.pop_front();
     }
 
-    let Some((ts, _)) = buf.front() else {
-        return None;
-    };
+    let (ts, _) = buf.front()?;
     if *ts + delay <= now {
         let (_, packet) = buf.pop_front().unwrap();
         Some(packet)
