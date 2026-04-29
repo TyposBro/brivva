@@ -1,9 +1,7 @@
 name: Deploy
 
 on:
-  push:
-    branches: [prod]
-  workflow_dispatch: # manual re-deploy from the Actions tab
+  workflow_dispatch: # manual full-stack re-deploy from the Actions tab
 
 concurrency:
   group: deploy-prod
