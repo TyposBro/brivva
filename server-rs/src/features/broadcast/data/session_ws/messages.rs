@@ -5,6 +5,7 @@ use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::pipeline;
+use crate::features::broadcast::data::session_log::SessionLogEmitter;
 use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
 
 use super::webrtc::{WebRtcOffer, handle_webrtc_offer};
@@ -15,6 +16,7 @@ pub(super) struct BinaryArgs<'a> {
     pub live_session_id: &'a str,
     pub source_lang: &'a Lang,
     pub audio_tx: &'a mut Option<mpsc::Sender<Vec<u8>>>,
+    pub session_log: &'a SessionLogEmitter,
 }
 
 pub(super) fn handle_binary(args: BinaryArgs<'_>) {
@@ -24,6 +26,7 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         live_session_id,
         source_lang,
         audio_tx,
+        session_log,
     } = args;
     if audio_tx.is_none() {
         *audio_tx = Some(spawn_stt_pipeline(
@@ -31,6 +34,7 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
             live_session_id,
             source_lang,
         ));
+        session_log.info("server.first_audio_received", serde_json::json!({}));
     }
     if let Some(tx) = audio_tx.as_ref()
         && let Err(error) = tx.try_send(data.clone())
@@ -84,7 +88,12 @@ fn spawn_stt_pipeline(
     tx
 }
 
-pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_session_id: &str) {
+pub(super) async fn handle_text(
+    text: &str,
+    live_sessions: &LiveSessions,
+    live_session_id: &str,
+    session_log: &SessionLogEmitter,
+) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
@@ -102,12 +111,21 @@ pub(super) async fn handle_text(text: &str, live_sessions: &LiveSessions, live_s
                 .get("stats")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            session_log.debug(
+                "server.client_media_stats",
+                serde_json::json!({ "stats": stats.clone() }),
+            );
             tracing::info!(
                 live_session_id = %live_session_id,
                 stats = %stats,
                 "client media stats"
             );
             for alert in media_quality_alerts(&stats) {
+                session_log.warn(
+                    "server.media_quality_warning",
+                    alert.clone(),
+                    serde_json::json!({ "alert": alert, "stats": stats.clone() }),
+                );
                 tracing::warn!(
                     live_session_id = %live_session_id,
                     alert = %alert,

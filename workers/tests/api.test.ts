@@ -48,6 +48,23 @@ async function seedUser(id: string): Promise<void> {
     .run();
 }
 
+async function seedSession(id: string, userId: string): Promise<void> {
+  await seedUser(userId);
+  await env.DB.prepare(
+    "INSERT INTO sessions (id, user_id, title, source_lang, target_langs, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(
+      id,
+      userId,
+      "Loggable",
+      "en",
+      '["ja"]',
+      "setup",
+      Math.floor(Date.now() / 1000),
+    )
+    .run();
+}
+
 async function call(path: string, init?: RequestInit): Promise<Response> {
   const url = new URL(path, "https://test.local");
   return await app.fetch(new Request(url, init), env);
@@ -70,11 +87,16 @@ function installFetchStub(calls: StubCall[]): void {
           : input instanceof URL
             ? input.toString()
             : input.url;
-      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
       for (let i = 0; i < calls.length; i++) {
         if (used.has(i)) continue;
         const c = calls[i];
-        if (c.match.test(url) && (!c.method || c.method.toUpperCase() === method)) {
+        if (
+          c.match.test(url) &&
+          (!c.method || c.method.toUpperCase() === method)
+        ) {
           used.add(i);
           return c.reply();
         }
@@ -130,6 +152,138 @@ describe("OpenAPI docs", () => {
     const html = await res.text();
     expect(html).toContain("SwaggerUIBundle");
     expect(html).toContain("/openapi.json");
+  });
+});
+
+describe("session log ingestion", () => {
+  it("POST /api/session-logs/client is disabled when the flag is off (happy)", async () => {
+    await seedSession("log-s1", "log-u1");
+    const res = await call("/api/session-logs/client?user_id=log-u1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events: [
+          {
+            session_id: "log-s1",
+            source: "frontend",
+            level: "info",
+            event: "frontend.connected",
+            fields: { width: 1920 },
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: 0, disabled: true });
+  });
+
+  it("POST /api/session-logs/client stores events when enabled (happy)", async () => {
+    await seedSession("log-s2", "log-u2");
+    env.SESSION_LOGS_ENABLED = "1";
+    const res = await call("/api/session-logs/client?user_id=log-u2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events: [
+          {
+            session_id: "log-s2",
+            live_session_id: "LIVE01",
+            source: "frontend",
+            level: "warn",
+            event: "webrtc.disconnected",
+            message: "ICE disconnected",
+            fields: { stream_key: "secret", fps: 30 },
+            ts_ms: 1234,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: 1, disabled: false });
+
+    const exportRes = await call(
+      "/api/sessions/log-s2/logs.ndjson?user_id=log-u2",
+    );
+    expect(exportRes.status).toBe(200);
+    const lines = (await exportRes.text()).trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const row = JSON.parse(lines[0]) as {
+      event: string;
+      fields: Record<string, unknown>;
+    };
+    expect(row.event).toBe("webrtc.disconnected");
+    expect(row.fields.stream_key).toBe("[redacted]");
+    env.SESSION_LOGS_ENABLED = "0";
+  });
+
+  it("POST /api/session-logs/client rejects mixed-session batches (sad)", async () => {
+    await seedSession("log-s3", "log-u3");
+    env.SESSION_LOGS_ENABLED = "1";
+    const res = await call("/api/session-logs/client?user_id=log-u3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events: [
+          {
+            session_id: "log-s3",
+            source: "frontend",
+            level: "info",
+            event: "ok",
+          },
+          {
+            session_id: "other",
+            source: "frontend",
+            level: "info",
+            event: "bad",
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /internal/session-logs stores server-rs events when enabled (happy)", async () => {
+    await seedSession("log-s4", "log-u4");
+    env.SESSION_LOGS_ENABLED = "1";
+    const res = await call("/internal/session-logs", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        events: [
+          {
+            session_id: "log-s4",
+            live_session_id: "LIVE04",
+            source: "server-rs",
+            level: "info",
+            event: "server.ws_accepted",
+            fields: { rtmp_url: "rtmps://secret.example/live" },
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const exportRes = await call(
+      "/api/sessions/log-s4/logs.ndjson?user_id=log-u4",
+    );
+    const row = JSON.parse((await exportRes.text()).trim()) as {
+      source: string;
+      fields: Record<string, unknown>;
+    };
+    expect(row.source).toBe("server-rs");
+    expect(row.fields.rtmp_url).toBe("[redacted]");
+  });
+
+  it("POST /internal/session-logs requires internal secret (sad)", async () => {
+    const res = await call("/internal/session-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events: [] }),
+    });
+    expect(res.status).toBe(401);
   });
 });
 
@@ -205,7 +359,14 @@ describe("POST /api/sessions — voice source_lang guard", () => {
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-match", "u-match", "el-match", "Aziz", "ko", Math.floor(Date.now() / 1000))
+      .bind(
+        "v-match",
+        "u-match",
+        "el-match",
+        "Aziz",
+        "ko",
+        Math.floor(Date.now() / 1000),
+      )
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-match", "u-match")
@@ -229,7 +390,14 @@ describe("POST /api/sessions — voice source_lang guard", () => {
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-mismatch", "u-mismatch", "el-mismatch", "Aziz", "en", Math.floor(Date.now() / 1000))
+      .bind(
+        "v-mismatch",
+        "u-mismatch",
+        "el-mismatch",
+        "Aziz",
+        "en",
+        Math.floor(Date.now() / 1000),
+      )
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-mismatch", "u-mismatch")
@@ -270,7 +438,14 @@ describe("POST /api/sessions — voice source_lang guard", () => {
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-legacy", "u-legacy", "el-legacy", "Aziz", null, Math.floor(Date.now() / 1000))
+      .bind(
+        "v-legacy",
+        "u-legacy",
+        "el-legacy",
+        "Aziz",
+        null,
+        Math.floor(Date.now() / 1000),
+      )
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-legacy", "u-legacy")
@@ -461,7 +636,11 @@ describe("POST /api/sessions — defaults + clamping", () => {
 
 async function seedYoutubeUser(
   id: string,
-  opts: { accessToken?: string; refreshToken?: string; expiresAt?: number } = {},
+  opts: {
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAt?: number;
+  } = {},
 ): Promise<void> {
   await seedUser(id);
   const access = opts.accessToken ?? "yt-access-token";
@@ -804,7 +983,9 @@ describe("DELETE /api/sessions/:id soft-ends the session (happy)", () => {
   });
 
   it("DELETE on a missing session returns 200 (idempotent — server-rs may race the FE)", async () => {
-    const res = await call("/api/sessions/does-not-exist", { method: "DELETE" });
+    const res = await call("/api/sessions/does-not-exist", {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("ended");
@@ -895,7 +1076,9 @@ describe("POST /api/credentials", () => {
 
 describe("DELETE /api/credentials", () => {
   it("requires both user_id and platform (sad)", async () => {
-    const res = await call("/api/credentials?user_id=u-1", { method: "DELETE" });
+    const res = await call("/api/credentials?user_id=u-1", {
+      method: "DELETE",
+    });
     expect(res.status).toBe(400);
   });
 
@@ -965,7 +1148,9 @@ describe("DELETE /api/voices/:id", () => {
           init?.method ?? (input instanceof Request ? input.method : "GET")
         ).toUpperCase();
         if (/voices\/add/.test(url)) {
-          return new Response(JSON.stringify({ voice_id: "el-del" }), { status: 200 });
+          return new Response(JSON.stringify({ voice_id: "el-del" }), {
+            status: 200,
+          });
         }
         if (method === "DELETE") return new Response("", { status: 200 });
         throw new Error(`unstubbed: ${method} ${url}`);
@@ -1014,13 +1199,15 @@ describe("/internal/* authentication", () => {
   });
 
   it("GET /internal/voices/:id returns the voice row when authed (happy)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-iv", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-iv", Math.floor(Date.now() / 1000))
+      .run();
     const id = crypto.randomUUID();
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(id, "u-iv", "el-internal", "V", Math.floor(Date.now() / 1000)).run();
+    )
+      .bind(id, "u-iv", "el-internal", "V", Math.floor(Date.now() / 1000))
+      .run();
 
     const res = await call(`/internal/voices/${id}`, {
       headers: { "X-Internal-Secret": env.INTERNAL_SECRET },
@@ -1048,9 +1235,9 @@ describe("/internal/* authentication", () => {
     // The bundle must track active_voice_id so Fargate dispatch picks up
     // the new voice without restarting the session.
     const ts = Math.floor(Date.now() / 1000);
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-voice-swap", ts).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-voice-swap", ts)
+      .run();
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
@@ -1101,9 +1288,9 @@ describe("/internal/* authentication", () => {
   });
 
   it("GET /internal/sessions/:id returns voice=null when the owner has no active clone (edge)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-no-voice", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-no-voice", Math.floor(Date.now() / 1000))
+      .run();
     const createRes = await call("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1246,7 +1433,12 @@ describe("GET /auth/google/callback 500 path", () => {
         method: "POST",
         reply: () =>
           new Response(
-            JSON.stringify({ access_token: "A", expires_in: 60, token_type: "Bearer", scope: "o" }),
+            JSON.stringify({
+              access_token: "A",
+              expires_in: 60,
+              token_type: "Bearer",
+              scope: "o",
+            }),
             { status: 200 },
           ),
       },
@@ -1292,7 +1484,9 @@ describe("GET /auth/youtube/callback happy path (fetch-stubbed)", () => {
         reply: () =>
           new Response(
             JSON.stringify({
-              items: [{ id: "UC-test-channel", snippet: { title: "Test Channel" } }],
+              items: [
+                { id: "UC-test-channel", snippet: { title: "Test Channel" } },
+              ],
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },
           ),
@@ -1503,7 +1697,9 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
         target_langs: ["en"],
       }),
     });
-    const { session } = (await sessionRes.json()) as { session: { id: string } };
+    const { session } = (await sessionRes.json()) as {
+      session: { id: string };
+    };
     const res = await call(`/api/sessions/${session.id}/voice`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1576,7 +1772,9 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
         target_langs: ["en"],
       }),
     });
-    const { session } = (await sessionRes.json()) as { session: { id: string } };
+    const { session } = (await sessionRes.json()) as {
+      session: { id: string };
+    };
     const res = await call(`/api/sessions/${session.id}/voice`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1589,7 +1787,9 @@ describe("POST /api/sessions/:id/voice (Workers-owned session voice clone)", () 
     expect(res.status).toBe(200);
     expect(seenLabels).toBe(JSON.stringify({ language: "ko" }));
 
-    const body = (await res.json()) as { voice: { source_lang: string | null } };
+    const body = (await res.json()) as {
+      voice: { source_lang: string | null };
+    };
     expect(body.voice.source_lang).toBe("ko");
   });
 });
@@ -1659,13 +1859,18 @@ describe("GET /auth/google (happy)", () => {
     const location = res.headers.get("location") ?? "";
     expect(location).toContain("accounts.google.com");
     expect(location).toContain("scope=openid+email+profile");
-    expect(location).toContain(encodeURIComponent(env.GOOGLE_SIGNIN_REDIRECT_URI));
+    expect(location).toContain(
+      encodeURIComponent(env.GOOGLE_SIGNIN_REDIRECT_URI),
+    );
   });
 
   it("DEV_AUTH_BYPASS=true mints JWT and skips Google round-trip", async () => {
     const url = new URL("/auth/google", "https://test.local");
     const devEnv = { ...env, DEV_AUTH_BYPASS: "true" };
-    const res = await app.fetch(new Request(url, { redirect: "manual" }), devEnv);
+    const res = await app.fetch(
+      new Request(url, { redirect: "manual" }),
+      devEnv,
+    );
     expect(res.status).toBe(302);
     const location = res.headers.get("location") ?? "";
     // Must go straight to the FE, never to accounts.google.com.
@@ -1693,7 +1898,10 @@ describe("GET /auth/google (happy)", () => {
   it("DEV_AUTH_BYPASS=false keeps the real Google flow intact", async () => {
     const url = new URL("/auth/google", "https://test.local");
     const devEnv = { ...env, DEV_AUTH_BYPASS: "false" };
-    const res = await app.fetch(new Request(url, { redirect: "manual" }), devEnv);
+    const res = await app.fetch(
+      new Request(url, { redirect: "manual" }),
+      devEnv,
+    );
     expect(res.status).toBe(302);
     // Strict "true" check — any other value falls through to real OAuth.
     expect(res.headers.get("location") ?? "").toContain("accounts.google.com");
@@ -1815,7 +2023,10 @@ describe("POST /auth/grip + /auth/tiktok", () => {
       }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { platform: string; display_name: string };
+    const body = (await res.json()) as {
+      platform: string;
+      display_name: string;
+    };
     expect(body.platform).toBe("tiktok");
     expect(body.display_name).toContain("tiktok:");
   });
@@ -2212,9 +2423,9 @@ describe("GET /api/billing/summary", () => {
   });
 
   it("aggregates usage across multiple sessions of one user (happy)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-agg", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-agg", Math.floor(Date.now() / 1000))
+      .run();
 
     const mkSession = async (titles: string) => {
       const res = await call("/api/sessions", {
@@ -2264,9 +2475,9 @@ describe("GET /api/billing/summary", () => {
 
 describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", () => {
   it("GET returns zeros until metrics are PATCHed (happy)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-usage", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-usage", Math.floor(Date.now() / 1000))
+      .run();
     const create = await call("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2310,9 +2521,9 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
   });
 
   it("PATCH merges per-lang outputs without clobbering prior langs (edge)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-merge", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-merge", Math.floor(Date.now() / 1000))
+      .run();
     const create = await call("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2382,7 +2593,8 @@ describe("POST /stripe/webhook", () => {
       new TextEncoder().encode(payload),
     );
     let out = "";
-    for (const byte of new Uint8Array(sig)) out += byte.toString(16).padStart(2, "0");
+    for (const byte of new Uint8Array(sig))
+      out += byte.toString(16).padStart(2, "0");
     return out;
   }
 
@@ -2505,12 +2717,18 @@ describe("POST /api/voices upsert behaviour", () => {
         ).toUpperCase();
         elCalls.push({ method, url });
         if (/api\.elevenlabs\.io\/v1\/voices\/add/.test(url)) {
-          return new Response(JSON.stringify({ voice_id: `el-${elCalls.length}` }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          return new Response(
+            JSON.stringify({ voice_id: `el-${elCalls.length}` }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         }
-        if (/api\.elevenlabs\.io\/v1\/voices\//.test(url) && method === "DELETE") {
+        if (
+          /api\.elevenlabs\.io\/v1\/voices\//.test(url) &&
+          method === "DELETE"
+        ) {
           return new Response("", { status: 200 });
         }
         throw new Error(`unstubbed fetch: ${method} ${url}`);
@@ -2556,7 +2774,9 @@ describe("POST /api/voices upsert behaviour", () => {
     expect(adds).toHaveLength(2);
     expect(deletes).toHaveLength(1);
     expect(deletes[0]!.url).toContain(firstVoice.elevenlabs_voice_id);
-    const addIndexes = elCalls.flatMap((x, i) => (/voices\/add/.test(x.url) ? [i] : []));
+    const addIndexes = elCalls.flatMap((x, i) =>
+      /voices\/add/.test(x.url) ? [i] : [],
+    );
     const deleteIdx = elCalls.findIndex((x) => x === deletes[0]);
     expect(addIndexes[1]).toBeLessThan(deleteIdx);
 
@@ -2651,7 +2871,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=20`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=20`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
@@ -2663,7 +2885,11 @@ describe("GET /api/sessions/:id/quote", () => {
     expect(body.estimated_cost_usd).toBe(90); // 60 × 1.5
     expect(body.per_output_minute_usd).toBe(1.5);
     expect(body.breakdown).toHaveLength(3);
-    expect(body.breakdown.map((b) => b.lang).sort()).toEqual(["en", "ja", "zh"]);
+    expect(body.breakdown.map((b) => b.lang).sort()).toEqual([
+      "en",
+      "ja",
+      "zh",
+    ]);
     for (const item of body.breakdown) {
       expect(item.minutes).toBe(20);
       expect(item.cost_usd).toBe(30); // 20 × 1.5
@@ -2687,7 +2913,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=30`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
@@ -2713,7 +2941,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=30`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
@@ -2728,15 +2958,22 @@ describe("GET /api/sessions/:id/quote", () => {
   it("user with an active voice clone receives a finite quote (happy)", async () => {
     // User onboarded + has cloned their voice. Rate is voice-agnostic, but
     // this guards against a regression where the handler branches on voice.
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-voiced", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-voiced", Math.floor(Date.now() / 1000))
+      .run();
     // Seed a real voice row + attach it so the FK holds. source_lang matches
     // the session's source_lang below so the mismatch guard stays silent.
     await env.DB.prepare(
       "INSERT INTO voices (id, user_id, elevenlabs_voice_id, name, source_lang, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind("v-voiced-1", "u-voiced", "el-voiced-1", "Aziz", "ko", Math.floor(Date.now() / 1000))
+      .bind(
+        "v-voiced-1",
+        "u-voiced",
+        "el-voiced-1",
+        "Aziz",
+        "ko",
+        Math.floor(Date.now() / 1000),
+      )
       .run();
     await env.DB.prepare("UPDATE users SET active_voice_id = ? WHERE id = ?")
       .bind("v-voiced-1", "u-voiced")
@@ -2754,7 +2991,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=30`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { estimated_cost_usd: number };
     expect(Number.isFinite(body.estimated_cost_usd)).toBe(true);
@@ -2764,9 +3003,9 @@ describe("GET /api/sessions/:id/quote", () => {
   it("fresh user without an active voice still gets a finite quote (no null)", async () => {
     // Reproduces the production bug: a user with no active_voice_id opens
     // the quote modal. Response must be a real number, not null/undefined.
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-fresh", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-fresh", Math.floor(Date.now() / 1000))
+      .run();
     const createRes = await call("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2779,7 +3018,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=30`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=30`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { estimated_cost_usd: number | null };
     expect(body.estimated_cost_usd).not.toBeNull();
@@ -2801,7 +3042,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=10`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=10`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
@@ -2824,7 +3067,9 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=180`);
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=180`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       output_minutes: number;
@@ -2850,7 +3095,9 @@ describe("GET /api/sessions/:id/quote", () => {
     const missing = await call(`/api/sessions/${session.id}/quote`);
     expect(missing.status).toBe(400);
 
-    const zero = await call(`/api/sessions/${session.id}/quote?expected_minutes=0`);
+    const zero = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=0`,
+    );
     expect(zero.status).toBe(400);
   });
 
@@ -2860,9 +3107,9 @@ describe("GET /api/sessions/:id/quote", () => {
   });
 
   it("returns 0 output minutes when target_langs is corrupted JSON (edge)", async () => {
-    await env.DB.prepare(
-      "INSERT INTO users (id, created_at) VALUES (?, ?)",
-    ).bind("u-bad", Math.floor(Date.now() / 1000)).run();
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-bad", Math.floor(Date.now() / 1000))
+      .run();
     const createRes = await call("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2875,12 +3122,17 @@ describe("GET /api/sessions/:id/quote", () => {
     });
     const { session } = (await createRes.json()) as { session: { id: string } };
     // Corrupt target_langs to exercise the JSON.parse catch branch.
-    await env.DB.prepare(
-      "UPDATE sessions SET target_langs = ? WHERE id = ?",
-    ).bind("not json at all", session.id).run();
+    await env.DB.prepare("UPDATE sessions SET target_langs = ? WHERE id = ?")
+      .bind("not json at all", session.id)
+      .run();
 
-    const res = await call(`/api/sessions/${session.id}/quote?expected_minutes=10`);
-    const body = (await res.json()) as { output_minutes: number; estimated_cost_usd: number };
+    const res = await call(
+      `/api/sessions/${session.id}/quote?expected_minutes=10`,
+    );
+    const body = (await res.json()) as {
+      output_minutes: number;
+      estimated_cost_usd: number;
+    };
     expect(body.output_minutes).toBe(0); // 10 × 0-langs
     expect(body.estimated_cost_usd).toBe(0);
   });
@@ -3168,7 +3420,10 @@ describe("DELETE /api/account", () => {
         const method = (
           init?.method ?? (input instanceof Request ? input.method : "GET")
         ).toUpperCase();
-        if (/api\.elevenlabs\.io\/v1\/voices\//.test(url) && method === "DELETE") {
+        if (
+          /api\.elevenlabs\.io\/v1\/voices\//.test(url) &&
+          method === "DELETE"
+        ) {
           elCalls.push(url);
           return new Response("", { status: 200 });
         }
@@ -3257,4 +3512,3 @@ describe("DELETE /api/account", () => {
     expect(await db.getVoice(env.DB, voice.id)).toBeNull();
   });
 });
-

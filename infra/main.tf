@@ -244,6 +244,11 @@ locals {
       { name = "BROADCAST_DELAY_MS", value = tostring(var.broadcast_delay_ms) },
       { name = "FRONTEND_URL", value = var.frontend_url },
       { name = "WORKERS_API_URL", value = var.workers_api_url },
+      { name = "BRIVVA_SESSION_LOGS", value = var.session_logs_enabled ? "1" : "0" },
+      { name = "BRIVVA_SESSION_LOG_VERBOSE", value = var.session_logs_verbose ? "1" : "0" },
+      { name = "BRIVVA_WEBRTC_STUN_URLS", value = "stun:stun.l.google.com:19302" },
+      { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = "40000" },
+      { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = "40100" },
     ]
     secrets = [
       { name = "SONIOX_API_KEY", valueFrom = "${local.secret_arn}:SONIOX_API_KEY::" },
@@ -358,8 +363,10 @@ resource "aws_ecs_service" "app" {
     assign_public_ip = true
   }
 
-  deployment_minimum_healthy_percent = 100
-  deployment_maximum_percent         = 200
+  # Account Fargate quota is 30 vCPU and this task is 16 vCPU, so a normal
+  # 100/200 rolling deploy cannot place old+new tasks concurrently.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   # ECS auto-rolls back failed task-def revisions per docs/runbook.md. Set
   # manually in prod before this block existed; capturing here to match.

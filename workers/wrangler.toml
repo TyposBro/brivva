@@ -18,9 +18,9 @@ database_id = "4e4ddf3c-aa0f-4716-bd2e-b5fc711805d7"
 migrations_dir = "migrations"
 
 # ── Vars (non-secret) ─────────────────────────────────────
-# The values below are PROD defaults. For local dev, copy
-# `.dev.vars.example` → `.dev.vars` (gitignored) — `wrangler dev` merges
-# .dev.vars over this block automatically, swapping in localhost URLs.
+# The values below are safe to expose and belong in config. Sensitive values
+# are injected from Infisical into Workers secrets by deploy automation; do not
+# store them in env files or in this config.
 [vars]
 FRONTEND_URL = "https://brivva.pages.dev"
 # IMPORTANT: OAUTH_REDIRECT_URI must be added to the Google OAuth Client's
@@ -30,8 +30,11 @@ FRONTEND_URL = "https://brivva.pages.dev"
 OAUTH_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/youtube/callback"
 # Sign-in flow — separate redirect registered in the Google OAuth Client.
 GOOGLE_SIGNIN_REDIRECT_URI = "https://brivva-api.milliytechnology.workers.dev/auth/google/callback"
+# D1-backed per-session log ingestion/export. Non-secret operational toggle.
+SESSION_LOGS_ENABLED = "1"
+SESSION_LOG_CONSOLE = "0"
 
-# ── Secrets (set via `wrangler secret put`) ───────────────
+# ── Secrets (Infisical-managed; never commit/store in env files) ─────────────
 # ELEVENLABS_API_KEY
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET

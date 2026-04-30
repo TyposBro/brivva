@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::auth;
+use crate::features::broadcast::data::session_log::SessionLogEmitter;
 use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::domain::{Lang, LiveSession, PipelineConfig, SessionQuery};
@@ -113,6 +114,19 @@ async fn handle_host(mut socket: HostSocket) {
         &socket.state.workers_api_url,
         &socket.state.internal_secret,
     ));
+    let session_log = SessionLogEmitter::new(
+        socket.state.session_logs_enabled,
+        socket.state.session_logs_verbose,
+        workers_api.clone(),
+        socket.session_id.clone(),
+        live_session_id.clone(),
+    );
+    session_log.info(
+        "server.ws_accepted",
+        serde_json::json!({
+            "source_lang": socket.source_lang.to_string(),
+        }),
+    );
 
     let mut live_session = LiveSession::new(
         live_session_id.clone(),
@@ -149,9 +163,19 @@ async fn handle_host(mut socket: HostSocket) {
         })
         .await;
         match outcome {
-            BootstrapOutcome::Continue => {}
-            BootstrapOutcome::Abort => return,
+            BootstrapOutcome::Continue => {
+                session_log.info("server.bootstrap_complete", serde_json::json!({}));
+            }
+            BootstrapOutcome::Abort => {
+                session_log.warn(
+                    "server.bootstrap_aborted",
+                    "bootstrap aborted",
+                    serde_json::json!({}),
+                );
+                return;
+            }
             BootstrapOutcome::AbortWithError(msg) => {
+                session_log.warn("server.bootstrap_error", msg.clone(), serde_json::json!({}));
                 // Surface the failure to the FE so it can render a banner
                 // instead of the default "Waiting for utterances..." spinner.
                 let payload = serde_json::json!({ "type": "error", "message": msg });
@@ -185,13 +209,14 @@ async fn handle_host(mut socket: HostSocket) {
                     live_session_id: &live_session_id,
                     source_lang: &socket.source_lang,
                     audio_tx: &mut audio_tx,
+                    session_log: &session_log,
                 });
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
                     break;
                 }
-                handle_text(&text, &live_sessions, &live_session_id).await;
+                handle_text(&text, &live_sessions, &live_session_id, &session_log).await;
             }
             Message::Close(_) => break,
             _ => {}
@@ -207,6 +232,7 @@ async fn handle_host(mut socket: HostSocket) {
     .await;
     send_task.abort();
     tracing::info!(live_session_id = %live_session_id, "live session closed");
+    session_log.info("server.ws_closed", serde_json::json!({}));
 }
 
 #[cfg(test)]
@@ -223,6 +249,8 @@ mod tests {
         state.elevenlabs_base_url = "https://e".into();
         state.force_default_voice = true;
         state.force_rtmp_not_rtmps = true;
+        state.session_logs_enabled = true;
+        state.session_logs_verbose = true;
 
         let cfg = pipeline_config_from(&state);
         assert_eq!(cfg.soniox_api_key, "sk-s");
@@ -231,5 +259,7 @@ mod tests {
         assert_eq!(cfg.elevenlabs_base_url, "https://e");
         assert!(cfg.force_default_voice);
         assert!(cfg.force_rtmp_not_rtmps);
+        assert!(state.session_logs_enabled);
+        assert!(state.session_logs_verbose);
     }
 }

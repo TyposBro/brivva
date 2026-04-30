@@ -161,10 +161,10 @@ export function useWebcam(
   };
 }
 
-
 function readVideoProfile(stream: MediaStream | null): VideoProfile {
   const track = stream?.getVideoTracks()[0];
-  const settings = typeof track?.getSettings === "function" ? track.getSettings() : undefined;
+  const settings =
+    typeof track?.getSettings === "function" ? track.getSettings() : undefined;
   const width = Math.round(Number(settings?.width) || HOST_VIDEO_MIN_WIDTH);
   const height = Math.round(Number(settings?.height) || HOST_VIDEO_MIN_HEIGHT);
   const fps = Math.round(Number(settings?.frameRate) || HOST_VIDEO_MIN_FPS);
@@ -210,12 +210,13 @@ function startMediaStats(args: StartMediaStatsArgs) {
       if (args.isSocketOpen()) {
         args.sendSignalJson({ type: "client:media_stats", stats });
       }
-      console.info("brivva media stats", stats);
     });
   }, 2000);
 }
 
-async function collectMediaStats(args: StartMediaStatsArgs): Promise<ClientMediaStats> {
+async function collectMediaStats(
+  args: StartMediaStatsArgs,
+): Promise<ClientMediaStats> {
   const sourceTrack = args.sourceStream?.getVideoTracks()[0]?.getSettings();
   const uplinkTrack = args.cfrUplink?.stream.getVideoTracks()[0]?.getSettings();
   const outboundVideo = await collectOutboundVideoStats(args.peer);
@@ -251,7 +252,6 @@ async function collectOutboundVideoStats(
   }
   return undefined;
 }
-
 
 function attachConnectionDiagnostics(
   peer: RTCPeerConnection,
@@ -322,7 +322,9 @@ function preferH264(peer: RTCPeerConnection | null) {
   if (!transceiver || !capabilities?.codecs || !transceiver.setCodecPreferences)
     return;
   const h264 = capabilities.codecs.filter(
-    (c) => c.mimeType.toLowerCase() === "video/h264" && !/packetization-mode=0/i.test(c.sdpFmtpLine ?? ""),
+    (c) =>
+      c.mimeType.toLowerCase() === "video/h264" &&
+      !/packetization-mode=0/i.test(c.sdpFmtpLine ?? ""),
   );
   if (h264.length > 0) transceiver.setCodecPreferences(h264);
 }

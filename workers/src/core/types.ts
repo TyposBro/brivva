@@ -6,6 +6,7 @@ export type {
   PlatformCredential,
   Session,
   SessionMetrics,
+  SessionLogEvent,
   StreamRecord,
   User,
   Voice,
@@ -66,6 +67,10 @@ export type Env = {
   GRIP_SECRET_KEY?: string;
   // Optional — unset during early dev, required before turning billing on.
   STRIPE_WEBHOOK_SECRET?: string;
+  // Turns D1-backed per-session log ingestion/export on. Keep off by default;
+  // set as a Worker secret/var during launch tests.
+  SESSION_LOGS_ENABLED?: string;
+  SESSION_LOG_CONSOLE?: string;
   // Dev-only sign-in bypass. When the string "true", `/auth/google` mints a
   // JWT for a fixed local user and redirects back without ever contacting
   // accounts.google.com. Guarded by strict string comparison so a stray

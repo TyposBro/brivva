@@ -1,6 +1,54 @@
 # Terraform state → S3 backend migration plan
 
-Status: **infrastructure provisioned, backend disabled until drift resolved**.
+Status: **S3 backend enabled and migrated** (Apr 30, 2026).
+
+OpenTofu now uses:
+
+- S3 bucket: `brivva-tf-state`
+- State key: `brivva/terraform.tfstate`
+- DynamoDB lock table: `brivva-tf-locks`
+- Region: `us-east-1`
+
+Run commands through Infisical. `infra/tofu-infisical.sh` maps Infisical secrets
+to `TF_VAR_*` and exports AWS CLI `login` credentials into the process when
+needed:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan
+```
+
+The post-migration plan no longer tries to recreate the stack. Remaining plan
+output is real config drift, mostly ECS task definition, security group, and ECR
+lifecycle-policy differences. Do not run `apply` casually; inspect the plan and
+only apply intentional infra changes.
+
+## Completed Migration (Apr 30)
+
+1. Restored valid local state from `infra/terraform.tfstate.backup` using
+   `tofu state push` after `infra/terraform.tfstate` was found empty.
+2. Verified local-backend `plan` no longer wanted to create every resource.
+3. Enabled the `backend "s3"` block in `infra/versions.tf`.
+4. Ran `tofu init -migrate-state` with exported AWS credentials.
+5. Verified `tofu state list` reads the full resource graph through S3.
+6. Verified remote-backed `plan` acquires/releases the DynamoDB state lock.
+
+## Current Drift To Resolve Separately
+
+- `aws_ecs_task_definition.app` replacement: config wants CPU/memory changes and
+  environment updates compared with tracked revision.
+- `aws_ecs_service.app` update: service task definition differs from Terraform's
+  generated task definition.
+- `aws_security_group.task` update: live UDP ingress includes an extra older
+  50000-50100 rule and a different 40000-40100 description.
+- `aws_ecr_lifecycle_policy.server_build_base` and
+  `aws_ecr_lifecycle_policy.server_runtime_base` replacement: description-only
+  lifecycle policy drift.
+- Local ignored `terraform.tfvars` contains undeclared `enable_cloudflared`,
+  which produces a warning until that local var is removed or declared.
+
+---
+
+## Historical Context
 
 ## What's Already Done (Apr 19)
 
@@ -27,11 +75,15 @@ duplicates of the CloudWatch + SNS alarm stack.
 
 Run these in `infra/`:
 
+Sensitive Terraform variables come from Infisical at process runtime. Do not
+create `.env` files or secret `terraform.tfvars` files for this workflow.
+
 1. **Confirm drift surface**:
 
    ```bash
    tofu init                                           # local backend
-   tofu plan -var-file=terraform.tfvars > /tmp/plan.txt
+   cd ..
+   infisical run --env=prod -- ./infra/tofu-infisical.sh plan > /tmp/plan.txt
    ```
 
    Read the plan carefully. Identify each "+ resource" block — these are
@@ -40,7 +92,8 @@ Run these in `infra/`:
 2. **Import real resources into state** (example for the SNS alarm topic):
 
    ```bash
-   tofu import -var-file=terraform.tfvars \
+   cd ..
+   infisical run --env=prod -- ./infra/tofu-infisical.sh import \
      'aws_sns_topic.alarms[0]' \
      arn:aws:sns:us-east-1:132593557399:brivva-alarms
    ```
@@ -52,8 +105,9 @@ Run these in `infra/`:
 3. **Refresh-only pass** once imports are done:
 
    ```bash
-   tofu plan -var-file=terraform.tfvars -refresh-only
-   tofu apply -var-file=terraform.tfvars -refresh-only
+   cd ..
+   infisical run --env=prod -- ./infra/tofu-infisical.sh plan -refresh-only
+   infisical run --env=prod -- ./infra/tofu-infisical.sh apply -refresh-only
    ```
 
    This pulls in the real attribute values without changing cloud.
@@ -61,7 +115,8 @@ Run these in `infra/`:
 4. **Regular plan should be clean now**:
 
    ```bash
-   tofu plan -var-file=terraform.tfvars
+   cd ..
+   infisical run --env=prod -- ./infra/tofu-infisical.sh plan
    ```
 
    Expect `0 to add, 0 to change, 0 to destroy`. If not, continue

@@ -43,11 +43,23 @@ import {
 } from "../features/grip/seller-api";
 import * as gsignin from "../features/auth/google-signin-client";
 import { verifyStripeSignature } from "../features/billing/stripe-webhook";
+import {
+  normalizeSessionLogBatch,
+  normalizeWorkerSessionLogEvent,
+  sessionLogConsoleEnabled,
+  sessionLogsEnabled,
+  writeSessionLogConsole,
+} from "../shared/logging/session-log";
 
 const app = new Hono<{ Bindings: Env }>();
 
 function invalid(c: Context<{ Bindings: Env }>, error: unknown) {
-  if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "issues" in error &&
+    Array.isArray(error.issues)
+  ) {
     return c.json(
       {
         error: "invalid request",
@@ -64,7 +76,11 @@ function invalid(c: Context<{ Bindings: Env }>, error: unknown) {
 
 function parseWithSchema<T>(
   c: Context<{ Bindings: Env }>,
-  schema: { safeParse(input: unknown): { success: true; data: T } | { success: false; error: unknown } },
+  schema: {
+    safeParse(
+      input: unknown,
+    ): { success: true; data: T } | { success: false; error: unknown };
+  },
   input: unknown,
 ): T | Response {
   const parsed = schema.safeParse(input);
@@ -85,6 +101,113 @@ app.get("/", (c) => c.text("Brivva API (Workers + D1)"));
 app.get("/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(buildOpenApiDocument()));
 app.get("/docs", swaggerUI({ url: "/openapi.json" }));
+
+async function ingestSessionLogs(
+  env: Env,
+  input: unknown,
+  expectedSessionId?: string,
+): Promise<{ accepted: number; disabled: boolean }> {
+  if (!sessionLogsEnabled(env.SESSION_LOGS_ENABLED)) {
+    return { accepted: 0, disabled: true };
+  }
+  const events = normalizeSessionLogBatch(input, expectedSessionId);
+  const accepted = await db.appendSessionLogEvents(env.DB, events);
+  if (sessionLogConsoleEnabled(env.SESSION_LOG_CONSOLE)) {
+    for (const event of events) writeSessionLogConsole(event);
+  }
+  return { accepted, disabled: false };
+}
+
+async function emitWorkerSessionLog(
+  env: Env,
+  event: Parameters<typeof normalizeWorkerSessionLogEvent>[0],
+): Promise<void> {
+  if (!sessionLogsEnabled(env.SESSION_LOGS_ENABLED)) return;
+  await db.appendSessionLogEvents(env.DB, [
+    normalizeWorkerSessionLogEvent(event),
+  ]);
+}
+
+app.post("/api/session-logs/client", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid json" }, 400);
+  }
+  const userId = readUserIdFromLogRequest(c, body);
+  if (!userId) return c.json({ error: "user_id required" }, 400);
+  const sessionId = readFirstSessionId(body);
+  if (!sessionId) return c.json({ error: "session_id required" }, 400);
+  const session = await db.getSession(c.env.DB, sessionId);
+  if (!session || session.user_id !== userId)
+    return c.json({ error: "not found" }, 404);
+  try {
+    const result = await ingestSessionLogs(c.env, body, sessionId);
+    return c.json(result);
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "invalid logs" },
+      400,
+    );
+  }
+});
+
+app.get("/api/sessions/:id/logs.ndjson", async (c) => {
+  const userId = c.req.query("user_id");
+  if (!userId) return c.json({ error: "user_id required" }, 400);
+  const sessionId = c.req.param("id");
+  const session = await db.getSession(c.env.DB, sessionId);
+  if (!session || session.user_id !== userId)
+    return c.json({ error: "not found" }, 404);
+  const limit = Math.min(Number(c.req.query("limit") ?? 5000) || 5000, 20_000);
+  const rows = await db.listSessionLogEvents(c.env.DB, sessionId, limit);
+  const body = rows
+    .map((row) =>
+      JSON.stringify({
+        id: row.id,
+        ts_ms: row.ts_ms,
+        session_id: row.session_id,
+        live_session_id: row.live_session_id,
+        source: row.source,
+        level: row.level,
+        event: row.event,
+        message: row.message,
+        fields: JSON.parse(row.fields_json),
+      }),
+    )
+    .join("\n");
+  return new Response(body ? `${body}\n` : "", {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Content-Disposition": `attachment; filename="brivva-${sessionId}-logs.ndjson"`,
+    },
+  });
+});
+
+function readUserIdFromLogRequest(
+  c: Context<{ Bindings: Env }>,
+  body: unknown,
+): string | null {
+  const queryUserId = c.req.query("user_id");
+  if (queryUserId) return queryUserId;
+  if (body && typeof body === "object" && "user_id" in body) {
+    const value = (body as { user_id?: unknown }).user_id;
+    return typeof value === "string" && value ? value : null;
+  }
+  return null;
+}
+
+function readFirstSessionId(body: unknown): string | null {
+  if (!body || typeof body !== "object" || !("events" in body)) return null;
+  const events = (body as { events?: unknown }).events;
+  if (!Array.isArray(events) || events.length === 0) return null;
+  const first = events[0];
+  if (!first || typeof first !== "object" || !("session_id" in first))
+    return null;
+  const sessionId = (first as { session_id?: unknown }).session_id;
+  return typeof sessionId === "string" && sessionId ? sessionId : null;
+}
 
 // ── Internal auth for server→worker calls ─────────────────
 // Fargate uses this on token-refresh writes (Phase 3 — currently unused).
@@ -110,7 +233,11 @@ app.get("/api/user", async (c) => {
 // Marks first-run onboarding as finished so the FE can stop gating UI on it.
 // Idempotent — re-posting is a no-op after the first call.
 app.post("/api/user/complete-onboarding", async (c) => {
-  const body = parseWithSchema(c, CompleteOnboardingRequestSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    CompleteOnboardingRequestSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
   await db.getOrCreateUser(c.env.DB, body.user_id);
   const user = await db.markOnboardingCompleted(c.env.DB, body.user_id);
@@ -143,7 +270,9 @@ app.post("/api/voices", async (c) => {
   }
 
   const user = await db.getOrCreateUser(c.env.DB, body.user_id); // ensure FK
-  const prior = user.active_voice_id ? await db.getVoice(c.env.DB, user.active_voice_id) : null;
+  const prior = user.active_voice_id
+    ? await db.getVoice(c.env.DB, user.active_voice_id)
+    : null;
 
   // Create + activate the replacement before deleting the old ElevenLabs
   // voice. The media server joins TTS on users.active_voice_id and may still
@@ -167,16 +296,23 @@ app.post("/api/voices", async (c) => {
   // pointing live TTS at a deleted voice.
   if (prior) {
     try {
-      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
+      await el.deleteRemoteVoice(
+        c.env.ELEVENLABS_API_KEY,
+        prior.elevenlabs_voice_id,
+      );
     } catch (e) {
-      console.warn(`[voices] failed to delete prior ElevenLabs voice: ${String(e)}`);
+      console.warn(
+        `[voices] failed to delete prior ElevenLabs voice: ${String(e)}`,
+      );
     }
     try {
       await db.deleteVoiceRow(c.env.DB, prior.id);
     } catch (e) {
       // Historical sessions can FK this voice. Re-cloning must still work;
       // leaving a stale local row is safer than failing POST /api/voices.
-      console.warn(`[voices] failed to delete prior local voice row: ${String(e)}`);
+      console.warn(
+        `[voices] failed to delete prior local voice row: ${String(e)}`,
+      );
     }
   }
   return c.json(voice);
@@ -225,7 +361,9 @@ app.delete("/api/account", async (c) => {
 
   const user = await db.getUserById(c.env.DB, query.user_id);
   if (!user) {
-    console.info(`[account.delete] noop user=${query.user_id} reason=not_found`);
+    console.info(
+      `[account.delete] noop user=${query.user_id} reason=not_found`,
+    );
     return c.json({ error: "not found" }, 404);
   }
 
@@ -237,8 +375,7 @@ app.delete("/api/account", async (c) => {
     return c.json(
       {
         error: "account_in_use",
-        message:
-          "End all live sessions before deleting your account.",
+        message: "End all live sessions before deleting your account.",
         active_sessions: active,
       },
       409,
@@ -251,7 +388,10 @@ app.delete("/api/account", async (c) => {
   const voices = await db.listVoices(c.env.DB, query.user_id);
   for (const v of voices) {
     try {
-      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, v.elevenlabs_voice_id);
+      await el.deleteRemoteVoice(
+        c.env.ELEVENLABS_API_KEY,
+        v.elevenlabs_voice_id,
+      );
     } catch (err) {
       console.warn(
         `[account.delete] elevenlabs delete failed voice=${v.id} el_voice=${v.elevenlabs_voice_id} err=${String(err)}`,
@@ -278,7 +418,11 @@ app.get("/api/credentials", async (c) => {
 });
 
 app.post("/api/credentials", async (c) => {
-  const body = parseWithSchema(c, SaveCredentialRequestSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    SaveCredentialRequestSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
   const row = await db.upsertCredential(c.env.DB, {
     userId: body.user_id,
@@ -327,11 +471,17 @@ function resolveHostGain(
   if (typeof p.host_gain === "number") {
     return Math.max(0, Math.min(1, p.host_gain));
   }
-  return p.lang === sourceLang ? DEFAULT_HOST_GAIN_SOURCE : DEFAULT_HOST_GAIN_TARGET;
+  return p.lang === sourceLang
+    ? DEFAULT_HOST_GAIN_SOURCE
+    : DEFAULT_HOST_GAIN_TARGET;
 }
 
 app.post("/api/sessions", async (c) => {
-  const body = parseWithSchema(c, CreateSessionRequestSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    CreateSessionRequestSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
   const user = await db.getOrCreateUser(c.env.DB, body.user_id);
   // Fall back to the user's active voice clone when the caller doesn't pin one
@@ -631,6 +781,17 @@ app.post("/api/sessions", async (c) => {
     throw e;
   }
 
+  await emitWorkerSessionLog(c.env, {
+    sessionId: session.id,
+    event: "workers.session_created",
+    fields: {
+      user_id: user.id,
+      source_lang: session.source_lang,
+      target_langs: body.target_langs,
+      stream_count: streams.length,
+      platforms: streams.map((stream) => stream.platform),
+    },
+  });
   return c.json({ session, streams });
 });
 
@@ -649,7 +810,11 @@ app.post("/api/sessions/:id/voice", async (c) => {
     id: c.req.param("id"),
   });
   if (params instanceof Response) return params;
-  const body = parseWithSchema(c, CloneSessionVoiceRequestSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    CloneSessionVoiceRequestSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
 
   const session = await db.getSession(c.env.DB, params.id);
@@ -664,7 +829,9 @@ app.post("/api/sessions/:id/voice", async (c) => {
   }
 
   const user = await db.getOrCreateUser(c.env.DB, body.user_id);
-  const prior = user.active_voice_id ? await db.getVoice(c.env.DB, user.active_voice_id) : null;
+  const prior = user.active_voice_id
+    ? await db.getVoice(c.env.DB, user.active_voice_id)
+    : null;
 
   const sourceLang = body.source_lang ?? session.source_lang;
   const voiceName = body.name?.trim() || `${session.title} Host Voice`;
@@ -688,14 +855,21 @@ app.post("/api/sessions/:id/voice", async (c) => {
   // clone only after the new one is safely selected.
   if (prior && prior.id !== voice.id) {
     try {
-      await el.deleteRemoteVoice(c.env.ELEVENLABS_API_KEY, prior.elevenlabs_voice_id);
+      await el.deleteRemoteVoice(
+        c.env.ELEVENLABS_API_KEY,
+        prior.elevenlabs_voice_id,
+      );
     } catch (e) {
-      console.warn(`[sessions/:id/voice] failed to delete prior ElevenLabs voice: ${String(e)}`);
+      console.warn(
+        `[sessions/:id/voice] failed to delete prior ElevenLabs voice: ${String(e)}`,
+      );
     }
     try {
       await db.deleteVoiceRow(c.env.DB, prior.id);
     } catch (e) {
-      console.warn(`[sessions/:id/voice] failed to delete prior local voice row: ${String(e)}`);
+      console.warn(
+        `[sessions/:id/voice] failed to delete prior local voice row: ${String(e)}`,
+      );
     }
   }
   return c.json({ voice });
@@ -706,7 +880,11 @@ app.patch("/api/sessions/:id/voice-preset", async (c) => {
     id: c.req.param("id"),
   });
   if (params instanceof Response) return params;
-  const body = parseWithSchema(c, UpdateSessionVoicePresetSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    UpdateSessionVoicePresetSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
 
   const session = await db.getSession(c.env.DB, params.id);
@@ -851,13 +1029,15 @@ app.get("/api/sessions/:id/quote", async (c) => {
   const billableLangs = targetLangs.filter(
     (lang) => lang !== "pass" && lang !== session.source_lang,
   );
-  const perMinuteCost = Math.round(expectedMinutes * PER_OUTPUT_MINUTE_USD * 100) / 100;
+  const perMinuteCost =
+    Math.round(expectedMinutes * PER_OUTPUT_MINUTE_USD * 100) / 100;
   const breakdown = billableLangs.map((lang) => ({
     lang,
     minutes: expectedMinutes,
     cost_usd: Number.isFinite(perMinuteCost) ? perMinuteCost : 0,
   }));
-  const outputMinutes = Math.round(expectedMinutes * billableLangs.length * 100) / 100;
+  const outputMinutes =
+    Math.round(expectedMinutes * billableLangs.length * 100) / 100;
   const rawCost = outputMinutes * PER_OUTPUT_MINUTE_USD;
   // Defensive: if anything upstream returns NaN/Infinity we still respond
   // with a number — the FE renderer must never see null for this field.
@@ -898,9 +1078,8 @@ app.get("/api/sessions/:id/summary", async (c) => {
     outputByLang[k] = minutesFromSeconds(v);
   }
   const totalMinutes =
-    Math.round(
-      Object.values(outputByLang).reduce((a, b) => a + b, 0) * 100,
-    ) / 100;
+    Math.round(Object.values(outputByLang).reduce((a, b) => a + b, 0) * 100) /
+    100;
 
   const liveStatuses = new Set(["setup", "live"]);
   // Tier resolves from the session owner. Pre-migration rows default to
@@ -923,7 +1102,7 @@ app.get("/api/sessions/:id/summary", async (c) => {
     // customer.
     total_cost_usd: isB2B ? null : estimateCost(outputByLang),
     rate_usd: isB2B ? null : PER_OUTPUT_MINUTE_USD,
-    billed_to: isB2B ? owner?.bills_to ?? null : null,
+    billed_to: isB2B ? (owner?.bills_to ?? null) : null,
     updated_at: metrics?.updated_at ?? null,
   });
 });
@@ -978,7 +1157,9 @@ app.get("/auth/youtube/callback", async (c) => {
   const state = query.state; // user_id
   const err = query.error;
   if (err) {
-    return c.redirect(`${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(err)}`);
+    return c.redirect(
+      `${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(err)}`,
+    );
   }
   if (!code || !state) return c.json({ error: "code + state required" }, 400);
 
@@ -997,7 +1178,9 @@ app.get("/auth/youtube/callback", async (c) => {
     });
     const jwt = await signJwt(c.env.JWT_SECRET, { sub: state });
     // Pass JWT via URL fragment (not readable by servers/logs).
-    return c.redirect(`${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(state)}#token=${jwt}`);
+    return c.redirect(
+      `${c.env.FRONTEND_URL}/?user_id=${encodeURIComponent(state)}#token=${jwt}`,
+    );
   } catch (e) {
     // §0.5.4: OAuth callback errors otherwise only surface as a 500 JSON
     // body to the FE; log so a post-incident grep catches token-exchange
@@ -1086,7 +1269,9 @@ app.get("/auth/google/callback", async (c) => {
   });
   if (query instanceof Response) return query;
   if (query.error) {
-    return c.redirect(`${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(query.error)}`);
+    return c.redirect(
+      `${c.env.FRONTEND_URL}/?oauth_error=${encodeURIComponent(query.error)}`,
+    );
   }
   if (!query.code) return c.json({ error: "code required" }, 400);
 
@@ -1107,7 +1292,9 @@ app.get("/auth/google/callback", async (c) => {
   } catch (e) {
     // §0.5.4: same rationale as /auth/youtube/callback — surface the
     // underlying cause so sign-in failures are grep-auditable.
-    console.warn("[auth] google sign-in callback exception", { error: String(e) });
+    console.warn("[auth] google sign-in callback exception", {
+      error: String(e),
+    });
     return c.json({ error: String(e) }, 500);
   }
 });
@@ -1156,7 +1343,8 @@ app.post("/auth/tiktok", async (c) => {
     platform: "tiktok",
     rtmpUrl: body.rtmp_url ?? null,
     streamKey: body.stream_key,
-    displayName: body.display_name ?? `tiktok:${body.session_token.slice(0, 6)}…`,
+    displayName:
+      body.display_name ?? `tiktok:${body.session_token.slice(0, 6)}…`,
   });
   return c.json(row);
 });
@@ -1187,7 +1375,10 @@ app.get("/api/billing/summary", async (c) => {
   const outputByLangSeconds: Record<string, number> = {};
   for (const m of metrics) {
     sourceSeconds += m.source_seconds;
-    const perSession = JSON.parse(m.output_seconds_json) as Record<string, number>;
+    const perSession = JSON.parse(m.output_seconds_json) as Record<
+      string,
+      number
+    >;
     for (const [lang, secs] of Object.entries(perSession)) {
       outputByLangSeconds[lang] = (outputByLangSeconds[lang] ?? 0) + secs;
     }
@@ -1268,7 +1459,9 @@ app.get("/internal/sessions/:id", async (c) => {
   // /api/voices upserts on every bundle fetch.
   const owner = await db.getUserById(c.env.DB, session.user_id);
   const activeVoiceId = owner?.active_voice_id ?? null;
-  const voice = activeVoiceId ? await db.getVoice(c.env.DB, activeVoiceId) : null;
+  const voice = activeVoiceId
+    ? await db.getVoice(c.env.DB, activeVoiceId)
+    : null;
   return c.json({ session, streams, voice });
 });
 
@@ -1280,12 +1473,22 @@ app.patch("/internal/sessions/:id", async (c) => {
     id: c.req.param("id"),
   });
   if (params instanceof Response) return params;
-  const body = parseWithSchema(c, InternalSessionStatusUpdateSchema, await c.req.json());
+  const body = parseWithSchema(
+    c,
+    InternalSessionStatusUpdateSchema,
+    await c.req.json(),
+  );
   if (body instanceof Response) return body;
   await db.updateSessionStatus(c.env.DB, {
     id: params.id,
     status: body.status,
     liveSessionId: body.live_session_id ?? null,
+  });
+  await emitWorkerSessionLog(c.env, {
+    sessionId: params.id,
+    liveSessionId: body.live_session_id ?? null,
+    event: "workers.session_status_updated",
+    fields: { status: body.status },
   });
   return c.json({ status: "ok" });
 });
@@ -1317,6 +1520,26 @@ app.patch("/internal/sessions/:id/metrics", async (c) => {
     outputSecondsByLang: body.output_seconds_by_lang,
   });
   return c.json({ status: "ok" });
+});
+
+app.post("/internal/session-logs", async (c) => {
+  const err = requireInternal(c);
+  if (err) return err;
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid json" }, 400);
+  }
+  try {
+    const result = await ingestSessionLogs(c.env, body);
+    return c.json(result);
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "invalid logs" },
+      400,
+    );
+  }
 });
 
 export default app;

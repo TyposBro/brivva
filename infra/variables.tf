@@ -30,21 +30,33 @@ variable "broadcast_delay_ms" {
 
 variable "task_cpu" {
   description = <<-EOT
-    Fargate CPU units (1024 = 1 vCPU). Default 8192 = 8 vCPU.
-    Sized for 1 concurrent stream with 1080p transcode + up to 3 translations
+    Fargate CPU units (1024 = 1 vCPU). Default 16384 = 16 vCPU.
+    Sized for 1 concurrent stream with 720p/1080p transcode + up to 3 translations
     + passthrough + burn-in subtitles (May 10 "ultimate test" shape:
     En -> Ko+Zh+Ja + passthrough = ~3.45 cores under load, comfortable
     headroom for STT/translate/TTS orchestration).
     See infra/README.md "Sizing" for the math and scale-out guidance.
   EOT
   type        = string
-  default     = "8192"
+  default     = "16384"
 }
 
 variable "task_memory" {
-  description = "Fargate memory MB. Default 16384 = 16 GB (paired with 8 vCPU)."
+  description = "Fargate memory MB. Default 32768 = 32 GB (paired with 16 vCPU)."
   type        = string
-  default     = "16384"
+  default     = "32768"
+}
+
+variable "session_logs_enabled" {
+  description = "Set BRIVVA_SESSION_LOGS=1 on server-rs to upload per-session NDJSON logs to Workers/D1."
+  type        = bool
+  default     = true
+}
+
+variable "session_logs_verbose" {
+  description = "Set BRIVVA_SESSION_LOG_VERBOSE=1 on server-rs for high-volume debug session events."
+  type        = bool
+  default     = false
 }
 
 variable "log_retention_days" {
@@ -52,7 +64,7 @@ variable "log_retention_days" {
   default = 7
 }
 
-# ── Secrets (sensitive, provided via terraform.tfvars from load-env.sh) ──
+# ── Secrets (sensitive, provided at runtime by Infisical as TF_VAR_*) ──
 
 variable "soniox_api_key" {
   type      = string

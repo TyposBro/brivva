@@ -19,6 +19,8 @@ declare global {
       STRIPE_WEBHOOK_SECRET: string;
       GRIP_ACCESS_KEY: string;
       GRIP_SECRET_KEY: string;
+      SESSION_LOGS_ENABLED: string;
+      SESSION_LOG_CONSOLE: string;
       TEST_MIGRATIONS: D1Migration[];
     }
   }

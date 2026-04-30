@@ -11,6 +11,7 @@ import * as schema from "../../core/schema";
 import type {
   PlatformCredential,
   Session,
+  SessionLogEvent,
   SessionMetrics,
   StreamRecord,
   User,
@@ -170,7 +171,10 @@ export type CreateVoice = {
   sourceLang: string | null;
 };
 
-export async function createVoice(db: D1Database, args: CreateVoice): Promise<Voice> {
+export async function createVoice(
+  db: D1Database,
+  args: CreateVoice,
+): Promise<Voice> {
   const row: Voice = {
     id: uuid(),
     user_id: args.userId,
@@ -248,11 +252,24 @@ export async function hardDeleteUserCascade(
 ): Promise<void> {
   const d = wrap(db);
   await d
+    .delete(schema.session_log_events)
+    .where(
+      inArray(
+        schema.session_log_events.session_id,
+        d
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(eq(schema.sessions.user_id, userId)),
+      ),
+    )
+    .run();
+  await d
     .delete(schema.session_metrics)
     .where(
       inArray(
         schema.session_metrics.session_id,
-        d.select({ id: schema.sessions.id })
+        d
+          .select({ id: schema.sessions.id })
           .from(schema.sessions)
           .where(eq(schema.sessions.user_id, userId)),
       ),
@@ -263,13 +280,17 @@ export async function hardDeleteUserCascade(
     .where(
       inArray(
         schema.streams.session_id,
-        d.select({ id: schema.sessions.id })
+        d
+          .select({ id: schema.sessions.id })
           .from(schema.sessions)
           .where(eq(schema.sessions.user_id, userId)),
       ),
     )
     .run();
-  await d.delete(schema.sessions).where(eq(schema.sessions.user_id, userId)).run();
+  await d
+    .delete(schema.sessions)
+    .where(eq(schema.sessions.user_id, userId))
+    .run();
   await d.delete(schema.voices).where(eq(schema.voices.user_id, userId)).run();
   await d
     .delete(schema.platform_credentials)
@@ -288,7 +309,10 @@ export type CreateSession = {
   targetLangs: string;
 };
 
-export async function createSession(db: D1Database, args: CreateSession): Promise<Session> {
+export async function createSession(
+  db: D1Database,
+  args: CreateSession,
+): Promise<Session> {
   // Default new sessions with an attached clone to voice_preset='cloned' so
   // returning users don't have to re-pick each time. No clone → 'female'
   // (matches the historical Lang::voice_id() default the schema migration
@@ -375,7 +399,14 @@ export async function deleteSessionRow(
   id: string,
 ): Promise<void> {
   const d = wrap(db);
-  await d.delete(schema.session_metrics).where(eq(schema.session_metrics.session_id, id)).run();
+  await d
+    .delete(schema.session_log_events)
+    .where(eq(schema.session_log_events.session_id, id))
+    .run();
+  await d
+    .delete(schema.session_metrics)
+    .where(eq(schema.session_metrics.session_id, id))
+    .run();
   await d.delete(schema.streams).where(eq(schema.streams.session_id, id)).run();
   await d.delete(schema.sessions).where(eq(schema.sessions.id, id)).run();
 }
@@ -440,7 +471,8 @@ export async function createStreamManual(
       eq(schema.streams.platform, args.platform),
     ),
   });
-  if (!existing) throw new Error("createStreamManual: row missing after insert");
+  if (!existing)
+    throw new Error("createStreamManual: row missing after insert");
   return existing;
 }
 
@@ -633,13 +665,15 @@ export async function upsertSessionMetrics(
   const prior = await getSessionMetrics(db, args.sessionId);
   const ts = now();
 
-  const nextSource =
-    args.sourceSeconds ?? prior?.source_seconds ?? 0;
+  const nextSource = args.sourceSeconds ?? prior?.source_seconds ?? 0;
 
   const priorOutputs: Record<string, number> = prior
     ? (JSON.parse(prior.output_seconds_json) as Record<string, number>)
     : {};
-  const mergedOutputs = { ...priorOutputs, ...(args.outputSecondsByLang ?? {}) };
+  const mergedOutputs = {
+    ...priorOutputs,
+    ...(args.outputSecondsByLang ?? {}),
+  };
 
   const row: SessionMetrics = {
     session_id: args.sessionId,
@@ -678,5 +712,52 @@ export async function listUserSessionMetrics(
   const ids = userSessions.map((s) => s.id);
   return await d.query.session_metrics.findMany({
     where: (m, { inArray }) => inArray(m.session_id, ids),
+  });
+}
+
+// ── session logs ──────────────────────────────────────────
+
+export type AppendSessionLogEvent = {
+  sessionId: string;
+  liveSessionId: string | null;
+  source: string;
+  level: string;
+  event: string;
+  message: string | null;
+  fields: Record<string, unknown>;
+  tsMs: number;
+};
+
+export async function appendSessionLogEvents(
+  db: D1Database,
+  events: AppendSessionLogEvent[],
+): Promise<number> {
+  if (events.length === 0) return 0;
+  const createdAt = now();
+  const rows: SessionLogEvent[] = events.map((event) => ({
+    id: uuid(),
+    session_id: event.sessionId,
+    live_session_id: event.liveSessionId,
+    source: event.source,
+    level: event.level,
+    event: event.event,
+    message: event.message,
+    fields_json: JSON.stringify(event.fields),
+    ts_ms: Math.trunc(event.tsMs),
+    created_at: createdAt,
+  }));
+  await wrap(db).insert(schema.session_log_events).values(rows).run();
+  return rows.length;
+}
+
+export async function listSessionLogEvents(
+  db: D1Database,
+  sessionId: string,
+  limit = 5000,
+): Promise<SessionLogEvent[]> {
+  return await wrap(db).query.session_log_events.findMany({
+    where: eq(schema.session_log_events.session_id, sessionId),
+    orderBy: schema.session_log_events.ts_ms,
+    limit,
   });
 }

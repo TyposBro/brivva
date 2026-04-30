@@ -2,6 +2,11 @@ import { useReducer, useRef, useCallback } from "react";
 import { AudioPipeline } from "../../../shared/audio/audio-pipeline";
 import { SessionSocket } from "../../../shared/networking/session-socket";
 import { ensureFreshToken } from "../../../shared/auth/auth-store";
+import {
+  configureSessionLogger,
+  flushSessionLogs,
+  sessionLog,
+} from "../../../shared/logging/session-logger";
 import { useTimings, type UtteranceTiming } from "./use-timings";
 import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
@@ -44,8 +49,17 @@ export function useHostSession() {
   } = useWebcam(
     (msg) => socket.current.sendJson(msg),
     () => socket.current.isOpen,
-    (stats) => dispatch({ type: "media_diagnostics", diagnostics: toDiagnostics(stats) }),
-    (issue) => dispatch({ type: "connection_issue", message: issue.message }),
+    (stats) => {
+      dispatch({
+        type: "media_diagnostics",
+        diagnostics: toDiagnostics(stats),
+      });
+      sessionLog("debug", "frontend.media_stats", { stats });
+    },
+    (issue) => {
+      dispatch({ type: "connection_issue", message: issue.message });
+      sessionLog("warn", "frontend.webrtc_issue", { issue }, issue.message);
+    },
   );
 
   const voiceClone = useVoiceClone(
@@ -88,6 +102,7 @@ export function useHostSession() {
     audio.current.stop();
     stopFrameStreaming();
     dispatch({ type: "recording_stopped" });
+    sessionLog("info", "frontend.recording_stopped");
   };
 
   const fetchAuthToken = async (): Promise<string | null> => {
@@ -119,6 +134,15 @@ export function useHostSession() {
     startWebcam();
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
+    if (opts.sessionId) {
+      configureSessionLogger({
+        sessionId: opts.sessionId,
+        userId: opts.userId,
+      });
+      sessionLog("info", "frontend.session_connect_requested", {
+        source_lang: opts.sourceLang ?? "en",
+      });
+    }
 
     const token = await fetchAuthToken();
     if (!token) return;
@@ -129,7 +153,10 @@ export function useHostSession() {
     };
     if (opts.sessionId) params.sessionId = opts.sessionId;
     socket.current.connect(params, {
-      onOpen: () => dispatch({ type: "connected" }),
+      onOpen: () => {
+        dispatch({ type: "connected" });
+        sessionLog("info", "frontend.ws_open");
+      },
       onMessage: (msg) => {
         if (handleWebRtcMessage(msg)) return;
         handleMessage(msg);
@@ -137,6 +164,8 @@ export function useHostSession() {
       onClose: () => {
         stopRecording();
         dispatch({ type: "disconnected" });
+        sessionLog("warn", "frontend.ws_closed");
+        void flushSessionLogs();
       },
     });
   };
@@ -147,15 +176,20 @@ export function useHostSession() {
       socket.current.sendAudio(buf),
     );
     dispatch({ type: "recording_started", analyser });
+    sessionLog("info", "frontend.recording_started");
     await startFrameStreaming();
+    sessionLog("info", "frontend.video_uplink_started");
   };
 
   const closeSession = () => {
+    sessionLog("info", "frontend.session_close_requested");
     socket.current.sendJson({ type: "host:end" });
     socket.current.close();
     stopRecording();
     stopFrameStreaming();
     stopWebcam();
+    void flushSessionLogs();
+    configureSessionLogger(null);
   };
 
   return {
@@ -186,10 +220,22 @@ function toDiagnostics(stats: ClientMediaStats) {
       frameRate: stats.sourceTrack?.frameRate,
     },
     outbound: {
-      frameWidth: typeof outbound.frameWidth === "number" ? outbound.frameWidth : undefined,
-      frameHeight: typeof outbound.frameHeight === "number" ? outbound.frameHeight : undefined,
-      framesPerSecond: typeof outbound.framesPerSecond === "number" ? outbound.framesPerSecond : undefined,
-      framesSent: typeof outbound.framesSent === "number" ? outbound.framesSent : undefined,
+      frameWidth:
+        typeof outbound.frameWidth === "number"
+          ? outbound.frameWidth
+          : undefined,
+      frameHeight:
+        typeof outbound.frameHeight === "number"
+          ? outbound.frameHeight
+          : undefined,
+      framesPerSecond:
+        typeof outbound.framesPerSecond === "number"
+          ? outbound.framesPerSecond
+          : undefined,
+      framesSent:
+        typeof outbound.framesSent === "number"
+          ? outbound.framesSent
+          : undefined,
       qualityLimitationReason: outbound.qualityLimitationReason,
     },
   };

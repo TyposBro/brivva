@@ -24,6 +24,10 @@ pub struct BroadcastState {
     pub force_default_voice: bool,
     /// Kill-switch: downgrade rtmps:// to rtmp:// at FFmpeg spawn. See runbook.
     pub force_rtmp_not_rtmps: bool,
+    /// Upload structured session events to Workers/D1 when enabled.
+    pub session_logs_enabled: bool,
+    /// Include high-volume debug events in the session log stream.
+    pub session_logs_verbose: bool,
 }
 
 impl BroadcastState {
@@ -39,6 +43,8 @@ impl BroadcastState {
             elevenlabs_base_url: String::new(),
             force_default_voice: false,
             force_rtmp_not_rtmps: false,
+            session_logs_enabled: false,
+            session_logs_verbose: false,
         }
     }
 }
@@ -65,6 +71,8 @@ mod tests {
         assert!(s.elevenlabs_base_url.is_empty());
         assert!(!s.force_default_voice);
         assert!(!s.force_rtmp_not_rtmps);
+        assert!(!s.session_logs_enabled);
+        assert!(!s.session_logs_verbose);
         assert!(s.live_sessions.is_empty());
     }
 

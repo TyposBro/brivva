@@ -23,5 +23,7 @@ pub fn broadcast_state() -> BroadcastState {
         elevenlabs_base_url: cfg.elevenlabs_base_url.clone(),
         force_default_voice: cfg.force_default_voice,
         force_rtmp_not_rtmps: cfg.force_rtmp_not_rtmps,
+        session_logs_enabled: cfg.session_logs_enabled,
+        session_logs_verbose: cfg.session_logs_verbose,
     }
 }

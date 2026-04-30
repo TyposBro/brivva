@@ -7,15 +7,17 @@ Reproducible AWS infra for Brivva backend. Region fixed to `us-east-1` for proxi
 | Resource | Name | Notes |
 |---|---|---|
 | ECR repo | `brivva/server-rs` | Keep last 10 images (lifecycle policy) |
-| Secrets Manager secret | `brivva/env` | JSON — keys below |
+| Secrets Manager secret | `brivva/env` | Runtime secret payload, populated from Infisical during `tofu apply` |
 | IAM role | `brivva-ecs-execution` | ECS task exec + `secretsmanager:GetSecretValue` on `brivva/env` |
 | CloudWatch log group | `/ecs/brivva` | 7d retention |
 | ECS cluster | `brivva` | Fargate-only |
-| ECS task def | `brivva` | 8 vCPU / 16 GB, server-rs + optional cloudflared sidecar |
-| ECS service | `brivva` | 1 task, public IP in default VPC |
+| ECS task def | `brivva` | 16 vCPU / 32 GB, server-rs + optional cloudflared sidecar |
+| ECS service | `brivva` | 1 task, public IP in default VPC, zero-surge deploys due Fargate vCPU quota |
 | Security group | `brivva-task` | Egress-only (cloudflared handles ingress) |
 
-Secret JSON keys: `SONIOX_API_KEY`, `ELEVENLABS_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TUNNEL_CREDS`.
+Sensitive values live in Infisical. Terraform receives them only as
+`TF_VAR_*` process environment variables via `infra/tofu-infisical.sh`; no
+`.env`, `.dev.vars`, or secret `terraform.tfvars` files are used.
 
 ## First apply
 
@@ -26,13 +28,11 @@ brew install opentofu
 # 2. Configure AWS creds for an account with admin-ish perms
 aws configure   # or: set -x AWS_PROFILE brivva
 
-# 3. Load secrets from ../.env.local → terraform.tfvars (gitignored)
+# 3. Init + apply with secrets injected by Infisical
 cd infra
-./load-env.sh
-
-# 4. Init + apply
 tofu init
-tofu apply
+cd ..
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply
 ```
 
 Outputs include `ecr_server_url`, `account_id`, etc.
@@ -63,23 +63,22 @@ The SQL lives in [workers/ops/live-session-id-migration.sql](../workers/ops/live
 
 ## Rotate secrets
 
-Edit `../.env.local`, then:
+Update the value in Infisical, then re-apply the AWS secret payload and
+restart tasks:
 
 ```fish
-cd infra
-./load-env.sh
-tofu apply          # updates secret value
-cd ..
-./deploy.sh --skip-build   # restart tasks to pick up new values
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply
+./deploy.sh --skip-build
 ```
 
 Tasks fetch secrets at container start — they don't hot-reload.
 
 ## Sizing
 
-**Current default: 8 vCPU / 16 GB.** (bumped from 2/4 on 2026-04-20 to
-carry the May 10 "ultimate test" shape: En source → Ko+Zh+Ja
-translations + passthrough on Grip+TikTok+YouTube simultaneously.)
+**Current default: 16 vCPU / 32 GB.** (bumped from 8/16 on 2026-04-30 after
+YouTube RTMP fell below realtime on 720p30, and from 2/4 on 2026-04-20 to carry
+the May 10 "ultimate test" shape: En source → Ko+Zh+Ja translations +
+passthrough on Grip+TikTok+YouTube simultaneously.)
 
 Rough budget per running stream:
 
@@ -93,28 +92,49 @@ Rough budget per running stream:
 
 **One stream = one ffmpeg process per RTMP destination** (source + K translated languages = 1+K processes).
 
-### Can an 8 vCPU / 16 GB task handle it?
+### Can a 16 vCPU / 32 GB task handle it?
 
 | Scenario | Fit |
 |---|---|
-| 1 stream, 1080p transcode, 3 translations + passthrough + burn-in subs ("ultimate test") | ✅ ~3.45 cores used, 4.5 cores headroom for STT/TTS orchestration |
-| 1 stream, 1080p transcode, 5 translations + passthrough | ✅ ~5.1 cores, still fits |
-| 2 concurrent host sessions, 1080p transcode, 3 translations each | ⚠️ ~7 cores used, tight. Scale horizontally (second task) rather than vertically |
+| 1 stream, 1080p transcode, 3 translations + passthrough + burn-in subs ("ultimate test") | ✅ ~3.45 cores budgeted, with >12 cores headroom for encoder variance + STT/TTS orchestration |
+| 1 stream, 1080p transcode, 5 translations + passthrough | ✅ ~5.1 cores budgeted, still comfortable |
+| 2 concurrent host sessions, 1080p transcode, 3 translations each | ✅ ~7 cores budgeted, but prefer horizontal scale-out for isolation once multi-room launches |
 | 3 concurrent host sessions | ❌ needs horizontal scale-out (see `docs/horizontal-scaling-plan.md` — Phase 2) |
 
-### Tune via tfvars
+### Tune via Terraform config
 
 If you need to override the new default:
 
 ```hcl
-# infra/terraform.tfvars
-task_cpu    = "8192"   # 8 vCPU (current default)
-task_memory = "16384"  # 16 GB
+task_cpu    = "16384"  # 16 vCPU (current default)
+task_memory = "32768"  # 32 GB
 ```
 
-Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html). Common pairs: 1024/2048, 2048/4096, 4096/8192, 8192/16384.
+Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html). Common pairs: 1024/2048, 2048/4096, 4096/8192, 8192/16384, 16384/32768.
 
 Apply changes: `tofu apply`, then `./deploy.sh --skip-build` to roll tasks.
+
+## Session log capture
+
+Per-session logs are disabled by default. When enabled, frontend + Workers +
+server-rs write structured events into D1 and expose them as NDJSON from:
+
+```txt
+GET /api/sessions/<SESSION_ID>/logs.ndjson?user_id=<USER_ID>
+```
+
+Toggle layers independently:
+
+| Layer | Flag | Default |
+|---|---|---|
+| Workers persistence/export | `SESSION_LOGS_ENABLED=0/1` in `workers/wrangler.toml` or Worker vars | on |
+| Frontend upload | `VITE_SESSION_LOGS=0/1` at build time or `localStorage.brivva:sessionLogs=1` | on |
+| server-rs upload | `session_logs_enabled` Terraform variable | on |
+| server-rs high-volume debug events | `session_logs_verbose` Terraform variable | off |
+
+Keep verbose off for normal production. Frontend media stats are enough for
+session-quality estimates; server verbose is only for debugging Fargate-side
+event ordering.
 
 ## Horizontal scale (many concurrent rooms)
 
@@ -205,7 +225,6 @@ filter pattern in `monitoring.tf` — the alarms silently report zero otherwise.
 ### Wiring alerts
 
 ```hcl
-# infra/terraform.tfvars
 alarm_email = "oncall@example.com"
 ```
 
@@ -229,7 +248,17 @@ Extend by editing the `widgets` list in `monitoring.tf`.
 
 ## State
 
-Local backend for now (`terraform.tfstate` in this dir, gitignored). Migrate to S3 + DynamoDB lock before team use.
+State lives in S3 with DynamoDB locking:
+
+- Bucket: `brivva-tf-state`
+- Key: `brivva/terraform.tfstate`
+- Lock table: `brivva-tf-locks`
+
+Run OpenTofu through Infisical so sensitive `TF_VAR_*` values are injected at process runtime. The wrapper also exports AWS CLI `login` credentials into the OpenTofu process when needed:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan
+```
 
 ## Cloudflared
 

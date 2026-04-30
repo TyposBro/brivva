@@ -27,6 +27,10 @@ pub struct AppConfig {
     /// platform's TLS stack is flaking. Only usable on platforms that accept
     /// unsecured RTMP. See `docs/runbook.md`.
     pub force_rtmp_not_rtmps: bool,
+    /// Upload structured session logs to Workers/D1 for NDJSON export.
+    pub session_logs_enabled: bool,
+    /// Include high-volume per-session debug events such as media stats.
+    pub session_logs_verbose: bool,
 }
 
 impl AppConfig {
@@ -45,6 +49,8 @@ impl AppConfig {
                 .to_string(),
             force_default_voice: env_flag("BRIVVA_FALLBACK_TO_DEFAULT_VOICE"),
             force_rtmp_not_rtmps: env_flag("BRIVVA_FORCE_RTMP_NOT_RTMPS"),
+            session_logs_enabled: env_flag("BRIVVA_SESSION_LOGS"),
+            session_logs_verbose: env_flag("BRIVVA_SESSION_LOG_VERBOSE"),
         })
     }
 }
@@ -87,6 +93,8 @@ mod tests {
                 "SONIOX_WS_URL",
                 "ELEVENLABS_API_KEY",
                 "ELEVENLABS_BASE_URL",
+                "BRIVVA_SESSION_LOGS",
+                "BRIVVA_SESSION_LOG_VERBOSE",
             ] {
                 std::env::remove_var(key);
             }
@@ -168,6 +176,8 @@ mod tests {
             std::env::set_var("ELEVENLABS_BASE_URL", "https://el");
             std::env::set_var("BRIVVA_FALLBACK_TO_DEFAULT_VOICE", "yes");
             std::env::set_var("BRIVVA_FORCE_RTMP_NOT_RTMPS", "on");
+            std::env::set_var("BRIVVA_SESSION_LOGS", "1");
+            std::env::set_var("BRIVVA_SESSION_LOG_VERBOSE", "true");
         }
 
         let cfg = AppConfig::from_env();
@@ -179,6 +189,8 @@ mod tests {
         assert_eq!(cfg.elevenlabs_base_url, "https://el");
         assert!(cfg.force_default_voice);
         assert!(cfg.force_rtmp_not_rtmps);
+        assert!(cfg.session_logs_enabled);
+        assert!(cfg.session_logs_verbose);
 
         unsafe {
             for key in [
@@ -190,6 +202,8 @@ mod tests {
                 "ELEVENLABS_BASE_URL",
                 "BRIVVA_FALLBACK_TO_DEFAULT_VOICE",
                 "BRIVVA_FORCE_RTMP_NOT_RTMPS",
+                "BRIVVA_SESSION_LOGS",
+                "BRIVVA_SESSION_LOG_VERBOSE",
             ] {
                 std::env::remove_var(key);
             }

@@ -141,6 +141,28 @@ impl WorkersApi {
         }
         Ok(())
     }
+
+    pub async fn report_session_logs<T: serde::Serialize + ?Sized>(
+        &self,
+        payload: &T,
+    ) -> Result<(), String> {
+        if self.base_url.is_empty() {
+            return Err("WORKERS_API_URL not set".into());
+        }
+        let url = format!("{}/internal/session-logs", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-Internal-Secret", &self.internal_secret)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| format!("workers session-log error: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("workers session-log upload → {}", resp.status()));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +173,7 @@ mod tests {
         Json, Router,
         extract::{Path, State},
         http::StatusCode,
-        routing::{get, patch},
+        routing::{get, patch, post},
     };
     use serde_json::{Value, json};
     use std::sync::Arc as StdArc;
@@ -195,6 +217,16 @@ mod tests {
             .expect_err("empty base url must error");
         assert!(matches!(err, MetricsReportError::Other(_)));
         assert!(err.to_string().contains("WORKERS_API_URL not set"));
+    }
+
+    #[tokio::test]
+    async fn report_session_logs_errors_when_base_url_is_empty() {
+        let api = WorkersApi::new("", "sec");
+        let err = api
+            .report_session_logs(&json!({ "events": [] }))
+            .await
+            .expect_err("empty base url must error");
+        assert!(err.contains("WORKERS_API_URL not set"));
     }
 
     #[tokio::test]
@@ -382,6 +414,32 @@ mod tests {
         api.report_session_metrics("X", &json!({"k":1}))
             .await
             .expect("ok");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn report_session_logs_succeeds_on_2xx_and_sends_payload() {
+        #[derive(Clone)]
+        struct S(StdArc<tokio::sync::Mutex<Option<Value>>>);
+
+        async fn capture(State(s): State<S>, Json(body): Json<Value>) -> StatusCode {
+            *s.0.lock().await = Some(body);
+            StatusCode::OK
+        }
+
+        let shared = StdArc::new(tokio::sync::Mutex::new(None));
+        let app = Router::new()
+            .route("/internal/session-logs", post(capture))
+            .with_state(S(shared.clone()));
+        let (base, handle) = spawn_mock(app).await;
+
+        let api = WorkersApi::new(&base, "sec");
+        api.report_session_logs(&json!({ "events": [{ "event": "x" }] }))
+            .await
+            .expect("ok");
+
+        let body = shared.lock().await.clone().expect("captured");
+        assert_eq!(body["events"][0]["event"], "x");
         handle.abort();
     }
 

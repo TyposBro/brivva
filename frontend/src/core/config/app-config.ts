@@ -13,6 +13,10 @@ export interface AppConfig {
   workersApiBase: string;
   /** WebSocket URL for the Fargate media server (ws:// or wss://). */
   mediaWsBase: string;
+  /** D1-backed session log upload toggle. */
+  sessionLogsEnabled: boolean;
+  /** Mirror structured session logs to browser console. */
+  sessionLogConsole: boolean;
 }
 
 let current: AppConfig | null = null;

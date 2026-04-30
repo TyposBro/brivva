@@ -21,7 +21,7 @@ for full context.
 | 4 — `active_voice_id` dispatch | ✅ shipped | `a74993d` (+ `active_voice_refresh.rs` mid-session retarget) |
 | 6 — D1 migrations 0001-0010 prod | ✅ applied | 2026-04-20 via `wrangler d1 migrations apply brivva --remote` |
 | 7 — Google OAuth redirect URIs | ✅ confirmed | user-verified |
-| 8 — `wrangler secret put GOOGLE_*` | ✅ verified | all 7 required secrets present on prod Workers |
+| 8 — Infisical-backed Workers secrets sync for `GOOGLE_*` | ✅ verified | all 7 required secrets present on prod Workers |
 | 10 — Accent-bug fix | ✅ verified | user-confirmed |
 | 17 — §0.5.4 silent-path log **infra** | ✅ shipped | `03b36d1` — wired + 44-row audit checklist + runner script |
 | 17 — §0.5.4 silent-path log **runtime alerts** | ✅ shipped | launch media hardening — FFmpeg idle/crash + slow encode/drop-frame warnings |
@@ -155,12 +155,10 @@ Steps (coordinate with Aziz — some require his console access):
 2. Dry-run migrations against prod D1: `bun run --cwd workers migrate:prod --dry-run` (or wrangler d1 migrations apply --preview). Post output.
 3. If clean, apply: `bun run --cwd workers migrate:prod`. Capture before/after schema diff.
 4. List required Google Console redirect URIs from workers/src/auth/google.ts. Produce copy-paste list for Aziz.
-5. Produce wrangler commands Aziz runs himself:
-     wrangler secret put GOOGLE_CLIENT_ID --env prod
-     wrangler secret put GOOGLE_CLIENT_SECRET --env prod
+5. Verify deploy automation syncs Infisical `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` into Workers prod secrets.
 6. Post-apply smoke: hit prod /auth/google with a test Gmail, confirm /api/user/me returns a row.
 
-DO NOT commit secrets. DO NOT run wrangler secret put yourself — surface the commands for Aziz.
+DO NOT commit secrets. Do not create `.env` / `.dev.vars` files. Secrets are Infisical-managed.
 ```
 
 ---

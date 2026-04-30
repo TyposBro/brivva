@@ -404,7 +404,7 @@ weekend for extra confidence.
 **Also this week:**
 - Apply D1 migrations 0005-0008 to prod (`bun run --cwd workers migrate:prod`)
 - Register production Google OAuth redirect URIs in Google Console
-- Put `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` in Workers prod env via `wrangler secret put`
+- Sync `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` to Workers prod from Infisical-backed deploy automation
 - Rehearse rollback end-to-end (`rollback.sh --list → rollback → smoke-test → roll-forward`) — target under 5 min without notes
 - Rehearse kill-switches on prod — flip each, verify behavior, flip back
 

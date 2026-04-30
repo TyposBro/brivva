@@ -9,7 +9,10 @@ beforeAll(async () => {
 // Wipe all tables between tests so each case starts from a known empty state.
 // Runs in FK-safe order (children first).
 beforeEach(async () => {
+  env.SESSION_LOGS_ENABLED = "0";
+  env.SESSION_LOG_CONSOLE = "0";
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM session_log_events"),
     env.DB.prepare("DELETE FROM platform_credentials"),
     env.DB.prepare("DELETE FROM session_metrics"),
     env.DB.prepare("DELETE FROM streams"),
