@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::Message;
 use ice::udp_network::{EphemeralUDP, UDPNetwork};
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use serde::Deserialize;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -15,8 +16,8 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp::codecs::h264::{
-    FU_END_BITMASK, FU_START_BITMASK, FUA_NALU_TYPE, H264Packet, NALU_TYPE_BITMASK, SPS_NALU_TYPE,
-    STAPA_NALU_TYPE,
+    FU_END_BITMASK, FU_START_BITMASK, FUA_NALU_TYPE, H264Packet, NALU_TYPE_BITMASK, PPS_NALU_TYPE,
+    SPS_NALU_TYPE, STAPA_NALU_TYPE,
 };
 use webrtc::rtp::packet::Packet;
 use webrtc::rtp::packetizer::Depacketizer;
@@ -172,7 +173,9 @@ fn wire_video_track(
     live_sessions: LiveSessions,
     live_session_id: String,
 ) {
+    let peer_for_track = peer.clone();
     peer.on_track(Box::new(move |track, _, _| {
+        let peer = peer_for_track.clone();
         let live_sessions = live_sessions.clone();
         let live_session_id = live_session_id.clone();
         Box::pin(async move {
@@ -188,17 +191,19 @@ fn wire_video_track(
                 );
                 return;
             }
-            forward_track_rtp(track, live_sessions, live_session_id).await;
+            forward_track_rtp(track, peer.clone(), live_sessions, live_session_id).await;
         })
     }));
 }
 
 async fn forward_track_rtp(
     track: Arc<TrackRemote>,
+    peer: Arc<RTCPeerConnection>,
     live_sessions: LiveSessions,
     live_session_id: String,
 ) {
     tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
+    let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
     let mut depacketizer = H264AnnexBDepacketizer::default();
     let mut clock = VideoRtpClock::default();
     while let Ok((packet, _)) = track.read_rtp().await {
@@ -217,7 +222,38 @@ async fn forward_track_rtp(
             .await
             .push_video_h264_at(&annex_b, captured_at);
     }
+    pli_task.abort();
     tracing::info!(live_session_id = %live_session_id, "webrtc video track ended");
+}
+
+fn spawn_periodic_pli(
+    peer: Arc<RTCPeerConnection>,
+    media_ssrc: u32,
+    live_session_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let packet = PictureLossIndication {
+                sender_ssrc: 0,
+                media_ssrc,
+            };
+            if let Err(error) = peer.write_rtcp(&[Box::new(packet)]).await {
+                tracing::debug!(
+                    live_session_id = %live_session_id,
+                    error = %error,
+                    "webrtc keyframe request failed"
+                );
+                break;
+            }
+            tracing::debug!(
+                live_session_id = %live_session_id,
+                media_ssrc,
+                "webrtc keyframe requested"
+            );
+        }
+    })
 }
 
 #[derive(Default)]
@@ -241,6 +277,7 @@ impl VideoRtpClock {
 struct H264AnnexBDepacketizer {
     inner: H264Packet,
     has_parameter_set: bool,
+    parameter_sets_annex_b: Vec<u8>,
     active_fu_a: bool,
     last_sequence_number: Option<u16>,
     access_unit: Vec<u8>,
@@ -310,7 +347,23 @@ impl H264AnnexBDepacketizer {
     fn push_depacketized(&mut self, marker: bool, bytes: &[u8]) -> Option<Vec<u8>> {
         self.access_unit.extend_from_slice(bytes);
         if marker && !self.access_unit.is_empty() {
-            return Some(std::mem::take(&mut self.access_unit));
+            let mut access_unit = std::mem::take(&mut self.access_unit);
+            if let Some(parameter_sets) = annex_b_parameter_sets(&access_unit)
+                && !parameter_sets.is_empty()
+            {
+                self.parameter_sets_annex_b = parameter_sets;
+            }
+            if annex_b_contains_type(&access_unit, 5)
+                && !annex_b_contains_type(&access_unit, SPS_NALU_TYPE)
+                && !self.parameter_sets_annex_b.is_empty()
+            {
+                let mut prefixed =
+                    Vec::with_capacity(self.parameter_sets_annex_b.len() + access_unit.len());
+                prefixed.extend_from_slice(&self.parameter_sets_annex_b);
+                prefixed.extend_from_slice(&access_unit);
+                access_unit = prefixed;
+            }
+            return Some(access_unit);
         }
         None
     }
@@ -348,6 +401,56 @@ fn stap_a_has_sps(payload: &[u8]) -> bool {
         offset += nalu_len;
     }
     false
+}
+
+fn annex_b_parameter_sets(access_unit: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for (start, end, nalu_type) in annex_b_nalus(access_unit) {
+        if nalu_type == SPS_NALU_TYPE || nalu_type == PPS_NALU_TYPE {
+            out.extend_from_slice(&access_unit[start..end]);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn annex_b_contains_type(access_unit: &[u8], needle: u8) -> bool {
+    annex_b_nalus(access_unit)
+        .into_iter()
+        .any(|(_, _, nalu_type)| nalu_type == needle)
+}
+
+fn annex_b_nalus(access_unit: &[u8]) -> Vec<(usize, usize, u8)> {
+    let starts = annex_b_start_codes(access_unit);
+    let mut nalus = Vec::new();
+    for (idx, (start, prefix_len)) in starts.iter().copied().enumerate() {
+        let nalu_idx = start + prefix_len;
+        if nalu_idx >= access_unit.len() {
+            continue;
+        }
+        let end = starts
+            .get(idx + 1)
+            .map(|(next_start, _)| *next_start)
+            .unwrap_or(access_unit.len());
+        nalus.push((start, end, access_unit[nalu_idx] & NALU_TYPE_BITMASK));
+    }
+    nalus
+}
+
+fn annex_b_start_codes(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        if bytes[i..].starts_with(&[0, 0, 0, 1]) {
+            starts.push((i, 4));
+            i += 4;
+        } else if bytes[i..].starts_with(&[0, 0, 1]) {
+            starts.push((i, 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    starts
 }
 
 #[cfg(test)]
@@ -414,6 +517,45 @@ mod tests {
             .expect("complete access unit");
         assert!(out.starts_with(&[0, 0, 0, 1, 0x67]));
         assert!(out.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
+    }
+
+    #[test]
+    fn depacketizer_prefixes_cached_parameter_sets_before_later_idr() {
+        let mut depacketizer = H264AnnexBDepacketizer::default();
+        let sps_pps_idr = Packet {
+            header: Header {
+                marker: true,
+                sequence_number: 1,
+                ..Default::default()
+            },
+            payload: vec![
+                24, // STAP-A
+                0, 3, 0x67, 1, 2, // SPS
+                0, 3, 0x68, 3, 4, // PPS
+                0, 3, 0x65, 5, 6, // IDR
+            ]
+            .into(),
+        };
+        let first = depacketizer
+            .depacketize(&sps_pps_idr)
+            .expect("initial access unit");
+        assert!(first.windows(5).any(|window| window == [0, 0, 0, 1, 0x68]));
+
+        let later_idr = Packet {
+            header: Header {
+                marker: true,
+                sequence_number: 2,
+                ..Default::default()
+            },
+            payload: vec![0x65, 7, 8, 9].into(),
+        };
+        let second = depacketizer
+            .depacketize(&later_idr)
+            .expect("later access unit");
+
+        assert!(second.starts_with(&[0, 0, 0, 1, 0x67]));
+        assert!(second.windows(5).any(|window| window == [0, 0, 0, 1, 0x68]));
+        assert!(second.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
     }
 
     #[test]

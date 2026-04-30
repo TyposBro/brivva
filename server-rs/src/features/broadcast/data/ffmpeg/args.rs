@@ -26,17 +26,19 @@ impl Default for VideoProfile {
 }
 
 impl VideoProfile {
-    pub fn from_capture(_width: u32, _height: u32, fps: u32) -> Self {
+    pub fn from_capture(width: u32, height: u32, fps: u32) -> Self {
         let input_fps = fps.clamp(30, 60);
-        // Launch-safe RTMP output is 1080p30. Browsers may capture 60fps (the
-        // latest Firefox/MacBook test did), but Fargate x264 1080p60 is too
-        // expensive and the H.264 copy path needs more work before YouTube can
-        // reliably start. Preserve the input cadence for demuxing, then output
-        // a stable 1080p30 stream.
+        // Keep RTMP output at the actual capture tier. Upscaling a 720p
+        // browser feed to 1080p made Fargate/libx264 fall below realtime until
+        // FFmpeg stopped draining stdin/FIFO and the idle watchdog restarted
+        // the stream. FFmpeg still owns the CFR clock via fps=30; it should
+        // duplicate cadence, not manufacture extra pixels.
         let output_fps = 30;
-        let max_width = 1920;
-        let max_height = 1080;
-        let bitrate_kbps = 6_000;
+        let (max_width, max_height, bitrate_kbps) = if width >= 1920 && height >= 1080 {
+            (1920, 1080, 6_000)
+        } else {
+            (1280, 720, 3_500)
+        };
         Self {
             input_fps,
             output_fps,
@@ -404,13 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn video_profile_keeps_1080p30_as_floor() {
+    fn video_profile_uses_720p30_for_720p_capture() {
         let profile = VideoProfile::from_capture(1280, 720, 15);
         assert_eq!(profile.input_fps, 30);
         assert_eq!(profile.output_fps, 30);
-        assert_eq!(profile.max_width, 1920);
-        assert_eq!(profile.max_height, 1080);
-        assert_eq!(profile.bitrate_kbps, 6_000);
+        assert_eq!(profile.max_width, 1280);
+        assert_eq!(profile.max_height, 720);
+        assert_eq!(profile.bitrate_kbps, 3_500);
     }
 
     #[test]
