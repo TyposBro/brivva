@@ -71,6 +71,7 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     } = ctx;
     let mut chunk_count: u64 = 0;
     let mut last_stats = Instant::now();
+    let mut need_keyframe = true;
 
     eprintln!(
         "[VIDEO:{}] H.264 pipe drain started (delay={}ms)",
@@ -89,7 +90,9 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
             last_stats = now;
         }
 
-        let Some(chunk) = drain_next_h264_live(&h264_buf, now, delay, VIDEO_MAX_LAG) else {
+        let Some(chunk) =
+            drain_next_h264_live(&h264_buf, now, delay, VIDEO_MAX_LAG, &mut need_keyframe)
+        else {
             thread::sleep(Duration::from_millis(2));
             continue;
         };
@@ -128,6 +131,7 @@ fn drain_next_h264_live(
     now: Instant,
     delay: Duration,
     max_lag: Duration,
+    need_keyframe: &mut bool,
 ) -> Option<Arc<[u8]>> {
     let mut buf = h264_buf.lock().unwrap();
     let live_cutoff = now.checked_sub(max_lag).unwrap_or(now);
@@ -155,6 +159,7 @@ fn drain_next_h264_live(
     // chunk rather than emptying the live buffer; the next keyframe will be
     // preferred as soon as it arrives.
     if dropped_stale {
+        *need_keyframe = true;
         while buf.len() > 1 {
             let Some((ts, packet)) = buf.front() else {
                 break;
@@ -166,9 +171,25 @@ fn drain_next_h264_live(
         }
     }
 
+    while *need_keyframe && buf.len() > 1 {
+        let Some((ts, packet)) = buf.front() else {
+            break;
+        };
+        if *ts + delay > now || h264_annexb_contains_idr(packet) {
+            break;
+        }
+        buf.pop_front();
+    }
+
     let (ts, _) = buf.front()?;
     if *ts + delay <= now {
         let (_, packet) = buf.pop_front().unwrap();
+        if *need_keyframe {
+            if !h264_annexb_contains_idr(&packet) {
+                return None;
+            }
+            *need_keyframe = false;
+        }
         Some(packet)
     } else {
         None
@@ -607,7 +628,14 @@ mod tests {
             b.push_back((now - Duration::from_millis(120), chunk(vec![1])));
             b.push_back((now + Duration::from_millis(500), chunk(vec![2])));
         }
-        let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
+        let mut need_keyframe = false;
+        let result = drain_next_h264_live(
+            &buf,
+            now,
+            delay,
+            Duration::from_millis(250),
+            &mut need_keyframe,
+        );
         assert_eq!(result, Some(chunk(vec![1])));
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
@@ -624,7 +652,14 @@ mod tests {
             b.push_back((now - Duration::from_millis(150), chunk(vec![0, 0, 1, 5])));
             b.push_back((now + Duration::from_millis(500), chunk(vec![4])));
         }
-        let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
+        let mut need_keyframe = false;
+        let result = drain_next_h264_live(
+            &buf,
+            now,
+            delay,
+            Duration::from_millis(250),
+            &mut need_keyframe,
+        );
         assert_eq!(result, Some(chunk(vec![0, 0, 1, 5])));
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
@@ -644,9 +679,46 @@ mod tests {
             b.push_back((now + Duration::from_millis(500), chunk(vec![4])));
         }
 
-        let result = drain_next_h264_live(&buf, now, delay, Duration::from_millis(250));
+        let mut need_keyframe = false;
+        let result = drain_next_h264_live(
+            &buf,
+            now,
+            delay,
+            Duration::from_millis(250),
+            &mut need_keyframe,
+        );
 
         assert_eq!(result, Some(chunk(idr.to_vec())));
+    }
+
+    #[test]
+    fn drain_next_h264_live_waits_for_keyframe_on_fresh_ffmpeg_pipe() {
+        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        let now = Instant::now();
+        let delay = Duration::from_millis(100);
+        {
+            let mut b = buf.lock().unwrap();
+            b.push_back((
+                now - Duration::from_millis(150),
+                chunk(vec![0, 0, 1, 1, 0xaa]),
+            ));
+            b.push_back((
+                now - Duration::from_millis(140),
+                chunk(vec![0, 0, 1, 5, 0xbb]),
+            ));
+        }
+
+        let mut need_keyframe = true;
+        let result = drain_next_h264_live(
+            &buf,
+            now,
+            delay,
+            Duration::from_millis(250),
+            &mut need_keyframe,
+        );
+
+        assert_eq!(result, Some(chunk(vec![0, 0, 1, 5, 0xbb])));
+        assert!(!need_keyframe);
     }
 
     #[test]
@@ -664,11 +736,13 @@ mod tests {
             let mut b = buf.lock().unwrap();
             b.push_back((now + Duration::from_millis(10), chunk(vec![1])));
         }
+        let mut need_keyframe = false;
         let result = drain_next_h264_live(
             &buf,
             now,
             Duration::from_millis(100),
             Duration::from_millis(250),
+            &mut need_keyframe,
         );
         assert!(result.is_none());
         assert_eq!(buf.lock().unwrap().len(), 1);
@@ -865,7 +939,7 @@ mod tests {
         let buf = Arc::new(StdMutex::new(VecDeque::new()));
         buf.lock().unwrap().push_back((
             Instant::now() - Duration::from_secs(1),
-            chunk(vec![1, 2, 3]),
+            chunk(vec![0, 0, 1, 5, 1, 2, 3]),
         ));
         let stop = Arc::new(AtomicBool::new(false));
         let ctx = VideoDrainCtx {
@@ -882,7 +956,7 @@ mod tests {
         stop.store(true, Ordering::Release);
         handle.join().unwrap();
         let _ = child.wait();
-        assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0, 0, 1, 5, 1, 2, 3]);
         let _ = std::fs::remove_file(&path);
     }
 }

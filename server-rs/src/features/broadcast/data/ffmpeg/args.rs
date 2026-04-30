@@ -18,9 +18,9 @@ impl Default for VideoProfile {
             output_fps: 30,
             max_width: 1920,
             max_height: 1080,
-            bitrate_kbps: 3500,
-            maxrate_kbps: 4500,
-            bufsize_kbps: 9000,
+            bitrate_kbps: 6_000,
+            maxrate_kbps: 9_000,
+            bufsize_kbps: 18_000,
         }
     }
 }
@@ -337,7 +337,7 @@ mod tests {
         assert!(joined.contains("-preset ultrafast"));
         assert!(joined.contains("-tune zerolatency"));
         assert!(joined.contains("-bf 0"));
-        assert!(joined.contains("-b:v 3500k -maxrate 4500k -bufsize 9000k"));
+        assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
         assert!(joined.contains("-g 60"));
         assert!(!joined.contains("-c:v copy"));
         assert!(!joined.contains("image2pipe"));
