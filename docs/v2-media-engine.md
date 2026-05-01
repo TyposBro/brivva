@@ -226,6 +226,32 @@ Implemented as logs-only shadow mode behind `BRIVVA_V2_TIMELINE_SHADOW`:
 
 Rollback: disable `BRIVVA_V2_TIMELINE_SHADOW`; with the flag off, shadow state is not allocated and no shadow logs are emitted.
 
+#### Phase 1 runtime proof — 2026-05-01
+
+Accepted Phase 1 and ran fake-browser-media rehearsal automation:
+
+```bash
+./scripts/prove-v2-timeline-shadow.sh --duration 120 --rollback-duration 45 --source ko
+./scripts/prove-v2-timeline-shadow.sh --duration 600 --rollback-duration 45 --source ko
+```
+
+Observed result:
+
+- ✅ Short shadow-on rehearsal: 2 minutes, Playwright Chromium fake camera/mic, local RTMP sink, source `ko`, passthrough output.
+- ✅ Full shadow-on rehearsal: 10 minutes with the same fake-media/local-RTMP path.
+- ✅ Logs contained `v2 timeline shadow video` and `video_rtp_authoritative` payloads.
+- ✅ Logs contained `v2 timeline shadow audio` and `audio_arrival_non_authoritative` payloads.
+- ✅ Rollback smoke: 45 seconds with `BRIVVA_V2_TIMELINE_SHADOW=0`.
+- ✅ Rollback logs did not contain video/audio shadow events or payload kinds.
+- ✅ No FFmpeg/RTMP/pipeline diff was part of the implementation packet.
+
+Proof directories:
+
+- `.dev-logs/v2-timeline-shadow-proof/20260501-153746/`
+- `.dev-logs/v2-timeline-shadow-proof/20260501-154159/`
+
+Automation note: `scripts/prove-v2-timeline-shadow.sh` preserves phase-specific proof logs as `shadow-on-server-rs.log`, `shadow-on-dev-stack.log`, `rollback-server-rs.log`, and `rollback-dev-stack.log` under `.dev-logs/v2-timeline-shadow-proof/<timestamp>/`.
+
 ### Phase 2 — timestamped audio ingest
 
 Goal: remove arrival-time audio ambiguity.
