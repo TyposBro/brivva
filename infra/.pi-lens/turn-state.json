@@ -1,0 +1,101 @@
+{
+  "files": {
+    "variables.tf": {
+      "modifiedRanges": [
+        {
+          "start": 50,
+          "end": 89
+        },
+        {
+          "start": 96,
+          "end": 107
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-30T16:04:01.146Z"
+    },
+    "main.tf": {
+      "modifiedRanges": [
+        {
+          "start": 14,
+          "end": 27
+        },
+        {
+          "start": 33,
+          "end": 33
+        },
+        {
+          "start": 87,
+          "end": 112
+        },
+        {
+          "start": 199,
+          "end": 230
+        },
+        {
+          "start": 240,
+          "end": 240
+        },
+        {
+          "start": 246,
+          "end": 246
+        },
+        {
+          "start": 252,
+          "end": 252
+        },
+        {
+          "start": 270,
+          "end": 336
+        },
+        {
+          "start": 338,
+          "end": 342
+        },
+        {
+          "start": 353,
+          "end": 353
+        },
+        {
+          "start": 439,
+          "end": 439
+        },
+        {
+          "start": 467,
+          "end": 467
+        },
+        {
+          "start": 469,
+          "end": 500
+        },
+        {
+          "start": 504,
+          "end": 513
+        },
+        {
+          "start": 528,
+          "end": 573
+        },
+        {
+          "start": 580,
+          "end": 584
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-30T16:08:33.606Z"
+    },
+    "outputs.tf": {
+      "modifiedRanges": [
+        {
+          "start": 18,
+          "end": 22
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-30T14:33:57.616Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-04-30T16:08:33.606Z"
+}

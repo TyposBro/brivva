@@ -1,0 +1,55 @@
+{
+  "files": {
+    "src/features/broadcast/data/ffmpeg/args.rs": {
+      "modifiedRanges": [
+        {
+          "start": 4,
+          "end": 27
+        },
+        {
+          "start": 83,
+          "end": 91
+        },
+        {
+          "start": 93,
+          "end": 98
+        },
+        {
+          "start": 121,
+          "end": 149
+        },
+        {
+          "start": 171,
+          "end": 227
+        },
+        {
+          "start": 496,
+          "end": 515
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-30T13:48:42.063Z"
+    },
+    "src/features/broadcast/data/ffmpeg/mod.rs": {
+      "modifiedRanges": [
+        {
+          "start": 23,
+          "end": 23
+        },
+        {
+          "start": 505,
+          "end": 505
+        },
+        {
+          "start": 511,
+          "end": 511
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-30T13:49:21.638Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-04-30T13:49:21.638Z"
+}

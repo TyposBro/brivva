@@ -8,6 +8,93 @@ Response section in `ARCHITECTURE.md`.
 
 ---
 
+## May 10 GPU Launch Topology
+
+Primary:
+
+```txt
+Cloudflare Pages frontend
+Cloudflare Workers + D1 control plane
+        ↓ VITE_MEDIA_URL
+ECS-on-EC2 GPU server-rs (BRIVVA_VIDEO_ENCODER=nvenc)
+        ↓ RTMP/RTMPS
+Grip / YouTube / TikTok
+```
+
+Fallback:
+
+```txt
+Cloudflare Pages frontend
+Cloudflare Workers + D1 control plane
+        ↓ VITE_MEDIA_URL changed to laptop tunnel/host
+Aziz laptop RTX 4060 server-rs (./scripts/run-local-engine.sh)
+        ↓ RTMP/RTMPS
+Grip / YouTube / TikTok
+```
+
+Preflight before any paid show:
+
+```bash
+./scripts/check-ffmpeg-runtime.sh nvenc
+terraform -chdir=infra validate
+./scripts/check-gpu-zero-spend.sh
+
+# ECS GPU no-spend preflight
+./scripts/run-ecs-gpu-rehearsal.sh --preflight-only
+
+# ECS GPU rehearsal/live drill: scales to 1, smokes endpoint, starts frontend, scales down on Ctrl-C
+./scripts/run-ecs-gpu-rehearsal.sh
+```
+
+60–90 min rehearsal proof after a real session:
+
+```bash
+# if you need the session id from D1
+./scripts/list-recent-sessions.sh --remote
+
+./scripts/verify-session-burn-in.sh <SESSION_ID> --remote
+# laptop-only local D1 rehearsal:
+# ./scripts/verify-session-burn-in.sh <SESSION_ID> --local
+
+# collect archive with D1 proof + engine/frontend logs + NVENC/GPU evidence
+./scripts/collect-rehearsal-proof.sh <SESSION_ID> --remote
+```
+
+This verifies D1 session state, `session_metrics`, `session_log_events`, local/exported NVENC log evidence, and writes a proof archive under `.dev-logs/rehearsals/`.
+
+Laptop fallback preflight/start:
+
+```bash
+# does not start server; verifies RTX/NVENC, RTMPS, drawtext, port 3000, env
+./scripts/run-local-engine.sh --preflight-only
+
+# one-command local rehearsal stack: media engine + frontend wired to it
+./scripts/run-laptop-rehearsal.sh
+
+# lower-level engine-only start
+./scripts/run-local-engine.sh
+
+# in another shell, after engine starts
+./scripts/smoke-media-engine.sh http://127.0.0.1:3000
+```
+
+Frontend routing rule:
+
+- `VITE_API_URL` = Workers API (`https://brivva-api...`) — keep stable.
+- `VITE_MEDIA_URL` = current media engine — ECS GPU primary or laptop fallback.
+- Frontend rewrites `https://...` to `wss://...` for `/api/session`.
+- For browser production/cutover, prefer a stable HTTPS media hostname; raw `http://<gpu-ip>:3000` is for smoke/rehearsal only.
+
+Failover steps if ECS GPU dies mid-rehearsal/show:
+
+1. Start laptop engine with `./scripts/run-local-engine.sh`.
+2. Expose laptop engine through approved hostname/tunnel or direct host.
+3. Rebuild/redeploy Pages with `VITE_MEDIA_URL=<laptop-engine-url>`.
+4. Host refreshes page, reopens session. D1 remains canonical; Fargate/ECS state is disposable.
+5. Confirm D1 session goes `setup/live`, then RTMP platform shows live.
+
+---
+
 ## Top 3 Likely Failures
 
 ### 1. Translated TTS silent — host audio fine, translated stream has no voice
@@ -17,12 +104,14 @@ or garbled. Usually ElevenLabs WS stall or voice clone id mismatch (the
 April 2026 Indian-accent regression is the canonical example).
 
 Triage (30 seconds):
+
 1. Open Fargate logs: `aws logs tail /ecs/brivva --follow --since 5m`.
 2. Grep for `[TTS]` — is the session even reaching TTS, or stuck at STT?
 3. If the cloned voice is producing the wrong language/accent → kill-switch fix.
 4. If ElevenLabs HTTP errors are the pattern → platform outage, skip to Plan B.
 
 Fix:
+
 - `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` → force the target language's
   default voice from the ElevenLabs library, bypass cloning entirely.
   Update Secrets Manager, force-restart the ECS service. Lower voice
@@ -31,6 +120,7 @@ Fix:
   outage, or switch to Plan B (desktop app fallback below).
 
 Recovery validation:
+
 - Listen to RTMP output: `ffplay rtmps://...:443/live/<STREAM_KEY>`.
 - Run `./scripts/smoke-test.sh <session_id>` (once that script exists).
 
@@ -40,18 +130,21 @@ Symptom: viewers see "stream offline", Grip dashboard shows red. FFmpeg
 log has `Connection reset` or `Broken pipe`.
 
 Triage:
+
 1. Check FFmpeg exit code in Fargate logs.
 2. If Grip-specific: known regional endpoints drop after ~30min idle —
    reconnect should auto-fire, give it 10s.
 3. If still dead after 30s: platform outage or credential rotation.
 
 Fix:
+
 - Restart session from dashboard (frontend: "Stop" then "Start"). This
   triggers a new FFmpeg spawn with fresh stream key.
 - If Grip TLS handshake fails: `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` →
   unsecured RTMP. Only if platform allows it (check with Simon).
 
 Recovery validation:
+
 - Stream appears in platform dashboard with live viewers.
 - ffprobe reports audio + video tracks on the RTMP output.
 
@@ -72,6 +165,7 @@ from source with `--enable-openssl`, and CI verifies both:
 2. `ffmpeg -hide_banner -protocols | grep -q rtmps`
 
 Triage (30 seconds):
+
 1. Confirm the running image is based on `brivva/ffmpeg-base:<version>-native-rtmp`.
 2. Confirm the two checks above pass inside the runtime image.
 3. Confirm with a ffmpeg CLI push using testsrc + sine to the same IVS URL.
@@ -82,6 +176,7 @@ OpenSSL-enabled binary plus its shared library deps; it must not install
 `librtmp1` or check for `enable-librtmp`.
 
 Non-fixes (tried, none work):
+
 - Changing encoder preset (veryfast, ultrafast), profile (main, constrained baseline)
 - Changing bitrate caps, keyframe interval, GOP size
 - Rotating the stream key (keys are persistent per IVS channel anyway)
@@ -94,12 +189,14 @@ Symptom: dashboard shows "disconnected", session state frozen, no audio
 frames reaching server.
 
 Triage:
+
 1. Browser dev console → Network → WS frame — server closed, or client?
 2. Check Fargate logs for `WS upgrade rejected` (JWT expiry) or
    `connection reset by peer` (cloudflared tunnel flap).
 3. If cloudflared → DNS propagation or tunnel token issue.
 
 Fix:
+
 - Refresh browser tab — re-fetches JWT, reconnects WS. **Fixes 80% of
   cases.** Session state restores from Workers / D1.
 - If JWT expired mid-session: check `JWT_SECRET` didn't rotate in
@@ -108,6 +205,7 @@ Fix:
   on the cluster → restarts `cloudflared-init` sidecar.
 
 Recovery validation:
+
 - Dashboard reconnects, session state matches pre-drop.
 - Host audio flows again, TTS resumes within 5s.
 
@@ -118,12 +216,13 @@ Recovery validation:
 Update Secrets Manager `brivva/env` → force task restart. Both switches
 are wired in `server-rs` and read once at session start per `AppConfig`.
 
-| Var | When to use | Wired at |
-|---|---|---|
+| Var                                  | When to use                                                       | Wired at                                  |
+| ------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------- |
 | `BRIVVA_FALLBACK_TO_DEFAULT_VOICE=1` | Voice clone producing garbage (accent bugs), force default voices | `features/broadcast/data/pipeline/tts.rs` |
-| `BRIVVA_FORCE_RTMP_NOT_RTMPS=1` | TLS handshake fails with a platform, drop to unsecured RTMP | `features/broadcast/data/session_ws.rs` |
+| `BRIVVA_FORCE_RTMP_NOT_RTMPS=1`      | TLS handshake fails with a platform, drop to unsecured RTMP       | `features/broadcast/data/session_ws.rs`   |
 
 Apply:
+
 ```bash
 aws secretsmanager update-secret --secret-id brivva/env --secret-string '{...}'
 aws ecs update-service --cluster brivva --service brivva --force-new-deployment
@@ -180,6 +279,7 @@ bunx wrangler pages rollback --project-name=brivva <DEPLOYMENT_ID>
 ### Rehearsal
 
 Rehearse the Fargate path **before May 10**:
+
 ```bash
 ./scripts/rollback.sh --list       # verify you can read revisions
 ./scripts/rollback.sh <prev-rev>   # actually roll, then forward again

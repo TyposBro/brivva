@@ -20,7 +20,7 @@ mod drain;
 mod mixer;
 mod orphan;
 
-use args::{FfmpegProgressAlert, FfmpegProgressMonitor};
+use args::{FfmpegProgressAlert, FfmpegProgressMonitor, VideoEncoder};
 pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
@@ -502,11 +502,13 @@ impl RtmpManager {
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
+        let encoder = VideoEncoder::from_env();
         let ffmpeg_args =
             build_ffmpeg_args_with_profile(&audio_fifo, &args.rtmp_url, self.video_profile);
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
+            video_encoder = encoder.codec_name(),
             input_fps = self.video_profile.input_fps,
             output_fps = self.video_profile.output_fps,
             max_width = self.video_profile.max_width,

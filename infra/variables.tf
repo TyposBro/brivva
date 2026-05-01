@@ -47,6 +47,64 @@ variable "task_memory" {
   default     = "32768"
 }
 
+variable "ecs_launch_type" {
+  description = "Media engine launch path: FARGATE for CPU fallback, EC2_GPU for May 10 GPU primary."
+  type        = string
+  default     = "FARGATE"
+  validation {
+    condition     = contains(["FARGATE", "EC2_GPU"], var.ecs_launch_type)
+    error_message = "ecs_launch_type must be FARGATE or EC2_GPU."
+  }
+}
+
+variable "gpu_capacity_enabled" {
+  description = "Create zero-capacity ECS GPU ASG/capacity provider without switching the service off Fargate. No GPU bill while gpu_desired_capacity=0."
+  type        = bool
+  default     = true
+}
+
+variable "gpu_instance_type" {
+  description = "EC2 GPU instance type for ecs_launch_type=EC2_GPU. g4dn.xlarge = cheapest NVIDIA T4 launch target."
+  type        = string
+  default     = "g4dn.xlarge"
+}
+
+variable "gpu_availability_zones" {
+  description = "AZs allowed for GPU ASG. us-east-1e excludes g4dn.xlarge, so keep it out by default."
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+}
+
+variable "gpu_desired_capacity" {
+  description = "Number of ECS GPU EC2 instances. Keep 0 until ready to pay; set 1 for rehearsal/launch."
+  type        = number
+  default     = 0
+}
+
+variable "gpu_rehearsal_service_enabled" {
+  description = "Create a parallel brivva-gpu ECS service for blue/green rehearsal without replacing the primary Fargate service."
+  type        = bool
+  default     = false
+}
+
+variable "gpu_rehearsal_desired_count" {
+  description = "Desired task count for the parallel brivva-gpu rehearsal service. Use 1 only when gpu_desired_capacity is also 1+."
+  type        = number
+  default     = 0
+}
+
+variable "gpu_task_cpu" {
+  description = "CPU units for EC2 GPU task. g4dn.xlarge has 4096 CPU units."
+  type        = string
+  default     = "4096"
+}
+
+variable "gpu_task_memory" {
+  description = "Memory MB for EC2 GPU task. Keep below g4dn.xlarge registered memory (~15.7GB)."
+  type        = string
+  default     = "14336"
+}
+
 variable "session_logs_enabled" {
   description = "Set BRIVVA_SESSION_LOGS=1 on server-rs to upload per-session NDJSON logs to Workers/D1."
   type        = bool

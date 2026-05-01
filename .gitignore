@@ -35,3 +35,6 @@ CLAUDE.md
 CODEX.md
 GEMINI.md
 *.agent-memory.bak.*
+.pi/*
+.pi-lens/*
+.ralph/*

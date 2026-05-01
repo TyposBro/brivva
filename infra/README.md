@@ -4,16 +4,16 @@ Reproducible AWS infra for Brivva backend. Region fixed to `us-east-1` for proxi
 
 ## What it provisions
 
-| Resource | Name | Notes |
-|---|---|---|
-| ECR repo | `brivva/server-rs` | Keep last 10 images (lifecycle policy) |
-| Secrets Manager secret | `brivva/env` | Runtime secret payload, populated from Infisical during `tofu apply` |
-| IAM role | `brivva-ecs-execution` | ECS task exec + `secretsmanager:GetSecretValue` on `brivva/env` |
-| CloudWatch log group | `/ecs/brivva` | 7d retention |
-| ECS cluster | `brivva` | Fargate-only |
-| ECS task def | `brivva` | 16 vCPU / 32 GB, server-rs + optional cloudflared sidecar |
-| ECS service | `brivva` | 1 task, public IP in default VPC, zero-surge deploys due Fargate vCPU quota |
-| Security group | `brivva-task` | Egress-only (cloudflared handles ingress) |
+| Resource               | Name                   | Notes                                                                                   |
+| ---------------------- | ---------------------- | --------------------------------------------------------------------------------------- |
+| ECR repo               | `brivva/server-rs`     | Keep last 10 images (lifecycle policy)                                                  |
+| Secrets Manager secret | `brivva/env`           | Runtime secret payload, populated from Infisical during `tofu apply`                    |
+| IAM role               | `brivva-ecs-execution` | ECS task exec + `secretsmanager:GetSecretValue` on `brivva/env`                         |
+| CloudWatch log group   | `/ecs/brivva`          | 7d retention                                                                            |
+| ECS cluster            | `brivva`               | Fargate CPU fallback or ECS-on-EC2 GPU primary                                          |
+| ECS task def           | `brivva`               | 16 vCPU / 32 GB fallback; GPU mode requests 1 GPU and sets `BRIVVA_VIDEO_ENCODER=nvenc` |
+| ECS service            | `brivva`               | 1 task; Fargate launch type or GPU capacity provider                                    |
+| Security group         | `brivva-task`          | Egress + WebRTC UDP 40000-40100                                                         |
 
 Sensitive values live in Infisical. Terraform receives them only as
 `TF_VAR_*` process environment variables via `infra/tofu-infisical.sh`; no
@@ -37,14 +37,111 @@ infisical run --env=prod -- ./infra/tofu-infisical.sh apply
 
 Outputs include `ecr_server_url`, `account_id`, etc.
 
+## ECS GPU mode (May 10 primary)
+
+Default Terraform remains `ecs_launch_type=FARGATE` and `gpu_desired_capacity=0`, so no GPU instance bill appears until explicitly enabled.
+
+Safer blue/green rehearsal: create a parallel `brivva-gpu` service first. This does **not** replace the primary Fargate `brivva` service.
+
+One-command smoke/rehearsal runner:
+
+```fish
+# no spend; checks quota/Terraform/scripts
+./scripts/run-ecs-gpu-rehearsal.sh --preflight-only
+
+# scale to 1, smoke endpoint, start local frontend pointed at ECS GPU, scale down on Ctrl-C
+./scripts/run-ecs-gpu-rehearsal.sh
+```
+
+Lower-level Terraform commands:
+
+```fish
+# create parallel GPU service/task definition with desired_count=0
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0'
+
+# pre-check EC2 GPU quota; must be >=4 vCPU for g4dn.xlarge
+./scripts/check-aws-gpu-quota.sh
+
+# request quota increase when blocked
+./scripts/check-aws-gpu-quota.sh --request
+
+# when ready to pay and smoke test, start one GPU host + one GPU task
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=1' \
+  -var='gpu_desired_capacity=1' \
+  -var='gpu_instance_type=g4dn.xlarge'
+
+# after task is RUNNING, print direct HTTP/WS endpoint for VITE_MEDIA_URL testing
+./scripts/ecs-gpu-endpoint.sh
+./scripts/smoke-media-engine.sh http://<gpu-public-ip>:3000
+
+# if quota/capacity blocks launch or smoke is done, return to zero spend/retry loop
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0'
+
+# verify no GPU EC2 spend remains
+./scripts/check-gpu-zero-spend.sh
+```
+
+Direct primary switch path (riskier): changes the existing `brivva` service from Fargate to EC2 GPU and may replace the service.
+
+```fish
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='ecs_launch_type=EC2_GPU' \
+  -var='gpu_desired_capacity=1' \
+  -var='gpu_instance_type=g4dn.xlarge'
+```
+
+Turn GPU spend back off:
+
+```fish
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='ecs_launch_type=EC2_GPU' \
+  -var='gpu_desired_capacity=0'
+```
+
+GPU runtime requirements:
+
+```fish
+./scripts/check-ffmpeg-runtime.sh nvenc
+```
+
+The GPU path uses:
+
+- ECS GPU-optimized AL2 AMI from SSM.
+- ASG + ECS capacity provider.
+- Task `resourceRequirements = GPU:1`.
+- `BRIVVA_VIDEO_ENCODER=nvenc`.
+- WebRTC UDP `40000-40100` directly on the task/instance security group.
+
 ## Redeploy (after code change)
 
-Terraform does NOT rebuild images. Flow:
+Terraform does NOT rebuild images. CPU/Fargate fallback flow:
 
 ```fish
 cd ..
 ./deploy.sh   # build → push :latest → force new ECS deployment
 ```
+
+GPU/ECS-on-EC2 image flow:
+
+```fish
+# first GPU image bootstrap / after GPU Dockerfile changes
+./deploy.sh --gpu --build-ffmpeg-gpu-base --build-server-bases --bases-only
+
+# build/push GPU server image without touching ECS services
+./deploy.sh --gpu --build-only
+
+# direct primary deploy only after cutover is intended
+./deploy.sh --gpu
+```
+
+`--gpu` selects the NVENC runtime base and writes `BRIVVA_VIDEO_ENCODER=nvenc` into the task definition. The server build base is shared with CPU deploys; the runtime base tag defaults to `bookworm-ffmpeg-7.1.1-nvenc-v1`.
 
 ### Session Naming Migration
 
@@ -82,24 +179,24 @@ passthrough on Grip+TikTok+YouTube simultaneously.)
 
 Rough budget per running stream:
 
-| Work | CPU per process | RAM per process |
-|---|---|---|
-| Audio-only encode (AAC) | ~5% of 1 core | 50 MB |
-| Video passthrough (`-c:v copy`) | ~5% of 1 core | 50 MB |
-| libx264 720p30 transcode | ~50% of 1 core | 200 MB |
-| libx264 1080p30 transcode | ~80% of 1 core | 400 MB |
-| + drawtext subtitle overlay | +5-10% | negligible |
+| Work                            | CPU per process | RAM per process |
+| ------------------------------- | --------------- | --------------- |
+| Audio-only encode (AAC)         | ~5% of 1 core   | 50 MB           |
+| Video passthrough (`-c:v copy`) | ~5% of 1 core   | 50 MB           |
+| libx264 720p30 transcode        | ~50% of 1 core  | 200 MB          |
+| libx264 1080p30 transcode       | ~80% of 1 core  | 400 MB          |
+| + drawtext subtitle overlay     | +5-10%          | negligible      |
 
 **One stream = one ffmpeg process per RTMP destination** (source + K translated languages = 1+K processes).
 
 ### Can a 16 vCPU / 32 GB task handle it?
 
-| Scenario | Fit |
-|---|---|
+| Scenario                                                                                 | Fit                                                                                           |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | 1 stream, 1080p transcode, 3 translations + passthrough + burn-in subs ("ultimate test") | ✅ ~3.45 cores budgeted, with >12 cores headroom for encoder variance + STT/TTS orchestration |
-| 1 stream, 1080p transcode, 5 translations + passthrough | ✅ ~5.1 cores budgeted, still comfortable |
-| 2 concurrent host sessions, 1080p transcode, 3 translations each | ✅ ~7 cores budgeted, but prefer horizontal scale-out for isolation once multi-room launches |
-| 3 concurrent host sessions | ❌ needs horizontal scale-out (see `docs/horizontal-scaling-plan.md` — Phase 2) |
+| 1 stream, 1080p transcode, 5 translations + passthrough                                  | ✅ ~5.1 cores budgeted, still comfortable                                                     |
+| 2 concurrent host sessions, 1080p transcode, 3 translations each                         | ✅ ~7 cores budgeted, but prefer horizontal scale-out for isolation once multi-room launches  |
+| 3 concurrent host sessions                                                               | ❌ needs horizontal scale-out (see `docs/horizontal-scaling-plan.md` — Phase 2)               |
 
 ### Tune via Terraform config
 
@@ -125,12 +222,12 @@ GET /api/sessions/<SESSION_ID>/logs.ndjson?user_id=<USER_ID>
 
 Toggle layers independently:
 
-| Layer | Flag | Default |
-|---|---|---|
-| Workers persistence/export | `SESSION_LOGS_ENABLED=0/1` in `workers/wrangler.toml` or Worker vars | on |
-| Frontend upload | `VITE_SESSION_LOGS=0/1` at build time or `localStorage.brivva:sessionLogs=1` | on |
-| server-rs upload | `session_logs_enabled` Terraform variable | on |
-| server-rs high-volume debug events | `session_logs_verbose` Terraform variable | off |
+| Layer                              | Flag                                                                         | Default |
+| ---------------------------------- | ---------------------------------------------------------------------------- | ------- |
+| Workers persistence/export         | `SESSION_LOGS_ENABLED=0/1` in `workers/wrangler.toml` or Worker vars         | on      |
+| Frontend upload                    | `VITE_SESSION_LOGS=0/1` at build time or `localStorage.brivva:sessionLogs=1` | on      |
+| server-rs upload                   | `session_logs_enabled` Terraform variable                                    | on      |
+| server-rs high-volume debug events | `session_logs_verbose` Terraform variable                                    | off     |
 
 Keep verbose off for normal production. Frontend media stats are enough for
 session-quality estimates; server verbose is only for debugging Fargate-side
@@ -160,20 +257,21 @@ If you expect ≤3 concurrent hosts, just bump vertically to 4 vCPU / 8 GB and k
 ### When to scale to many tasks
 
 Signal: **any** of these
+
 - Average CPU >70% for >5min
 - ffmpeg process restart rate climbs (dropped frames under load)
-- >2 concurrent hosts routinely
+- > 2 concurrent hosts routinely
 
 ## Subtitles architecture
 
 Live subtitle support is uneven across platforms:
 
-| Platform | Text caption ingest | How |
-|---|---|---|
-| YouTube Live | ✅ | HTTP POST per-broadcast caption URL |
-| Facebook Live | ✅ | Graph API captions endpoint |
-| Twitch | ⚠️ | CEA-608/708 embedded as H.264 SEI |
-| Instagram / TikTok / Kuaishou / Bilibili / custom RTMP | ❌ | — |
+| Platform                                               | Text caption ingest | How                                 |
+| ------------------------------------------------------ | ------------------- | ----------------------------------- |
+| YouTube Live                                           | ✅                  | HTTP POST per-broadcast caption URL |
+| Facebook Live                                          | ✅                  | Graph API captions endpoint         |
+| Twitch                                                 | ⚠️                  | CEA-608/708 embedded as H.264 SEI   |
+| Instagram / TikTok / Kuaishou / Bilibili / custom RTMP | ❌                  | —                                   |
 
 **Decision: burn in subtitles universally** (via ffmpeg `drawtext` filter). Writing per-platform caption code for only 2-3 platforms is more work than one burn-in path that covers everything.
 
@@ -210,13 +308,13 @@ the `dashboard_url` output.
 
 ### Alarms
 
-| Name | Trigger | What it means |
-|---|---|---|
-| `brivva-ecs-running-tasks-low` | `RunningTaskCount < 1` for 2m | Task crashed or deploy rolling. Tunnel users see 530/1033. |
-| `brivva-ecs-cpu-high` | CPU avg > 80% for 15m | Saturated — bump `task_cpu` or scale out. |
-| `brivva-ecs-memory-high` | Mem avg > 85% for 15m | OOM-kill imminent — bump `task_memory`. |
-| `brivva-ffmpeg-crash-rate` | > 3 ffmpeg crashes in 5m | Destination RTMP unhealthy or CPU throttling. |
-| `brivva-ffmpeg-gave-up` | Any "restart limit exceeded" in 1m | A stream is fully DOWN until the session restarts. **Page.** |
+| Name                           | Trigger                            | What it means                                                |
+| ------------------------------ | ---------------------------------- | ------------------------------------------------------------ |
+| `brivva-ecs-running-tasks-low` | `RunningTaskCount < 1` for 2m      | Task crashed or deploy rolling. Tunnel users see 530/1033.   |
+| `brivva-ecs-cpu-high`          | CPU avg > 80% for 15m              | Saturated — bump `task_cpu` or scale out.                    |
+| `brivva-ecs-memory-high`       | Mem avg > 85% for 15m              | OOM-kill imminent — bump `task_memory`.                      |
+| `brivva-ffmpeg-crash-rate`     | > 3 ffmpeg crashes in 5m           | Destination RTMP unhealthy or CPU throttling.                |
+| `brivva-ffmpeg-gave-up`        | Any "restart limit exceeded" in 1m | A stream is fully DOWN until the session restarts. **Page.** |
 
 The crash + give-up alarms rely on metric filters that match the tracing JSON
 `fields.message` field. If you rename a log line in `server-rs/**`, update the

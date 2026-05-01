@@ -1,6 +1,33 @@
 use std::io::BufRead;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEncoder {
+    X264,
+    Nvenc,
+}
+
+impl VideoEncoder {
+    pub fn from_env() -> Self {
+        match std::env::var("BRIVVA_VIDEO_ENCODER") {
+            Ok(value)
+                if value.eq_ignore_ascii_case("nvenc")
+                    || value.eq_ignore_ascii_case("h264_nvenc") =>
+            {
+                Self::Nvenc
+            }
+            _ => Self::X264,
+        }
+    }
+
+    pub fn codec_name(self) -> &'static str {
+        match self {
+            Self::X264 => "libx264",
+            Self::Nvenc => "h264_nvenc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoProfile {
     pub input_fps: u32,
     pub output_fps: u32,
@@ -63,6 +90,20 @@ pub(super) fn build_ffmpeg_args_with_profile(
     rtmp_url: &str,
     profile: VideoProfile,
 ) -> Vec<String> {
+    build_ffmpeg_args_with_profile_and_encoder(
+        audio_fifo,
+        rtmp_url,
+        profile,
+        VideoEncoder::from_env(),
+    )
+}
+
+pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
+    audio_fifo: &str,
+    rtmp_url: &str,
+    profile: VideoProfile,
+    encoder: VideoEncoder,
+) -> Vec<String> {
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".into(),
         "-loglevel".into(),
@@ -118,32 +159,9 @@ pub(super) fn build_ffmpeg_args_with_profile(
             "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
             profile.output_fps, profile.max_width, profile.max_height
         ),
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "ultrafast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
-        "-profile:v".into(),
-        "main".into(),
-        "-bf".into(),
-        "0".into(),
-        "-r".into(),
-        profile.output_fps.to_string(),
-        "-g".into(),
-        (profile.output_fps * 2).to_string(),
-        "-keyint_min".into(),
-        (profile.output_fps * 2).to_string(),
-        "-sc_threshold".into(),
-        "0".into(),
-        "-b:v".into(),
-        format!("{}k", profile.bitrate_kbps),
-        "-maxrate".into(),
-        format!("{}k", profile.maxrate_kbps),
-        "-bufsize".into(),
-        format!("{}k", profile.bufsize_kbps),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
+    ]);
+    ffmpeg_args.extend_from_slice(&video_encoder_args(encoder, profile));
+    ffmpeg_args.extend_from_slice(&[
         "-c:a".into(),
         "aac".into(),
         "-ac:a".into(),
@@ -163,6 +181,63 @@ pub(super) fn build_ffmpeg_args_with_profile(
         rtmp_url.to_string(),
     ]);
     ffmpeg_args
+}
+
+fn video_encoder_args(encoder: VideoEncoder, profile: VideoProfile) -> Vec<String> {
+    let mut args = vec!["-c:v".into()];
+    match encoder {
+        VideoEncoder::X264 => args.extend_from_slice(&[
+            "libx264".into(),
+            "-preset".into(),
+            "ultrafast".into(),
+            "-tune".into(),
+            "zerolatency".into(),
+            "-profile:v".into(),
+            "main".into(),
+            "-bf".into(),
+            "0".into(),
+        ]),
+        VideoEncoder::Nvenc => args.extend_from_slice(&[
+            "h264_nvenc".into(),
+            // Premium live path: keep latency bounded, but spend RTX GPU
+            // budget on quality via HQ tuning + adaptive quantization.
+            "-preset".into(),
+            "p5".into(),
+            "-tune".into(),
+            "hq".into(),
+            "-rc".into(),
+            "cbr".into(),
+            "-profile:v".into(),
+            "high".into(),
+            "-bf".into(),
+            "0".into(),
+            "-spatial-aq".into(),
+            "1".into(),
+            "-temporal-aq".into(),
+            "1".into(),
+            "-aq-strength".into(),
+            "8".into(),
+        ]),
+    }
+    args.extend_from_slice(&[
+        "-r".into(),
+        profile.output_fps.to_string(),
+        "-g".into(),
+        (profile.output_fps * 2).to_string(),
+        "-keyint_min".into(),
+        (profile.output_fps * 2).to_string(),
+        "-sc_threshold".into(),
+        "0".into(),
+        "-b:v".into(),
+        format!("{}k", profile.bitrate_kbps),
+        "-maxrate".into(),
+        format!("{}k", profile.maxrate_kbps),
+        "-bufsize".into(),
+        format!("{}k", profile.bufsize_kbps),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+    ]);
+    args
 }
 
 /// Pure drain loop for the ffmpeg-child stderr pipe. Reads `BufRead`
@@ -430,6 +505,26 @@ mod tests {
         assert!(joined.contains("-c:v libx264"));
         assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
         assert!(!joined.contains("-c:v copy"));
+    }
+
+    #[test]
+    fn build_ffmpeg_args_can_use_nvenc_for_gpu_launch_path() {
+        let args = build_ffmpeg_args_with_profile_and_encoder(
+            "/tmp/fifo",
+            "rtmp://x/y",
+            VideoProfile::default(),
+            VideoEncoder::Nvenc,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-c:v h264_nvenc"));
+        assert!(joined.contains("-preset p5"));
+        assert!(joined.contains("-tune hq"));
+        assert!(joined.contains("-rc cbr"));
+        assert!(joined.contains("-profile:v high"));
+        assert!(joined.contains("-spatial-aq 1"));
+        assert!(joined.contains("-temporal-aq 1"));
+        assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
+        assert!(!joined.contains("-c:v libx264"));
     }
 
     #[test]

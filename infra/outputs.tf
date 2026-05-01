@@ -15,6 +15,11 @@ output "ecr_ffmpeg_base_url" {
   value       = aws_ecr_repository.ffmpeg_base.repository_url
 }
 
+output "ecr_ffmpeg_gpu_base_url" {
+  description = "Repo URL for the prebuilt amd64 FFmpeg GPU/NVENC base image."
+  value       = aws_ecr_repository.ffmpeg_gpu_base.repository_url
+}
+
 output "ecr_server_build_base_url" {
   description = "Repo URL for the prebuilt amd64 server-rs build toolchain image."
   value       = aws_ecr_repository.server_build_base.repository_url
