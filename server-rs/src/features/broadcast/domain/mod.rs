@@ -1,3 +1,4 @@
+pub mod gpu_worker_shadow;
 pub mod media_timeline;
 pub mod metrics;
 pub mod output_health;
@@ -153,6 +154,8 @@ pub struct PipelineConfig {
     pub v2_render_graph: bool,
     /// V2 Phase 5 shared decode/fan-out planning. Shadow/contracts only.
     pub v2_shared_decode: bool,
+    /// V2 Phase 6A GPU worker shadow proof. Logs/contracts only; no live route.
+    pub v2_gpu_workers: bool,
 }
 
 /// Handle to a single live session — the pair every pipeline function needs

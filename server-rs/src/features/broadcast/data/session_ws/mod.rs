@@ -99,6 +99,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         v2_output_controls: state.v2_output_controls,
         v2_render_graph: state.v2_render_graph,
         v2_shared_decode: state.v2_shared_decode,
+        v2_gpu_workers: state.v2_gpu_workers,
     })
 }
 
@@ -273,6 +274,7 @@ mod tests {
         state.v2_output_controls = true;
         state.v2_render_graph = true;
         state.v2_shared_decode = true;
+        state.v2_gpu_workers = true;
         state.session_logs_enabled = true;
         state.session_logs_verbose = true;
 
@@ -286,6 +288,7 @@ mod tests {
         assert!(cfg.v2_output_controls);
         assert!(cfg.v2_render_graph);
         assert!(cfg.v2_shared_decode);
+        assert!(cfg.v2_gpu_workers);
         assert!(state.session_logs_enabled);
         assert!(state.session_logs_verbose);
     }

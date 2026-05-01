@@ -653,6 +653,15 @@ Alert-before-customer-notice rule: if media latency trends upward for 20s, encod
 
 Recommended next implementation loop after this planning pass: `brivva-v2-gpu-worker-phase-6a-local-shadow-proof`, scoped to contracts/tests and local shadow worker proof only; it must not add ECS/Terraform/deploy changes or route customer output.
 
+Phase 6A local shadow proof evidence — 2026-05-01:
+
+- Phase 6 planning doc commit exists: `79b99ef docs: plan V2 GPU worker split`.
+- Added pure local shadow contracts/model in `server-rs/src/features/broadcast/domain/gpu_worker_shadow.rs`; no process spawn, media transport, deploy, queue, DB, frontend, Worker, or FFmpeg topology changes.
+- `BRIVVA_V2_GPU_WORKERS` is wired through config/state and defaults false.
+- Shadow proof log helper emits only local planning/proof strings when enabled: `gpu.worker.shadow.registered`, `gpu.worker.shadow.heartbeat`, `gpu.job.shadow.assigned`, `gpu.job.shadow.preflighted`, `gpu.job.shadow.health`, `gpu.job.shadow.stopped`.
+- Proof script passed: `./scripts/prove-v2-gpu-worker-shadow.sh` (focused cargo tests with flag off/on plus static safety check for process/network/deploy primitives).
+- Next required human review: approve whether Phase 6B may introduce a same-host worker process and route one non-customer test output. Until then, 6B is blocked; the live path remains current in-process/per-output FFmpeg.
+
 Phase 6A hard scope:
 
 - Allowed: pure protocol/lease/health contracts with focused tests, local fake worker shadow proof, fake-media artifact archive format, and docs/runbook updates.

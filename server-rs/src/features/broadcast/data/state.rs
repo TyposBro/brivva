@@ -38,6 +38,8 @@ pub struct BroadcastState {
     pub v2_render_graph: bool,
     /// V2 Phase 5 shared decode/fan-out planning. Shadow/contracts only.
     pub v2_shared_decode: bool,
+    /// V2 Phase 6A GPU worker shadow proof. Logs/contracts only; no live route.
+    pub v2_gpu_workers: bool,
 }
 
 impl BroadcastState {
@@ -60,6 +62,7 @@ impl BroadcastState {
             v2_output_controls: false,
             v2_render_graph: false,
             v2_shared_decode: false,
+            v2_gpu_workers: false,
         }
     }
 }
@@ -93,6 +96,7 @@ mod tests {
         assert!(!s.v2_output_controls);
         assert!(!s.v2_render_graph);
         assert!(!s.v2_shared_decode);
+        assert!(!s.v2_gpu_workers);
         assert!(s.live_sessions.is_empty());
     }
 

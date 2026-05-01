@@ -215,6 +215,7 @@ mod tests {
                 v2_output_controls: false,
                 v2_render_graph: false,
                 v2_shared_decode: false,
+                v2_gpu_workers: false,
             }),
         );
         live.selected_voice_id = voice_id;
