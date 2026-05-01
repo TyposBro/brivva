@@ -96,6 +96,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         elevenlabs_base_url: state.elevenlabs_base_url.clone(),
         force_default_voice: state.force_default_voice,
         force_rtmp_not_rtmps: state.force_rtmp_not_rtmps,
+        v2_output_controls: state.v2_output_controls,
     })
 }
 
@@ -267,6 +268,7 @@ mod tests {
         state.elevenlabs_base_url = "https://e".into();
         state.force_default_voice = true;
         state.force_rtmp_not_rtmps = true;
+        state.v2_output_controls = true;
         state.session_logs_enabled = true;
         state.session_logs_verbose = true;
 
@@ -277,6 +279,7 @@ mod tests {
         assert_eq!(cfg.elevenlabs_base_url, "https://e");
         assert!(cfg.force_default_voice);
         assert!(cfg.force_rtmp_not_rtmps);
+        assert!(cfg.v2_output_controls);
         assert!(state.session_logs_enabled);
         assert!(state.session_logs_verbose);
     }

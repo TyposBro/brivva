@@ -35,6 +35,8 @@ pub struct AppConfig {
     pub v2_timeline_shadow: bool,
     /// V2 Phase 2 timestamped audio ingest. Logs timing only; old PCM remains default.
     pub v2_timestamped_audio: bool,
+    /// V2 Phase 3 output health/control logs. Logs/contracts only; no process control.
+    pub v2_output_controls: bool,
 }
 
 impl AppConfig {
@@ -57,6 +59,7 @@ impl AppConfig {
             session_logs_verbose: env_flag("BRIVVA_SESSION_LOG_VERBOSE"),
             v2_timeline_shadow: env_flag("BRIVVA_V2_TIMELINE_SHADOW"),
             v2_timestamped_audio: env_flag("BRIVVA_V2_TIMESTAMPED_AUDIO"),
+            v2_output_controls: env_flag("BRIVVA_V2_OUTPUT_CONTROLS"),
         })
     }
 }
@@ -103,6 +106,7 @@ mod tests {
                 "BRIVVA_SESSION_LOG_VERBOSE",
                 "BRIVVA_V2_TIMELINE_SHADOW",
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
+                "BRIVVA_V2_OUTPUT_CONTROLS",
             ] {
                 std::env::remove_var(key);
             }
@@ -114,6 +118,7 @@ mod tests {
         assert!(cfg.jwt_secret.is_empty());
         assert!(!cfg.v2_timeline_shadow);
         assert!(!cfg.v2_timestamped_audio);
+        assert!(!cfg.v2_output_controls);
     }
 
     #[test]
@@ -190,6 +195,7 @@ mod tests {
             std::env::set_var("BRIVVA_SESSION_LOG_VERBOSE", "true");
             std::env::set_var("BRIVVA_V2_TIMELINE_SHADOW", "on");
             std::env::set_var("BRIVVA_V2_TIMESTAMPED_AUDIO", "yes");
+            std::env::set_var("BRIVVA_V2_OUTPUT_CONTROLS", "true");
         }
 
         let cfg = AppConfig::from_env();
@@ -205,6 +211,7 @@ mod tests {
         assert!(cfg.session_logs_verbose);
         assert!(cfg.v2_timeline_shadow);
         assert!(cfg.v2_timestamped_audio);
+        assert!(cfg.v2_output_controls);
 
         unsafe {
             for key in [
@@ -220,6 +227,7 @@ mod tests {
                 "BRIVVA_SESSION_LOG_VERBOSE",
                 "BRIVVA_V2_TIMELINE_SHADOW",
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
+                "BRIVVA_V2_OUTPUT_CONTROLS",
             ] {
                 std::env::remove_var(key);
             }

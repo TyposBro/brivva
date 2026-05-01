@@ -332,6 +332,57 @@ Goal: operator can manage one output without ending the session.
 - Add control commands: restart output, stop output, set captions-only/default-voice/no-overlays.
 - Surface in logs first, then Workers/D1/UI.
 
+Current implementation status — 2026-05-01:
+
+- Implemented logs-first contracts behind `BRIVVA_V2_OUTPUT_CONTROLS`.
+- Pure domain model lives in `server-rs/src/features/broadcast/domain/output_health.rs`:
+  - `OutputId`
+  - `OutputHealthState`
+  - `OutputDegradationLabel`
+  - `OutputHealthSnapshot`
+  - typed `OutputControlCommand`
+- Output id generation is wired at RTMP stream startup in `server-rs/src/features/broadcast/data/session_ws/rtmp.rs` using the RFC format:
+
+```txt
+output_id = {session_id}:{lang}:{destination_platform}:{index}
+```
+
+- `index` is scoped per `(lang, destination_platform)` within the session, so duplicate `ja/youtube` outputs become `...:0`, `...:1` while `ja/tiktok` starts at `...:0`.
+- Existing `RtmpManager` lifecycle emits logs-only output health events when the flag is enabled:
+  - `output.starting`
+  - `output.live`
+  - `output.degraded`
+  - `output.restarting`
+  - `output.failed`
+  - `output.stopped`
+- Degradation labels are mapped from existing lifecycle signals only: slow encode, dropped frames, idle/no writes, FFmpeg crash, restart limit reached, and spawn/restart publish errors.
+- No D1 command queue, frontend UI, render graph, shared decode, billing change, or new process-control path was added.
+- No one-output operator restart command kills/restarts FFmpeg yet; existing automatic FFmpeg restart behavior is only annotated with output health logs.
+
+Proof commands so far:
+
+```bash
+cargo test -p server-rs output_health
+cargo test -p server-rs output_id_for_stream
+cargo test -p server-rs ffmpeg::tests::detect_crashed
+cargo test -p server-rs pipeline_config_from_maps_every_broadcast_state_field
+cargo test -p server-rs media_timeline
+cargo test -p server-rs timeline_shadow
+cargo test -p server-rs timestamped_audio
+bash -n scripts/prove-v2-output-controls.sh
+scripts/prove-v2-output-controls.sh --help
+```
+
+Runtime proof automation added:
+
+```bash
+./scripts/prove-v2-output-controls.sh --duration 90 --rollback-duration 45 --source ko
+```
+
+The script runs a fake-browser-media rehearsal with `BRIVVA_V2_OUTPUT_CONTROLS=1`, verifies `v2 output health event`, `output.starting`, `output.live`, and `output_id` logs, then reruns with `BRIVVA_V2_OUTPUT_CONTROLS=0` and verifies those output-control logs are absent.
+
+Rollback: disable `BRIVVA_V2_OUTPUT_CONTROLS`; this removes Phase 3 health/control logs and leaves current RTMP/FFmpeg behavior unchanged.
+
 Exit: simulated TTS/RTMP failure affects only one output in tests and manual rehearsal.
 
 ### Phase 4 — in-process render graph

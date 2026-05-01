@@ -28,6 +28,9 @@ use args::build_ffmpeg_args_with_profile;
 use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
 use crate::features::broadcast::domain::SessionMetrics;
+use crate::features::broadcast::domain::output_health::{
+    OutputDegradationLabel, OutputHealthSnapshot, OutputHealthState, OutputId,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
@@ -111,6 +114,9 @@ struct RtmpStream {
     /// stream billing exemption) can tell "user picked passthrough" apart
     /// from "stream's lang coincidentally equals source_lang".
     passthrough: bool,
+    output_id: Option<OutputId>,
+    destination_platform: String,
+    output_controls_enabled: bool,
     buffers: StreamBuffers,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
@@ -144,6 +150,9 @@ type CrashedStreamSnapshot = (
     bool,
     f32,
     bool,
+    Option<OutputId>,
+    String,
+    bool,
     u32,
     StreamBuffers,
 );
@@ -156,6 +165,9 @@ struct RestartStreamArgs {
     is_source: bool,
     host_gain: f32,
     passthrough: bool,
+    output_id: Option<OutputId>,
+    destination_platform: String,
+    output_controls_enabled: bool,
     prev_count: u32,
     buffers: StreamBuffers,
 }
@@ -168,6 +180,9 @@ struct StreamSpawnArgs {
     is_source: bool,
     host_gain: f32,
     passthrough: bool,
+    output_id: Option<OutputId>,
+    destination_platform: String,
+    output_controls_enabled: bool,
     existing_buffers: Option<StreamBuffers>,
 }
 
@@ -182,10 +197,55 @@ pub struct StartStreamArgs<'a> {
     pub delay_ms: u64,
     pub is_source: bool,
     pub host_gain: f32,
+    pub output_id: Option<OutputId>,
+    pub destination_platform: &'a str,
+    pub output_controls_enabled: bool,
     /// See `RtmpStream::passthrough`. Fargate skips STT/translate/TTS entirely
     /// for passthrough streams — host audio re-broadcast at gain 1.0, no
     /// caption overlay.
     pub passthrough: bool,
+}
+
+fn emit_output_health(
+    enabled: bool,
+    output_id: &Option<OutputId>,
+    stream_id: &str,
+    lang: &str,
+    destination_platform: &str,
+    state: OutputHealthState,
+    restart_count: u32,
+    degradation: Option<OutputDegradationLabel>,
+    message: Option<String>,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(output_id) = output_id else {
+        return;
+    };
+    let mut snapshot = OutputHealthSnapshot::new(
+        output_id.clone(),
+        stream_id,
+        lang,
+        destination_platform,
+        state,
+    )
+    .with_restart_count(restart_count);
+    snapshot.degradation = degradation;
+    snapshot.message = message;
+    tracing::info!(
+        event = snapshot.event_name(),
+        output_id = %snapshot.output_id,
+        stream_id = %snapshot.stream_id,
+        lang = %snapshot.lang,
+        destination_platform = %snapshot.destination_platform,
+        state = ?snapshot.state,
+        restart_count = snapshot.restart_count,
+        degradation = ?snapshot.degradation,
+        message = ?snapshot.message,
+        snapshot = ?snapshot,
+        "v2 output health event"
+    );
 }
 
 impl Default for RtmpManager {
@@ -244,7 +304,18 @@ impl RtmpManager {
     /// ducked target streams). Video arrives separately as encoded WebRTC RTP
     /// and is copied to RTMP by FFmpeg.
     pub fn start_stream(&mut self, args: StartStreamArgs<'_>) -> Result<(), String> {
-        self.spawn_stream_inner(StreamSpawnArgs {
+        emit_output_health(
+            args.output_controls_enabled,
+            &args.output_id,
+            args.stream_id,
+            args.lang,
+            args.destination_platform,
+            OutputHealthState::Starting,
+            0,
+            None,
+            None,
+        );
+        if let Err(e) = self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.stream_id.to_string(),
             lang: args.lang.to_string(),
             rtmp_url: args.rtmp_url.to_string(),
@@ -252,8 +323,35 @@ impl RtmpManager {
             is_source: args.is_source,
             host_gain: args.host_gain,
             passthrough: args.passthrough,
+            output_id: args.output_id.clone(),
+            destination_platform: args.destination_platform.to_string(),
+            output_controls_enabled: args.output_controls_enabled,
             existing_buffers: None,
-        })?;
+        }) {
+            emit_output_health(
+                args.output_controls_enabled,
+                &args.output_id,
+                args.stream_id,
+                args.lang,
+                args.destination_platform,
+                OutputHealthState::Failed,
+                0,
+                Some(OutputDegradationLabel::RtmpPublishError),
+                Some(e.clone()),
+            );
+            return Err(e);
+        }
+        emit_output_health(
+            args.output_controls_enabled,
+            &args.output_id,
+            args.stream_id,
+            args.lang,
+            args.destination_platform,
+            OutputHealthState::Live,
+            0,
+            None,
+            None,
+        );
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
@@ -381,6 +479,17 @@ impl RtmpManager {
                 threshold_ms,
                 "ffmpeg idle beyond threshold, killing to trigger restart"
             );
+            emit_output_health(
+                stream.output_controls_enabled,
+                &stream.output_id,
+                id,
+                &stream.lang,
+                &stream.destination_platform,
+                OutputHealthState::Degraded,
+                stream.restart_count,
+                Some(OutputDegradationLabel::IdleNoWrites),
+                Some(format!("idle_ms={idle_ms} threshold_ms={threshold_ms}")),
+            );
             match stream.child.kill() {
                 Ok(()) => {
                     // Reset the timestamp so we don't try to kill a second
@@ -414,12 +523,34 @@ impl RtmpManager {
                         restart_count = stream.restart_count,
                         "ffmpeg rtmp process crashed, scheduling restart"
                     );
+                    emit_output_health(
+                        stream.output_controls_enabled,
+                        &stream.output_id,
+                        id,
+                        &stream.lang,
+                        &stream.destination_platform,
+                        OutputHealthState::Degraded,
+                        stream.restart_count,
+                        Some(OutputDegradationLabel::FfmpegCrash),
+                        Some(format!("ffmpeg exit_code={code}")),
+                    );
                     if stream.restart_count >= MAX_FFMPEG_RESTARTS {
                         tracing::error!(
                             stream_id = %id,
                             lang = %stream.lang,
                             attempts = MAX_FFMPEG_RESTARTS,
                             "ffmpeg rtmp giving up after max restart attempts"
+                        );
+                        emit_output_health(
+                            stream.output_controls_enabled,
+                            &stream.output_id,
+                            id,
+                            &stream.lang,
+                            &stream.destination_platform,
+                            OutputHealthState::Failed,
+                            stream.restart_count,
+                            Some(OutputDegradationLabel::RestartLimitReached),
+                            Some("max ffmpeg restart attempts reached".to_string()),
                         );
                         stream.stop_flag.store(true, Ordering::Release);
                         continue;
@@ -451,6 +582,9 @@ impl RtmpManager {
                     old.is_source,
                     old.host_gain,
                     old.passthrough,
+                    old.output_id,
+                    old.destination_platform,
+                    old.output_controls_enabled,
                     old.restart_count,
                     old.buffers,
                 ));
@@ -462,6 +596,17 @@ impl RtmpManager {
     /// Restart a stream after a crash, reusing its buffers so queued host
     /// media + TTS survive the FFmpeg restart.
     fn restart_stream(&mut self, args: RestartStreamArgs) {
+        emit_output_health(
+            args.output_controls_enabled,
+            &args.output_id,
+            &args.id,
+            &args.lang,
+            &args.destination_platform,
+            OutputHealthState::Restarting,
+            args.prev_count,
+            Some(OutputDegradationLabel::FfmpegCrash),
+            None,
+        );
         match self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.id.clone(),
             lang: args.lang.clone(),
@@ -470,12 +615,26 @@ impl RtmpManager {
             is_source: args.is_source,
             host_gain: args.host_gain,
             passthrough: args.passthrough,
+            output_id: args.output_id.clone(),
+            destination_platform: args.destination_platform.clone(),
+            output_controls_enabled: args.output_controls_enabled,
             existing_buffers: Some(args.buffers),
         }) {
             Ok(()) => {
                 if let Some(stream) = self.streams.get_mut(&args.id) {
                     stream.restart_count = args.prev_count + 1;
                 }
+                emit_output_health(
+                    args.output_controls_enabled,
+                    &args.output_id,
+                    &args.id,
+                    &args.lang,
+                    &args.destination_platform,
+                    OutputHealthState::Live,
+                    args.prev_count + 1,
+                    None,
+                    None,
+                );
                 tracing::info!(
                     stream_id = %args.id,
                     lang = %args.lang,
@@ -484,12 +643,25 @@ impl RtmpManager {
                     "ffmpeg rtmp restarted"
                 );
             }
-            Err(e) => tracing::error!(
-                stream_id = %args.id,
-                lang = %args.lang,
-                error = %e,
-                "ffmpeg rtmp restart failed"
-            ),
+            Err(e) => {
+                emit_output_health(
+                    args.output_controls_enabled,
+                    &args.output_id,
+                    &args.id,
+                    &args.lang,
+                    &args.destination_platform,
+                    OutputHealthState::Failed,
+                    args.prev_count,
+                    Some(OutputDegradationLabel::RtmpPublishError),
+                    Some(e.clone()),
+                );
+                tracing::error!(
+                    stream_id = %args.id,
+                    lang = %args.lang,
+                    error = %e,
+                    "ffmpeg rtmp restart failed"
+                );
+            }
         }
     }
 
@@ -535,6 +707,9 @@ impl RtmpManager {
         if let Some(stderr) = child.stderr.take() {
             let sid_for_log = args.stream_id.clone();
             let lang_for_log = args.lang.clone();
+            let output_id_for_log = args.output_id.clone();
+            let platform_for_log = args.destination_platform.clone();
+            let output_controls_for_log = args.output_controls_enabled;
             let thread_name = format!("stderr-drain-{}", args.stream_id);
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
                 let mut progress = FfmpegProgressMonitor::default();
@@ -556,6 +731,19 @@ impl RtmpManager {
                                     drop_frames = snapshot.drop_frames,
                                     "ffmpeg encode below realtime"
                                 );
+                                emit_output_health(
+                                    output_controls_for_log,
+                                    &output_id_for_log,
+                                    &sid_for_log,
+                                    &lang_for_log,
+                                    &platform_for_log,
+                                    OutputHealthState::Degraded,
+                                    0,
+                                    Some(OutputDegradationLabel::SlowEncode),
+                                    Some(format!(
+                                        "speed={speed} consecutive_ticks={consecutive_ticks}"
+                                    )),
+                                );
                             }
                             FfmpegProgressAlert::DroppedFrames { total, delta } => {
                                 let snapshot = progress.snapshot();
@@ -567,6 +755,19 @@ impl RtmpManager {
                                     speed = snapshot.speed,
                                     fps = snapshot.fps,
                                     "ffmpeg output dropped frames"
+                                );
+                                emit_output_health(
+                                    output_controls_for_log,
+                                    &output_id_for_log,
+                                    &sid_for_log,
+                                    &lang_for_log,
+                                    &platform_for_log,
+                                    OutputHealthState::Degraded,
+                                    0,
+                                    Some(OutputDegradationLabel::DroppedFrames),
+                                    Some(format!(
+                                        "total_drop_frames={total} delta_drop_frames={delta}"
+                                    )),
                                 );
                             }
                         }
@@ -656,6 +857,9 @@ impl RtmpManager {
                 is_source: args.is_source,
                 host_gain: args.host_gain,
                 passthrough: args.passthrough,
+                output_id: args.output_id,
+                destination_platform: args.destination_platform,
+                output_controls_enabled: args.output_controls_enabled,
                 buffers,
                 stop_flag,
                 restart_count: 0,
@@ -669,6 +873,17 @@ impl RtmpManager {
     pub async fn stop_all(&mut self) {
         for (id, mut stream) in self.streams.drain() {
             stream.stop_flag.store(true, Ordering::Release);
+            emit_output_health(
+                stream.output_controls_enabled,
+                &stream.output_id,
+                &id,
+                &stream.lang,
+                &stream.destination_platform,
+                OutputHealthState::Stopped,
+                stream.restart_count,
+                None,
+                None,
+            );
             match stream.child.kill() {
                 Ok(_) => {
                     let _ = stream.child.wait();
@@ -737,6 +952,9 @@ pub fn spawn_health_monitor(
                 is_source,
                 host_gain,
                 passthrough,
+                output_id,
+                destination_platform,
+                output_controls_enabled,
                 prev_count,
                 buffers,
             ) in crashed
@@ -754,6 +972,9 @@ pub fn spawn_health_monitor(
                     is_source,
                     host_gain,
                     passthrough,
+                    output_id,
+                    destination_platform,
+                    output_controls_enabled,
                     prev_count,
                     buffers,
                 });

@@ -1,5 +1,6 @@
 pub mod media_timeline;
 pub mod metrics;
+pub mod output_health;
 pub mod render_graph;
 
 use axum::extract::ws::Message;
@@ -146,6 +147,8 @@ pub struct PipelineConfig {
     /// Kill-switch: downgrade `rtmps://` to `rtmp://` at FFmpeg spawn
     /// when a platform's TLS is flaking. See `docs/runbook.md`.
     pub force_rtmp_not_rtmps: bool,
+    /// V2 Phase 3 output health/control logs. Logs/contracts only; no process control.
+    pub v2_output_controls: bool,
 }
 
 /// Handle to a single live session — the pair every pipeline function needs

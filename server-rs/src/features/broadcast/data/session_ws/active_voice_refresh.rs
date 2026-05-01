@@ -212,6 +212,7 @@ mod tests {
                 elevenlabs_base_url: "".into(),
                 force_default_voice: false,
                 force_rtmp_not_rtmps: false,
+                v2_output_controls: false,
             }),
         );
         live.selected_voice_id = voice_id;

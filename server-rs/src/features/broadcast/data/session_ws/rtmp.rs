@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::core::contracts::workers::SessionBundle;
+use crate::core::contracts::workers::{SessionBundle, Stream};
+use crate::features::broadcast::domain::output_health::OutputId;
 use crate::features::broadcast::domain::{Lang, LiveSession, SessionMetrics};
 
 /// Wire value the frontend sends on a destination's `lang` field when the
@@ -51,6 +53,19 @@ pub fn resolve_stream_flags(
     }
 }
 
+pub fn output_id_for_stream(
+    session_id: &str,
+    stream: &Stream,
+    seen: &mut HashMap<(String, String), usize>,
+) -> Result<OutputId, crate::features::broadcast::domain::output_health::OutputHealthError> {
+    let key = (
+        stream.lang.trim().to_ascii_lowercase(),
+        stream.platform.trim().to_ascii_lowercase(),
+    );
+    let index = seen.entry(key).and_modify(|n| *n += 1).or_insert(0);
+    OutputId::new(session_id, &stream.lang, &stream.platform, *index)
+}
+
 pub(super) struct RtmpStartArgs<'a> {
     pub bundle: &'a SessionBundle,
     pub source_lang: &'a Lang,
@@ -76,6 +91,8 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     manager.set_metrics(metrics);
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
+    let output_controls_enabled = live_session.pipeline_config.v2_output_controls;
+    let mut output_indexes = HashMap::new();
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
             // Pre-flight guards this path; the only way to reach it now is a
@@ -109,6 +126,22 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         // "user chose passthrough" from "stream's lang happens to equal
         // source_lang" for tracing / future bifurcation.
         let flags = resolve_stream_flags(&s.lang, source_lang, s.host_gain);
+        let output_id = if output_controls_enabled {
+            match output_id_for_stream(sid, s, &mut output_indexes) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::error!(
+                        session_id = %sid,
+                        stream_id = %s.id,
+                        error = ?e,
+                        "v2 output_id generation failed"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let spawn_args = crate::features::broadcast::data::ffmpeg::StartStreamArgs {
             stream_id: &s.id,
             lang: &s.lang,
@@ -116,6 +149,9 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
             delay_ms: s.delay_ms,
             is_source: flags.is_source,
             host_gain: flags.host_gain,
+            output_id,
+            destination_platform: &s.platform,
+            output_controls_enabled,
             passthrough: flags.passthrough,
         };
         if let Err(e) = manager.start_stream(spawn_args) {
@@ -168,6 +204,38 @@ mod tests {
             maybe_downgrade_rtmps("srt://host:9999?x=1", true),
             "srt://host:9999?x=1"
         );
+    }
+
+    fn stream(id: &str, lang: &str, platform: &str) -> Stream {
+        Stream {
+            id: id.into(),
+            session_id: "sess-1".into(),
+            lang: lang.into(),
+            platform: platform.into(),
+            platform_broadcast_id: None,
+            platform_stream_id: None,
+            stream_key: Some("k".into()),
+            rtmp_url: Some("rtmp://x".into()),
+            status: "ready".into(),
+            delay_ms: 0,
+            host_gain: 0.2,
+            created_at: 0,
+            watch_url: None,
+        }
+    }
+
+    #[test]
+    fn output_id_for_stream_uses_stable_per_lang_platform_index() {
+        let mut seen = HashMap::new();
+        let a = output_id_for_stream("B8EF28", &stream("a", "ja", "youtube"), &mut seen).unwrap();
+        let b = output_id_for_stream("B8EF28", &stream("b", "ja", "youtube"), &mut seen).unwrap();
+        let c = output_id_for_stream("B8EF28", &stream("c", "ja", "tiktok"), &mut seen).unwrap();
+        let d = output_id_for_stream("B8EF28", &stream("d", "ko", "youtube"), &mut seen).unwrap();
+
+        assert_eq!(a.as_str(), "B8EF28:ja:youtube:0");
+        assert_eq!(b.as_str(), "B8EF28:ja:youtube:1");
+        assert_eq!(c.as_str(), "B8EF28:ja:tiktok:0");
+        assert_eq!(d.as_str(), "B8EF28:ko:youtube:0");
     }
 
     #[test]

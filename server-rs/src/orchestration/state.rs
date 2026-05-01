@@ -27,5 +27,6 @@ pub fn broadcast_state() -> BroadcastState {
         session_logs_verbose: cfg.session_logs_verbose,
         v2_timeline_shadow: cfg.v2_timeline_shadow,
         v2_timestamped_audio: cfg.v2_timestamped_audio,
+        v2_output_controls: cfg.v2_output_controls,
     }
 }
