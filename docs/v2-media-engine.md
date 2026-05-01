@@ -437,13 +437,249 @@ Exit: contracts/tests and shadow logs prove one decode, N output encodes, indepe
 
 ### Phase 6 — GPU worker split
 
-Goal: move heavy graph to ECS GPU worker only after in-process success.
+Goal: move heavy render/encode work to external GPU workers only after in-process shared decode and per-output health are proven. This phase is **RFC/planning only until Phase 6A is separately approved**. Do not add ECS services, Terraform, Docker deploy changes, queues, D1 migrations, frontend UI, or live worker runtime code as part of this planning pass.
 
-- Reuse existing `brivva-gpu` service, zero-spend guard, endpoint smoke, proof collector.
-- Keep Fargate/laptop fallback hot.
-- Worker split must preserve operator controls and health events.
+Current launch invariant: `BRIVVA_V2_GPU_WORKERS=0` keeps the existing in-process/per-output FFmpeg publish path as the live path. Phase 6 must be introduced as an additive route that can be disabled without code deploy.
 
-Exit: ECS GPU 4-output burn-in 60–90 min with proof archive.
+#### Phase 6 architecture proposal
+
+```txt
+Workers/D1/session config
+  ↓ internal session bundle fetch (existing pattern)
+server-rs media engine control plane
+  ├─ owns host WebRTC/WS ingest and authoritative session/output ids
+  ├─ owns operator controls, health aggregation, rollback decisions
+  ├─ assigns output jobs to GPU workers only when BRIVVA_V2_GPU_WORKERS=1
+  └─ keeps current in-process/per-output FFmpeg path available as fallback
+        ↓ authenticated internal control protocol
+GPU worker data plane
+  ├─ registers capacity + codec/GPU capabilities
+  ├─ heartbeats per worker and per claimed output job
+  ├─ receives media input according to the selected transport for the phase
+  ├─ renders/mixes/encodes one or more output jobs
+  ├─ publishes RTMP/SRT/etc. to destination platforms
+  └─ uploads logs, health snapshots, and proof artifacts
+```
+
+Control plane responsibilities:
+
+- Keep `session_id`, `output_id`, output config, destination metadata, and operator command state authoritative in `server-rs`/Workers, not in the worker.
+- Decide whether an output uses current in-process FFmpeg or a GPU worker route.
+- Track worker liveness and revoke assignments when heartbeat or lease deadlines expire.
+- Aggregate per-worker health into the existing per-output health contract.
+- Prefer one-output fallback over whole-session restart when only one output is degraded.
+- Keep the existing ECS/Fargate/laptop media engine service path warm enough to prove rollback before customer traffic.
+
+GPU worker data plane responsibilities:
+
+- Treat each `output_id` render/encode/publish as an independently leased job.
+- Never own source-of-truth session state; cache only the job snapshot and scoped secrets required for the lease.
+- Emit health at two levels: worker process/GPU health and per-output job health.
+- Archive proof artifacts for every rehearsal: input clock summary, output health timeline, FFmpeg/GStreamer stderr, destination connect logs, GPU stats, and git/image identity.
+- Redact RTMP keys and short-lived job tokens from every log/artifact.
+
+Session/output assignment model:
+
+- Assignment key: `{session_id}:{output_id}:{route_generation}`.
+- `route_generation` increments every time an output is reassigned or rolled back so stale workers cannot publish health as the current owner.
+- Default Phase 6A/6B assignment is one output per local/same-host worker process for isolation.
+- Later phases may pack multiple outputs per GPU host only after burn-in proves per-output crash isolation and capacity headroom.
+- The control plane must be able to route one output back to in-process FFmpeg while sibling outputs remain on worker routes.
+
+Worker registration/heartbeat model:
+
+- Worker registers over an internal-only authenticated channel with `worker_id`, `instance_id`, git/image id, GPU model, encoder support, max concurrent outputs, current load, and supported media transports.
+- Heartbeat interval target: 2s in rehearsal, stale after 6s, hard-dead after 15s unless phase proof changes the thresholds.
+- Heartbeat payload includes GPU utilization, encoder sessions used/limit, memory used, process restart count, active job ids, and last media input/output timestamps.
+- Stale worker: stop assigning new jobs and mark all jobs `restarting`/`suspect` until lease recovery resolves.
+- Dead worker: revoke leases, route affected outputs to fallback or another worker according to the rollback policy.
+
+Job lease model:
+
+- Lease id: `{session_id}:{output_id}:{route_generation}:{lease_seq}`.
+- Lease owner is one worker at a time; leases expire if heartbeat/job renewal is stale.
+- Every worker command is idempotent by `(command_id, lease_id, output_id, route_generation)`.
+- Duplicate execution is handled by fencing: only the current `route_generation` may report health as authoritative or publish to the destination.
+- Start is two-phase: `assign` → worker preflights media/destination without taking traffic → `activate` → worker is allowed to publish.
+- Stop is also fenced: revoked leases must stop publishing immediately and upload final proof logs as `revoked`.
+
+Artifact/log/proof archive:
+
+- Archive root draft: `.dev-logs/v2-gpu-worker-proof/<timestamp>/` for local proofs; S3/R2-equivalent path later only after infra approval.
+- Required files per proof: `session.json`, `outputs.json`, `worker-heartbeats.ndjson`, `output-health.ndjson`, `control-plane.log`, `worker-<id>.log`, `ffmpeg-or-gstreamer-stderr.log`, `gpu-stats.ndjson`, `rollback-actions.md`, and `redaction-report.md`.
+- Every proof records git SHA, image tag/digest if applicable, enabled flags, route generations, worker ids, session id, output ids, and exact rollback action.
+
+#### Phase 6 protocol boundary — server-rs ↔ GPU worker
+
+Control messages that cross the boundary:
+
+| Direction       | Message            | Purpose                                                                       | Required identity/idempotency                  |
+| --------------- | ------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------- |
+| worker → server | `worker.register`  | Advertise worker/capacity/capabilities                                        | `worker_id`, `instance_id`, `boot_id`          |
+| worker → server | `worker.heartbeat` | Liveness, capacity, GPU/process stats                                         | monotonic `heartbeat_seq`                      |
+| server → worker | `job.assign`       | Send output job snapshot, media transport params, destination token reference | `command_id`, `lease_id`, `route_generation`   |
+| worker → server | `job.preflighted`  | Worker is ready or rejected before live activation                            | `lease_id`, preflight result                   |
+| server → worker | `job.activate`     | Fence that allows publishing                                                  | `command_id`, `lease_id`, activation deadline  |
+| worker → server | `job.health`       | Per-output health snapshot and drift/encode stats                             | `lease_id`, `route_generation`, `snapshot_seq` |
+| worker → server | `job.artifact`     | Proof/log artifact uploaded or available                                      | `lease_id`, redacted artifact URI/path         |
+| server → worker | `job.stop`         | Graceful stop/revoke/fallback                                                 | `command_id`, `lease_id`, reason               |
+| worker → server | `job.stopped`      | Final state after stop/revoke/crash recovery                                  | `lease_id`, terminal reason                    |
+
+Auth model:
+
+- No public worker control plane. Worker endpoints/listeners are private network or local IPC only.
+- Use short-lived job tokens scoped to exactly one `session_id`, `output_id`, `route_generation`, and allowed destination secret reference.
+- Token TTL should be shorter than the expected stream segment of trust (draft: 5–15 min) and renewable only while the lease is current.
+- Workers must not receive global Workers/D1 credentials or long-lived RTMP secrets.
+- Destination keys are passed as redacted secret references or sealed payloads; logs must only show platform + stream id hash.
+
+Retry semantics:
+
+- `worker.register` and `worker.heartbeat` are retryable; duplicate boot ids update the same worker record.
+- `job.assign` is retryable until preflight succeeds or the assignment deadline expires.
+- `job.activate` is retryable but fenced by `route_generation`; stale activations are ignored.
+- `job.stop` is retryable and must be safe after the job already stopped.
+- Media publish retries are per-output, not per-session. Exceeding the output retry budget marks that output failed/degraded and must not kill sibling outputs.
+
+Timeout semantics draft:
+
+- Register response: 2s local/same-host, 5s ECS internal.
+- Heartbeat stale: 6s; hard-dead: 15s.
+- Job preflight: 10s for local/same-host; 30s for ECS cold worker; longer requires explicit proof.
+- Activation deadline: worker must produce first publish/health proof within 10s after `job.activate` for warm path.
+- Output health slow-warning threshold: encode speed `<0.98` for 15s, FPS below target for 10s, or media latency increasing for 20s.
+- Rollback target: operator can disable `BRIVVA_V2_GPU_WORKERS` and see current in-process/fallback route recovering within 2 minutes.
+
+#### Phase 6 media transport options
+
+| Option                                  | Latency                                                 | Reliability                                                            | Operational complexity                                   | Best use                                                                           | Phase 6 default                                                       |
+| --------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Local process / same host IPC           | Lowest; avoids network jitter                           | Good while host is healthy; weak host-failure isolation                | Low; easiest logs/debug/rollback                         | Phase 6A/6B proof, local worker shadow, one test output                            | Yes for first proof                                                   |
+| RTP/RTMP/SRT between control and worker | Low-medium; SRT handles jitter better than raw RTP/RTMP | Good if retransmit/buffering tuned; network partitions must be handled | Medium-high; ports, security groups, clock/jitter tuning | ECS worker after same-host proof; live-ish transport                               | Candidate for 6C/6D                                                   |
+| Shared object storage / pipe            | High unless chunking is tiny; not ideal for live        | Durable artifacts; poor real-time behavior                             | Medium; lifecycle/cleanup/idempotency burden             | Proof archives, non-live test assets, offline replay                               | Archive/replay only, not primary live transport                       |
+| WebRTC to worker                        | Low with built-in jitter/NAT tools                      | Good media semantics; harder server-side fan-out/debug                 | High; signaling, ICE/TURN, auth, observability           | Future if browser/source can send directly or control plane forwards tracks safely | Defer until RTP/IPC proof fails or direct ingest redesign is approved |
+
+Transport decision for planning: Phase 6A uses local process/same-host IPC shadow/proof because it isolates worker protocol risk from network/ECS risk. Phase 6C can evaluate SRT or RTP over private network for ECS worker shadow. Object storage is for artifacts and offline replay only, not live media. WebRTC-to-worker is a later architecture review because it changes signaling and ingest boundaries.
+
+#### Phase 6 rollback model
+
+Primary rollback switch: set `BRIVVA_V2_GPU_WORKERS=0`.
+
+Expected rollback behavior:
+
+1. Control plane stops assigning new GPU worker jobs.
+2. Current worker leases receive `job.stop(reason=gpu_workers_disabled)` when reachable.
+3. Each affected output route_generation increments and is reassigned to the current in-process/per-output FFmpeg path.
+4. Existing ECS/Fargate/laptop media engine path remains available as whole-engine fallback if `server-rs` itself is unstable.
+5. Operator validates recovery from output health logs and destination preview, then archives rollback proof.
+
+Rollback proof requirements:
+
+- Fake-media rehearsal: enable workers for one test output, disable `BRIVVA_V2_GPU_WORKERS`, prove output returns to current FFmpeg route and sibling outputs stay live.
+- One real-platform rehearsal: same drill against a non-production YouTube/Grip/TikTok destination before any customer traffic.
+- Preserve existing ECS service/task definition as fallback; do not require replacing the service during rollback.
+- Rollback must not require D1 migration, Terraform apply, Docker image rebuild, or frontend deploy.
+
+#### Phase 6 failure isolation plan
+
+| Failure                             | Expected behavior                                                                            | Health/log proof                                                    | Operator action                                                    |
+| ----------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| One output worker process crashes   | Only that `output_id` enters `restarting`; siblings continue                                 | `worker.dead`, `lease.revoked`, output restart/fallback health      | Let automatic fallback run; restart only affected output if needed |
+| One GPU host dies                   | All jobs leased to that host are revoked; other hosts/outputs continue                       | stale heartbeats, hard-dead transition, route_generation increments | Disable GPU workers if capacity insufficient; otherwise reassign   |
+| Worker heartbeat stale              | Stop new assignments; mark active jobs suspect until renewed or revoked                      | heartbeat age and last media timestamps                             | Watch 15s hard-dead; prepare fallback                              |
+| Partial network partition           | Fencing prevents stale worker from reporting current health or continuing authorized publish | rejected stale `route_generation`, duplicate lease log              | Prefer fallback route; investigate network after session is safe   |
+| Queue/job lease duplicate execution | Only current lease/generation is authoritative; duplicate worker must stop                   | duplicate command id and fenced stale lease evidence                | No session restart; revoke stale lease                             |
+| RTMP destination rejects connection | Affected output retries/degrades/fails; source and siblings remain live                      | destination connect stderr, per-output retry budget exhausted       | Recheck key/platform; stop or reroute one output                   |
+| Worker slow but alive               | Output health moves to degraded before platform visibly fails                                | encode FPS/speed, media latency trend, dropped frames               | Lower quality/fewer outputs or rollback that output                |
+
+#### Phase 6 observability requirements
+
+Minimum worker-level health:
+
+```json
+{
+  "worker_id": "gpu-worker-a",
+  "instance_id": "ecs-task-or-local-pid",
+  "boot_id": "uuid",
+  "state": "registering|idle|busy|draining|stale|dead",
+  "active_jobs": 2,
+  "max_jobs": 4,
+  "gpu": {
+    "model": "...",
+    "util_pct": 71,
+    "mem_used_mb": 6144,
+    "encoder_sessions": 2
+  },
+  "process": { "restart_count": 0, "uptime_ms": 123456 },
+  "last_heartbeat_age_ms": 1200
+}
+```
+
+Minimum per-output worker route health extends the existing output snapshot with:
+
+- `worker_id`, `lease_id`, `route_generation`, `transport_kind`.
+- Media input latency, worker render latency, encode queue latency, publish write latency.
+- Encode FPS, encode speed, dropped/duplicated frames, keyframe age.
+- Audio/video PTS delta and trend, subtitle cue lag, TTS mix latency.
+- Destination connect/write state and last successful write age.
+- Artifact/log archive path for the current proof window.
+
+Alert-before-customer-notice rule: if media latency trends upward for 20s, encode speed remains below realtime for 15s, or A/V sync delta exceeds accepted bound for 10s, mark output `degraded` and emit an operator-visible log before waiting for RTMP failure.
+
+#### Phase 6 cost/capacity planning
+
+- Minimum viable GPU shape: reuse the existing `brivva-gpu` NVENC-capable shape for proofs; do not introduce a new instance family or service until 6C review.
+- Capacity assumption for planning: prove 1 output first, then 2, then 4. Do not pack 4 customer outputs onto one worker until 90-minute burn-in shows stable FPS, latency, GPU utilization, and restart count.
+- Scale-up trigger draft: active job count at 75% of proven capacity, GPU utilization over 80% for 60s, encode speed under 1.0 for 15s, or queued assignments older than preflight timeout.
+- Scale-down trigger draft: no active jobs and no scheduled rehearsal for 10–15 minutes, bounded by zero-spend guard and cold-start proof.
+- Cold-start budget: must be measured separately for ECS GPU worker registration, first job preflight, and first publish. If cold-start threatens the 2-minute rollback target, keep fallback path warm.
+- Cost ceiling review gate: before 6D live-route, record expected cost per 30/60/90 minute burn-in and max concurrent output plan; abort live routing if zero-spend guard/proof collector cannot attribute cost to the rehearsal.
+
+#### Phase 6 security model
+
+- Worker control plane must be private/internal only; no public unauthenticated worker API.
+- Job token scope: one session, one output, one route_generation, one lease, limited TTL, and explicit capabilities (`read_media`, `publish_destination`, `write_artifacts`).
+- RTMP keys: never log raw keys; worker receives only scoped secret material required for the leased output and redacts destination URLs.
+- Worker artifacts: redact secrets, host tokens, customer PII, and translated transcript text unless the proof explicitly needs media-content capture and the rehearsal is non-customer.
+- Partial deployment safety: a new worker image/version can register as `draining`/`shadow_only` first; control plane must not assign live jobs until version/capability checks pass.
+
+#### Phase 6 implementation sequence — future task packets only
+
+- **Phase 6A — local worker process shadow/proof:** build the protocol/lease/health proof with fake media and local/same-host process boundaries. No live route. Acceptance: worker can register, receive shadow jobs, emit health/artifacts, and be fenced/revoked without touching current FFmpeg output.
+- **Phase 6B — same-host worker driving one test output only:** route one non-customer test output through same-host worker while sibling outputs use current FFmpeg. Acceptance: one-output rollback works under 2 minutes and crash drill affects only that output.
+- **Phase 6C — ECS GPU worker shadow:** use existing `brivva-gpu` foundation for shadow registration/heartbeat and proof archives. No customer live route. Acceptance: cold-start, auth, heartbeat, cost, and artifact collection are measured.
+- **Phase 6D — one non-prod output live-routed:** one rehearsal destination receives worker-published media. Acceptance: fake-media plus one real platform rehearsal, rollback drill, RTMP reject drill.
+- **Phase 6E — multi-output burn-in:** 2 then 4 outputs on proven worker capacity. Acceptance: 30/60/90 minute burn-ins, one-output crash drill, GPU host restart drill, cost ceiling review.
+
+Recommended next implementation loop after this planning pass: `brivva-v2-gpu-worker-phase-6a-local-shadow-proof`, scoped to contracts/tests and local shadow worker proof only; it must not add ECS/Terraform/deploy changes or route customer output.
+
+Phase 6A hard scope:
+
+- Allowed: pure protocol/lease/health contracts with focused tests, local fake worker shadow proof, fake-media artifact archive format, and docs/runbook updates.
+- Not allowed: ECS services, Terraform, Docker deploy changes, public worker endpoints, queues/D1 migrations, frontend UI, production route switching, FFmpeg drain/mixer/pacing changes, or customer/live destination routing.
+- Stop and ask before implementing any real media transport or worker process that can publish to a platform.
+
+#### Phase 6 acceptance gates
+
+- Fake-media proof archives exist for registration, heartbeat, lease assign/activate/stop, and rollback.
+- 30/60/90 minute burn-ins show stable encode FPS, media latency, dropped frames, GPU utilization, restart count, and A/V sync evidence.
+- Rollback drill proves `BRIVVA_V2_GPU_WORKERS=0` restores current route under 2 minutes.
+- One-output crash drill proves sibling outputs and source ingest stay live.
+- GPU host restart drill proves lease revocation/fallback and artifact capture.
+- Cost ceiling review is signed off before any non-prod live route and repeated before customer route.
+- No FFmpeg args/drains/mixer/pacing/publish behavior changes are bundled with worker-boundary work.
+
+#### Phase 6 2am-test answers
+
+- **How do we roll back in under 2 minutes?** Disable `BRIVVA_V2_GPU_WORKERS`, let the control plane revoke worker leases, increment `route_generation`, and route affected outputs back to current in-process/per-output FFmpeg. If the engine itself is unstable, repoint `VITE_MEDIA_URL` to the known-good V1/laptop/Fargate fallback. No deploy or migration is allowed in the rollback path.
+- **What happens if the GPU worker dies mid-stream?** Heartbeat becomes stale, then hard-dead. Jobs on that worker are fenced/revoked, affected outputs enter `restarting`, and the control plane routes them to fallback or reassigns them. Sibling outputs on other routes keep running.
+- **What happens if only one output is degraded?** Only that `output_id` changes health/degradation state. Operator restarts/stops/falls back that output first; session restart is last resort.
+- **How do we know the worker is slow before customers notice?** Worker health emits encode speed/FPS, media latency trend, queue latency, dropped frames, GPU utilization, and last successful publish write age. Slow-warning thresholds mark output degraded before RTMP failure.
+- **What logs/metrics prove we did not lose audio/video sync?** Per-output snapshots include audio PTS, video PTS, media clock, A/V delta/trend, jitter depth, dropped/duplicated frames, subtitle lag, and route_generation. Proof archive preserves health timeline plus worker media input/output timestamps.
+- **What do we do if deployment partially succeeds?** New workers register as `shadow_only`/`draining` until capability/version checks pass. If some workers fail registration or heartbeat, do not assign live jobs; keep `BRIVVA_V2_GPU_WORKERS=0` or route only approved test outputs. Roll back by disabling the flag, not by debugging live traffic.
+- **What human action is required during an incident?** Operator identifies bad `output_id` from health logs, disables `BRIVVA_V2_GPU_WORKERS` if worker route is implicated, verifies destination preview/health recovery, records session/output ids and rollback timestamp in the proof archive, and escalates infra debugging only after media is safe.
+
+Exit: ECS GPU 4-output burn-in 60–90 min with proof archive, one-output and GPU-host failure drills passed, rollback under 2 minutes proven, and cost ceiling accepted.
 
 ## Failure-mode matrix
 
