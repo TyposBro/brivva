@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub v2_timestamped_audio: bool,
     /// V2 Phase 3 output health/control logs. Logs/contracts only; no process control.
     pub v2_output_controls: bool,
+    /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
+    pub v2_render_graph: bool,
 }
 
 impl AppConfig {
@@ -60,6 +62,7 @@ impl AppConfig {
             v2_timeline_shadow: env_flag("BRIVVA_V2_TIMELINE_SHADOW"),
             v2_timestamped_audio: env_flag("BRIVVA_V2_TIMESTAMPED_AUDIO"),
             v2_output_controls: env_flag("BRIVVA_V2_OUTPUT_CONTROLS"),
+            v2_render_graph: env_flag("BRIVVA_V2_RENDER_GRAPH"),
         })
     }
 }
@@ -107,6 +110,7 @@ mod tests {
                 "BRIVVA_V2_TIMELINE_SHADOW",
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
                 "BRIVVA_V2_OUTPUT_CONTROLS",
+                "BRIVVA_V2_RENDER_GRAPH",
             ] {
                 std::env::remove_var(key);
             }
@@ -119,6 +123,7 @@ mod tests {
         assert!(!cfg.v2_timeline_shadow);
         assert!(!cfg.v2_timestamped_audio);
         assert!(!cfg.v2_output_controls);
+        assert!(!cfg.v2_render_graph);
     }
 
     #[test]
@@ -196,6 +201,7 @@ mod tests {
             std::env::set_var("BRIVVA_V2_TIMELINE_SHADOW", "on");
             std::env::set_var("BRIVVA_V2_TIMESTAMPED_AUDIO", "yes");
             std::env::set_var("BRIVVA_V2_OUTPUT_CONTROLS", "true");
+            std::env::set_var("BRIVVA_V2_RENDER_GRAPH", "1");
         }
 
         let cfg = AppConfig::from_env();
@@ -212,6 +218,7 @@ mod tests {
         assert!(cfg.v2_timeline_shadow);
         assert!(cfg.v2_timestamped_audio);
         assert!(cfg.v2_output_controls);
+        assert!(cfg.v2_render_graph);
 
         unsafe {
             for key in [
@@ -228,6 +235,7 @@ mod tests {
                 "BRIVVA_V2_TIMELINE_SHADOW",
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
                 "BRIVVA_V2_OUTPUT_CONTROLS",
+                "BRIVVA_V2_RENDER_GRAPH",
             ] {
                 std::env::remove_var(key);
             }

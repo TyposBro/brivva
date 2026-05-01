@@ -213,6 +213,7 @@ mod tests {
                 force_default_voice: false,
                 force_rtmp_not_rtmps: false,
                 v2_output_controls: false,
+                v2_render_graph: false,
             }),
         );
         live.selected_voice_id = voice_id;

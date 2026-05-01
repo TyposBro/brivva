@@ -149,6 +149,8 @@ pub struct PipelineConfig {
     pub force_rtmp_not_rtmps: bool,
     /// V2 Phase 3 output health/control logs. Logs/contracts only; no process control.
     pub v2_output_controls: bool,
+    /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
+    pub v2_render_graph: bool,
 }
 
 /// Handle to a single live session — the pair every pipeline function needs

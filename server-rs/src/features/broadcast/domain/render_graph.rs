@@ -97,6 +97,88 @@ pub enum OutputLifecycleState {
     Stopped,
 }
 
+/// Stable identity for one in-process render graph adapter instance.
+/// Phase 4 adapter-only: this names the current per-output FFmpeg path; it
+/// does not imply shared decode, GPU workers, or a complex FFmpeg graph.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderGraphId(String);
+
+impl RenderGraphId {
+    pub fn for_session(session_id: impl AsRef<str>) -> Self {
+        Self(format!("render-graph:{}", session_id.as_ref()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable identity for one output node inside the Phase 4 adapter graph.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderGraphNodeId(String);
+
+impl RenderGraphNodeId {
+    pub fn for_output(graph_id: &RenderGraphId, output_id: impl AsRef<str>) -> Self {
+        Self(format!(
+            "{}:output:{}",
+            graph_id.as_str(),
+            output_id.as_ref()
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderGraphNodeKind {
+    EncodePublishRtmp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderGraphNodeState {
+    Starting,
+    Live,
+    Restarting,
+    Failed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderGraphOutputNode {
+    pub graph_id: RenderGraphId,
+    pub node_id: RenderGraphNodeId,
+    pub output_id: String,
+    pub stream_id: String,
+    pub kind: RenderGraphNodeKind,
+    pub state: RenderGraphNodeState,
+}
+
+impl RenderGraphOutputNode {
+    pub fn new(
+        graph_id: RenderGraphId,
+        output_id: impl Into<String>,
+        stream_id: impl Into<String>,
+        kind: RenderGraphNodeKind,
+    ) -> Self {
+        let output_id = output_id.into();
+        let node_id = RenderGraphNodeId::for_output(&graph_id, &output_id);
+        Self {
+            graph_id,
+            node_id,
+            output_id,
+            stream_id: stream_id.into(),
+            kind,
+            state: RenderGraphNodeState::Starting,
+        }
+    }
+
+    pub fn transition(&mut self, state: RenderGraphNodeState) {
+        self.state = state;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputDegradation {
     None,
@@ -292,6 +374,46 @@ mod tests {
             spec.degradation_policy.action_for(OutputFailureKind::Tts),
             DegradationAction::CaptionsOnly
         );
+    }
+
+    #[test]
+    fn render_graph_adapter_builds_stable_output_node_identity() {
+        let graph_id = RenderGraphId::for_session("B8EF28");
+        let node = RenderGraphOutputNode::new(
+            graph_id.clone(),
+            "B8EF28:ja:youtube:0",
+            "stream-1",
+            RenderGraphNodeKind::EncodePublishRtmp,
+        );
+
+        assert_eq!(graph_id.as_str(), "render-graph:B8EF28");
+        assert_eq!(
+            node.node_id.as_str(),
+            "render-graph:B8EF28:output:B8EF28:ja:youtube:0"
+        );
+        assert_eq!(node.output_id, "B8EF28:ja:youtube:0");
+        assert_eq!(node.stream_id, "stream-1");
+        assert_eq!(node.kind, RenderGraphNodeKind::EncodePublishRtmp);
+        assert_eq!(node.state, RenderGraphNodeState::Starting);
+    }
+
+    #[test]
+    fn render_graph_adapter_tracks_lifecycle_state_transitions() {
+        let mut node = RenderGraphOutputNode::new(
+            RenderGraphId::for_session("B8EF28"),
+            "B8EF28:ko:grip:0",
+            "stream-2",
+            RenderGraphNodeKind::EncodePublishRtmp,
+        );
+
+        node.transition(RenderGraphNodeState::Live);
+        assert_eq!(node.state, RenderGraphNodeState::Live);
+        node.transition(RenderGraphNodeState::Restarting);
+        assert_eq!(node.state, RenderGraphNodeState::Restarting);
+        node.transition(RenderGraphNodeState::Failed);
+        assert_eq!(node.state, RenderGraphNodeState::Failed);
+        node.transition(RenderGraphNodeState::Stopped);
+        assert_eq!(node.state, RenderGraphNodeState::Stopped);
     }
 
     #[test]

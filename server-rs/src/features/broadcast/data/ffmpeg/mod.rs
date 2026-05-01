@@ -31,6 +31,9 @@ use crate::features::broadcast::domain::SessionMetrics;
 use crate::features::broadcast::domain::output_health::{
     OutputDegradationLabel, OutputHealthSnapshot, OutputHealthState, OutputId,
 };
+use crate::features::broadcast::domain::render_graph::{
+    RenderGraphNodeState, RenderGraphOutputNode,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
@@ -117,6 +120,7 @@ struct RtmpStream {
     output_id: Option<OutputId>,
     destination_platform: String,
     output_controls_enabled: bool,
+    render_graph_node: Option<RenderGraphOutputNode>,
     buffers: StreamBuffers,
     stop_flag: Arc<AtomicBool>,
     restart_count: u32,
@@ -153,6 +157,7 @@ type CrashedStreamSnapshot = (
     Option<OutputId>,
     String,
     bool,
+    Option<RenderGraphOutputNode>,
     u32,
     StreamBuffers,
 );
@@ -168,6 +173,7 @@ struct RestartStreamArgs {
     output_id: Option<OutputId>,
     destination_platform: String,
     output_controls_enabled: bool,
+    render_graph_node: Option<RenderGraphOutputNode>,
     prev_count: u32,
     buffers: StreamBuffers,
 }
@@ -183,6 +189,7 @@ struct StreamSpawnArgs {
     output_id: Option<OutputId>,
     destination_platform: String,
     output_controls_enabled: bool,
+    render_graph_node: Option<RenderGraphOutputNode>,
     existing_buffers: Option<StreamBuffers>,
 }
 
@@ -200,6 +207,9 @@ pub struct StartStreamArgs<'a> {
     pub output_id: Option<OutputId>,
     pub destination_platform: &'a str,
     pub output_controls_enabled: bool,
+    /// Optional V2 Phase 4 adapter metadata. When present, logs node lifecycle
+    /// around the existing per-output FFmpeg process only.
+    pub render_graph_node: Option<RenderGraphOutputNode>,
     /// See `RtmpStream::passthrough`. Fargate skips STT/translate/TTS entirely
     /// for passthrough streams — host audio re-broadcast at gain 1.0, no
     /// caption overlay.
@@ -245,6 +255,28 @@ fn emit_output_health(
         message = ?snapshot.message,
         snapshot = ?snapshot,
         "v2 output health event"
+    );
+}
+
+fn emit_render_graph_adapter_event(
+    node: &Option<RenderGraphOutputNode>,
+    state: RenderGraphNodeState,
+    event: &'static str,
+    message: Option<String>,
+) {
+    let Some(node) = node else {
+        return;
+    };
+    tracing::info!(
+        event,
+        graph_id = %node.graph_id.as_str(),
+        node_id = %node.node_id.as_str(),
+        output_id = %node.output_id,
+        stream_id = %node.stream_id,
+        node_kind = ?node.kind,
+        node_state = ?state,
+        message = ?message,
+        "v2 render graph adapter event"
     );
 }
 
@@ -315,6 +347,12 @@ impl RtmpManager {
             None,
             None,
         );
+        emit_render_graph_adapter_event(
+            &args.render_graph_node,
+            RenderGraphNodeState::Starting,
+            "render_graph.node.start",
+            None,
+        );
         if let Err(e) = self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.stream_id.to_string(),
             lang: args.lang.to_string(),
@@ -326,6 +364,7 @@ impl RtmpManager {
             output_id: args.output_id.clone(),
             destination_platform: args.destination_platform.to_string(),
             output_controls_enabled: args.output_controls_enabled,
+            render_graph_node: args.render_graph_node.clone(),
             existing_buffers: None,
         }) {
             emit_output_health(
@@ -339,6 +378,12 @@ impl RtmpManager {
                 Some(OutputDegradationLabel::RtmpPublishError),
                 Some(e.clone()),
             );
+            emit_render_graph_adapter_event(
+                &args.render_graph_node,
+                RenderGraphNodeState::Failed,
+                "render_graph.node.failure",
+                Some(e.clone()),
+            );
             return Err(e);
         }
         emit_output_health(
@@ -350,6 +395,17 @@ impl RtmpManager {
             OutputHealthState::Live,
             0,
             None,
+            None,
+        );
+        if let Some(stream) = self.streams.get_mut(args.stream_id)
+            && let Some(node) = stream.render_graph_node.as_mut()
+        {
+            node.transition(RenderGraphNodeState::Live);
+        }
+        emit_render_graph_adapter_event(
+            &args.render_graph_node,
+            RenderGraphNodeState::Live,
+            "render_graph.node.live",
             None,
         );
         tracing::info!(
@@ -585,6 +641,7 @@ impl RtmpManager {
                     old.output_id,
                     old.destination_platform,
                     old.output_controls_enabled,
+                    old.render_graph_node,
                     old.restart_count,
                     old.buffers,
                 ));
@@ -607,6 +664,12 @@ impl RtmpManager {
             Some(OutputDegradationLabel::FfmpegCrash),
             None,
         );
+        emit_render_graph_adapter_event(
+            &args.render_graph_node,
+            RenderGraphNodeState::Restarting,
+            "render_graph.node.start",
+            Some("ffmpeg restart".to_string()),
+        );
         match self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.id.clone(),
             lang: args.lang.clone(),
@@ -618,11 +681,15 @@ impl RtmpManager {
             output_id: args.output_id.clone(),
             destination_platform: args.destination_platform.clone(),
             output_controls_enabled: args.output_controls_enabled,
+            render_graph_node: args.render_graph_node.clone(),
             existing_buffers: Some(args.buffers),
         }) {
             Ok(()) => {
                 if let Some(stream) = self.streams.get_mut(&args.id) {
                     stream.restart_count = args.prev_count + 1;
+                    if let Some(node) = stream.render_graph_node.as_mut() {
+                        node.transition(RenderGraphNodeState::Live);
+                    }
                 }
                 emit_output_health(
                     args.output_controls_enabled,
@@ -634,6 +701,12 @@ impl RtmpManager {
                     args.prev_count + 1,
                     None,
                     None,
+                );
+                emit_render_graph_adapter_event(
+                    &args.render_graph_node,
+                    RenderGraphNodeState::Live,
+                    "render_graph.node.live",
+                    Some("ffmpeg restarted".to_string()),
                 );
                 tracing::info!(
                     stream_id = %args.id,
@@ -653,6 +726,12 @@ impl RtmpManager {
                     OutputHealthState::Failed,
                     args.prev_count,
                     Some(OutputDegradationLabel::RtmpPublishError),
+                    Some(e.clone()),
+                );
+                emit_render_graph_adapter_event(
+                    &args.render_graph_node,
+                    RenderGraphNodeState::Failed,
+                    "render_graph.node.failure",
                     Some(e.clone()),
                 );
                 tracing::error!(
@@ -860,6 +939,7 @@ impl RtmpManager {
                 output_id: args.output_id,
                 destination_platform: args.destination_platform,
                 output_controls_enabled: args.output_controls_enabled,
+                render_graph_node: args.render_graph_node,
                 buffers,
                 stop_flag,
                 restart_count: 0,
@@ -882,6 +962,15 @@ impl RtmpManager {
                 OutputHealthState::Stopped,
                 stream.restart_count,
                 None,
+                None,
+            );
+            if let Some(node) = stream.render_graph_node.as_mut() {
+                node.transition(RenderGraphNodeState::Stopped);
+            }
+            emit_render_graph_adapter_event(
+                &stream.render_graph_node,
+                RenderGraphNodeState::Stopped,
+                "render_graph.node.stop",
                 None,
             );
             match stream.child.kill() {
@@ -955,6 +1044,7 @@ pub fn spawn_health_monitor(
                 output_id,
                 destination_platform,
                 output_controls_enabled,
+                render_graph_node,
                 prev_count,
                 buffers,
             ) in crashed
@@ -975,6 +1065,7 @@ pub fn spawn_health_monitor(
                     output_id,
                     destination_platform,
                     output_controls_enabled,
+                    render_graph_node,
                     prev_count,
                     buffers,
                 });

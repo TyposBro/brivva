@@ -148,6 +148,7 @@ fn fake_exited_stream_full(id: &str, lang: &str, is_source: bool, passthrough: b
         output_id: None,
         destination_platform: "fake".into(),
         output_controls_enabled: false,
+        render_graph_node: None,
         buffers: StreamBuffers::new(),
         stop_flag: Arc::new(AtomicBool::new(false)),
         restart_count: 0,

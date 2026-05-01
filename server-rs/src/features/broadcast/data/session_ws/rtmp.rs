@@ -4,6 +4,9 @@ use std::sync::atomic::AtomicBool;
 
 use crate::core::contracts::workers::{SessionBundle, Stream};
 use crate::features::broadcast::domain::output_health::OutputId;
+use crate::features::broadcast::domain::render_graph::{
+    RenderGraphId, RenderGraphNodeKind, RenderGraphOutputNode,
+};
 use crate::features::broadcast::domain::{Lang, LiveSession, SessionMetrics};
 
 /// Wire value the frontend sends on a destination's `lang` field when the
@@ -92,6 +95,8 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     let output_controls_enabled = live_session.pipeline_config.v2_output_controls;
+    let render_graph_enabled = live_session.pipeline_config.v2_render_graph;
+    let render_graph_id = render_graph_enabled.then(|| RenderGraphId::for_session(sid));
     let mut output_indexes = HashMap::new();
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
@@ -126,7 +131,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         // "user chose passthrough" from "stream's lang happens to equal
         // source_lang" for tracing / future bifurcation.
         let flags = resolve_stream_flags(&s.lang, source_lang, s.host_gain);
-        let output_id = if output_controls_enabled {
+        let output_id = if output_controls_enabled || render_graph_enabled {
             match output_id_for_stream(sid, s, &mut output_indexes) {
                 Ok(id) => Some(id),
                 Err(e) => {
@@ -142,6 +147,16 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         } else {
             None
         };
+        let render_graph_node = render_graph_id.as_ref().and_then(|graph_id| {
+            output_id.as_ref().map(|output_id| {
+                RenderGraphOutputNode::new(
+                    graph_id.clone(),
+                    output_id.as_str(),
+                    &s.id,
+                    RenderGraphNodeKind::EncodePublishRtmp,
+                )
+            })
+        });
         let spawn_args = crate::features::broadcast::data::ffmpeg::StartStreamArgs {
             stream_id: &s.id,
             lang: &s.lang,
@@ -152,6 +167,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
             output_id,
             destination_platform: &s.platform,
             output_controls_enabled,
+            render_graph_node,
             passthrough: flags.passthrough,
         };
         if let Err(e) = manager.start_stream(spawn_args) {

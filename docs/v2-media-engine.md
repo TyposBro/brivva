@@ -395,6 +395,28 @@ Goal: model outputs as nodes while still using current FFmpeg process model.
 
 Exit: graph controls current outputs without broad rewrites.
 
+#### Phase 4 implementation evidence — 2026-05-01
+
+Implemented as an adapter-only wrapper behind `BRIVVA_V2_RENDER_GRAPH`:
+
+- Flag source: `AppConfig::from_env()` reads `BRIVVA_V2_RENDER_GRAPH`; `BroadcastState` and `PipelineConfig` carry it into session bootstrap.
+- Pure adapter contract: `render_graph.rs` now defines graph id, output node id, node kind (`EncodePublishRtmp`), node state, and output_id/stream_id mapping.
+- RTMP wiring: `session_ws/rtmp.rs` builds one adapter node per current Workers stream when the flag is enabled. It reuses the Phase 3 `output_id` format.
+- FFmpeg lifecycle: `RtmpManager` stores optional adapter metadata and emits `v2 render graph adapter event` logs for start/live/stop/failure/restart around the existing per-output FFmpeg lifecycle.
+- Adapter-only guardrail: no shared decode, GPU worker split, FFmpeg complex graph, GStreamer, UI, D1 migration, command queue, billing, or frontend behavior was added.
+- No output behavior change: `ffmpeg/args.rs`, `ffmpeg/drain.rs`, and `ffmpeg/mixer.rs` have no diff; `spawn_stream_inner` still calls the same `build_ffmpeg_args_with_profile`, drain loops, buffers, restart monitor, and publish path.
+
+Proof commands:
+
+```bash
+cargo test -p server-rs render_graph
+for t in media_timeline timeline_shadow timestamped_audio output_health output_id_for_stream pipeline_config_from_maps_every_broadcast_state_field; do cargo test -p server-rs "$t"; done
+for t in from_env_populates_secrets_and_kill_switches_from_environment from_env_applies_soniox_and_elevenlabs_defaults_when_unset; do cargo test -p server-rs "$t"; done
+git diff --exit-code -- server-rs/src/features/broadcast/data/ffmpeg/args.rs server-rs/src/features/broadcast/data/ffmpeg/drain.rs server-rs/src/features/broadcast/data/ffmpeg/mixer.rs
+```
+
+Rollback: disable `BRIVVA_V2_RENDER_GRAPH`; adapter nodes are not attached and no render-graph adapter logs are emitted. Existing `RtmpManager` FFmpeg behavior remains the live path.
+
 ### Phase 5 — shared decode/normalize
 
 Goal: decode source video once, fork frames to outputs.
@@ -567,7 +589,7 @@ Decision: RFC recommends not billing captions-only/degraded minutes during early
 | 1 timeline shadow      | Logs extra timing metrics       | Disable `BRIVVA_V2_TIMELINE_SHADOW`                                    | 30–60 min no drift trend, no V1 regression |
 | 2 timestamped audio    | New audio clock source          | Disable `BRIVVA_V2_TIMESTAMPED_AUDIO`; old PCM remains                 | A/V drift bounded; reconnect still works   |
 | 3 output controls      | Per-output commands/health      | Disable `BRIVVA_V2_OUTPUT_CONTROLS`; use session restart               | One-output restart tested                  |
-| 4 render graph adapter | Current FFmpeg wrapped by graph | Disable `BRIVVA_V2_RENDER_GRAPH`; direct `RtmpManager` path            | Same outputs as V1 plus health logs        |
+| 4 render graph adapter | Current FFmpeg wrapped by graph | Disable `BRIVVA_V2_RENDER_GRAPH`; direct `RtmpManager` path            | Same outputs as V1 plus adapter logs       |
 | 5 shared decode        | One decode/fan-out              | Disable `BRIVVA_V2_SHARED_DECODE`; return per-output encode            | 2 then 4 outputs stable                    |
 | 6 GPU workers          | External heavy media worker     | Disable `BRIVVA_V2_GPU_WORKERS`; repoint `VITE_MEDIA_URL` to V1/laptop | 60–90 min proof archive                    |
 

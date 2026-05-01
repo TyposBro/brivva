@@ -34,6 +34,8 @@ pub struct BroadcastState {
     pub v2_timestamped_audio: bool,
     /// V2 Phase 3 output health/control logs. Logs/contracts only; no process control.
     pub v2_output_controls: bool,
+    /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
+    pub v2_render_graph: bool,
 }
 
 impl BroadcastState {
@@ -54,6 +56,7 @@ impl BroadcastState {
             v2_timeline_shadow: false,
             v2_timestamped_audio: false,
             v2_output_controls: false,
+            v2_render_graph: false,
         }
     }
 }
@@ -85,6 +88,7 @@ mod tests {
         assert!(!s.v2_timeline_shadow);
         assert!(!s.v2_timestamped_audio);
         assert!(!s.v2_output_controls);
+        assert!(!s.v2_render_graph);
         assert!(s.live_sessions.is_empty());
     }
 

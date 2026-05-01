@@ -97,6 +97,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         force_default_voice: state.force_default_voice,
         force_rtmp_not_rtmps: state.force_rtmp_not_rtmps,
         v2_output_controls: state.v2_output_controls,
+        v2_render_graph: state.v2_render_graph,
     })
 }
 
@@ -269,6 +270,7 @@ mod tests {
         state.force_default_voice = true;
         state.force_rtmp_not_rtmps = true;
         state.v2_output_controls = true;
+        state.v2_render_graph = true;
         state.session_logs_enabled = true;
         state.session_logs_verbose = true;
 
@@ -280,6 +282,7 @@ mod tests {
         assert!(cfg.force_default_voice);
         assert!(cfg.force_rtmp_not_rtmps);
         assert!(cfg.v2_output_controls);
+        assert!(cfg.v2_render_graph);
         assert!(state.session_logs_enabled);
         assert!(state.session_logs_verbose);
     }

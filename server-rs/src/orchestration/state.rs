@@ -28,5 +28,6 @@ pub fn broadcast_state() -> BroadcastState {
         v2_timeline_shadow: cfg.v2_timeline_shadow,
         v2_timestamped_audio: cfg.v2_timestamped_audio,
         v2_output_controls: cfg.v2_output_controls,
+        v2_render_graph: cfg.v2_render_graph,
     }
 }
