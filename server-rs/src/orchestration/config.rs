@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub v2_output_controls: bool,
     /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
     pub v2_render_graph: bool,
+    /// V2 Phase 5 shared decode/fan-out planning. Shadow/contracts only; no live routing.
+    pub v2_shared_decode: bool,
 }
 
 impl AppConfig {
@@ -63,6 +65,7 @@ impl AppConfig {
             v2_timestamped_audio: env_flag("BRIVVA_V2_TIMESTAMPED_AUDIO"),
             v2_output_controls: env_flag("BRIVVA_V2_OUTPUT_CONTROLS"),
             v2_render_graph: env_flag("BRIVVA_V2_RENDER_GRAPH"),
+            v2_shared_decode: env_flag("BRIVVA_V2_SHARED_DECODE"),
         })
     }
 }
@@ -111,6 +114,7 @@ mod tests {
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
                 "BRIVVA_V2_OUTPUT_CONTROLS",
                 "BRIVVA_V2_RENDER_GRAPH",
+                "BRIVVA_V2_SHARED_DECODE",
             ] {
                 std::env::remove_var(key);
             }
@@ -124,6 +128,7 @@ mod tests {
         assert!(!cfg.v2_timestamped_audio);
         assert!(!cfg.v2_output_controls);
         assert!(!cfg.v2_render_graph);
+        assert!(!cfg.v2_shared_decode);
     }
 
     #[test]
@@ -202,6 +207,7 @@ mod tests {
             std::env::set_var("BRIVVA_V2_TIMESTAMPED_AUDIO", "yes");
             std::env::set_var("BRIVVA_V2_OUTPUT_CONTROLS", "true");
             std::env::set_var("BRIVVA_V2_RENDER_GRAPH", "1");
+            std::env::set_var("BRIVVA_V2_SHARED_DECODE", "on");
         }
 
         let cfg = AppConfig::from_env();
@@ -219,6 +225,7 @@ mod tests {
         assert!(cfg.v2_timestamped_audio);
         assert!(cfg.v2_output_controls);
         assert!(cfg.v2_render_graph);
+        assert!(cfg.v2_shared_decode);
 
         unsafe {
             for key in [
@@ -236,6 +243,7 @@ mod tests {
                 "BRIVVA_V2_TIMESTAMPED_AUDIO",
                 "BRIVVA_V2_OUTPUT_CONTROLS",
                 "BRIVVA_V2_RENDER_GRAPH",
+                "BRIVVA_V2_SHARED_DECODE",
             ] {
                 std::env::remove_var(key);
             }

@@ -151,6 +151,8 @@ pub struct PipelineConfig {
     pub v2_output_controls: bool,
     /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
     pub v2_render_graph: bool,
+    /// V2 Phase 5 shared decode/fan-out planning. Shadow/contracts only.
+    pub v2_shared_decode: bool,
 }
 
 /// Handle to a single live session — the pair every pipeline function needs

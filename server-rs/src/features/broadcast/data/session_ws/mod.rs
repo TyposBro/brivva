@@ -98,6 +98,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         force_rtmp_not_rtmps: state.force_rtmp_not_rtmps,
         v2_output_controls: state.v2_output_controls,
         v2_render_graph: state.v2_render_graph,
+        v2_shared_decode: state.v2_shared_decode,
     })
 }
 
@@ -271,6 +272,7 @@ mod tests {
         state.force_rtmp_not_rtmps = true;
         state.v2_output_controls = true;
         state.v2_render_graph = true;
+        state.v2_shared_decode = true;
         state.session_logs_enabled = true;
         state.session_logs_verbose = true;
 
@@ -283,6 +285,7 @@ mod tests {
         assert!(cfg.force_rtmp_not_rtmps);
         assert!(cfg.v2_output_controls);
         assert!(cfg.v2_render_graph);
+        assert!(cfg.v2_shared_decode);
         assert!(state.session_logs_enabled);
         assert!(state.session_logs_verbose);
     }

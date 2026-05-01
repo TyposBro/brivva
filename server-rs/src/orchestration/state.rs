@@ -29,5 +29,6 @@ pub fn broadcast_state() -> BroadcastState {
         v2_timestamped_audio: cfg.v2_timestamped_audio,
         v2_output_controls: cfg.v2_output_controls,
         v2_render_graph: cfg.v2_render_graph,
+        v2_shared_decode: cfg.v2_shared_decode,
     }
 }

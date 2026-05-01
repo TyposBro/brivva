@@ -421,11 +421,19 @@ Rollback: disable `BRIVVA_V2_RENDER_GRAPH`; adapter nodes are not attached and n
 
 Goal: decode source video once, fork frames to outputs.
 
-- Choose FFmpeg filter graph vs GStreamer vs Rust-side frame graph after prototype.
-- Validate 2 outputs first, then 4.
-- NVENC on laptop/ECS required for heavy paths.
+Status — 2026-05-01 loop: architecture/contracts/shadow planning only. **Not live-routed yet.** Current per-output FFmpeg remains the only live publish path.
 
-Exit: one decode, N output encodes, sync metrics green.
+- `BRIVVA_V2_SHARED_DECODE` defaults false and is the rollback switch.
+- Pure render-graph contracts model `SharedDecodeNode`, normalized `SourceMediaFrame` identity, `FanOutEdge`, `OutputEncodeNode`, and backpressure/degradation policy.
+- Shadow runtime proof, when enabled, emits planning logs only: `graph.shared_decode.planned`, `graph.fanout.edge_planned`, and `output.encode_node.planned`.
+- A slow/failed output is modeled as degradation on only its edge/output; source decode and sibling outputs remain isolated.
+- Restart budget exhaustion is modeled as one output failure, not source decode failure.
+- No FFmpeg args, drain loops, buffer ownership, frame pacing, RTMP publishing, restart semantics, GPU workers, FFmpeg complex graph, or GStreamer routing are changed in this phase.
+- Choose FFmpeg filter graph vs GStreamer vs Rust-side frame graph only after separate review/proof approval.
+- Validate 2 outputs first, then 4, before any live route switch.
+- NVENC on laptop/ECS remains required for future heavy paths, but no GPU worker work is included here.
+
+Exit: contracts/tests and shadow logs prove one decode, N output encodes, independent edge degradation, and flag-off no-op. Live shared decode requires a separate approval after parity proof.
 
 ### Phase 6 — GPU worker split
 

@@ -126,6 +126,10 @@ impl RenderGraphNodeId {
         ))
     }
 
+    pub fn for_shared_decode(graph_id: &RenderGraphId) -> Self {
+        Self(format!("{}:shared-decode:source", graph_id.as_str()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -133,6 +137,7 @@ impl RenderGraphNodeId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderGraphNodeKind {
+    SharedDecodeSource,
     EncodePublishRtmp,
 }
 
@@ -176,6 +181,211 @@ impl RenderGraphOutputNode {
 
     pub fn transition(&mut self, state: RenderGraphNodeState) {
         self.state = state;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedDecodeNode {
+    pub graph_id: RenderGraphId,
+    pub node_id: RenderGraphNodeId,
+    pub source_label: String,
+    pub kind: RenderGraphNodeKind,
+    pub state: RenderGraphNodeState,
+}
+
+impl SharedDecodeNode {
+    pub fn new(graph_id: RenderGraphId, source_label: impl Into<String>) -> Self {
+        let node_id = RenderGraphNodeId::for_shared_decode(&graph_id);
+        Self {
+            graph_id,
+            node_id,
+            source_label: source_label.into(),
+            kind: RenderGraphNodeKind::SharedDecodeSource,
+            state: RenderGraphNodeState::Starting,
+        }
+    }
+
+    pub fn transition(&mut self, state: RenderGraphNodeState) {
+        self.state = state;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceMediaKind {
+    Video,
+    Audio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceMediaFrameId {
+    pub source_node_id: String,
+    pub media_kind: SourceMediaKind,
+    pub pts_ms: u64,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMediaFrame {
+    pub id: SourceMediaFrameId,
+    pub duration_ms: u32,
+    pub payload_bytes: usize,
+}
+
+impl SourceMediaFrame {
+    pub fn normalized(
+        source: &SharedDecodeNode,
+        media_kind: SourceMediaKind,
+        pts_ms: u64,
+        sequence: u64,
+        duration_ms: u32,
+        payload_bytes: usize,
+    ) -> Self {
+        Self {
+            id: SourceMediaFrameId {
+                source_node_id: source.node_id.as_str().to_string(),
+                media_kind,
+                pts_ms,
+                sequence,
+            },
+            duration_ms,
+            payload_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanOutEdgeState {
+    Healthy,
+    Degraded,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressureAction {
+    KeepLive,
+    DropOldestFrames,
+    MarkOutputDegraded,
+    StopOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanOutDegradationReason {
+    SlowConsumer,
+    OutputFailed,
+    RestartBudgetExhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackpressurePolicy {
+    pub max_queued_frames: usize,
+    pub slow_consumer: BackpressureAction,
+    pub output_failed: BackpressureAction,
+    pub restart_budget_exhausted: BackpressureAction,
+}
+
+impl Default for BackpressurePolicy {
+    fn default() -> Self {
+        Self {
+            max_queued_frames: 120,
+            slow_consumer: BackpressureAction::MarkOutputDegraded,
+            output_failed: BackpressureAction::MarkOutputDegraded,
+            restart_budget_exhausted: BackpressureAction::StopOutput,
+        }
+    }
+}
+
+impl BackpressurePolicy {
+    pub fn action_for(self, reason: FanOutDegradationReason) -> BackpressureAction {
+        match reason {
+            FanOutDegradationReason::SlowConsumer => self.slow_consumer,
+            FanOutDegradationReason::OutputFailed => self.output_failed,
+            FanOutDegradationReason::RestartBudgetExhausted => self.restart_budget_exhausted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanOutEdge {
+    pub source_node_id: String,
+    pub output_id: OutputId,
+    pub queued_frames: usize,
+    pub policy: BackpressurePolicy,
+    pub state: FanOutEdgeState,
+    pub degradation_reason: Option<FanOutDegradationReason>,
+}
+
+impl FanOutEdge {
+    pub fn new(source: &SharedDecodeNode, output_id: impl Into<OutputId>) -> Self {
+        Self {
+            source_node_id: source.node_id.as_str().to_string(),
+            output_id: output_id.into(),
+            queued_frames: 0,
+            policy: BackpressurePolicy::default(),
+            state: FanOutEdgeState::Healthy,
+            degradation_reason: None,
+        }
+    }
+
+    pub fn with_policy(mut self, policy: BackpressurePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn observe_queue_depth(&mut self, queued_frames: usize) {
+        self.queued_frames = queued_frames;
+        if queued_frames > self.policy.max_queued_frames {
+            self.apply_degradation(FanOutDegradationReason::SlowConsumer);
+        }
+    }
+
+    pub fn apply_degradation(&mut self, reason: FanOutDegradationReason) {
+        match self.policy.action_for(reason) {
+            BackpressureAction::KeepLive | BackpressureAction::DropOldestFrames => {
+                self.state = FanOutEdgeState::Healthy;
+                self.degradation_reason = None;
+            }
+            BackpressureAction::MarkOutputDegraded => {
+                self.state = FanOutEdgeState::Degraded;
+                self.degradation_reason = Some(reason);
+            }
+            BackpressureAction::StopOutput => {
+                self.state = FanOutEdgeState::Stopped;
+                self.degradation_reason = Some(reason);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEncodeNode {
+    pub graph_id: RenderGraphId,
+    pub node_id: RenderGraphNodeId,
+    pub output_id: OutputId,
+    pub stream_id: String,
+    pub state: RenderGraphNodeState,
+    pub restart_count: u32,
+}
+
+impl OutputEncodeNode {
+    pub fn new(
+        graph_id: RenderGraphId,
+        output_id: impl Into<OutputId>,
+        stream_id: impl Into<String>,
+    ) -> Self {
+        let output_id = output_id.into();
+        let node_id = RenderGraphNodeId::for_output(&graph_id, output_id.as_str());
+        Self {
+            graph_id,
+            node_id,
+            output_id,
+            stream_id: stream_id.into(),
+            state: RenderGraphNodeState::Starting,
+            restart_count: 0,
+        }
+    }
+
+    pub fn apply_restart_budget_exhausted(&mut self) {
+        self.state = RenderGraphNodeState::Failed;
     }
 }
 
@@ -463,5 +673,88 @@ mod tests {
         };
 
         assert_eq!(command.output_id().as_str(), "ja-youtube");
+    }
+
+    #[test]
+    fn shared_decode_node_builds_stable_source_identity_and_normalized_frames() {
+        let source = SharedDecodeNode::new(RenderGraphId::for_session("B8EF28"), "host-webrtc");
+        let video =
+            SourceMediaFrame::normalized(&source, SourceMediaKind::Video, 1_000, 42, 33, 4096);
+        let audio =
+            SourceMediaFrame::normalized(&source, SourceMediaKind::Audio, 1_020, 43, 20, 1764);
+
+        assert_eq!(source.kind, RenderGraphNodeKind::SharedDecodeSource);
+        assert_eq!(
+            source.node_id.as_str(),
+            "render-graph:B8EF28:shared-decode:source"
+        );
+        assert_eq!(video.id.source_node_id, source.node_id.as_str());
+        assert_eq!(video.id.media_kind, SourceMediaKind::Video);
+        assert_eq!(video.id.pts_ms, 1_000);
+        assert_eq!(video.id.sequence, 42);
+        assert_eq!(audio.id.media_kind, SourceMediaKind::Audio);
+        assert_eq!(audio.duration_ms, 20);
+    }
+
+    #[test]
+    fn one_shared_source_fans_out_to_many_output_encode_nodes() {
+        let graph_id = RenderGraphId::for_session("B8EF28");
+        let source = SharedDecodeNode::new(graph_id.clone(), "host-webrtc");
+        let ja = OutputEncodeNode::new(graph_id.clone(), "B8EF28:ja:youtube:0", "stream-ja");
+        let zh = OutputEncodeNode::new(graph_id, "B8EF28:zh:grip:0", "stream-zh");
+        let ja_edge = FanOutEdge::new(&source, ja.output_id.clone());
+        let zh_edge = FanOutEdge::new(&source, zh.output_id.clone());
+
+        assert_eq!(ja_edge.source_node_id, source.node_id.as_str());
+        assert_eq!(zh_edge.source_node_id, source.node_id.as_str());
+        assert_ne!(ja.output_id, zh.output_id);
+        assert_eq!(
+            ja.node_id.as_str(),
+            "render-graph:B8EF28:output:B8EF28:ja:youtube:0"
+        );
+        assert_eq!(
+            zh.node_id.as_str(),
+            "render-graph:B8EF28:output:B8EF28:zh:grip:0"
+        );
+    }
+
+    #[test]
+    fn slow_output_degrades_only_its_fanout_edge() {
+        let source = SharedDecodeNode::new(RenderGraphId::for_session("B8EF28"), "host-webrtc");
+        let mut slow =
+            FanOutEdge::new(&source, "B8EF28:ja:youtube:0").with_policy(BackpressurePolicy {
+                max_queued_frames: 2,
+                ..BackpressurePolicy::default()
+            });
+        let healthy = FanOutEdge::new(&source, "B8EF28:ko:grip:0");
+
+        slow.observe_queue_depth(3);
+
+        assert_eq!(slow.state, FanOutEdgeState::Degraded);
+        assert_eq!(
+            slow.degradation_reason,
+            Some(FanOutDegradationReason::SlowConsumer)
+        );
+        assert_eq!(healthy.state, FanOutEdgeState::Healthy);
+        assert_eq!(healthy.degradation_reason, None);
+    }
+
+    #[test]
+    fn restart_budget_exhaustion_affects_output_not_source_decode() {
+        let graph_id = RenderGraphId::for_session("B8EF28");
+        let source = SharedDecodeNode::new(graph_id.clone(), "host-webrtc");
+        let mut output = OutputEncodeNode::new(graph_id, "B8EF28:ja:youtube:0", "stream-ja");
+        let mut edge = FanOutEdge::new(&source, output.output_id.clone());
+
+        output.apply_restart_budget_exhausted();
+        edge.apply_degradation(FanOutDegradationReason::RestartBudgetExhausted);
+
+        assert_eq!(output.state, RenderGraphNodeState::Failed);
+        assert_eq!(edge.state, FanOutEdgeState::Stopped);
+        assert_eq!(source.state, RenderGraphNodeState::Starting);
+        assert_eq!(
+            source.node_id.as_str(),
+            "render-graph:B8EF28:shared-decode:source"
+        );
     }
 }

@@ -214,6 +214,7 @@ mod tests {
                 force_rtmp_not_rtmps: false,
                 v2_output_controls: false,
                 v2_render_graph: false,
+                v2_shared_decode: false,
             }),
         );
         live.selected_voice_id = voice_id;

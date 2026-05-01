@@ -36,6 +36,10 @@ pub struct StreamPipelineFlags {
     pub host_gain: f32,
 }
 
+pub fn shared_decode_shadow_enabled(enabled: bool) -> bool {
+    enabled
+}
+
 pub fn resolve_stream_flags(
     stream_lang: &str,
     source_lang: &Lang,
@@ -96,7 +100,19 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     let output_controls_enabled = live_session.pipeline_config.v2_output_controls;
     let render_graph_enabled = live_session.pipeline_config.v2_render_graph;
+    let shared_decode_enabled =
+        shared_decode_shadow_enabled(live_session.pipeline_config.v2_shared_decode);
     let render_graph_id = render_graph_enabled.then(|| RenderGraphId::for_session(sid));
+    let shared_decode_graph_id = shared_decode_enabled.then(|| RenderGraphId::for_session(sid));
+    if let Some(graph_id) = &shared_decode_graph_id {
+        tracing::info!(
+            session_id = %sid,
+            graph_id = %graph_id.as_str(),
+            stream_count = bundle.streams.len(),
+            live_routed = false,
+            "graph.shared_decode.planned"
+        );
+    }
     let mut output_indexes = HashMap::new();
     for s in &bundle.streams {
         let (Some(rtmp_url), Some(stream_key)) = (&s.rtmp_url, &s.stream_key) else {
@@ -131,7 +147,8 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         // "user chose passthrough" from "stream's lang happens to equal
         // source_lang" for tracing / future bifurcation.
         let flags = resolve_stream_flags(&s.lang, source_lang, s.host_gain);
-        let output_id = if output_controls_enabled || render_graph_enabled {
+        let output_id = if output_controls_enabled || render_graph_enabled || shared_decode_enabled
+        {
             match output_id_for_stream(sid, s, &mut output_indexes) {
                 Ok(id) => Some(id),
                 Err(e) => {
@@ -157,6 +174,24 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
                 )
             })
         });
+        if let (Some(graph_id), Some(output_id)) = (&shared_decode_graph_id, &output_id) {
+            tracing::info!(
+                session_id = %sid,
+                graph_id = %graph_id.as_str(),
+                output_id = %output_id.as_str(),
+                stream_id = %s.id,
+                live_routed = false,
+                "graph.fanout.edge_planned"
+            );
+            tracing::info!(
+                session_id = %sid,
+                graph_id = %graph_id.as_str(),
+                output_id = %output_id.as_str(),
+                stream_id = %s.id,
+                live_routed = false,
+                "output.encode_node.planned"
+            );
+        }
         let spawn_args = crate::features::broadcast::data::ffmpeg::StartStreamArgs {
             stream_id: &s.id,
             lang: &s.lang,
@@ -206,6 +241,12 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_decode_shadow_flag_is_direct_injected_gate() {
+        assert!(!shared_decode_shadow_enabled(false));
+        assert!(shared_decode_shadow_enabled(true));
+    }
 
     #[test]
     fn maybe_downgrade_rtmps_preserves_url_when_flag_is_off_even_for_rtmps() {

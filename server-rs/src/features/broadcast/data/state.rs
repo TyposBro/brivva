@@ -36,6 +36,8 @@ pub struct BroadcastState {
     pub v2_output_controls: bool,
     /// V2 Phase 4 render graph adapter logs. Wraps current FFmpeg path only.
     pub v2_render_graph: bool,
+    /// V2 Phase 5 shared decode/fan-out planning. Shadow/contracts only.
+    pub v2_shared_decode: bool,
 }
 
 impl BroadcastState {
@@ -57,6 +59,7 @@ impl BroadcastState {
             v2_timestamped_audio: false,
             v2_output_controls: false,
             v2_render_graph: false,
+            v2_shared_decode: false,
         }
     }
 }
@@ -89,6 +92,7 @@ mod tests {
         assert!(!s.v2_timestamped_audio);
         assert!(!s.v2_output_controls);
         assert!(!s.v2_render_graph);
+        assert!(!s.v2_shared_decode);
         assert!(s.live_sessions.is_empty());
     }
 
