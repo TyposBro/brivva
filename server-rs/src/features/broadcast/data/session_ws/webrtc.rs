@@ -27,6 +27,8 @@ use webrtc::track::track_remote::TrackRemote;
 use crate::features::broadcast::data::ffmpeg::VideoProfile;
 use crate::features::broadcast::domain::LiveSessions;
 
+use super::timeline_shadow::{VideoTimelineShadow, timeline_shadow_enabled};
+
 #[derive(Debug, Deserialize)]
 pub(super) struct WebRtcOffer {
     pub sdp: String,
@@ -45,8 +47,9 @@ pub(super) async fn handle_webrtc_offer(
     offer: WebRtcOffer,
     live_sessions: &LiveSessions,
     live_session_id: &str,
+    timeline_shadow: bool,
 ) {
-    match accept_webrtc_video(offer, live_sessions, live_session_id).await {
+    match accept_webrtc_video(offer, live_sessions, live_session_id, timeline_shadow).await {
         Ok(peer) => {
             if let Some(mut session) = live_sessions.get_mut(live_session_id) {
                 session.webrtc_peer = Some(peer);
@@ -66,6 +69,7 @@ async fn accept_webrtc_video(
     offer: WebRtcOffer,
     live_sessions: &LiveSessions,
     live_session_id: &str,
+    timeline_shadow: bool,
 ) -> WebRtcResult<Arc<RTCPeerConnection>> {
     apply_video_profile(&offer, live_sessions, live_session_id).await;
     let mut media = MediaEngine::default();
@@ -87,6 +91,7 @@ async fn accept_webrtc_video(
         peer.clone(),
         live_sessions.clone(),
         live_session_id.to_string(),
+        timeline_shadow,
     );
 
     let remote = RTCSessionDescription::offer(offer.sdp)?;
@@ -172,12 +177,14 @@ fn wire_video_track(
     peer: Arc<RTCPeerConnection>,
     live_sessions: LiveSessions,
     live_session_id: String,
+    timeline_shadow: bool,
 ) {
     let peer_for_track = peer.clone();
     peer.on_track(Box::new(move |track, _, _| {
         let peer = peer_for_track.clone();
         let live_sessions = live_sessions.clone();
         let live_session_id = live_session_id.clone();
+        let timeline_shadow = timeline_shadow_enabled(timeline_shadow);
         Box::pin(async move {
             if track.kind() != RTPCodecType::Video {
                 return;
@@ -191,7 +198,14 @@ fn wire_video_track(
                 );
                 return;
             }
-            forward_track_rtp(track, peer.clone(), live_sessions, live_session_id).await;
+            forward_track_rtp(
+                track,
+                peer.clone(),
+                live_sessions,
+                live_session_id,
+                timeline_shadow,
+            )
+            .await;
         })
     }));
 }
@@ -201,16 +215,33 @@ async fn forward_track_rtp(
     peer: Arc<RTCPeerConnection>,
     live_sessions: LiveSessions,
     live_session_id: String,
+    timeline_shadow: bool,
 ) {
     tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
     let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
     let mut depacketizer = H264AnnexBDepacketizer::default();
     let mut clock = VideoRtpClock::default();
+    let mut timeline_shadow = timeline_shadow.then(VideoTimelineShadow::default);
     while let Ok((packet, _)) = track.read_rtp().await {
         let Some(annex_b) = depacketizer.depacketize(&packet) else {
             continue;
         };
         let captured_at = clock.instant_for(packet.header.timestamp);
+        if let Some(shadow) = timeline_shadow.as_mut() {
+            let sample = shadow.observe_access_unit(
+                packet.header.timestamp,
+                packet.header.sequence_number,
+                Instant::now(),
+            );
+            if sample.should_log {
+                let payload = sample.to_log_payload();
+                tracing::info!(
+                    live_session_id = %live_session_id,
+                    payload = %payload,
+                    "v2 timeline shadow video"
+                );
+            }
+        }
         let manager = live_sessions
             .get(&live_session_id)
             .and_then(|session| session.rtmp_manager.clone());

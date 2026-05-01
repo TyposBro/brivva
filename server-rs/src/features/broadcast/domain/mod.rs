@@ -1,4 +1,6 @@
+pub mod media_timeline;
 pub mod metrics;
+pub mod render_graph;
 
 use axum::extract::ws::Message;
 use dashmap::DashMap;

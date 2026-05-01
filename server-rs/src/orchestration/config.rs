@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub session_logs_enabled: bool,
     /// Include high-volume per-session debug events such as media stats.
     pub session_logs_verbose: bool,
+    /// V2 Phase 1 timeline shadow mode. Logs metrics only; no media behavior change.
+    pub v2_timeline_shadow: bool,
 }
 
 impl AppConfig {
@@ -51,6 +53,7 @@ impl AppConfig {
             force_rtmp_not_rtmps: env_flag("BRIVVA_FORCE_RTMP_NOT_RTMPS"),
             session_logs_enabled: env_flag("BRIVVA_SESSION_LOGS"),
             session_logs_verbose: env_flag("BRIVVA_SESSION_LOG_VERBOSE"),
+            v2_timeline_shadow: env_flag("BRIVVA_V2_TIMELINE_SHADOW"),
         })
     }
 }
@@ -95,6 +98,7 @@ mod tests {
                 "ELEVENLABS_BASE_URL",
                 "BRIVVA_SESSION_LOGS",
                 "BRIVVA_SESSION_LOG_VERBOSE",
+                "BRIVVA_V2_TIMELINE_SHADOW",
             ] {
                 std::env::remove_var(key);
             }
@@ -104,6 +108,7 @@ mod tests {
         assert_eq!(cfg.soniox_ws_url, SONIOX_WS_URL_DEFAULT);
         assert_eq!(cfg.elevenlabs_base_url, ELEVENLABS_BASE_URL_DEFAULT);
         assert!(cfg.jwt_secret.is_empty());
+        assert!(!cfg.v2_timeline_shadow);
     }
 
     #[test]
@@ -178,6 +183,7 @@ mod tests {
             std::env::set_var("BRIVVA_FORCE_RTMP_NOT_RTMPS", "on");
             std::env::set_var("BRIVVA_SESSION_LOGS", "1");
             std::env::set_var("BRIVVA_SESSION_LOG_VERBOSE", "true");
+            std::env::set_var("BRIVVA_V2_TIMELINE_SHADOW", "on");
         }
 
         let cfg = AppConfig::from_env();
@@ -191,6 +197,7 @@ mod tests {
         assert!(cfg.force_rtmp_not_rtmps);
         assert!(cfg.session_logs_enabled);
         assert!(cfg.session_logs_verbose);
+        assert!(cfg.v2_timeline_shadow);
 
         unsafe {
             for key in [
@@ -204,6 +211,7 @@ mod tests {
                 "BRIVVA_FORCE_RTMP_NOT_RTMPS",
                 "BRIVVA_SESSION_LOGS",
                 "BRIVVA_SESSION_LOG_VERBOSE",
+                "BRIVVA_V2_TIMELINE_SHADOW",
             ] {
                 std::env::remove_var(key);
             }

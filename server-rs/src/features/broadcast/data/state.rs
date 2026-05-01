@@ -28,6 +28,8 @@ pub struct BroadcastState {
     pub session_logs_enabled: bool,
     /// Include high-volume debug events in the session log stream.
     pub session_logs_verbose: bool,
+    /// V2 Phase 1 timeline shadow mode. Logs metrics only; no media behavior change.
+    pub v2_timeline_shadow: bool,
 }
 
 impl BroadcastState {
@@ -45,6 +47,7 @@ impl BroadcastState {
             force_rtmp_not_rtmps: false,
             session_logs_enabled: false,
             session_logs_verbose: false,
+            v2_timeline_shadow: false,
         }
     }
 }
@@ -73,6 +76,7 @@ mod tests {
         assert!(!s.force_rtmp_not_rtmps);
         assert!(!s.session_logs_enabled);
         assert!(!s.session_logs_verbose);
+        assert!(!s.v2_timeline_shadow);
         assert!(s.live_sessions.is_empty());
     }
 

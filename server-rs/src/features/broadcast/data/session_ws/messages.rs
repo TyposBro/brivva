@@ -8,6 +8,9 @@ use crate::features::broadcast::data::pipeline;
 use crate::features::broadcast::data::session_log::SessionLogEmitter;
 use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
 
+use super::timeline_shadow::{
+    AudioTimelineShadowSample, timeline_shadow_enabled, timeline_shadow_log_due,
+};
 use super::webrtc::{WebRtcOffer, handle_webrtc_offer};
 
 pub(super) struct BinaryArgs<'a> {
@@ -17,6 +20,9 @@ pub(super) struct BinaryArgs<'a> {
     pub source_lang: &'a Lang,
     pub audio_tx: &'a mut Option<mpsc::Sender<Vec<u8>>>,
     pub session_log: &'a SessionLogEmitter,
+    pub timeline_shadow: bool,
+    pub session_started_at: Instant,
+    pub last_audio_timeline_shadow_log_at: &'a mut Option<Instant>,
 }
 
 pub(super) fn handle_binary(args: BinaryArgs<'_>) {
@@ -27,7 +33,28 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         source_lang,
         audio_tx,
         session_log,
+        timeline_shadow,
+        session_started_at,
+        last_audio_timeline_shadow_log_at,
     } = args;
+    let queue_was_initialized = audio_tx.is_some();
+    let now = Instant::now();
+    if timeline_shadow_enabled(timeline_shadow)
+        && timeline_shadow_log_due(last_audio_timeline_shadow_log_at, now)
+    {
+        let sample = AudioTimelineShadowSample::from_arrival(
+            data.len(),
+            queue_was_initialized,
+            session_started_at,
+            now,
+        );
+        let payload = sample.to_log_payload();
+        tracing::info!(
+            live_session_id = %live_session_id,
+            payload = %payload,
+            "v2 timeline shadow audio"
+        );
+    }
     if audio_tx.is_none() {
         *audio_tx = Some(spawn_stt_pipeline(
             live_sessions,
@@ -93,13 +120,16 @@ pub(super) async fn handle_text(
     live_sessions: &LiveSessions,
     live_session_id: &str,
     session_log: &SessionLogEmitter,
+    timeline_shadow: bool,
 ) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
     match json.get("type").and_then(|v| v.as_str()) {
         Some("webrtc:offer") => match serde_json::from_value::<WebRtcOffer>(json) {
-            Ok(offer) => handle_webrtc_offer(offer, live_sessions, live_session_id).await,
+            Ok(offer) => {
+                handle_webrtc_offer(offer, live_sessions, live_session_id, timeline_shadow).await
+            }
             Err(error) => tracing::warn!(
                 live_session_id = %live_session_id,
                 error = %error,

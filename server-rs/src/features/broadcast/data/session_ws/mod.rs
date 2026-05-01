@@ -11,6 +11,7 @@ use futures_util::{
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::auth;
@@ -26,6 +27,7 @@ mod ids;
 mod messages;
 mod rtmp;
 mod teardown;
+mod timeline_shadow;
 mod webrtc;
 
 pub use active_voice_refresh::refresh_active_voice_once;
@@ -108,6 +110,8 @@ struct HostSocket {
 async fn handle_host(mut socket: HostSocket) {
     let live_sessions = socket.state.live_sessions.clone();
     let live_session_id = next_available_live_session_id(&live_sessions);
+    let session_started_at = Instant::now();
+    let timeline_shadow = socket.state.v2_timeline_shadow;
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
     let workers_api = Arc::new(WorkersApi::new(
@@ -200,6 +204,7 @@ async fn handle_host(mut socket: HostSocket) {
     });
 
     let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
+    let mut last_audio_timeline_shadow_log_at: Option<Instant> = None;
     while let Some(Ok(msg)) = socket.receiver.next().await {
         match msg {
             Message::Binary(data) => {
@@ -210,13 +215,23 @@ async fn handle_host(mut socket: HostSocket) {
                     source_lang: &socket.source_lang,
                     audio_tx: &mut audio_tx,
                     session_log: &session_log,
+                    timeline_shadow,
+                    session_started_at,
+                    last_audio_timeline_shadow_log_at: &mut last_audio_timeline_shadow_log_at,
                 });
             }
             Message::Text(text) => {
                 if text.contains("host:end") {
                     break;
                 }
-                handle_text(&text, &live_sessions, &live_session_id, &session_log).await;
+                handle_text(
+                    &text,
+                    &live_sessions,
+                    &live_session_id,
+                    &session_log,
+                    timeline_shadow,
+                )
+                .await;
             }
             Message::Close(_) => break,
             _ => {}
