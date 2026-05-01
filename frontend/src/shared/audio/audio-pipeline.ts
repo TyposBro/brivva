@@ -2,6 +2,13 @@ const SAMPLE_RATE = 44100;
 const BUFFER_SIZE = 4096;
 const WORKLET_FRAME_SIZE = 882; // 20 ms @ 44.1 kHz
 const FFT_SIZE = 512;
+const TIMESTAMPED_AUDIO_HEADER_BYTES = 28;
+const TIMESTAMPED_AUDIO_MAGIC = "BTA2";
+const TIMESTAMPED_AUDIO_VERSION = 1;
+
+export type AudioPipelineStartOptions = {
+  timestampedAudio?: boolean;
+};
 
 const PCM_WORKLET_SOURCE = `
 class BrivvaPcmWorklet extends AudioWorkletProcessor {
@@ -47,14 +54,19 @@ export class AudioPipeline {
   private workletSink: GainNode | null = null;
   private workletUrl: string | null = null;
   private stream: MediaStream | null = null;
+  private nextSampleIndex = 0;
 
-  async start(onAudio: (buffer: ArrayBuffer) => void): Promise<AnalyserNode> {
+  async start(
+    onAudio: (buffer: ArrayBuffer) => void,
+    options: AudioPipelineStartOptions = {},
+  ): Promise<AnalyserNode> {
+    this.nextSampleIndex = 0;
     this.stream = await this.captureMic();
     this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     const source = this.ctx.createMediaStreamSource(this.stream);
 
     const analyser = this.createAnalyser(source);
-    await this.startStreaming(source, onAudio);
+    await this.startStreaming(source, onAudio, options.timestampedAudio === true);
 
     return analyser;
   }
@@ -81,14 +93,16 @@ export class AudioPipeline {
   private async startStreaming(
     source: MediaStreamAudioSourceNode,
     onAudio: (buffer: ArrayBuffer) => void,
+    timestampedAudio: boolean,
   ): Promise<void> {
-    if (await this.tryStartAudioWorklet(source, onAudio)) return;
-    this.startScriptProcessorFallback(source, onAudio);
+    if (await this.tryStartAudioWorklet(source, onAudio, timestampedAudio)) return;
+    this.startScriptProcessorFallback(source, onAudio, timestampedAudio);
   }
 
   private async tryStartAudioWorklet(
     source: MediaStreamAudioSourceNode,
     onAudio: (buffer: ArrayBuffer) => void,
+    timestampedAudio: boolean,
   ): Promise<boolean> {
     if (!this.ctx?.audioWorklet || typeof AudioWorkletNode === "undefined") {
       return false;
@@ -105,7 +119,7 @@ export class AudioPipeline {
         outputChannelCount: [1],
       });
       node.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-        onAudio(event.data);
+        this.emitAudio(event.data, onAudio, timestampedAudio);
       };
 
       // Keep the worklet in the live audio graph without playing mic audio
@@ -129,10 +143,15 @@ export class AudioPipeline {
   private startScriptProcessorFallback(
     source: MediaStreamAudioSourceNode,
     onAudio: (buffer: ArrayBuffer) => void,
+    timestampedAudio: boolean,
   ): void {
     this.processor = this.ctx!.createScriptProcessor(BUFFER_SIZE, 1, 1);
     this.processor.onaudioprocess = (e) =>
-      onAudio(toInt16(e.inputBuffer.getChannelData(0)));
+      this.emitAudio(
+        toInt16(e.inputBuffer.getChannelData(0)),
+        onAudio,
+        timestampedAudio,
+      );
     source.connect(this.processor);
     this.processor.connect(this.ctx!.destination);
   }
@@ -145,6 +164,28 @@ export class AudioPipeline {
     this.processor = null;
     this.stream = null;
     this.ctx = null;
+    this.nextSampleIndex = 0;
+  }
+
+  private emitAudio(
+    pcm: ArrayBuffer,
+    onAudio: (buffer: ArrayBuffer) => void,
+    timestampedAudio: boolean,
+  ): void {
+    if (!timestampedAudio) {
+      onAudio(pcm);
+      return;
+    }
+    const sampleIndex = this.nextSampleIndex;
+    this.nextSampleIndex += pcm.byteLength / Int16Array.BYTES_PER_ELEMENT;
+    onAudio(
+      encodeTimestampedPcmFrame({
+        pcm,
+        sampleIndex,
+        sampleRate: SAMPLE_RATE,
+        clientCaptureTimeUs: Math.round(performance.now() * 1000),
+      }),
+    );
   }
 
   private cleanupWorklet(): void {
@@ -156,6 +197,34 @@ export class AudioPipeline {
     this.workletSink = null;
     this.workletUrl = null;
   }
+}
+
+export function encodeTimestampedPcmFrame(args: {
+  pcm: ArrayBuffer;
+  sampleIndex: number;
+  sampleRate: number;
+  clientCaptureTimeUs: number;
+}): ArrayBuffer {
+  const out = new ArrayBuffer(
+    TIMESTAMPED_AUDIO_HEADER_BYTES + args.pcm.byteLength,
+  );
+  const bytes = new Uint8Array(out);
+  for (let i = 0; i < TIMESTAMPED_AUDIO_MAGIC.length; i++) {
+    bytes[i] = TIMESTAMPED_AUDIO_MAGIC.charCodeAt(i);
+  }
+  const view = new DataView(out);
+  view.setUint8(4, TIMESTAMPED_AUDIO_VERSION);
+  setU64(view, 8, args.sampleIndex);
+  view.setUint32(16, args.sampleRate, true);
+  setU64(view, 20, args.clientCaptureTimeUs);
+  bytes.set(new Uint8Array(args.pcm), TIMESTAMPED_AUDIO_HEADER_BYTES);
+  return out;
+}
+
+function setU64(view: DataView, offset: number, value: number): void {
+  const safe = Math.max(0, Math.floor(value));
+  view.setUint32(offset, safe >>> 0, true);
+  view.setUint32(offset + 4, Math.floor(safe / 2 ** 32), true);
 }
 
 function toInt16(float32: Float32Array): ArrayBuffer {

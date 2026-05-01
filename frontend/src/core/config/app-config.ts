@@ -17,6 +17,8 @@ export interface AppConfig {
   sessionLogsEnabled: boolean;
   /** Mirror structured session logs to browser console. */
   sessionLogConsole: boolean;
+  /** V2 Phase 2 timestamped WS PCM bridge. Default off for deploy safety. */
+  timestampedAudioEnabled: boolean;
 }
 
 let current: AppConfig | null = null;

@@ -265,6 +265,65 @@ Fallback path: WS PCM frame includes `sample_index`, `sample_rate`, and client m
 
 Exit: audio/video drift measurable and bounded; old clients still work.
 
+#### Phase 2 implementation evidence — 2026-05-01
+
+Implemented the safe bridge path, not WebRTC Opus RTP, because the current browser/server WebRTC path is video-only and changing A/V negotiation would broaden runtime risk. Timestamped WS PCM removes arrival-only ambiguity while keeping old clients safe.
+
+Bridge frame format:
+
+```txt
+magic                  4 bytes   "BTA2"
+version                u8        1
+reserved               3 bytes   zero
+sample_index           u64le     cumulative PCM sample index
+sample_rate            u32le     e.g. 44100
+client_capture_time_us u64le     performance.now() * 1000
+pcm_payload            bytes     little-endian int16 mono PCM
+```
+
+Server behavior:
+
+- `BRIVVA_V2_TIMESTAMPED_AUDIO=0`/unset: every binary WS message stays old raw PCM, even if it starts with `BTA2`.
+- `BRIVVA_V2_TIMESTAMPED_AUDIO=1` + non-`BTA2`: old raw PCM remains accepted.
+- `BRIVVA_V2_TIMESTAMPED_AUDIO=1` + valid `BTA2`: server strips the timestamp header, computes media PTS from `sample_index / sample_rate`, logs `audio_timestamped_pcm_bridge_derived`, and immediately feeds the PCM payload to the existing STT/RTMP path.
+- `BRIVVA_V2_TIMESTAMPED_AUDIO=1` + malformed `BTA2`: frame is rejected with a warning instead of sending header bytes to STT/RTMP.
+
+Frontend behavior:
+
+- `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO=0`/unset: `AudioPipeline.start()` sends the same raw Int16 PCM `ArrayBuffer` as before.
+- `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO=1`: frontend wraps PCM chunks in the `BTA2` bridge frame before `SessionSocket.sendAudio(...)`.
+
+Flag coordination:
+
+- `BRIVVA_V2_TIMESTAMPED_AUDIO=1` can be enabled server-side alone safely; raw PCM remains accepted and logs as arrival-only.
+- `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO=1` must not be enabled unless the server flag is already enabled, otherwise old server code would treat `BTA2` headers as PCM audio.
+- Rollback when both are on: disable `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO` first, then disable `BRIVVA_V2_TIMESTAMPED_AUDIO`.
+
+Raw PCM compatibility proof required:
+
+- Server flag off + frontend flag off = current raw PCM behavior.
+- Server flag on + frontend flag off = raw PCM still works and logs `audio_arrival_non_authoritative`.
+
+Proof commands so far:
+
+```bash
+cargo test -p server-rs media_timeline
+cargo test -p server-rs timestamped_audio
+cargo test -p server-rs timeline_shadow
+bun run --cwd frontend test -- audio-pipeline session-socket bootstrap
+bun run --cwd frontend typecheck
+```
+
+Runtime proof automation added:
+
+```bash
+./scripts/prove-v2-timestamped-audio.sh --duration 120 --rollback-duration 45 --source ko
+```
+
+The script sets both `BRIVVA_V2_TIMESTAMPED_AUDIO=1` and `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO=1` for the timestamped phase, verifies `audio_timestamped_pcm_bridge_derived`, then verifies both raw-PCM compatibility cases described above.
+
+Rollback: disable `VITE_BRIVVA_V2_TIMESTAMPED_AUDIO` first, then `BRIVVA_V2_TIMESTAMPED_AUDIO`; old raw PCM stays supported and Phase 1 arrival-only audio shadow logs remain available when `BRIVVA_V2_TIMELINE_SHADOW=1`.
+
 ### Phase 3 — output health/control surface
 
 Goal: operator can manage one output without ending the session.

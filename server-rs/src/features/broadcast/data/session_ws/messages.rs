@@ -9,8 +9,10 @@ use crate::features::broadcast::data::session_log::SessionLogEmitter;
 use crate::features::broadcast::domain::{Lang, LiveSessions, PipelineConfig};
 
 use super::timeline_shadow::{
-    AudioTimelineShadowSample, timeline_shadow_enabled, timeline_shadow_log_due,
+    AudioTimelineShadowSample, TimestampedAudioTimelineShadowSample, timeline_shadow_enabled,
+    timeline_shadow_log_due,
 };
+use super::timestamped_audio::{BinaryAudioPayload, decode_binary_audio};
 use super::webrtc::{WebRtcOffer, handle_webrtc_offer};
 
 pub(super) struct BinaryArgs<'a> {
@@ -21,6 +23,7 @@ pub(super) struct BinaryArgs<'a> {
     pub audio_tx: &'a mut Option<mpsc::Sender<Vec<u8>>>,
     pub session_log: &'a SessionLogEmitter,
     pub timeline_shadow: bool,
+    pub timestamped_audio: bool,
     pub session_started_at: Instant,
     pub last_audio_timeline_shadow_log_at: &'a mut Option<Instant>,
 }
@@ -34,21 +37,48 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         audio_tx,
         session_log,
         timeline_shadow,
+        timestamped_audio,
         session_started_at,
         last_audio_timeline_shadow_log_at,
     } = args;
     let queue_was_initialized = audio_tx.is_some();
     let now = Instant::now();
+    let decoded = decode_binary_audio(&data, timestamped_audio);
+    let (pcm_data, timestamped_sample) = match decoded {
+        BinaryAudioPayload::RawPcm(pcm) => (pcm.to_vec(), None),
+        BinaryAudioPayload::TimestampedPcm(frame) => {
+            let sample = TimestampedAudioTimelineShadowSample::from_bridge(
+                frame.pcm.len(),
+                frame.sample_index,
+                frame.sample_rate,
+                frame.client_capture_time_us,
+                frame.media_pts(),
+            );
+            (frame.pcm.to_vec(), Some(sample))
+        }
+        BinaryAudioPayload::RejectedTimestamped(error) => {
+            tracing::warn!(
+                live_session_id = %live_session_id,
+                error = ?error,
+                "rejected malformed timestamped audio frame"
+            );
+            return;
+        }
+    };
     if timeline_shadow_enabled(timeline_shadow)
         && timeline_shadow_log_due(last_audio_timeline_shadow_log_at, now)
     {
-        let sample = AudioTimelineShadowSample::from_arrival(
-            data.len(),
-            queue_was_initialized,
-            session_started_at,
-            now,
-        );
-        let payload = sample.to_log_payload();
+        let payload = timestamped_sample
+            .map(|sample| sample.to_log_payload())
+            .unwrap_or_else(|| {
+                AudioTimelineShadowSample::from_arrival(
+                    pcm_data.len(),
+                    queue_was_initialized,
+                    session_started_at,
+                    now,
+                )
+                .to_log_payload()
+            });
         tracing::info!(
             live_session_id = %live_session_id,
             payload = %payload,
@@ -64,14 +94,14 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         session_log.info("server.first_audio_received", serde_json::json!({}));
     }
     if let Some(tx) = audio_tx.as_ref()
-        && let Err(error) = tx.try_send(data.clone())
+        && let Err(error) = tx.try_send(pcm_data.clone())
     {
         // STT pipeline is behind or gone. Debug-level so a stuck
         // pipeline producing identical dropped-frame logs per audio
         // tick is greppable without drowning healthy sessions.
         tracing::debug!(
             session_id = %live_session_id,
-            bytes = data.len(),
+            bytes = pcm_data.len(),
             error = %error,
             "dropped host audio chunk into stt pipeline channel"
         );
@@ -81,7 +111,7 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         .and_then(|r| r.rtmp_manager.clone());
     if let Some(mgr) = rtmp_mgr {
         tokio::spawn(async move {
-            mgr.lock().await.push_host_audio(&data);
+            mgr.lock().await.push_host_audio(&pcm_data);
         });
     }
 }

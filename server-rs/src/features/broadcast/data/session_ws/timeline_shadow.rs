@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use crate::features::broadcast::domain::media_timeline::RtpMediaClock;
+use crate::features::broadcast::domain::media_timeline::{MediaTime, RtpMediaClock};
 
 #[derive(Debug, Default)]
 pub(super) struct VideoTimelineShadow {
@@ -95,6 +95,48 @@ pub(super) struct AudioTimelineShadowSample {
     pub chunk_bytes: usize,
     pub queue_was_initialized: bool,
     pub arrival_age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TimestampedAudioTimelineShadowSample {
+    pub chunk_bytes: usize,
+    pub sample_index: u64,
+    pub sample_rate: u32,
+    pub client_capture_time_us: u64,
+    pub media_pts_us: u64,
+}
+
+impl TimestampedAudioTimelineShadowSample {
+    pub fn from_bridge(
+        chunk_bytes: usize,
+        sample_index: u64,
+        sample_rate: u32,
+        client_capture_time_us: u64,
+        media_pts: MediaTime,
+    ) -> Self {
+        Self {
+            chunk_bytes,
+            sample_index,
+            sample_rate,
+            client_capture_time_us,
+            media_pts_us: media_pts.as_micros(),
+        }
+    }
+
+    pub fn to_log_payload(&self) -> Value {
+        json!({
+            "mode": "shadow",
+            "kind": "audio_timestamped_pcm_bridge_derived",
+            "authoritative": false,
+            "bridge_derived": true,
+            "note": "Phase 2 audio timing is derived from timestamped WS PCM sample_index/sample_rate; not WebRTC RTP authoritative yet.",
+            "chunk_bytes": self.chunk_bytes,
+            "sample_index": self.sample_index,
+            "sample_rate": self.sample_rate,
+            "client_capture_time_us": self.client_capture_time_us,
+            "media_pts_us": self.media_pts_us,
+        })
+    }
 }
 
 impl AudioTimelineShadowSample {
@@ -237,6 +279,24 @@ mod tests {
         assert_eq!(payload["kind"], "video_rtp_authoritative");
         assert_eq!(payload["media_pts_us"], 1_000);
         assert_eq!(payload["jitter_us"], 6);
+    }
+
+    #[test]
+    fn timestamped_audio_log_payload_is_bridge_derived() {
+        let sample = TimestampedAudioTimelineShadowSample::from_bridge(
+            1_764,
+            44_100,
+            44_100,
+            123_456,
+            MediaTime::from_micros(1_000_000),
+        );
+
+        let payload = sample.to_log_payload();
+        assert_eq!(payload["mode"], "shadow");
+        assert_eq!(payload["kind"], "audio_timestamped_pcm_bridge_derived");
+        assert_eq!(payload["authoritative"], false);
+        assert_eq!(payload["bridge_derived"], true);
+        assert_eq!(payload["media_pts_us"], 1_000_000);
     }
 
     #[test]

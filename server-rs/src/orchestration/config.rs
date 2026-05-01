@@ -33,6 +33,8 @@ pub struct AppConfig {
     pub session_logs_verbose: bool,
     /// V2 Phase 1 timeline shadow mode. Logs metrics only; no media behavior change.
     pub v2_timeline_shadow: bool,
+    /// V2 Phase 2 timestamped audio ingest. Logs timing only; old PCM remains default.
+    pub v2_timestamped_audio: bool,
 }
 
 impl AppConfig {
@@ -54,6 +56,7 @@ impl AppConfig {
             session_logs_enabled: env_flag("BRIVVA_SESSION_LOGS"),
             session_logs_verbose: env_flag("BRIVVA_SESSION_LOG_VERBOSE"),
             v2_timeline_shadow: env_flag("BRIVVA_V2_TIMELINE_SHADOW"),
+            v2_timestamped_audio: env_flag("BRIVVA_V2_TIMESTAMPED_AUDIO"),
         })
     }
 }
@@ -99,6 +102,7 @@ mod tests {
                 "BRIVVA_SESSION_LOGS",
                 "BRIVVA_SESSION_LOG_VERBOSE",
                 "BRIVVA_V2_TIMELINE_SHADOW",
+                "BRIVVA_V2_TIMESTAMPED_AUDIO",
             ] {
                 std::env::remove_var(key);
             }
@@ -109,6 +113,7 @@ mod tests {
         assert_eq!(cfg.elevenlabs_base_url, ELEVENLABS_BASE_URL_DEFAULT);
         assert!(cfg.jwt_secret.is_empty());
         assert!(!cfg.v2_timeline_shadow);
+        assert!(!cfg.v2_timestamped_audio);
     }
 
     #[test]
@@ -184,6 +189,7 @@ mod tests {
             std::env::set_var("BRIVVA_SESSION_LOGS", "1");
             std::env::set_var("BRIVVA_SESSION_LOG_VERBOSE", "true");
             std::env::set_var("BRIVVA_V2_TIMELINE_SHADOW", "on");
+            std::env::set_var("BRIVVA_V2_TIMESTAMPED_AUDIO", "yes");
         }
 
         let cfg = AppConfig::from_env();
@@ -198,6 +204,7 @@ mod tests {
         assert!(cfg.session_logs_enabled);
         assert!(cfg.session_logs_verbose);
         assert!(cfg.v2_timeline_shadow);
+        assert!(cfg.v2_timestamped_audio);
 
         unsafe {
             for key in [
@@ -212,6 +219,7 @@ mod tests {
                 "BRIVVA_SESSION_LOGS",
                 "BRIVVA_SESSION_LOG_VERBOSE",
                 "BRIVVA_V2_TIMELINE_SHADOW",
+                "BRIVVA_V2_TIMESTAMPED_AUDIO",
             ] {
                 std::env::remove_var(key);
             }

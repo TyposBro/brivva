@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { AudioPipeline } from "./audio-pipeline";
+import { AudioPipeline, encodeTimestampedPcmFrame } from "./audio-pipeline";
 
 type ProcessorStub = {
   onaudioprocess: ((e: { inputBuffer: { getChannelData: (ch: number) => Float32Array } }) => void) | null;
@@ -70,7 +70,7 @@ describe("AudioPipeline", () => {
     expect(mocks.processor.connect).toHaveBeenCalledWith(mocks.ctx.destination);
   });
 
-  it("onaudioprocess emits Int16 PCM ArrayBuffer", async () => {
+  it("onaudioprocess emits raw Int16 PCM ArrayBuffer by default", async () => {
     const pipe = new AudioPipeline();
     const onAudio = vi.fn();
     await pipe.start(onAudio);
@@ -89,6 +89,58 @@ describe("AudioPipeline", () => {
     // clipping sanity
     expect(int16[5]).toBe(32767);
     expect(int16[6]).toBe(-32768);
+  });
+
+  it("encodes timestamped PCM frames when enabled", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(123.456);
+    const pipe = new AudioPipeline();
+    const onAudio = vi.fn();
+    await pipe.start(onAudio, { timestampedAudio: true });
+
+    mocks.processor.onaudioprocess!({
+      inputBuffer: { getChannelData: () => new Float32Array([0.5, -0.5]) },
+    });
+
+    const buf = onAudio.mock.calls[0][0] as ArrayBuffer;
+    const view = new DataView(buf);
+    expect(String.fromCharCode(...new Uint8Array(buf, 0, 4))).toBe("BTA2");
+    expect(view.getUint8(4)).toBe(1);
+    expect(view.getUint32(8, true)).toBe(0);
+    expect(view.getUint32(12, true)).toBe(0);
+    expect(view.getUint32(16, true)).toBe(44100);
+    expect(view.getUint32(20, true)).toBe(123456);
+    expect(Array.from(new Int16Array(buf.slice(28)))).toEqual([16384, -16384]);
+  });
+
+  it("increments timestamped PCM sample_index per emitted chunk", async () => {
+    const pipe = new AudioPipeline();
+    const onAudio = vi.fn();
+    await pipe.start(onAudio, { timestampedAudio: true });
+
+    for (const sample of [new Float32Array([0, 0, 0]), new Float32Array([0, 0])]) {
+      mocks.processor.onaudioprocess!({ inputBuffer: { getChannelData: () => sample } });
+    }
+
+    const second = onAudio.mock.calls[1][0] as ArrayBuffer;
+    expect(new DataView(second).getUint32(8, true)).toBe(3);
+  });
+
+  it("standalone timestamped frame encoder writes little-endian header", () => {
+    const pcm = new Int16Array([1, -2]).buffer;
+    const encoded = encodeTimestampedPcmFrame({
+      pcm,
+      sampleIndex: 88_200,
+      sampleRate: 44_100,
+      clientCaptureTimeUs: 55_000,
+    });
+    const view = new DataView(encoded);
+
+    expect(String.fromCharCode(...new Uint8Array(encoded, 0, 4))).toBe("BTA2");
+    expect(view.getUint8(4)).toBe(1);
+    expect(view.getUint32(8, true)).toBe(88_200);
+    expect(view.getUint32(16, true)).toBe(44_100);
+    expect(view.getUint32(20, true)).toBe(55_000);
+    expect(Array.from(new Int16Array(encoded.slice(28)))).toEqual([1, -2]);
   });
 
   it("stop disconnects processor, stops tracks, closes ctx", async () => {

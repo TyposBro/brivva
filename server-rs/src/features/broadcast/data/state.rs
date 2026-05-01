@@ -30,6 +30,8 @@ pub struct BroadcastState {
     pub session_logs_verbose: bool,
     /// V2 Phase 1 timeline shadow mode. Logs metrics only; no media behavior change.
     pub v2_timeline_shadow: bool,
+    /// V2 Phase 2 timestamped audio ingest. Logs timing only; old PCM remains default.
+    pub v2_timestamped_audio: bool,
 }
 
 impl BroadcastState {
@@ -48,6 +50,7 @@ impl BroadcastState {
             session_logs_enabled: false,
             session_logs_verbose: false,
             v2_timeline_shadow: false,
+            v2_timestamped_audio: false,
         }
     }
 }
@@ -77,6 +80,7 @@ mod tests {
         assert!(!s.session_logs_enabled);
         assert!(!s.session_logs_verbose);
         assert!(!s.v2_timeline_shadow);
+        assert!(!s.v2_timestamped_audio);
         assert!(s.live_sessions.is_empty());
     }
 

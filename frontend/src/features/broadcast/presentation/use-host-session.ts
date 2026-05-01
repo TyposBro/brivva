@@ -1,4 +1,5 @@
 import { useReducer, useRef, useCallback } from "react";
+import { appConfig } from "../../../core/config/app-config";
 import { AudioPipeline } from "../../../shared/audio/audio-pipeline";
 import { SessionSocket } from "../../../shared/networking/session-socket";
 import { ensureFreshToken } from "../../../shared/auth/auth-store";
@@ -172,8 +173,9 @@ export function useHostSession() {
 
   const startRecording = async () => {
     if (!socket.current.isOpen) return;
-    const analyser = await audio.current.start((buf) =>
-      socket.current.sendAudio(buf),
+    const analyser = await audio.current.start(
+      (buf) => socket.current.sendAudio(buf),
+      { timestampedAudio: appConfig().timestampedAudioEnabled },
     );
     dispatch({ type: "recording_started", analyser });
     sessionLog("info", "frontend.recording_started");

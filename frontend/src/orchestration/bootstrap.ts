@@ -43,6 +43,9 @@ export function bootstrap(): void {
 		mediaWsBase: toWebSocketBase(mediaHttp),
 		sessionLogsEnabled: envEnabledByDefault(import.meta.env.VITE_SESSION_LOGS),
 		sessionLogConsole: envFlag(import.meta.env.VITE_SESSION_LOG_CONSOLE),
+		timestampedAudioEnabled: envFlag(
+			import.meta.env.VITE_BRIVVA_V2_TIMESTAMPED_AUDIO,
+		),
 	});
 
 	configureAuth({

@@ -28,6 +28,7 @@ mod messages;
 mod rtmp;
 mod teardown;
 mod timeline_shadow;
+mod timestamped_audio;
 mod webrtc;
 
 pub use active_voice_refresh::refresh_active_voice_once;
@@ -112,6 +113,7 @@ async fn handle_host(mut socket: HostSocket) {
     let live_session_id = next_available_live_session_id(&live_sessions);
     let session_started_at = Instant::now();
     let timeline_shadow = socket.state.v2_timeline_shadow;
+    let timestamped_audio = socket.state.v2_timestamped_audio;
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
     let workers_api = Arc::new(WorkersApi::new(
@@ -216,6 +218,7 @@ async fn handle_host(mut socket: HostSocket) {
                     audio_tx: &mut audio_tx,
                     session_log: &session_log,
                     timeline_shadow,
+                    timestamped_audio,
                     session_started_at,
                     last_audio_timeline_shadow_log_at: &mut last_audio_timeline_shadow_log_at,
                 });

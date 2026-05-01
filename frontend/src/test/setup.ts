@@ -10,6 +10,7 @@ _setAppConfig({
   mediaWsBase: "ws://test.invalid",
   sessionLogsEnabled: false,
   sessionLogConsole: false,
+  timestampedAudioEnabled: false,
 });
 
 afterEach(() => {
