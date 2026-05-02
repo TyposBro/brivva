@@ -6,6 +6,40 @@ and RTMP publishers are exercised without frontend/Workers.
 
 ## Base Command
 
+Run the full automated sequence:
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh \
+    --mp4 /home/typosbro/Desktop/text.mp4 \
+    --source ko \
+    --duration 180 \
+    --long-duration 900
+```
+
+Optional:
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh \
+    --mp4 /home/typosbro/Desktop/text.mp4 \
+    --4k-mp4 /path/to/4k.mp4 \
+    --audio-mp4 /path/to/noisy-or-overlap.mp4 \
+    --include-network \
+    --iface <iface>
+```
+
+Run one scenario:
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only many_outputs
+```
+
+The runner writes per-scenario logs under `tmp/rust-stress-logs/`.
+
+Manual single-scenario base command:
+
 ```bash
 infisical run --env=dev --path=/ -- \
   env MP4_FANOUT_SMOKE_MP4=/home/typosbro/Desktop/text.mp4 \
