@@ -127,6 +127,31 @@ Flexible default:
 - Prefer preserving exact numbers, prices, discounts, product names, stock
   counts, dates, and CTA over preserving every filler phrase.
 
+Viewer scenarios:
+
+- Normal product pitch: host says "This serum is 29,000 won today, only 50
+  left" in 4s. If translated TTS is about 4.5-4.8s, play normally. The viewer
+  hears a small natural delay.
+- Japanese politeness expansion: host says a fast 5s Korean sales line, but
+  Japanese TTS becomes 9s because it adds polite/explanatory phrasing. This is
+  `1.8x`, so switch to concise live-commerce mode. Preserve price, product,
+  discount, stock, deadline, and CTA; cut filler and excessive politeness.
+- Chinese compact text but slow voice: host speaks 6s and Chinese text is short,
+  but the selected TTS voice takes 8s. This is `1.33x`, so first use playback
+  catch-up instead of rewriting. The problem may be voice pacing, not text
+  verbosity.
+- Korean tone risk: host speaks English for 5s and Korean TTS takes 6.5s. This
+  is `1.3x`, so catch up first. Do not aggressively shorten Korean by default,
+  because removing honorific tone too early can sound rude.
+- Host ramble with no pause: host talks for 40s continuously. Manual Soniox
+  finalize, sentence grouping, and max-length flush should turn the ramble into
+  live chunks. Each chunk gets measured; only long/backlogged chunks enter
+  concise mode.
+- Fast-changing sale info: host says "29,000 won", then 10s later says "flash
+  deal, now 19,000 won." A 20s delayed translation is harmful because viewers
+  hear stale pricing. This is why hard recovery exists: complete-but-late can be
+  worse than missing-but-live.
+
 ## ElevenLabs Slow Or Down
 
 Risk: TTS request times out or returns non-2xx.
