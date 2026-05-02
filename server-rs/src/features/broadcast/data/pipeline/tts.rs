@@ -81,9 +81,162 @@ pub fn compute_tts_deadline(text: &str) -> Duration {
     Duration::from_millis((FLOOR_MS + char_count * PER_CHAR_MS).min(CEILING_MS))
 }
 
+const TTS_EXPANSION_NORMAL_MILLI: u32 = 1_200;
+const TTS_EXPANSION_CATCHUP_MILLI: u32 = 1_500;
+const TTS_CONCISE_BACKLOG_MS: u64 = 5_000;
+const TTS_HARD_RECOVERY_BACKLOG_MS: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TtsExpansionPolicy {
+    Normal,
+    CatchUp,
+    Concise,
+    HardRecovery,
+}
+
+impl TtsExpansionPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::CatchUp => "catch_up",
+            Self::Concise => "concise",
+            Self::HardRecovery => "hard_recovery",
+        }
+    }
+}
+
+pub(crate) fn classify_tts_expansion(
+    expansion_ratio_milli: Option<u32>,
+    backlog_ms: u64,
+) -> TtsExpansionPolicy {
+    if backlog_ms >= TTS_HARD_RECOVERY_BACKLOG_MS {
+        return TtsExpansionPolicy::HardRecovery;
+    }
+    if backlog_ms >= TTS_CONCISE_BACKLOG_MS {
+        return TtsExpansionPolicy::Concise;
+    }
+    let Some(ratio) = expansion_ratio_milli else {
+        return TtsExpansionPolicy::Normal;
+    };
+    if ratio > TTS_EXPANSION_CATCHUP_MILLI {
+        TtsExpansionPolicy::Concise
+    } else if ratio > TTS_EXPANSION_NORMAL_MILLI {
+        TtsExpansionPolicy::CatchUp
+    } else {
+        TtsExpansionPolicy::Normal
+    }
+}
+
+pub(crate) fn estimate_source_duration_ms(text: &str, lang: &Lang) -> u64 {
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count() as u64;
+    if chars == 0 {
+        return 1_000;
+    }
+    let chars_per_second = match lang {
+        Lang::Ja | Lang::Zh => 8,
+        Lang::Ko => 7,
+        Lang::En => 13,
+    };
+    chars
+        .saturating_mul(1_000)
+        .saturating_div(chars_per_second)
+        .clamp(1_000, 15_000)
+}
+
+pub(crate) fn expansion_ratio_milli(
+    tts_duration_ms: u64,
+    estimated_source_duration_ms: u64,
+) -> Option<u32> {
+    if estimated_source_duration_ms == 0 {
+        return None;
+    }
+    Some(
+        tts_duration_ms
+            .saturating_mul(1_000)
+            .saturating_div(estimated_source_duration_ms)
+            .min(u32::MAX as u64) as u32,
+    )
+}
+
+pub(crate) fn concise_live_commerce_text(text: &str, target_lang: &Lang) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_chars = match target_lang {
+        Lang::Ja | Lang::Zh => 90,
+        Lang::Ko => 110,
+        Lang::En => 130,
+    };
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+
+    let mut out = String::new();
+    let mut sentence_count = 0usize;
+    for ch in collapsed.chars() {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        out.push(ch);
+        if matches!(ch, '.' | '!' | '?' | '。' | '！' | '？') {
+            sentence_count += 1;
+            if sentence_count >= 2 {
+                break;
+            }
+        }
+    }
+
+    let trimmed = out
+        .trim_end_matches(|c: char| c == ',' || c == '，' || c == ';' || c == '；')
+        .trim()
+        .to_string();
+    if trimmed.is_empty() {
+        collapsed
+    } else {
+        trimmed
+    }
+}
+
+async fn current_tts_backlog_ms(req: &TtsRequest) -> u64 {
+    let rtmp_manager = req
+        .handle
+        .sessions
+        .get(&req.handle.id)
+        .and_then(|session| session.rtmp_manager.clone());
+    let Some(manager) = rtmp_manager else {
+        return 0;
+    };
+    manager
+        .lock()
+        .await
+        .tts_backlog_ms(&req.target_lang.to_string())
+}
+
 pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
-    let tts_deadline = compute_tts_deadline(&req.text);
+    let initial_backlog_ms = current_tts_backlog_ms(&req).await;
+    let estimated_source_duration_ms = estimate_source_duration_ms(&req.text, &req.target_lang);
+    let initial_policy = classify_tts_expansion(None, initial_backlog_ms);
+    let tts_text = if matches!(
+        initial_policy,
+        TtsExpansionPolicy::Concise | TtsExpansionPolicy::HardRecovery
+    ) {
+        let concise = concise_live_commerce_text(&req.text, &req.target_lang);
+        if concise != req.text {
+            tracing::warn!(
+                live_session_id = %req.handle.id,
+                utterance_id = req.utterance_id,
+                target_lang = %req.target_lang,
+                backlog_ms = initial_backlog_ms,
+                original_chars = req.text.chars().count(),
+                concise_chars = concise.chars().count(),
+                policy = initial_policy.as_str(),
+                "tts concise live-commerce mode applied before synthesis"
+            );
+        }
+        concise
+    } else {
+        req.text.clone()
+    };
+    let tts_deadline = compute_tts_deadline(&tts_text);
     // §0.5.4: operators reading logs need to distinguish "deadline too
     // tight" (scale bug) from "utterance dropped for another reason".
     // Emit the computed deadline + char count at dispatch entry so a
@@ -92,7 +245,10 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         live_session_id = %req.handle.id,
         utterance_id = req.utterance_id,
         target_lang = %req.target_lang,
-        char_count = req.text.chars().count(),
+        char_count = tts_text.chars().count(),
+        estimated_source_duration_ms,
+        initial_backlog_ms,
+        initial_policy = initial_policy.as_str(),
         deadline_ms = tts_deadline.as_millis() as u64,
         "tts dispatch starting"
     );
@@ -156,7 +312,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     let mut audio_buffer = match fetch_tts_audio(FetchTtsArgs {
         url: &url,
         api_key: &api_key,
-        text: &req.text,
+        text: &tts_text,
         model_id,
         is_cloned,
         lang: &req.target_lang,
@@ -192,7 +348,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         audio_buffer = match fetch_tts_audio(FetchTtsArgs {
             url: &url,
             api_key: &api_key,
-            text: &req.text,
+            text: &tts_text,
             model_id,
             is_cloned,
             lang: &req.target_lang,
@@ -226,7 +382,15 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     let pcm_bytes = audio_buffer.len();
-    push_tts_into_rtmp(&req, &audio_buffer).await;
+    push_tts_into_rtmp(PushTtsArgs {
+        req: &req,
+        tts_text: &tts_text,
+        audio_buffer: &audio_buffer,
+        estimated_source_duration_ms,
+        initial_backlog_ms,
+        initial_policy,
+    })
+    .await;
     notify_host_tts_complete(NotifyCompleteArgs {
         lang: &req.target_lang,
         utterance_id: req.utterance_id,
@@ -406,7 +570,17 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
     }
 }
 
-async fn push_tts_into_rtmp(req: &TtsRequest, audio_buffer: &[u8]) {
+struct PushTtsArgs<'a> {
+    req: &'a TtsRequest,
+    tts_text: &'a str,
+    audio_buffer: &'a [u8],
+    estimated_source_duration_ms: u64,
+    initial_backlog_ms: u64,
+    initial_policy: TtsExpansionPolicy,
+}
+
+async fn push_tts_into_rtmp(args: PushTtsArgs<'_>) {
+    let req = args.req;
     let rtmp_manager = req
         .handle
         .sessions
@@ -419,7 +593,7 @@ async fn push_tts_into_rtmp(req: &TtsRequest, audio_buffer: &[u8]) {
         tracing::warn!(
             live_session_id = %req.handle.id,
             target_lang = %req.target_lang,
-            audio_bytes = audio_buffer.len(),
+            audio_bytes = args.audio_buffer.len(),
             "tts audio produced but session has no rtmp_manager — dropping"
         );
         return;
@@ -430,15 +604,33 @@ async fn push_tts_into_rtmp(req: &TtsRequest, audio_buffer: &[u8]) {
     // `stream.passthrough` defensively. So translated PCM for lang=ja only
     // lands in genuine ja-translated streams, never in a parallel
     // passthrough destination on the same session.
-    match crate::features::broadcast::data::ffmpeg::decode_mp3_to_pcm(audio_buffer).await {
+    match crate::features::broadcast::data::ffmpeg::decode_mp3_to_pcm(args.audio_buffer).await {
         Ok(pcm) => {
+            let tts_duration_ms = (pcm.len() as u64).saturating_mul(1_000) / 88_200u64;
+            let ratio = expansion_ratio_milli(tts_duration_ms, args.estimated_source_duration_ms);
+            let policy = classify_tts_expansion(ratio, args.initial_backlog_ms);
+            tracing::info!(
+                live_session_id = %req.handle.id,
+                utterance_id = req.utterance_id,
+                target_lang = %req.target_lang,
+                estimated_source_duration_ms = args.estimated_source_duration_ms,
+                tts_duration_ms,
+                expansion_ratio_milli = ratio,
+                backlog_ms = args.initial_backlog_ms,
+                initial_policy = args.initial_policy.as_str(),
+                final_policy = policy.as_str(),
+                text_chars = args.tts_text.chars().count(),
+                "tts expansion measured"
+            );
             let manager = manager.lock().await;
-            manager.push_tts_segment(TtsSegment::new(
+            manager.push_tts_segment(TtsSegment::with_metadata(
                 req.utterance_id,
                 0,
                 req.target_lang.to_string(),
-                req.text.clone(),
+                args.tts_text.to_string(),
                 pcm,
+                Some(args.estimated_source_duration_ms),
+                policy.as_str(),
             ));
         }
         Err(error) => tracing::warn!(
@@ -535,6 +727,49 @@ mod tests {
         // Correct behaviour counts chars → 17000.
         let ko: String = "안".repeat(100);
         assert_eq!(compute_tts_deadline(&ko), Duration::from_millis(17_000));
+    }
+
+    #[test]
+    fn classify_tts_expansion_uses_ratio_thresholds() {
+        assert_eq!(
+            classify_tts_expansion(Some(1_200), 0),
+            TtsExpansionPolicy::Normal
+        );
+        assert_eq!(
+            classify_tts_expansion(Some(1_201), 0),
+            TtsExpansionPolicy::CatchUp
+        );
+        assert_eq!(
+            classify_tts_expansion(Some(1_501), 0),
+            TtsExpansionPolicy::Concise
+        );
+    }
+
+    #[test]
+    fn classify_tts_expansion_backlog_overrides_ratio() {
+        assert_eq!(
+            classify_tts_expansion(Some(1_000), 5_000),
+            TtsExpansionPolicy::Concise
+        );
+        assert_eq!(
+            classify_tts_expansion(Some(1_000), 10_000),
+            TtsExpansionPolicy::HardRecovery
+        );
+    }
+
+    #[test]
+    fn expansion_ratio_milli_measures_tts_against_estimated_source_duration() {
+        assert_eq!(expansion_ratio_milli(4_800, 4_000), Some(1_200));
+        assert_eq!(expansion_ratio_milli(9_000, 5_000), Some(1_800));
+        assert_eq!(expansion_ratio_milli(1_000, 0), None);
+    }
+
+    #[test]
+    fn concise_live_commerce_text_caps_long_text_by_language() {
+        let text = "첫번째 문장은 오늘 가격과 재고를 설명합니다. 두번째 문장은 할인 조건을 설명합니다. 세번째 문장은 너무 긴 반복 설명입니다. 네번째 문장은 더 이상 필요 없습니다.";
+        let concise = concise_live_commerce_text(text, &Lang::Ko);
+        assert!(concise.chars().count() <= 110);
+        assert!(concise.contains("가격"));
     }
 
     #[test]

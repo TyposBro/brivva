@@ -693,12 +693,14 @@ fn drain_tts_segment_bytes(queue: &mut VecDeque<TtsSegment>, mut bytes: usize) {
             continue;
         }
         let remaining = front.pcm[bytes..].to_vec();
-        queue.push_front(TtsSegment::new(
+        queue.push_front(TtsSegment::with_metadata(
             front.utterance_id,
             front.sentence_id,
             front.lang,
             front.text,
             remaining,
+            front.estimated_source_duration_ms,
+            front.policy,
         ));
         break;
     }

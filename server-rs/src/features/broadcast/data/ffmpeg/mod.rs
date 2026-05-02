@@ -89,9 +89,14 @@ pub(crate) struct TtsSegment {
     pub lang: String,
     pub text: String,
     pub pcm: Arc<[u8]>,
+    pub estimated_source_duration_ms: Option<u64>,
+    pub tts_duration_ms: u64,
+    pub expansion_ratio_milli: Option<u32>,
+    pub policy: String,
 }
 
 impl TtsSegment {
+    #[cfg(test)]
     pub(crate) fn new(
         utterance_id: u64,
         sentence_id: u32,
@@ -99,12 +104,38 @@ impl TtsSegment {
         text: String,
         pcm: Vec<u8>,
     ) -> Self {
+        Self::with_metadata(utterance_id, sentence_id, lang, text, pcm, None, "normal")
+    }
+
+    pub(crate) fn with_metadata(
+        utterance_id: u64,
+        sentence_id: u32,
+        lang: String,
+        text: String,
+        pcm: Vec<u8>,
+        estimated_source_duration_ms: Option<u64>,
+        policy: impl Into<String>,
+    ) -> Self {
+        let tts_duration_ms =
+            (pcm.len() as u64).saturating_mul(1_000) / PCM_BYTES_PER_SECOND as u64;
+        let expansion_ratio_milli = estimated_source_duration_ms
+            .filter(|source_ms| *source_ms > 0)
+            .map(|source_ms| {
+                tts_duration_ms
+                    .saturating_mul(1_000)
+                    .saturating_div(source_ms)
+                    .min(u32::MAX as u64) as u32
+            });
         Self {
             utterance_id,
             sentence_id,
             lang,
             text,
             pcm: Arc::from(pcm),
+            estimated_source_duration_ms,
+            tts_duration_ms,
+            expansion_ratio_milli,
+            policy: policy.into(),
         }
     }
 
@@ -113,7 +144,7 @@ impl TtsSegment {
     }
 
     pub(crate) fn duration_ms(&self) -> u64 {
-        (self.byte_len() as u64).saturating_mul(1_000) / PCM_BYTES_PER_SECOND as u64
+        self.tts_duration_ms
     }
 }
 
@@ -660,6 +691,9 @@ impl RtmpManager {
                         sentence_id = dropped.sentence_id,
                         dropped_bytes = dropped.byte_len(),
                         dropped_duration_ms = dropped.duration_ms(),
+                        estimated_source_duration_ms = dropped.estimated_source_duration_ms,
+                        expansion_ratio_milli = dropped.expansion_ratio_milli,
+                        policy = %dropped.policy,
                         text_chars = dropped.text.chars().count(),
                         cap_bytes = TTS_QUEUE_CAP_BYTES,
                         "tts segment queue overflow — whole segment dropped"
@@ -667,6 +701,18 @@ impl RtmpManager {
                 }
             }
         }
+    }
+
+    pub(crate) fn tts_backlog_ms(&self, lang: &str) -> u64 {
+        self.streams
+            .values()
+            .filter(|stream| stream.lang == lang && !stream.is_source && !stream.passthrough)
+            .map(|stream| {
+                let q = stream.buffers.tts.lock().unwrap();
+                (tts_queue_bytes(&q).saturating_mul(1_000) / PCM_BYTES_PER_SECOND) as u64
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// Update burned subtitle text for every target stream in `lang`.
