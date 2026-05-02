@@ -1,0 +1,201 @@
+# Rust Stress Scenarios
+
+## CPU Fallback
+
+Goal: know non-GPU behavior.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  env MP4_FANOUT_SMOKE_MP4=/home/typosbro/Desktop/text.mp4 \
+      MP4_FANOUT_SMOKE_SOURCE_LANG=ko \
+      MP4_FANOUT_SMOKE_DURATION=600 \
+      MP4_FANOUT_SMOKE_ENCODER=x264 \
+      BRIVVA_VIDEO_MAX_WIDTH=1920 \
+      BRIVVA_VIDEO_MAX_HEIGHT=1080 \
+      BRIVVA_VIDEO_MAX_FPS=30 \
+  cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
+```
+
+Pass: 1080p30 stays near realtime. Fail means CPU fallback should use lower caps,
+for example 720p30.
+
+## Many Outputs
+
+Goal: find practical encoder ceiling.
+
+Set all five YouTube keys, then run the base command. This starts up to five
+output groups: pass, source language, and translated languages.
+
+Pass: all streams stay near realtime. Fail: reduce output resolution/FPS or move
+to per-language GPU workers.
+
+## High-Resolution Input
+
+Goal: verify 4K/high-FPS sources downscale or preserve correctly.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  env MP4_FANOUT_SMOKE_MP4=/path/to/h264-4k.mp4 \
+      MP4_FANOUT_SMOKE_SOURCE_LANG=ko \
+      MP4_FANOUT_SMOKE_DURATION=600 \
+      MP4_FANOUT_SMOKE_ENCODER=nvenc \
+      BRIVVA_VIDEO_MAX_WIDTH=3840 \
+      BRIVVA_VIDEO_MAX_HEIGHT=2160 \
+      BRIVVA_VIDEO_MAX_FPS=30 \
+  cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
+```
+
+Then cap output to 1080p:
+
+```bash
+BRIVVA_VIDEO_MAX_WIDTH=1920 BRIVVA_VIDEO_MAX_HEIGHT=1080 BRIVVA_VIDEO_MAX_FPS=30
+```
+
+Pass: 4K source works when capped, and only uses 4K when GPU capacity is enough.
+
+## Low-Quality Host
+
+Goal: simulate weak camera/laptop.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  env MP4_FANOUT_SMOKE_MP4=/home/typosbro/Desktop/text.mp4 \
+      MP4_FANOUT_SMOKE_SOURCE_LANG=ko \
+      MP4_FANOUT_SMOKE_DURATION=600 \
+      MP4_FANOUT_SMOKE_ENCODER=nvenc \
+      MP4_FANOUT_SMOKE_CAPTURE_WIDTH=1280 \
+      MP4_FANOUT_SMOKE_CAPTURE_HEIGHT=720 \
+      MP4_FANOUT_SMOKE_CAPTURE_FPS=15 \
+      BRIVVA_VIDEO_MAX_WIDTH=1920 \
+      BRIVVA_VIDEO_MAX_HEIGHT=1080 \
+      BRIVVA_VIDEO_MAX_FPS=30 \
+  cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
+```
+
+Pass: server does not upscale/stutter; output profile follows 720p15 tier.
+
+## Bad Network
+
+Goal: simulate RTMP backpressure and packet loss.
+
+Find interface:
+
+```bash
+ip route get 8.8.8.8
+```
+
+Apply impairment:
+
+```bash
+sudo tc qdisc add dev <iface> root netem delay 150ms 50ms loss 1% rate 6mbit
+```
+
+Run base command. Remove impairment:
+
+```bash
+sudo tc qdisc del dev <iface> root
+```
+
+Pass: logs show degraded output clearly; process does not deadlock.
+
+## Backlog Catch-Up
+
+Goal: verify short FFmpeg/RTMP stalls preserve original audio, video, and TTS
+within the live lag window before any forced drop. This scenario intentionally
+selects a translated output, not `pass`, when a translated YouTube key exists.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only backlog_catchup
+```
+
+Pass:
+
+- `BRIVVA_VIDEO_MAX_LAG_MS=3000` and `BRIVVA_AUDIO_MAX_LAG_MS=3000` are active.
+- Brief `fifo_would_blocks` does not consume TTS; `tts_buffered_bytes` later drains.
+- `requeued_host_bytes` appears only during FIFO backpressure.
+- `host_audio_stale_chunks_dropped`, `ready_host_bytes_dropped`, and
+  `video_stale_chunks_dropped` stay `0` unless the stream exceeds the lag window.
+
+## Backlog Catch-Up With All Outputs
+
+Goal: verify the same 3s backlog policy under real fanout load.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only backlog_catchup_many_outputs
+```
+
+Pass:
+
+- All available outputs start.
+- Translated outputs show TTS activity and eventually drain `tts_buffered_bytes`.
+- `tts_playback_speed` may rise above `1.00` during backlog, then returns to
+  `1.00`.
+- No repeated `tts segment queue overflow` during healthy 1080p30 fanout.
+- Per-output `video_stale_chunks_dropped`, `host_audio_stale_chunks_dropped`,
+  and `ready_host_bytes_dropped` stay `0` unless total load exceeds the lag window.
+- If a drop happens, logs identify which output/lang dropped.
+
+## One Bad Destination
+
+Goal: one failed platform must not kill others.
+
+```bash
+MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad
+```
+
+Run base command with normal YouTube keys too.
+
+Pass: bad destination logs failure; valid YouTube outputs remain live.
+
+## TTS Failure
+
+Goal: translated audio failure must not kill original stream.
+
+Run with wrong ElevenLabs key:
+
+```bash
+ELEVENLABS_API_KEY=bad
+```
+
+Pass: source/pass streams continue. Translated streams show subtitle/TTS failure
+logs, but video does not stall.
+
+## STT Failure
+
+Goal: STT failure must not kill original stream.
+
+Run with wrong Soniox key:
+
+```bash
+SONIOX_API_KEY=bad
+```
+
+Pass: source/pass streams continue. Target translation streams degrade clearly.
+
+## Long Run
+
+Goal: catch memory growth, queue drift, slow leaks.
+
+```bash
+MP4_FANOUT_SMOKE_DURATION=3600
+```
+
+Pass: memory stable; `tts_buffered_bytes`, `fifo_would_blocks`, and restarts do
+not grow without bound.
+
+## Difficult Audio
+
+Goal: test translation quality and queue behavior, not encoder.
+
+Try MP4 files with:
+
+- silence
+- background music
+- overlapping speakers
+- noisy mic
+- very fast speech
+- code-switching Korean/English
+
+Pass: original stream remains stable; STT/TTS errors are visible and bounded.
