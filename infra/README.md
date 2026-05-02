@@ -43,19 +43,34 @@ Default Terraform remains `ecs_launch_type=FARGATE` and `gpu_desired_capacity=0`
 
 Safer blue/green rehearsal: create a parallel `brivva-gpu` service first. This does **not** replace the primary Fargate `brivva` service.
 
+Phase 6C GPU rehearsal is private/internal-only: no public IP assignment, no TCP 3000 from `0.0.0.0/0`, `BRIVVA_V2_GPU_WORKERS=0`, and fake-sink/shadow mode only. The endpoint helper refuses to print public HTTP/WS endpoints.
+
+No-public-IP GPU ECS capacity needs private AWS control-plane access. The low-blast-radius rehearsal path is VPC endpoints, gated by `gpu_private_endpoints_enabled=false` by default. When enabled, Terraform creates one-AZ interface endpoints for `ecs`, `ecs-agent`, `ecs-telemetry`, `ecr.api`, `ecr.dkr`, `logs`, and `secretsmanager`, plus an S3 gateway endpoint for ECR image layers. Optional SSM debug endpoints are behind `gpu_private_endpoint_debug_services_enabled`. You must explicitly pass `gpu_private_endpoint_route_table_ids=[...]` for the GPU subnet route table(s); Terraform intentionally refuses to infer or mutate all default VPC route tables.
+
 One-command smoke/rehearsal runner:
 
 ```fish
-# no spend; checks quota/Terraform/scripts
+# no spend; checks quota/Terraform/scripts/private-only 6C guards
 ./scripts/run-ecs-gpu-rehearsal.sh --preflight-only
+./scripts/prove-v2-gpu-worker-cloud-private-static.sh
 
-# scale to 1, smoke endpoint, start local frontend pointed at ECS GPU, scale down on Ctrl-C
+# scale to 1 only from an operator network that can reach the VPC-private endpoint;
+# smoke endpoint, start local frontend pointed at ECS GPU, scale down on Ctrl-C
 ./scripts/run-ecs-gpu-rehearsal.sh
 ```
 
 Lower-level Terraform commands:
 
 ```fish
+# reviewed 6C endpoint prep only: creates private endpoints, keeps GPU desired/task count at 0
+# replace rtb-... with the reviewed GPU subnet route table id(s)
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0' \
+  -var='gpu_private_endpoints_enabled=true' \
+  -var='gpu_private_endpoint_route_table_ids=["rtb-..."]'
+
 # create parallel GPU service/task definition with desired_count=0
 infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
   -var='gpu_rehearsal_service_enabled=true' \
@@ -74,9 +89,10 @@ infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
   -var='gpu_desired_capacity=1' \
   -var='gpu_instance_type=g4dn.xlarge'
 
-# after task is RUNNING, print direct HTTP/WS endpoint for VITE_MEDIA_URL testing
+# after task is RUNNING, print private/internal HTTP/WS endpoint for VITE_MEDIA_URL testing
+# from a network that can reach the VPC. Refuses public IP endpoints.
 ./scripts/ecs-gpu-endpoint.sh
-./scripts/smoke-media-engine.sh http://<gpu-public-ip>:3000
+./scripts/smoke-media-engine.sh http://<gpu-private-ip>:3000
 
 # if quota/capacity blocks launch or smoke is done, return to zero spend/retry loop
 infisical run --env=prod -- ./infra/tofu-infisical.sh apply \

@@ -1,3 +1,4 @@
+pub mod gpu_worker_local;
 pub mod gpu_worker_shadow;
 pub mod media_timeline;
 pub mod metrics;

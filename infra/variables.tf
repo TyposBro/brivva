@@ -93,6 +93,24 @@ variable "gpu_rehearsal_desired_count" {
   default     = 0
 }
 
+variable "gpu_private_endpoints_enabled" {
+  description = "Create private VPC endpoints required for no-public-IP ECS GPU rehearsal capacity. Keep false until the reviewed 6C endpoint apply."
+  type        = bool
+  default     = false
+}
+
+variable "gpu_private_endpoint_route_table_ids" {
+  description = "Route table IDs for the S3 gateway endpoint used by private ECR image layer pulls. Intentionally explicit so 6C does not mutate unrelated route tables by discovery."
+  type        = list(string)
+  default     = []
+}
+
+variable "gpu_private_endpoint_debug_services_enabled" {
+  description = "Also create SSM/EC2Messages/SSMMessages interface endpoints for private GPU debugging. Not required for base ECS registration."
+  type        = bool
+  default     = false
+}
+
 variable "gpu_task_cpu" {
   description = "CPU units for EC2 GPU task. g4dn.xlarge has 4096 CPU units."
   type        = string

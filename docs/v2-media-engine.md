@@ -668,6 +668,78 @@ Phase 6A hard scope:
 - Not allowed: ECS services, Terraform, Docker deploy changes, public worker endpoints, queues/D1 migrations, frontend UI, production route switching, FFmpeg drain/mixer/pacing changes, or customer/live destination routing.
 - Stop and ask before implementing any real media transport or worker process that can publish to a platform.
 
+Phase 6B same-host local worker proof evidence — 2026-05-01:
+
+- Phase 6A commit exists: `4bd1954 feat(render): add GPU worker shadow contracts`.
+- Added local-only proof runtime/model in `server-rs/src/features/broadcast/domain/gpu_worker_local.rs` and exported it from `server-rs/src/features/broadcast/domain/mod.rs`.
+- Scope remains non-customer/test-output only: route policy selects a worker only when the flag is enabled, the output is explicitly a test output, and the destination is a local fake sink. Customer or real/live destinations fall back to the current in-process FFmpeg route.
+- Local worker proof emits: `gpu.worker.local.started`, `gpu.worker.local.ready`, `gpu.job.local.assigned`, `gpu.job.local.activated`, `gpu.job.local.health`, `gpu.job.local.revoked`, `gpu.worker.local.stopped`.
+- Lease/health fencing carries typed fields and does not parse colon-delimited lease ids: health must match `lease_id`, `worker_id`, and `route_generation`.
+- Proof script passed: `./scripts/prove-v2-gpu-worker-local.sh`. It covers flag-off/no-worker logs, flag-on one local test-output route, worker failure/stale revoke, fallback, lease fencing, customer/live destination rejection, static local-safety checks, and protected FFmpeg file no-diff guard.
+- Rollback drill result: disabling the flag returned to current route in `147ms`, under the 2-minute target.
+- Protected production FFmpeg route files had no diff: `ffmpeg/args.rs`, `ffmpeg/drain.rs`, `ffmpeg/mixer.rs`, `ffmpeg/mod.rs`, and `session_ws/rtmp.rs`.
+
+Phase 6B hard scope:
+
+- Allowed: local/same-host proof model for one non-customer test output and local fake sink only.
+- Not allowed: ECS/cloud/deploy/IaC, Docker service changes, network media transport, public endpoints, queues, D1 migrations, Workers changes, frontend UI, customer traffic, real RTMP destination publishing, credential handling changes, or FFmpeg production args/drains/mixer/pacing/publish changes.
+- 6B remains a proof boundary, not a customer route. The current in-process/per-output FFmpeg path remains the production/fallback route.
+
+Final Phase 6C recommendation:
+
+- Proceed to Phase 6C only as **ECS GPU worker shadow**, not live routing: use the existing `brivva-gpu` foundation for registration/heartbeat/cold-start/cost/artifact proof while keeping `BRIVVA_V2_GPU_WORKERS=0` as the production route default.
+- Do not add customer traffic, real destination publishing, or shared decode live routing in 6C. Require another approval gate before any Phase 6D non-prod live destination.
+- Carry forward 6B fencing rules exactly: never parse `lease_id`; fence health/ownership by `lease_id + worker_id + route_generation`; revoke stale workers before fallback/reassignment.
+
+Phase 6C ECS/cloud GPU worker shadow validation — 2026-05-01:
+
+- Verdict: **failed / blocked before cloud scale-up**.
+- Evidence archive: `.dev-logs/v2-gpu-worker-cloud-validation/20260501-235137/`.
+- Blocker: the existing ECS GPU rehearsal pattern is not private/internal-only. `infra/main.tf` exposes direct ECS GPU rehearsal HTTP/WSS on TCP `3000` to `0.0.0.0/0`, associates public IPs, and `scripts/ecs-gpu-endpoint.sh` prints `http://<public-ip>:3000` / `ws://<public-ip>:3000` endpoints.
+- This violates the Phase 6C/global hard stop: **no public unauthenticated endpoints**. Therefore no ECS GPU worker was started, no AWS scale-up was attempted, and Phase 6D/6E did not run.
+- Non-destructive verification still passed after formatting: `./scripts/prove-v2-gpu-worker-shadow.sh`, `cargo test gpu_worker_local --lib`, and `cargo fmt -p server-rs --check`.
+- Protected production route diff guard is clean: no diff to `ffmpeg/args.rs`, `ffmpeg/drain.rs`, `ffmpeg/mixer.rs`, `ffmpeg/mod.rs`, or `session_ws/rtmp.rs` in the proof archive.
+- Rollback result: **not-tested live / pass by non-engagement**. No cloud worker was started and no route changed; `BRIVVA_V2_GPU_WORKERS=0` remains the safe default/current route and no worker route was selected.
+- Worker-failure containment result: **not tested in 6C** because the public-endpoint hard stop happened before worker start. Prior 6B local-only stale-worker/fallback tests passed, but they do not satisfy 6C cloud containment.
+- Safety confirmation: no customer traffic, production destination, new public endpoint, secret model change, D1 migration, billing change, frontend UI, destructive infra change, cloud scale-up, or FFmpeg production path change occurred in this 6C attempt.
+- Recommendation before retrying 6C: create or adapt a **private-only** worker shadow path (private subnet/no public IP, security group limited to internal control-plane source, authenticated control protocol, fake sink/no publish) or run a same-VPC private rehearsal. Do not proceed to 6D until 6C passes with private/internal-only evidence.
+
+Phase 6C private/internal retry preparation — 2026-05-02:
+
+- Static/local repo changes only; no cloud worker was run, no AWS GPU capacity was scaled, and no Terraform apply/live infrastructure update was performed.
+- Terraform rehearsal config now disables GPU launch-template public IP assignment, limits TCP `3000` ingress to the default VPC CIDR instead of `0.0.0.0/0`, and pins GPU rehearsal env to `BRIVVA_V2_GPU_WORKERS=0`, `BRIVVA_V2_GPU_REHEARSAL_MODE=shadow`, `BRIVVA_V2_GPU_REHEARSAL_SINK=fake`.
+- `scripts/ecs-gpu-endpoint.sh` now refuses to emit endpoints if AWS reports a public IP and only prints `http_private=` / `ws_private=` from the instance private IP.
+- `scripts/run-ecs-gpu-rehearsal.sh` now runs the 6C private-only static proof before any scale-up path and parses only `http_private=`.
+- Added `scripts/prove-v2-gpu-worker-cloud-private-static.sh`; it fails if public IP assignment is enabled, TCP `3000` is world-open, the endpoint helper emits public HTTP/WS endpoint fields, GPU workers are not default-off for rehearsal, rehearsal mode/sink are not shadow/fake, or an RTMP(S) publish destination appears in the GPU rehearsal container block.
+- Static validation evidence: `.dev-logs/v2-gpu-worker-cloud-private-static/20260502-105452/static-validation.log` shows bash syntax checks, the private-only static proof, `terraform -chdir=infra fmt -check`, and protected FFmpeg route diff size `0` all passing.
+- 6C status after this prep: **ready for a cloud shadow retry only after review/apply approval**. Cloud worker start, AWS scale-up, 6D, 6E, and Phase 7 remain not attempted.
+
+Phase 6C private cloud shadow retry — 2026-05-02:
+
+- Verdict: **blocked/fail**; private-only cloud path was applied and rolled back, but no worker reached running/registration/heartbeat.
+- Evidence archive: `.dev-logs/v2-gpu-worker-cloud-validation/20260502-105832/`.
+- Cloud command run: `./scripts/run-ecs-gpu-rehearsal.sh --no-frontend` after required static checks and preflight.
+- Private/no-public proof: Terraform plan changed TCP `3000` SG ingress from `0.0.0.0/0` to `172.31.0.0/16`, changed GPU launch template public IP assignment from `true` to `false`, and later AWS SG query showed TCP `3000` only from `172.31.0.0/16`. The attempted instance `i-06e51ea64acfed7bd` had no public IP evidence and is terminated.
+- Fake/no-publish proof: static proof passed with `BRIVVA_V2_GPU_WORKERS=0`, `BRIVVA_V2_GPU_REHEARSAL_MODE=shadow`, `BRIVVA_V2_GPU_REHEARSAL_SINK=fake`, and no RTMP(S) destination in the GPU rehearsal container block.
+- Blocker: with public IP disabled in the current default-subnet path, ECS capacity did not become usable; the service stayed pending and endpoint discovery failed with `No EC2 container instances found for running tasks`. ECS task details report `TaskFailedToStart: EMPTY CAPACITY PROVIDER`.
+- Rollback: initial scripted scale-down left ASG desired/instance non-zero briefly; emergency rollback forced ASG desired capacity to `0`. Final zero-spend proof passed: ASG desired `0`, instances `0`; ECS desired/running/pending `0/0/0`.
+- Worker failure containment: **not tested**; worker never started, registered, or heartbeated.
+- Protected production route diff: `0` bytes for FFmpeg args/drain/mixer/mod and `session_ws/rtmp.rs`.
+- Next 6C-only fix: provide private egress/control-plane connectivity for no-public-IP ECS GPU capacity (for example NAT or required VPC endpoints for ECS/ECR/Logs/Secrets/SSM as appropriate), then retry shadow only. Do not proceed to 6D/6E until worker start/register/heartbeat/preflight/fake-sink proof passes.
+
+Phase 6C private VPC endpoint prep — 2026-05-02:
+
+- Implemented static Terraform support only; no `terraform apply`, AWS mutation, ASG scale-up, cloud worker run, 6C retry, 6D/6E, or Phase 7 was performed.
+- Added gated `gpu_private_endpoints_enabled` support, default `false`, for no-public-IP GPU rehearsal control-plane access.
+- Endpoint mode constrains GPU ASG subnet selection to one GPU subnet/AZ via `local.gpu_subnet_ids` to contain endpoint hourly cost and avoid G/VT quota overlap.
+- Required interface endpoints when enabled: `ecs`, `ecs-agent`, `ecs-telemetry`, `ecr.api`, `ecr.dkr`, `logs`, and `secretsmanager`.
+- S3 gateway endpoint is supported for ECR image layers, but route tables must be supplied explicitly with `gpu_private_endpoint_route_table_ids`; Terraform intentionally refuses enabled endpoint mode with an empty route table list so it cannot infer/mutate all default VPC route tables.
+- Optional debug endpoints are gated separately by `gpu_private_endpoint_debug_services_enabled`: `ssm`, `ec2messages`, `ssmmessages`. STS was not added because current ECS agent/task execution path does not clearly require it for the 6C shadow proof.
+- Endpoint security group accepts TCP `443` only from the existing GPU/task security group. Public IP assignment remains disabled, TCP `3000` remains VPC-only, and rehearsal env remains `BRIVVA_V2_GPU_WORKERS=0` / `shadow` / `fake`.
+- Static proof script now checks the private endpoint gate/resources, one-subnet endpoint scoping, explicit S3 route-table requirement, and required service names in addition to the existing no-public/no-publish guards.
+- Validation evidence: `.dev-logs/v2-gpu-worker-endpoint-prep/20260502-114914/validation.log` shows `terraform -chdir=infra fmt -check`, `terraform -chdir=infra validate`, `./scripts/prove-v2-gpu-worker-cloud-private-static.sh`, and protected FFmpeg route diff size `0` passing.
+- Status: ready for reviewed Terraform plan/apply only after identifying the exact GPU subnet route table ID(s). 6C is still **not passed** and must be retried as cloud shadow only after endpoint infra is applied.
+
 #### Phase 6 acceptance gates
 
 - Fake-media proof archives exist for registration, heartbeat, lease assign/activate/stop, and rollback.

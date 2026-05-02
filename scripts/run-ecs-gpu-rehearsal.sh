@@ -17,9 +17,10 @@ usage() {
 	cat <<EOF
 Usage: $0 [--preflight-only] [--no-frontend] [--no-scale-down]
 
-Scale the parallel ECS GPU rehearsal service to 1, discover the direct media
-endpoint, smoke /health, optionally start local frontend pointed at it, then
-scale back to zero on exit.
+Scale the parallel ECS GPU rehearsal service to 1 only after private-only
+static checks pass, discover the private/internal media endpoint, smoke /health
+from a network that can reach the VPC, optionally start local frontend pointed
+at it, then scale back to zero on exit.
 
 Env:
   AWS_REGION=us-east-1
@@ -98,7 +99,9 @@ terraform -chdir="$REPO_ROOT/infra" validate
 bash -n \
 	"$REPO_ROOT/scripts/ecs-gpu-endpoint.sh" \
 	"$REPO_ROOT/scripts/smoke-media-engine.sh" \
-	"$REPO_ROOT/scripts/collect-rehearsal-proof.sh"
+	"$REPO_ROOT/scripts/collect-rehearsal-proof.sh" \
+	"$REPO_ROOT/scripts/prove-v2-gpu-worker-cloud-private-static.sh"
+"$REPO_ROOT/scripts/prove-v2-gpu-worker-cloud-private-static.sh"
 
 if [[ "$PREFLIGHT_ONLY" == true ]]; then
 	echo "✓ ECS GPU rehearsal preflight complete"
@@ -127,7 +130,7 @@ done
 
 endpoint_line="$($REPO_ROOT/scripts/ecs-gpu-endpoint.sh)"
 echo "$endpoint_line"
-MEDIA_URL="$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i ~ /^http=/){sub(/^http=/,"",$i); print $i}}' <<<"$endpoint_line")"
+MEDIA_URL="$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i ~ /^http_private=/){sub(/^http_private=/,"",$i); print $i}}' <<<"$endpoint_line")"
 if [[ -z "$MEDIA_URL" ]]; then
 	echo "Could not discover ECS GPU media URL" >&2
 	exit 3

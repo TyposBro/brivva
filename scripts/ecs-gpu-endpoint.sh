@@ -9,8 +9,8 @@ usage() {
 	cat <<EOF
 Usage: $0 [--service NAME]
 
-Print public endpoint info for the parallel ECS GPU rehearsal service.
-Defaults: CLUSTER=brivva SERVICE=brivva-gpu AWS_REGION=us-east-1
+Print private/internal endpoint info for the parallel ECS GPU rehearsal service.
+Refuses to emit public http/ws endpoints. Defaults: CLUSTER=brivva SERVICE=brivva-gpu AWS_REGION=us-east-1
 EOF
 	exit 1
 }
@@ -75,13 +75,19 @@ EC2_JSON="$(aws ec2 describe-instances \
 	--region "$AWS_REGION" \
 	--instance-ids $EC2_IDS)"
 
+if jq -e '.Reservations[].Instances[] | select((.PublicIpAddress // "") != "")' <<<"$EC2_JSON" >/dev/null; then
+	echo "Refusing to emit endpoint: GPU rehearsal instance has a public IP" >&2
+	jq -r '.Reservations[].Instances[] | "instance=" + .InstanceId + " public_ip=" + (.PublicIpAddress // "")' <<<"$EC2_JSON" >&2
+	exit 4
+fi
+
 jq -r '
   .Reservations[].Instances[] |
   [
     "instance=" + .InstanceId,
     "state=" + .State.Name,
-    "public_ip=" + (.PublicIpAddress // ""),
-    "http=http://" + (.PublicIpAddress // "") + ":3000",
-    "ws=ws://" + (.PublicIpAddress // "") + ":3000"
+    "private_ip=" + (.PrivateIpAddress // ""),
+    "http_private=http://" + (.PrivateIpAddress // "") + ":3000",
+    "ws_private=ws://" + (.PrivateIpAddress // "") + ":3000"
   ] | @tsv
 ' <<<"$EC2_JSON"
