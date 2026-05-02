@@ -27,10 +27,11 @@ use crate::features::broadcast::domain::SessionMetrics;
 const AUDIO_TICK: Duration = Duration::from_millis(20);
 /// Audio: 1764 bytes = 44.1 kHz × 20 ms × s16le mono.
 const AUDIO_BYTES_PER_TICK: usize = 1764;
-/// Live media must not "catch up" by dumping delayed backlog into FFmpeg
-/// faster than wall clock. If drains are this far behind, stale chunks are
-/// dropped until the output is near-live again.
-const VIDEO_MAX_LAG: Duration = Duration::from_millis(250);
+/// Video is allowed to queue briefly and catch up by writing faster than wall
+/// clock. Past this window the stream is too stale for live commerce, so old
+/// chunks are dropped and the drain resumes at an IDR/keyframe.
+const DEFAULT_VIDEO_MAX_LAG: Duration = Duration::from_secs(3);
+const MAX_VIDEO_MAX_LAG: Duration = Duration::from_secs(5);
 const AUDIO_MAX_LAG: Duration = Duration::from_millis(250);
 /// Ready-host audio can normally exceed one 20ms tick because browsers send
 /// microphone PCM in larger chunks (ScriptProcessor 4096 frames ≈93ms). Only
@@ -72,6 +73,9 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     let mut chunk_count: u64 = 0;
     let mut last_stats = Instant::now();
     let mut need_keyframe = true;
+    let max_lag = video_max_lag_from_env();
+    let mut stale_chunks_dropped: u64 = 0;
+    let mut keyframe_wait_chunks_dropped: u64 = 0;
 
     eprintln!(
         "[VIDEO:{}] H.264 pipe drain started (delay={}ms)",
@@ -84,18 +88,33 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
         if now.duration_since(last_stats) >= Duration::from_secs(1) {
             let buffered_chunks = h264_buf.lock().unwrap().len();
             eprintln!(
-                "[VIDEO:{}] stats chunks_written={} buffered_chunks={}",
-                stream_id, chunk_count, buffered_chunks
+                "[VIDEO:{}] stats chunks_written={} buffered_chunks={} video_stale_chunks_dropped={} video_keyframe_wait_chunks_dropped={}",
+                stream_id,
+                chunk_count,
+                buffered_chunks,
+                stale_chunks_dropped,
+                keyframe_wait_chunks_dropped
             );
             last_stats = now;
         }
 
-        let Some(chunk) =
-            drain_next_h264_live(&h264_buf, now, delay, VIDEO_MAX_LAG, &mut need_keyframe)
+        let Some(drain) = drain_next_h264_live(&h264_buf, now, delay, max_lag, &mut need_keyframe)
         else {
             thread::sleep(Duration::from_millis(2));
             continue;
         };
+        if drain.dropped_stale > 0 || drain.dropped_for_keyframe > 0 {
+            stale_chunks_dropped += drain.dropped_stale as u64;
+            keyframe_wait_chunks_dropped += drain.dropped_for_keyframe as u64;
+            eprintln!(
+                "[VIDEO:{}] video_stale_chunks_dropped={} video_keyframe_wait_chunks_dropped={} max_lag_ms={}",
+                stream_id,
+                drain.dropped_stale,
+                drain.dropped_for_keyframe,
+                max_lag.as_millis()
+            );
+        }
+        let chunk = drain.chunk;
         let n = chunk.len() as u64;
         let write_start = Instant::now();
         if video_stdin.write_all(&chunk).is_err() {
@@ -126,13 +145,19 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     );
 }
 
+struct VideoDrainNext {
+    chunk: Arc<[u8]>,
+    dropped_stale: usize,
+    dropped_for_keyframe: usize,
+}
+
 fn drain_next_h264_live(
     h264_buf: &StdMutex<VecDeque<TimedChunk>>,
     now: Instant,
     delay: Duration,
     max_lag: Duration,
     need_keyframe: &mut bool,
-) -> Option<Arc<[u8]>> {
+) -> Option<VideoDrainNext> {
     let mut buf = h264_buf.lock().unwrap();
     let live_cutoff = now.checked_sub(max_lag).unwrap_or(now);
 
@@ -140,7 +165,7 @@ fn drain_next_h264_live(
     // video. Emitting all of it makes viewers see fast-forward video until the
     // pipe catches up. For live streaming, stale video is worse than dropped
     // video: drop old chunks until the next emit is close to wall clock.
-    let mut dropped_stale = false;
+    let mut dropped_stale = 0;
     while buf.len() > 1 {
         let Some((ts, _)) = buf.front() else { break };
         let target_ts = *ts + delay;
@@ -148,7 +173,7 @@ fn drain_next_h264_live(
             break;
         }
         buf.pop_front();
-        dropped_stale = true;
+        dropped_stale += 1;
     }
 
     // After a stale-drop event, resuming in the middle of an H.264 GOP can
@@ -158,7 +183,8 @@ fn drain_next_h264_live(
     // and producing corrupted frames. If no IDR is available yet, keep the last
     // chunk rather than emptying the live buffer; the next keyframe will be
     // preferred as soon as it arrives.
-    if dropped_stale {
+    let mut dropped_for_keyframe = 0;
+    if dropped_stale > 0 {
         *need_keyframe = true;
         while buf.len() > 1 {
             let Some((ts, packet)) = buf.front() else {
@@ -168,6 +194,7 @@ fn drain_next_h264_live(
                 break;
             }
             buf.pop_front();
+            dropped_for_keyframe += 1;
         }
     }
 
@@ -179,6 +206,7 @@ fn drain_next_h264_live(
             break;
         }
         buf.pop_front();
+        dropped_for_keyframe += 1;
     }
 
     let (ts, _) = buf.front()?;
@@ -190,10 +218,23 @@ fn drain_next_h264_live(
             }
             *need_keyframe = false;
         }
-        Some(packet)
+        Some(VideoDrainNext {
+            chunk: packet,
+            dropped_stale,
+            dropped_for_keyframe,
+        })
     } else {
         None
     }
+}
+
+fn video_max_lag_from_env() -> Duration {
+    let millis = std::env::var("BRIVVA_VIDEO_MAX_LAG_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_VIDEO_MAX_LAG.as_millis() as u64)
+        .clamp(250, MAX_VIDEO_MAX_LAG.as_millis() as u64);
+    Duration::from_millis(millis)
 }
 
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
@@ -636,12 +677,36 @@ mod tests {
             Duration::from_millis(250),
             &mut need_keyframe,
         );
-        assert_eq!(result, Some(chunk(vec![1])));
+        let result = result.unwrap();
+        assert_eq!(result.chunk, chunk(vec![1]));
+        assert_eq!(result.dropped_stale, 0);
+        assert_eq!(result.dropped_for_keyframe, 0);
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn drain_next_h264_live_drops_stale_backlog_instead_of_catching_up() {
+    fn drain_next_h264_live_catches_up_within_lag_window() {
+        let buf = Arc::new(StdMutex::new(VecDeque::new()));
+        let now = Instant::now();
+        let delay = Duration::from_millis(100);
+        {
+            let mut b = buf.lock().unwrap();
+            b.push_back((now - Duration::from_millis(1_000), chunk(vec![1])));
+            b.push_back((now - Duration::from_millis(150), chunk(vec![0, 0, 1, 5])));
+            b.push_back((now + Duration::from_millis(500), chunk(vec![4])));
+        }
+        let mut need_keyframe = false;
+        let result =
+            drain_next_h264_live(&buf, now, delay, Duration::from_secs(3), &mut need_keyframe)
+                .unwrap();
+        assert_eq!(result.chunk, chunk(vec![1]));
+        assert_eq!(result.dropped_stale, 0);
+        assert_eq!(result.dropped_for_keyframe, 0);
+        assert_eq!(buf.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn drain_next_h264_live_drops_stale_backlog_past_lag_window() {
         let buf = Arc::new(StdMutex::new(VecDeque::new()));
         let now = Instant::now();
         let delay = Duration::from_millis(100);
@@ -660,7 +725,10 @@ mod tests {
             Duration::from_millis(250),
             &mut need_keyframe,
         );
-        assert_eq!(result, Some(chunk(vec![0, 0, 1, 5])));
+        let result = result.unwrap();
+        assert_eq!(result.chunk, chunk(vec![0, 0, 1, 5]));
+        assert_eq!(result.dropped_stale, 2);
+        assert_eq!(result.dropped_for_keyframe, 0);
         assert_eq!(buf.lock().unwrap().len(), 1);
     }
 
@@ -688,7 +756,10 @@ mod tests {
             &mut need_keyframe,
         );
 
-        assert_eq!(result, Some(chunk(idr.to_vec())));
+        let result = result.unwrap();
+        assert_eq!(result.chunk, chunk(idr.to_vec()));
+        assert_eq!(result.dropped_stale, 1);
+        assert_eq!(result.dropped_for_keyframe, 1);
     }
 
     #[test]
@@ -717,7 +788,10 @@ mod tests {
             &mut need_keyframe,
         );
 
-        assert_eq!(result, Some(chunk(vec![0, 0, 1, 5, 0xbb])));
+        let result = result.unwrap();
+        assert_eq!(result.chunk, chunk(vec![0, 0, 1, 5, 0xbb]));
+        assert_eq!(result.dropped_stale, 0);
+        assert_eq!(result.dropped_for_keyframe, 1);
         assert!(!need_keyframe);
     }
 

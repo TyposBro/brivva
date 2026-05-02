@@ -553,8 +553,19 @@ impl RtmpManager {
         for stream in self.streams.values() {
             let mut buf = stream.buffers.video_h264.lock().unwrap();
             buf.push_back((captured_at, shared_chunk.clone()));
+            let mut dropped = 0usize;
             while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
                 buf.pop_front();
+                dropped += 1;
+            }
+            if dropped > 0 {
+                tracing::warn!(
+                    destination_platform = %stream.destination_platform,
+                    lang = %stream.lang,
+                    video_buffer_cap_chunks_dropped = dropped,
+                    cap_chunks = HOST_VIDEO_H264_CAP_CHUNKS,
+                    "video h264 queue cap dropped oldest chunks"
+                );
             }
         }
     }
