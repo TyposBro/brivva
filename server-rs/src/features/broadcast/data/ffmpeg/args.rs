@@ -72,7 +72,7 @@ impl VideoProfile {
         // Fargate can stay conservative while GPU nodes can opt into 4K/high
         // fps without changing media code.
         let output_fps = input_fps.min(caps.max_fps);
-        let (max_width, max_height) = if width >= 3840 && height >= 2160 {
+        let (max_width, max_height) = if is_4k_class(width, height) {
             (3840.min(caps.max_width), 2160.min(caps.max_height))
         } else if width >= 1920 && height >= 1080 {
             (1920.min(caps.max_width), 1080.min(caps.max_height))
@@ -94,13 +94,17 @@ impl VideoProfile {
 
 fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
     match (width, height, fps) {
-        (w, h, f) if w >= 3840 && h >= 2160 && f > 60 => 35_000,
-        (w, h, _) if w >= 3840 && h >= 2160 => 24_000,
+        (w, h, f) if is_4k_class(w, h) && f > 60 => 35_000,
+        (w, h, _) if is_4k_class(w, h) => 24_000,
         (w, h, f) if w >= 1920 && h >= 1080 && f > 60 => 12_000,
         (w, h, _) if w >= 1920 && h >= 1080 => 6_000,
         (_, _, f) if f > 60 => 6_000,
         _ => 3_500,
     }
+}
+
+fn is_4k_class(width: u32, height: u32) -> bool {
+    width >= 3840 && width.saturating_mul(height) >= 3840 * 1600
 }
 
 /// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
@@ -613,6 +617,21 @@ mod tests {
         assert_eq!(profile.max_width, 3840);
         assert_eq!(profile.max_height, 2160);
         assert_eq!(profile.bitrate_kbps, 35_000);
+    }
+
+    #[test]
+    fn video_profile_treats_wide_4k_as_4k_class() {
+        let profile = VideoProfile::from_capture_with_caps(
+            3840,
+            1920,
+            30,
+            VideoProfileCaps::new(3840, 2160, 30),
+        );
+        assert_eq!(profile.input_fps, 30);
+        assert_eq!(profile.output_fps, 30);
+        assert_eq!(profile.max_width, 3840);
+        assert_eq!(profile.max_height, 2160);
+        assert_eq!(profile.bitrate_kbps, 24_000);
     }
 
     #[test]
