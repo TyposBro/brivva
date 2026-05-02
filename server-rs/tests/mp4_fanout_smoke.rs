@@ -57,7 +57,7 @@ impl SmokeOutput {
 async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     let args = parse_args()?;
-    tracing::info!(?args, "mp4 fanout smoke starting");
+    log_smoke_args(&args);
 
     let mut manager = RtmpManager::new();
     manager.set_video_encoder(args.encoder);
@@ -125,6 +125,44 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let _ = monitor.await;
     tracing::info!("mp4 fanout smoke finished");
     Ok(())
+}
+
+fn log_smoke_args(args: &Args) {
+    let outputs: Vec<_> = args
+        .outputs
+        .iter()
+        .map(|output| {
+            serde_json::json!({
+                "label": output.label,
+                "lang": output.lang.as_ref().map(ToString::to_string),
+                "destination_platforms": output
+                    .destinations
+                    .iter()
+                    .map(|dest| dest.platform.clone())
+                    .collect::<Vec<_>>(),
+                "destination_count": output.destinations.len(),
+            })
+        })
+        .collect();
+    tracing::info!(
+        mp4 = %args.mp4,
+        outputs = %serde_json::Value::Array(outputs),
+        duration_secs = args.duration_secs,
+        video_encoder = %args.encoder.codec_name(),
+        max_width = args.max_width,
+        max_height = args.max_height,
+        max_fps = args.max_fps,
+        capture_width = args.capture_width,
+        capture_height = args.capture_height,
+        capture_fps = args.capture_fps,
+        subtitle_enabled = args.subtitle.is_some(),
+        source_lang = %args.source_lang,
+        soniox_api_key_present = !args.soniox_api_key.trim().is_empty(),
+        soniox_ws_url = %args.soniox_ws_url,
+        elevenlabs_api_key_present = !args.elevenlabs_api_key.trim().is_empty(),
+        elevenlabs_base_url = %args.elevenlabs_base_url,
+        "mp4 fanout smoke starting"
+    );
 }
 
 fn init_tracing() {
