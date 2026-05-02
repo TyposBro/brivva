@@ -23,8 +23,9 @@ struct Args {
     subtitle: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+#[ignore = "manual RTMP e2e; requires MP4_FANOUT_SMOKE_MP4 and live destination secrets"]
+async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     let args = parse_args()?;
     tracing::info!(?args, "mp4 fanout smoke starting");
@@ -87,100 +88,43 @@ fn init_tracing() {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut mp4 = None;
+    let mp4 = std::env::var("MP4_FANOUT_SMOKE_MP4")
+        .map_err(|_| "MP4_FANOUT_SMOKE_MP4 env var required".to_string())?;
     let mut rtmp = Vec::new();
-    let mut duration_secs = 180;
-    let mut encoder = VideoEncoderKind::X264;
-    let mut max_width = env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920);
-    let mut max_height = env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080);
-    let mut max_fps = env_u32("BRIVVA_VIDEO_MAX_FPS", 30);
-    let mut capture_width = max_width;
-    let mut capture_height = max_height;
-    let mut capture_fps = max_fps;
-    let mut subtitle = None;
-    let mut youtube_url = std::env::var("YOUTUBE_RTMP_URL")
+    let duration_secs = env_u32("MP4_FANOUT_SMOKE_DURATION", 180) as u64;
+    let encoder = VideoEncoderKind::from_wire(
+        &std::env::var("MP4_FANOUT_SMOKE_ENCODER").unwrap_or_else(|_| "x264".to_string()),
+    );
+    let max_width = env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920);
+    let max_height = env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080);
+    let max_fps = env_u32("BRIVVA_VIDEO_MAX_FPS", 30);
+    let capture_width = env_u32("MP4_FANOUT_SMOKE_CAPTURE_WIDTH", max_width);
+    let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", max_height);
+    let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", max_fps);
+    let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
+    let youtube_url = std::env::var("YOUTUBE_RTMP_URL")
         .unwrap_or_else(|_| "rtmp://a.rtmp.youtube.com/live2".to_string());
-    let mut youtube_key_env = "STREAM_KEY_YOUTUBE".to_string();
-
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--mp4" => {
-                mp4 = Some(value(&args, i)?);
-                i += 2;
-            }
-            "--rtmp" => {
-                rtmp.push(RtmpDestination::new("rtmp", value(&args, i)?));
-                i += 2;
-            }
-            "--youtube-url" => {
-                youtube_url = value(&args, i)?;
-                i += 2;
-            }
-            "--youtube-key-env" => {
-                youtube_key_env = value(&args, i)?;
-                i += 2;
-            }
-            "--youtube" => {
-                let key = std::env::var(&youtube_key_env)
-                    .map_err(|_| format!("{youtube_key_env} env var missing"))?;
-                rtmp.push(RtmpDestination::new(
-                    "youtube",
-                    format!("{}/{}", youtube_url.trim_end_matches('/'), key),
-                ));
-                i += 1;
-            }
-            "--duration" => {
-                duration_secs = value(&args, i)?.parse().map_err(|_| "bad --duration")?;
-                i += 2;
-            }
-            "--encoder" => {
-                encoder = VideoEncoderKind::from_wire(&value(&args, i)?);
-                i += 2;
-            }
-            "--max-width" => {
-                max_width = value(&args, i)?.parse().map_err(|_| "bad --max-width")?;
-                i += 2;
-            }
-            "--max-height" => {
-                max_height = value(&args, i)?.parse().map_err(|_| "bad --max-height")?;
-                i += 2;
-            }
-            "--max-fps" => {
-                max_fps = value(&args, i)?.parse().map_err(|_| "bad --max-fps")?;
-                i += 2;
-            }
-            "--capture-width" => {
-                capture_width = value(&args, i)?
-                    .parse()
-                    .map_err(|_| "bad --capture-width")?;
-                i += 2;
-            }
-            "--capture-height" => {
-                capture_height = value(&args, i)?
-                    .parse()
-                    .map_err(|_| "bad --capture-height")?;
-                i += 2;
-            }
-            "--capture-fps" => {
-                capture_fps = value(&args, i)?.parse().map_err(|_| "bad --capture-fps")?;
-                i += 2;
-            }
-            "--subtitle" => {
-                subtitle = Some(value(&args, i)?);
-                i += 2;
-            }
-            "--help" | "-h" => return Err(usage()),
-            other => return Err(format!("unknown arg: {other}\n{}", usage())),
-        }
+    if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
+        rtmp.push(RtmpDestination::new(
+            "youtube",
+            format!("{}/{}", youtube_url.trim_end_matches('/'), key),
+        ));
+    }
+    for (idx, url) in std::env::var("MP4_FANOUT_SMOKE_RTMP_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .enumerate()
+    {
+        rtmp.push(RtmpDestination::new(format!("rtmp{idx}"), url.to_string()));
     }
 
     if rtmp.is_empty() {
-        return Err("provide --youtube or at least one --rtmp <full-url>".to_string());
+        return Err("provide STREAM_KEY_YOUTUBE or MP4_FANOUT_SMOKE_RTMP_URLS".to_string());
     }
     Ok(Args {
-        mp4: mp4.ok_or_else(|| "--mp4 <path> required".to_string())?,
+        mp4,
         rtmp,
         duration_secs,
         encoder,
@@ -192,16 +136,6 @@ fn parse_args() -> Result<Args, String> {
         capture_fps,
         subtitle,
     })
-}
-
-fn usage() -> String {
-    "Usage: cargo run -p server-rs --bin mp4_fanout_smoke -- --mp4 file.mp4 (--youtube | --rtmp full-url) [--duration 180] [--encoder x264|nvenc] [--max-width 1920 --max-height 1080 --max-fps 60]".into()
-}
-
-fn value(args: &[String], i: usize) -> Result<String, String> {
-    args.get(i + 1)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {}", args[i]))
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
