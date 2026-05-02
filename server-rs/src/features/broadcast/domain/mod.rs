@@ -157,6 +157,10 @@ pub struct PipelineConfig {
     pub v2_shared_decode: bool,
     /// V2 Phase 6A GPU worker shadow proof. Logs/contracts only; no live route.
     pub v2_gpu_workers: bool,
+    /// V2 FFmpeg tee fanout. One encoder per compatible language group,
+    /// publishing to multiple RTMP destinations. Off by default because
+    /// Grip/librtmp needs production validation on tee muxer failure modes.
+    pub v2_encoded_fanout: bool,
     /// FFmpeg video encoder backend for this session. Injected from
     /// orchestration so the media layer does not read env vars.
     pub video_encoder: VideoEncoderKind,

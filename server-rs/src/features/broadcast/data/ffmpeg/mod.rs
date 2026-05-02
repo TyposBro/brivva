@@ -108,7 +108,7 @@ struct RtmpStream {
     subtitle_textfile: String,
 
     lang: String,
-    rtmp_url: String,
+    rtmp_urls: Vec<String>,
     delay: Duration,
     is_source: bool,
     host_gain: f32,
@@ -152,7 +152,7 @@ pub struct RtmpManager {
 type CrashedStreamSnapshot = (
     String,
     String,
-    String,
+    Vec<String>,
     u64,
     bool,
     f32,
@@ -168,7 +168,7 @@ type CrashedStreamSnapshot = (
 struct RestartStreamArgs {
     id: String,
     lang: String,
-    rtmp_url: String,
+    rtmp_urls: Vec<String>,
     delay_ms: u64,
     is_source: bool,
     host_gain: f32,
@@ -184,7 +184,7 @@ struct RestartStreamArgs {
 struct StreamSpawnArgs {
     stream_id: String,
     lang: String,
-    rtmp_url: String,
+    rtmp_urls: Vec<String>,
     delay_ms: u64,
     is_source: bool,
     host_gain: f32,
@@ -216,6 +216,20 @@ pub struct StartStreamArgs<'a> {
     /// See `RtmpStream::passthrough`. Fargate skips STT/translate/TTS entirely
     /// for passthrough streams — host audio re-broadcast at gain 1.0, no
     /// caption overlay.
+    pub passthrough: bool,
+}
+
+pub struct StartStreamGroupArgs<'a> {
+    pub stream_id: &'a str,
+    pub lang: &'a str,
+    pub rtmp_urls: Vec<String>,
+    pub delay_ms: u64,
+    pub is_source: bool,
+    pub host_gain: f32,
+    pub output_id: Option<OutputId>,
+    pub destination_platform: &'a str,
+    pub output_controls_enabled: bool,
+    pub render_graph_node: Option<RenderGraphOutputNode>,
     pub passthrough: bool,
 }
 
@@ -344,6 +358,22 @@ impl RtmpManager {
     /// ducked target streams). Video arrives separately as encoded WebRTC RTP
     /// and is copied to RTMP by FFmpeg.
     pub fn start_stream(&mut self, args: StartStreamArgs<'_>) -> Result<(), String> {
+        self.start_stream_group(StartStreamGroupArgs {
+            stream_id: args.stream_id,
+            lang: args.lang,
+            rtmp_urls: vec![args.rtmp_url.to_string()],
+            delay_ms: args.delay_ms,
+            is_source: args.is_source,
+            host_gain: args.host_gain,
+            output_id: args.output_id,
+            destination_platform: args.destination_platform,
+            output_controls_enabled: args.output_controls_enabled,
+            render_graph_node: args.render_graph_node,
+            passthrough: args.passthrough,
+        })
+    }
+
+    pub fn start_stream_group(&mut self, args: StartStreamGroupArgs<'_>) -> Result<(), String> {
         emit_output_health(
             args.output_controls_enabled,
             &args.output_id,
@@ -364,7 +394,7 @@ impl RtmpManager {
         if let Err(e) = self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.stream_id.to_string(),
             lang: args.lang.to_string(),
-            rtmp_url: args.rtmp_url.to_string(),
+            rtmp_urls: args.rtmp_urls.clone(),
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
@@ -419,12 +449,13 @@ impl RtmpManager {
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
-            rtmp_url = %redact_rtmp_secrets(args.rtmp_url),
+            rtmp_urls = ?args.rtmp_urls.iter().map(|url| redact_rtmp_secrets(url)).collect::<Vec<_>>(),
+            rtmp_destination_count = args.rtmp_urls.len(),
             delay_ms = args.delay_ms,
             is_source = args.is_source,
             host_gain = args.host_gain,
             passthrough = args.passthrough,
-            "ffmpeg rtmp stream started"
+            "ffmpeg rtmp stream group started"
         );
         Ok(())
     }
@@ -660,7 +691,7 @@ impl RtmpManager {
                 result.push((
                     id,
                     old.lang,
-                    old.rtmp_url,
+                    old.rtmp_urls,
                     old.delay.as_millis() as u64,
                     old.is_source,
                     old.host_gain,
@@ -700,7 +731,7 @@ impl RtmpManager {
         match self.spawn_stream_inner(StreamSpawnArgs {
             stream_id: args.id.clone(),
             lang: args.lang.clone(),
-            rtmp_url: args.rtmp_url.clone(),
+            rtmp_urls: args.rtmp_urls.clone(),
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
@@ -786,7 +817,7 @@ impl RtmpManager {
         let ffmpeg_args = build_ffmpeg_args_with_profile(
             &audio_fifo,
             Some(&subtitle_textfile),
-            &args.rtmp_url,
+            &args.rtmp_urls,
             self.video_profile,
             encoder,
         );
@@ -966,7 +997,7 @@ impl RtmpManager {
                 audio_fifo,
                 subtitle_textfile,
                 lang: args.lang,
-                rtmp_url: args.rtmp_url,
+                rtmp_urls: args.rtmp_urls,
                 delay,
                 is_source: args.is_source,
                 host_gain: args.host_gain,
@@ -1072,7 +1103,7 @@ pub fn spawn_health_monitor(
             for (
                 id,
                 lang,
-                rtmp_url,
+                rtmp_urls,
                 delay_ms,
                 is_source,
                 host_gain,
@@ -1093,7 +1124,7 @@ pub fn spawn_health_monitor(
                 mgr.restart_stream(RestartStreamArgs {
                     id,
                     lang,
-                    rtmp_url,
+                    rtmp_urls,
                     delay_ms,
                     is_source,
                     host_gain,

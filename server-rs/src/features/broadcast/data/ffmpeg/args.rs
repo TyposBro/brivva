@@ -60,7 +60,7 @@ pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String>
     build_ffmpeg_args_with_profile(
         audio_fifo,
         None,
-        rtmp_url,
+        &[rtmp_url.to_string()],
         VideoProfile::default(),
         VideoEncoderKind::X264,
     )
@@ -69,14 +69,14 @@ pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String>
 pub(super) fn build_ffmpeg_args_with_profile(
     audio_fifo: &str,
     subtitle_textfile: Option<&str>,
-    rtmp_url: &str,
+    rtmp_urls: &[String],
     profile: VideoProfile,
     encoder: VideoEncoderKind,
 ) -> Vec<String> {
     build_ffmpeg_args_with_profile_and_encoder(
         audio_fifo,
         subtitle_textfile,
-        rtmp_url,
+        rtmp_urls,
         profile,
         encoder,
     )
@@ -85,7 +85,7 @@ pub(super) fn build_ffmpeg_args_with_profile(
 pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
     audio_fifo: &str,
     subtitle_textfile: Option<&str>,
-    rtmp_url: &str,
+    rtmp_urls: &[String],
     profile: VideoProfile,
     encoder: VideoEncoderKind,
 ) -> Vec<String> {
@@ -158,11 +158,33 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         "0".into(),
         "-flush_packets".into(),
         "1".into(),
-        "-f".into(),
-        "flv".into(),
-        rtmp_url.to_string(),
     ]);
+    append_publish_target(&mut ffmpeg_args, rtmp_urls);
     ffmpeg_args
+}
+
+fn append_publish_target(ffmpeg_args: &mut Vec<String>, rtmp_urls: &[String]) {
+    if rtmp_urls.len() <= 1 {
+        ffmpeg_args.extend_from_slice(&[
+            "-f".into(),
+            "flv".into(),
+            rtmp_urls.first().cloned().unwrap_or_default(),
+        ]);
+        return;
+    }
+    ffmpeg_args.extend_from_slice(&[
+        "-f".into(),
+        "tee".into(),
+        rtmp_urls
+            .iter()
+            .map(|url| format!("[f=flv:onfail=ignore]{}", escape_tee_url(url)))
+            .collect::<Vec<_>>()
+            .join("|"),
+    ]);
+}
+
+fn escape_tee_url(url: &str) -> String {
+    url.replace('\\', "\\\\").replace('|', "\\|")
 }
 
 fn video_filter(profile: VideoProfile, subtitle_textfile: Option<&str>) -> String {
@@ -497,7 +519,7 @@ mod tests {
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
             None,
-            "rtmp://x/y",
+            &["rtmp://x/y".to_string()],
             VideoProfile::from_capture(3840, 2160, 60),
             VideoEncoderKind::X264,
         );
@@ -516,7 +538,7 @@ mod tests {
         let args = build_ffmpeg_args_with_profile_and_encoder(
             "/tmp/fifo",
             None,
-            "rtmp://x/y",
+            &["rtmp://x/y".to_string()],
             VideoProfile::default(),
             VideoEncoderKind::Nvenc,
         );
@@ -537,13 +559,32 @@ mod tests {
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
             Some("/tmp/brivva_subtitle_stream-1.txt"),
-            "rtmp://x/y",
+            &["rtmp://x/y".to_string()],
             VideoProfile::default(),
             VideoEncoderKind::X264,
         );
         let joined = args.join(" ");
         assert!(joined.contains("drawtext=textfile=/tmp/brivva_subtitle_stream-1.txt:reload=1"));
         assert!(joined.contains("box=1"));
+    }
+
+    #[test]
+    fn build_ffmpeg_args_can_publish_one_encode_to_multiple_rtmp_urls() {
+        let args = build_ffmpeg_args_with_profile(
+            "/tmp/fifo",
+            None,
+            &[
+                "rtmp://a/live/key-a".to_string(),
+                "rtmp://b/live/key-b".to_string(),
+            ],
+            VideoProfile::default(),
+            VideoEncoderKind::X264,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-f tee"));
+        assert!(joined.contains("[f=flv:onfail=ignore]rtmp://a/live/key-a"));
+        assert!(joined.contains("|[f=flv:onfail=ignore]rtmp://b/live/key-b"));
+        assert!(!joined.contains("-f flv rtmp://a/live/key-a"));
     }
 
     #[test]

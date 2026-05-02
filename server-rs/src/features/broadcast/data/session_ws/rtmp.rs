@@ -74,6 +74,90 @@ pub fn output_id_for_stream(
     OutputId::new(session_id, &stream.lang, &stream.platform, *index)
 }
 
+fn full_rtmp_url(stream: &Stream, force_rtmp: bool) -> Option<String> {
+    let (Some(rtmp_url), Some(stream_key)) = (&stream.rtmp_url, &stream.stream_key) else {
+        return None;
+    };
+    let full_url_with_key = if stream_key.is_empty() {
+        rtmp_url.clone()
+    } else {
+        format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
+    };
+    Some(maybe_downgrade_rtmps(&full_url_with_key, force_rtmp))
+}
+
+struct EncodedFanoutSpawn {
+    stream_id: String,
+    lang: String,
+    rtmp_urls: Vec<String>,
+    delay_ms: u64,
+    is_source: bool,
+    host_gain: f32,
+    passthrough: bool,
+    output_id: Option<OutputId>,
+    destination_label: String,
+    render_graph_node: Option<RenderGraphOutputNode>,
+}
+
+fn build_encoded_fanout_spawns(
+    streams: &[Stream],
+    source_lang: &Lang,
+    sid: &str,
+    force_rtmp: bool,
+    render_graph_id: Option<&RenderGraphId>,
+    output_ids_enabled: bool,
+) -> Vec<EncodedFanoutSpawn> {
+    let mut output_indexes = HashMap::new();
+    let mut groups: Vec<EncodedFanoutSpawn> = Vec::new();
+    for stream in streams {
+        let Some(full_url) = full_rtmp_url(stream, force_rtmp) else {
+            continue;
+        };
+        let flags = resolve_stream_flags(&stream.lang, source_lang, stream.host_gain);
+        let output_id = if output_ids_enabled {
+            output_id_for_stream(sid, stream, &mut output_indexes).ok()
+        } else {
+            None
+        };
+        let key_matches = |group: &EncodedFanoutSpawn| {
+            group.lang == stream.lang
+                && group.delay_ms == stream.delay_ms
+                && group.is_source == flags.is_source
+                && (group.host_gain - flags.host_gain).abs() < f32::EPSILON
+                && group.passthrough == flags.passthrough
+        };
+        if let Some(group) = groups.iter_mut().find(|group| key_matches(group)) {
+            group.rtmp_urls.push(full_url);
+            group.destination_label = format!("{},{}", group.destination_label, stream.platform);
+            continue;
+        }
+        let group_stream_id = format!("{}-fanout-{}", stream.lang, groups.len());
+        let render_graph_node = render_graph_id.and_then(|graph_id| {
+            output_id.as_ref().map(|output_id| {
+                RenderGraphOutputNode::new(
+                    graph_id.clone(),
+                    output_id.as_str(),
+                    &group_stream_id,
+                    RenderGraphNodeKind::EncodePublishRtmp,
+                )
+            })
+        });
+        groups.push(EncodedFanoutSpawn {
+            stream_id: group_stream_id,
+            lang: stream.lang.clone(),
+            rtmp_urls: vec![full_url],
+            delay_ms: stream.delay_ms,
+            is_source: flags.is_source,
+            host_gain: flags.host_gain,
+            passthrough: flags.passthrough,
+            output_id,
+            destination_label: stream.platform.clone(),
+            render_graph_node,
+        });
+    }
+    groups
+}
+
 fn render_graph_spec_for_streams(
     session_id: &str,
     streams: &[Stream],
@@ -161,7 +245,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
                     sid,
                     live_session.pipeline_config.video_encoder,
                     &plan,
-                    false,
+                    live_session.pipeline_config.v2_encoded_fanout,
                 );
             }
             Err(error) => tracing::error!(
@@ -170,6 +254,68 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
                 "render graph planning failed"
             ),
         }
+    }
+    if live_session.pipeline_config.v2_encoded_fanout {
+        let groups = build_encoded_fanout_spawns(
+            &bundle.streams,
+            source_lang,
+            sid,
+            force_rtmp,
+            render_graph_id.as_ref(),
+            output_controls_enabled || render_graph_enabled || shared_decode_enabled,
+        );
+        for group in groups {
+            if !group.passthrough
+                && let Some(lang) = Lang::from_str(&group.lang)
+            {
+                rtmp_langs.push(lang);
+            }
+            let destination_count = group.rtmp_urls.len();
+            if let Err(e) = manager.start_stream_group(
+                crate::features::broadcast::data::ffmpeg::StartStreamGroupArgs {
+                    stream_id: &group.stream_id,
+                    lang: &group.lang,
+                    rtmp_urls: group.rtmp_urls,
+                    delay_ms: group.delay_ms,
+                    is_source: group.is_source,
+                    host_gain: group.host_gain,
+                    output_id: group.output_id,
+                    destination_platform: &group.destination_label,
+                    output_controls_enabled,
+                    render_graph_node: group.render_graph_node,
+                    passthrough: group.passthrough,
+                },
+            ) {
+                tracing::error!(
+                    stream_id = %group.stream_id,
+                    lang = %group.lang,
+                    error = %e,
+                    "rtmp fanout stream group start failed"
+                );
+                continue;
+            }
+            tracing::info!(
+                session_id = %sid,
+                stream_id = %group.stream_id,
+                lang = %group.lang,
+                destination_count,
+                "ffmpeg encoded fanout group live"
+            );
+        }
+        let shared_mgr = Arc::new(tokio::sync::Mutex::new(manager));
+        live_session.rtmp_manager = Some(shared_mgr.clone());
+        live_session.rtmp_langs = rtmp_langs;
+        tracing::info!(
+            session_id = %sid,
+            stream_count = bundle.streams.len(),
+            langs = ?live_session.rtmp_langs,
+            "ffmpeg encoded fanout streams started"
+        );
+        let _health_monitor = crate::features::broadcast::data::ffmpeg::spawn_health_monitor(
+            shared_mgr,
+            ffmpeg_monitor_stop,
+        );
+        return;
     }
     let mut output_indexes = HashMap::new();
     for s in &bundle.streams {
@@ -351,6 +497,53 @@ mod tests {
         assert_eq!(b.as_str(), "B8EF28:ja:youtube:1");
         assert_eq!(c.as_str(), "B8EF28:ja:tiktok:0");
         assert_eq!(d.as_str(), "B8EF28:ko:youtube:0");
+    }
+
+    #[test]
+    fn encoded_fanout_groups_compatible_streams_by_language() {
+        let mut youtube = stream("a", "ja", "youtube");
+        youtube.rtmp_url = Some("rtmp://youtube".into());
+        youtube.stream_key = Some("key-y".into());
+        youtube.delay_ms = 2000;
+        let mut grip = stream("b", "ja", "grip");
+        grip.rtmp_url = Some("rtmp://grip".into());
+        grip.stream_key = Some("key-g".into());
+        grip.delay_ms = 2000;
+        let ko = stream("c", "ko", "youtube");
+
+        let groups = build_encoded_fanout_spawns(
+            &[youtube, grip, ko],
+            &Lang::En,
+            "sess-1",
+            false,
+            None,
+            false,
+        );
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].lang, "ja");
+        assert_eq!(
+            groups[0].rtmp_urls,
+            vec!["rtmp://youtube/key-y", "rtmp://grip/key-g"]
+        );
+        assert_eq!(groups[0].delay_ms, 2000);
+        assert_eq!(groups[1].lang, "ko");
+        assert_eq!(groups[1].rtmp_urls, vec!["rtmp://x/k"]);
+    }
+
+    #[test]
+    fn encoded_fanout_keeps_incompatible_same_lang_streams_separate() {
+        let mut fast = stream("a", "ja", "youtube");
+        fast.delay_ms = 1000;
+        let mut slow = stream("b", "ja", "grip");
+        slow.delay_ms = 2500;
+
+        let groups =
+            build_encoded_fanout_spawns(&[fast, slow], &Lang::En, "sess-1", false, None, false);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].rtmp_urls.len(), 1);
+        assert_eq!(groups[1].rtmp_urls.len(), 1);
     }
 
     #[test]
