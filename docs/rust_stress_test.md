@@ -12,9 +12,10 @@ Run the full automated sequence:
 infisical run --env=dev --path=/ -- \
   ./scripts/run-rust-stress-tests.sh \
     --mp4 /home/typosbro/Desktop/text.mp4 \
+    --4k-mp4 /home/typosbro/Desktop/4k-h264.mp4 \
     --source ko \
-    --duration 180 \
-    --long-duration 900
+    --duration 60 \
+    --long-duration 300
 ```
 
 Optional:
@@ -23,7 +24,7 @@ Optional:
 infisical run --env=dev --path=/ -- \
   ./scripts/run-rust-stress-tests.sh \
     --mp4 /home/typosbro/Desktop/text.mp4 \
-    --4k-mp4 /path/to/4k.mp4 \
+    --4k-mp4 /path/to/h264-4k.mp4 \
     --audio-mp4 /path/to/noisy-or-overlap.mp4 \
     --include-network \
     --iface <iface>
@@ -33,10 +34,27 @@ Run one scenario:
 
 ```bash
 infisical run --env=dev --path=/ -- \
-  ./scripts/run-rust-stress-tests.sh --only many_outputs
+  ./scripts/run-rust-stress-tests.sh --only many_outputs_1080p30
 ```
 
 The runner writes per-scenario logs under `tmp/rust-stress-logs/`.
+
+Default full sequence:
+
+- `single_720p15`: weak camera profile, one output.
+- `single_1080p30`: normal host profile, one output.
+- `cpu_720p30`: CPU fallback ceiling, one output.
+- `many_outputs_1080p30`: all available per-language YouTube outputs.
+- `low_quality`: 720p15 input with 1080p30 caps, verifies no bad upscale/stutter.
+- `single_4k30`: one 4K output, requires `--4k-mp4`.
+- `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
+- `high_res_capped`: 4K input capped to 1080p30.
+- `bad_destination`: one good output plus one dead RTMP destination.
+- `tts_failure`: bad ElevenLabs key, original stream should continue.
+- `stt_failure`: bad Soniox key, original stream should continue.
+- `long_run`: longer one-output run.
+- `difficult_audio`: optional, requires `--audio-mp4`.
+- `network`: optional, requires `--include-network --iface <iface>`.
 
 Manual single-scenario base command:
 
@@ -126,13 +144,13 @@ Goal: verify 4K/high-FPS sources downscale or preserve correctly.
 
 ```bash
 infisical run --env=dev --path=/ -- \
-  env MP4_FANOUT_SMOKE_MP4=/path/to/4k.mp4 \
+  env MP4_FANOUT_SMOKE_MP4=/path/to/h264-4k.mp4 \
       MP4_FANOUT_SMOKE_SOURCE_LANG=ko \
       MP4_FANOUT_SMOKE_DURATION=600 \
       MP4_FANOUT_SMOKE_ENCODER=nvenc \
       BRIVVA_VIDEO_MAX_WIDTH=3840 \
       BRIVVA_VIDEO_MAX_HEIGHT=2160 \
-      BRIVVA_VIDEO_MAX_FPS=60 \
+      BRIVVA_VIDEO_MAX_FPS=30 \
   cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
 ```
 

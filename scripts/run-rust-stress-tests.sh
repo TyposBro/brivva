@@ -35,8 +35,9 @@ Expected to be run inside Infisical:
   infisical run --env=dev --path=/ -- ./scripts/run-rust-stress-tests.sh
 
 Scenario names:
-  base cpu many_outputs high_res high_res_capped low_quality bad_destination
-  tts_failure stt_failure long_run difficult_audio network
+  single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
+  single_4k30 many_outputs_4k30 high_res_capped low_quality
+  bad_destination tts_failure stt_failure long_run difficult_audio network
 EOF
 }
 
@@ -142,6 +143,39 @@ have_multi_youtube_output() {
 	[[ "$count" -ge 2 ]]
 }
 
+have_output_key() {
+	local output="$1"
+	case "$output" in
+		pass) [[ -n "${STREAM_KEY_YOUTUBE_PASS:-}" ]] ;;
+		ko) [[ -n "${STREAM_KEY_YOUTUBE_KO:-}" ]] ;;
+		en) [[ -n "${STREAM_KEY_YOUTUBE_EN:-}" ]] ;;
+		ja) [[ -n "${STREAM_KEY_YOUTUBE_JA:-}" ]] ;;
+		zh) [[ -n "${STREAM_KEY_YOUTUBE_ZH:-}" ]] ;;
+		legacy) [[ -n "${STREAM_KEY_YOUTUBE:-}" || -n "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]] ;;
+		*) return 1 ;;
+	esac
+}
+
+first_available_output() {
+	for output in pass "$SOURCE_LANG" en ko ja zh legacy; do
+		if have_output_key "$output"; then
+			echo "$output"
+			return 0
+		fi
+	done
+	return 1
+}
+
+all_available_outputs() {
+	local outputs=()
+	for output in pass ko en ja zh; do
+		if have_output_key "$output"; then
+			outputs+=("$output")
+		fi
+	done
+	(IFS=,; echo "${outputs[*]}")
+}
+
 should_run() {
 	local name="$1"
 	[[ -z "$ONLY" || "$ONLY" == "$name" ]]
@@ -186,30 +220,55 @@ common_env=(
 	"BRIVVA_SUBTITLE_FONTFILE=${BRIVVA_SUBTITLE_FONTFILE:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
 )
 
-run_case base \
-	"${common_env[@]}" \
-	"MP4_FANOUT_SMOKE_MP4=$MP4" \
-	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-	"BRIVVA_VIDEO_MAX_FPS=30"
+SINGLE_OUTPUT="$(first_available_output || true)"
+MULTI_OUTPUTS="$(all_available_outputs)"
 
-run_case cpu \
-	"${common_env[@]}" \
-	"MP4_FANOUT_SMOKE_MP4=$MP4" \
-	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-	"MP4_FANOUT_SMOKE_ENCODER=x264" \
-	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-	"BRIVVA_VIDEO_MAX_FPS=30"
-
-if should_run many_outputs && ! have_multi_youtube_output; then
-	record_skip many_outputs "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+if [[ -z "$SINGLE_OUTPUT" ]]; then
+	should_run single_720p15 && record_skip single_720p15 "no YouTube/RTMP destination secrets"
+	should_run single_1080p30 && record_skip single_1080p30 "no YouTube/RTMP destination secrets"
+	should_run cpu_720p30 && record_skip cpu_720p30 "no YouTube/RTMP destination secrets"
 else
-	run_case many_outputs \
+	run_case single_720p15 \
 		"${common_env[@]}" \
 		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"MP4_FANOUT_SMOKE_CAPTURE_WIDTH=1280" \
+		"MP4_FANOUT_SMOKE_CAPTURE_HEIGHT=720" \
+		"MP4_FANOUT_SMOKE_CAPTURE_FPS=15" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1280" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=720" \
+		"BRIVVA_VIDEO_MAX_FPS=15"
+
+	run_case single_1080p30 \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30"
+
+	run_case cpu_720p30 \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=x264" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1280" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=720" \
+		"BRIVVA_VIDEO_MAX_FPS=30"
+fi
+
+if should_run many_outputs_1080p30 && ! have_multi_youtube_output; then
+	record_skip many_outputs_1080p30 "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+else
+	run_case many_outputs_1080p30 \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
 		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
@@ -217,33 +276,10 @@ else
 		"BRIVVA_VIDEO_MAX_FPS=30"
 fi
 
-if should_run high_res || should_run high_res_capped; then
-	if [[ -z "$FOUR_K_MP4" || ! -f "$FOUR_K_MP4" ]]; then
-		record_skip high_res "provide --4k-mp4 /path/to/4k.mp4"
-		record_skip high_res_capped "provide --4k-mp4 /path/to/4k.mp4"
-	else
-		run_case high_res \
-			"${common_env[@]}" \
-			"MP4_FANOUT_SMOKE_MP4=$FOUR_K_MP4" \
-			"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-			"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-			"BRIVVA_VIDEO_MAX_WIDTH=3840" \
-			"BRIVVA_VIDEO_MAX_HEIGHT=2160" \
-			"BRIVVA_VIDEO_MAX_FPS=60"
-		run_case high_res_capped \
-			"${common_env[@]}" \
-			"MP4_FANOUT_SMOKE_MP4=$FOUR_K_MP4" \
-			"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-			"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-			"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-			"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-			"BRIVVA_VIDEO_MAX_FPS=30"
-	fi
-fi
-
 run_case low_quality \
 	"${common_env[@]}" \
 	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
 	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 	"MP4_FANOUT_SMOKE_CAPTURE_WIDTH=1280" \
@@ -253,9 +289,50 @@ run_case low_quality \
 	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 	"BRIVVA_VIDEO_MAX_FPS=30"
 
+if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res_capped; then
+	if [[ -z "$FOUR_K_MP4" || ! -f "$FOUR_K_MP4" ]]; then
+		record_skip single_4k30 "provide --4k-mp4 /path/to/h264-4k.mp4"
+		record_skip many_outputs_4k30 "provide --4k-mp4 /path/to/h264-4k.mp4"
+		record_skip high_res_capped "provide --4k-mp4 /path/to/4k.mp4"
+	else
+		run_case single_4k30 \
+			"${common_env[@]}" \
+			"MP4_FANOUT_SMOKE_MP4=$FOUR_K_MP4" \
+			"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+			"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+			"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+			"BRIVVA_VIDEO_MAX_WIDTH=3840" \
+			"BRIVVA_VIDEO_MAX_HEIGHT=2160" \
+			"BRIVVA_VIDEO_MAX_FPS=30"
+		if [[ -z "$MULTI_OUTPUTS" || "$MULTI_OUTPUTS" != *,* ]]; then
+			record_skip many_outputs_4k30 "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+		else
+			run_case many_outputs_4k30 \
+				"${common_env[@]}" \
+				"MP4_FANOUT_SMOKE_MP4=$FOUR_K_MP4" \
+				"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
+				"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+				"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+				"BRIVVA_VIDEO_MAX_WIDTH=3840" \
+				"BRIVVA_VIDEO_MAX_HEIGHT=2160" \
+				"BRIVVA_VIDEO_MAX_FPS=30"
+		fi
+		run_case high_res_capped \
+			"${common_env[@]}" \
+			"MP4_FANOUT_SMOKE_MP4=$FOUR_K_MP4" \
+			"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+			"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+			"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+			"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+			"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+			"BRIVVA_VIDEO_MAX_FPS=30"
+	fi
+fi
+
 run_case bad_destination \
 	"${common_env[@]}" \
 	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT,legacy" \
 	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
@@ -263,29 +340,37 @@ run_case bad_destination \
 	"BRIVVA_VIDEO_MAX_FPS=30" \
 	"MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad"
 
-run_case tts_failure \
-	"${common_env[@]}" \
-	"MP4_FANOUT_SMOKE_MP4=$MP4" \
-	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-	"BRIVVA_VIDEO_MAX_FPS=30" \
-	"ELEVENLABS_API_KEY=bad"
+if [[ -z "$MULTI_OUTPUTS" || "$MULTI_OUTPUTS" != *,* ]]; then
+	should_run tts_failure && record_skip tts_failure "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+	should_run stt_failure && record_skip stt_failure "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+else
+	run_case tts_failure \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"ELEVENLABS_API_KEY=bad"
 
-run_case stt_failure \
-	"${common_env[@]}" \
-	"MP4_FANOUT_SMOKE_MP4=$MP4" \
-	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-	"BRIVVA_VIDEO_MAX_FPS=30" \
-	"SONIOX_API_KEY=bad"
+	run_case stt_failure \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"SONIOX_API_KEY=bad"
+fi
 
 run_case long_run \
 	"${common_env[@]}" \
 	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
 	"MP4_FANOUT_SMOKE_DURATION=$LONG_DURATION" \
 	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
@@ -299,6 +384,7 @@ if should_run difficult_audio; then
 		run_case difficult_audio \
 			"${common_env[@]}" \
 			"MP4_FANOUT_SMOKE_MP4=$AUDIO_MP4" \
+			"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
 			"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 			"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 			"BRIVVA_VIDEO_MAX_WIDTH=1920" \
@@ -325,6 +411,7 @@ if should_run network; then
 			run_case network \
 				"${common_env[@]}" \
 				"MP4_FANOUT_SMOKE_MP4=$MP4" \
+				"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
 				"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 				"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 				"BRIVVA_VIDEO_MAX_WIDTH=1920" \

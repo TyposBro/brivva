@@ -169,19 +169,31 @@ fn parse_args() -> Result<Args, String> {
         .unwrap_or_else(|_| "https://api.elevenlabs.io".to_string());
     let youtube_url = std::env::var("YOUTUBE_RTMP_URL")
         .unwrap_or_else(|_| "rtmp://a.rtmp.youtube.com/live2".to_string());
-    let mut outputs = youtube_outputs(&youtube_url, &source_lang, &explicit_target_langs);
+    let output_filter = parse_output_filter_env("MP4_FANOUT_SMOKE_OUTPUTS")?;
+    let mut outputs = youtube_outputs(
+        &youtube_url,
+        &source_lang,
+        &explicit_target_langs,
+        output_filter.as_deref(),
+    );
     let mut legacy_rtmp = Vec::new();
-    if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
-        legacy_rtmp.push(youtube_destination("youtube", &youtube_url, &key));
+    if output_allowed(output_filter.as_deref(), "legacy") {
+        if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
+            if !key.trim().is_empty() {
+                legacy_rtmp.push(youtube_destination("youtube", &youtube_url, &key));
+            }
+        }
     }
-    for (idx, url) in std::env::var("MP4_FANOUT_SMOKE_RTMP_URLS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .enumerate()
-    {
-        legacy_rtmp.push(RtmpDestination::new(format!("rtmp{idx}"), url.to_string()));
+    if output_allowed(output_filter.as_deref(), "legacy") {
+        for (idx, url) in std::env::var("MP4_FANOUT_SMOKE_RTMP_URLS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .enumerate()
+        {
+            legacy_rtmp.push(RtmpDestination::new(format!("rtmp{idx}"), url.to_string()));
+        }
     }
 
     if !legacy_rtmp.is_empty() {
@@ -222,16 +234,25 @@ fn youtube_outputs(
     youtube_url: &str,
     source_lang: &Lang,
     explicit_target_langs: &[Lang],
+    output_filter: Option<&[String]>,
 ) -> Vec<SmokeOutput> {
     let mut outputs = Vec::new();
-    if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE_PASS") {
-        outputs.push(SmokeOutput {
-            label: "youtube-pass".to_string(),
-            lang: None,
-            destinations: vec![youtube_destination("youtube-pass", youtube_url, &key)],
-        });
+    if output_allowed(output_filter, "pass") {
+        if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE_PASS") {
+            if !key.trim().is_empty() {
+                outputs.push(SmokeOutput {
+                    label: "youtube-pass".to_string(),
+                    lang: None,
+                    destinations: vec![youtube_destination("youtube-pass", youtube_url, &key)],
+                });
+            }
+        }
     }
     for lang in [Lang::Ko, Lang::En, Lang::Ja, Lang::Zh] {
+        let lang_label = lang.to_string();
+        if !output_allowed(output_filter, &lang_label) {
+            continue;
+        }
         let key = format!(
             "STREAM_KEY_YOUTUBE_{}",
             lang.to_string().to_ascii_uppercase()
@@ -245,6 +266,9 @@ fn youtube_outputs(
         let Ok(stream_key) = std::env::var(&key) else {
             continue;
         };
+        if stream_key.trim().is_empty() {
+            continue;
+        }
         let label = format!("youtube-{}", lang);
         outputs.push(SmokeOutput {
             label: label.clone(),
@@ -253,6 +277,36 @@ fn youtube_outputs(
         });
     }
     outputs
+}
+
+fn parse_output_filter_env(name: &str) -> Result<Option<Vec<String>>, String> {
+    let Ok(raw) = std::env::var(name) else {
+        return Ok(None);
+    };
+    let mut outputs = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let normalized = value.to_ascii_lowercase();
+        match normalized.as_str() {
+            "pass" | "ko" | "en" | "ja" | "zh" | "legacy" => outputs.push(normalized),
+            _ => {
+                return Err(format!(
+                    "{name} contains unsupported output '{value}', expected pass,ko,en,ja,zh,legacy"
+                ));
+            }
+        }
+    }
+    Ok(Some(outputs))
+}
+
+fn output_allowed(filter: Option<&[String]>, output: &str) -> bool {
+    match filter {
+        Some(outputs) => outputs.iter().any(|candidate| candidate == output),
+        None => true,
+    }
 }
 
 fn youtube_destination(platform: &str, youtube_url: &str, key: &str) -> RtmpDestination {
