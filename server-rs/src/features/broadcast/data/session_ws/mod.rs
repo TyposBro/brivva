@@ -102,6 +102,9 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         v2_gpu_workers: state.v2_gpu_workers,
         v2_encoded_fanout: state.v2_encoded_fanout,
         video_encoder: state.video_encoder,
+        video_max_width: state.video_max_width,
+        video_max_height: state.video_max_height,
+        video_max_fps: state.video_max_fps,
     })
 }
 

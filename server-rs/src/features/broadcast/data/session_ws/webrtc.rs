@@ -24,7 +24,6 @@ use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::features::broadcast::data::ffmpeg::VideoProfile;
 use crate::features::broadcast::domain::LiveSessions;
 
 use super::timeline_shadow::{VideoTimelineShadow, timeline_shadow_enabled};
@@ -127,14 +126,18 @@ async fn apply_video_profile(
     };
     let width = client.width.unwrap_or(1920).clamp(320, 3840);
     let height = client.height.unwrap_or(1080).clamp(180, 2160);
-    let fps = client.fps.unwrap_or(30).clamp(10, 60);
-    let profile = VideoProfile::from_capture(width, height, fps);
+    let fps = client.fps.unwrap_or(30).clamp(10, 120);
     let manager = live_sessions
         .get(live_session_id)
         .and_then(|session| session.rtmp_manager.clone());
-    if let Some(manager) = manager {
-        manager.lock().await.set_video_profile(profile);
-    }
+    let profile = if let Some(manager) = manager {
+        manager
+            .lock()
+            .await
+            .set_capture_video_profile(width, height, fps)
+    } else {
+        crate::features::broadcast::data::ffmpeg::VideoProfile::from_capture(width, height, fps)
+    };
     tracing::info!(
         live_session_id = %live_session_id,
         capture_width = width,

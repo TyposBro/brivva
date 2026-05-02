@@ -136,7 +136,6 @@ pub struct SessionQuery {
 // runtime. Built once at session start from `AppConfig` so lower layers
 // never read env vars directly (CLAUDE.md §7).
 
-#[derive(Default)]
 pub struct PipelineConfig {
     pub soniox_api_key: String,
     pub soniox_ws_url: String,
@@ -164,6 +163,33 @@ pub struct PipelineConfig {
     /// FFmpeg video encoder backend for this session. Injected from
     /// orchestration so the media layer does not read env vars.
     pub video_encoder: VideoEncoderKind,
+    /// Runtime output cap for adaptive capture profiles. Weak nodes can stay
+    /// 1080p30; GPU nodes can opt into 4K/high-fps.
+    pub video_max_width: u32,
+    pub video_max_height: u32,
+    pub video_max_fps: u32,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            soniox_api_key: String::new(),
+            soniox_ws_url: String::new(),
+            elevenlabs_api_key: String::new(),
+            elevenlabs_base_url: String::new(),
+            force_default_voice: false,
+            force_rtmp_not_rtmps: false,
+            v2_output_controls: false,
+            v2_render_graph: false,
+            v2_shared_decode: false,
+            v2_gpu_workers: false,
+            v2_encoded_fanout: false,
+            video_encoder: VideoEncoderKind::X264,
+            video_max_width: 1920,
+            video_max_height: 1080,
+            video_max_fps: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -49,6 +49,9 @@ pub struct AppConfig {
     /// FFmpeg encoder backend. `x264` is portable; `nvenc` enables NVIDIA GPU
     /// encode on GPU hosts with an FFmpeg build that includes h264_nvenc.
     pub video_encoder: crate::features::broadcast::domain::VideoEncoderKind,
+    pub video_max_width: u32,
+    pub video_max_height: u32,
+    pub video_max_fps: u32,
 }
 
 impl AppConfig {
@@ -79,6 +82,9 @@ impl AppConfig {
             video_encoder: crate::features::broadcast::domain::VideoEncoderKind::from_wire(
                 &env_or_default("BRIVVA_VIDEO_ENCODER", "x264"),
             ),
+            video_max_width: env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920).clamp(640, 3840),
+            video_max_height: env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080).clamp(360, 2160),
+            video_max_fps: env_u32("BRIVVA_VIDEO_MAX_FPS", 30).clamp(15, 120),
         })
     }
 }
@@ -97,6 +103,13 @@ fn env_flag(key: &str) -> bool {
         ),
         Err(_) => false,
     }
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -131,6 +144,9 @@ mod tests {
                 "BRIVVA_V2_GPU_WORKERS",
                 "BRIVVA_V2_ENCODED_FANOUT",
                 "BRIVVA_VIDEO_ENCODER",
+                "BRIVVA_VIDEO_MAX_WIDTH",
+                "BRIVVA_VIDEO_MAX_HEIGHT",
+                "BRIVVA_VIDEO_MAX_FPS",
             ] {
                 std::env::remove_var(key);
             }
@@ -151,6 +167,9 @@ mod tests {
             cfg.video_encoder,
             crate::features::broadcast::domain::VideoEncoderKind::X264
         );
+        assert_eq!(cfg.video_max_width, 1920);
+        assert_eq!(cfg.video_max_height, 1080);
+        assert_eq!(cfg.video_max_fps, 30);
     }
 
     #[test]
@@ -233,6 +252,9 @@ mod tests {
             std::env::set_var("BRIVVA_V2_GPU_WORKERS", "yes");
             std::env::set_var("BRIVVA_V2_ENCODED_FANOUT", "on");
             std::env::set_var("BRIVVA_VIDEO_ENCODER", "h264_nvenc");
+            std::env::set_var("BRIVVA_VIDEO_MAX_WIDTH", "3840");
+            std::env::set_var("BRIVVA_VIDEO_MAX_HEIGHT", "2160");
+            std::env::set_var("BRIVVA_VIDEO_MAX_FPS", "120");
         }
 
         let cfg = AppConfig::from_env();
@@ -257,6 +279,9 @@ mod tests {
             cfg.video_encoder,
             crate::features::broadcast::domain::VideoEncoderKind::Nvenc
         );
+        assert_eq!(cfg.video_max_width, 3840);
+        assert_eq!(cfg.video_max_height, 2160);
+        assert_eq!(cfg.video_max_fps, 120);
 
         unsafe {
             for key in [
@@ -278,6 +303,9 @@ mod tests {
                 "BRIVVA_V2_GPU_WORKERS",
                 "BRIVVA_V2_ENCODED_FANOUT",
                 "BRIVVA_VIDEO_ENCODER",
+                "BRIVVA_VIDEO_MAX_WIDTH",
+                "BRIVVA_VIDEO_MAX_HEIGHT",
+                "BRIVVA_VIDEO_MAX_FPS",
             ] {
                 std::env::remove_var(key);
             }

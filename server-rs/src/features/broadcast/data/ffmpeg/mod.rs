@@ -21,7 +21,7 @@ mod mixer;
 mod orphan;
 
 use args::{FfmpegProgressAlert, FfmpegProgressMonitor, parse_tee_slave_muxer_index};
-pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
+pub use args::{VideoProfile, VideoProfileCaps, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
 use args::build_ffmpeg_args_with_profile;
@@ -157,6 +157,7 @@ impl RtmpDestination {
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
     video_profile: VideoProfile,
+    video_profile_caps: VideoProfileCaps,
     /// Optional billing counters. `None` in unit tests / paths that don't
     /// care about metrics; `Some` when the session wires one via
     /// `set_metrics`. Cloned into each drain thread so increments stay
@@ -328,6 +329,7 @@ impl RtmpManager {
         Self {
             streams: HashMap::new(),
             video_profile: VideoProfile::default(),
+            video_profile_caps: VideoProfileCaps::default(),
             metrics: None,
             video_encoder: VideoEncoderKind::X264,
         }
@@ -335,6 +337,17 @@ impl RtmpManager {
 
     pub fn set_video_encoder(&mut self, encoder: VideoEncoderKind) {
         self.video_encoder = encoder;
+    }
+
+    pub fn set_video_profile_caps(&mut self, caps: VideoProfileCaps) {
+        self.video_profile_caps = caps;
+    }
+
+    pub fn set_capture_video_profile(&mut self, width: u32, height: u32, fps: u32) -> VideoProfile {
+        let profile =
+            VideoProfile::from_capture_with_caps(width, height, fps, self.video_profile_caps);
+        self.set_video_profile(profile);
+        profile
     }
 
     pub fn set_video_profile(&mut self, profile: VideoProfile) {

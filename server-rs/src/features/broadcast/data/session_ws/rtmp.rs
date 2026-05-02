@@ -234,6 +234,13 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
     manager.set_metrics(metrics);
     manager.set_video_encoder(live_session.pipeline_config.video_encoder);
+    manager.set_video_profile_caps(
+        crate::features::broadcast::data::ffmpeg::VideoProfileCaps::new(
+            live_session.pipeline_config.video_max_width,
+            live_session.pipeline_config.video_max_height,
+            live_session.pipeline_config.video_max_fps,
+        ),
+    );
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     let output_controls_enabled = live_session.pipeline_config.v2_output_controls;

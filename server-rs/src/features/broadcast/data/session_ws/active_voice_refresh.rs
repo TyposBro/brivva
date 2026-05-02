@@ -218,6 +218,9 @@ mod tests {
                 v2_gpu_workers: false,
                 v2_encoded_fanout: false,
                 video_encoder: Default::default(),
+                video_max_width: 1920,
+                video_max_height: 1080,
+                video_max_fps: 30,
             }),
         );
         live.selected_voice_id = voice_id;

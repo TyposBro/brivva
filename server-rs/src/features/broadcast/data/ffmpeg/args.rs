@@ -13,6 +13,33 @@ pub struct VideoProfile {
     pub bufsize_kbps: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoProfileCaps {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u32,
+}
+
+impl Default for VideoProfileCaps {
+    fn default() -> Self {
+        Self {
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 30,
+        }
+    }
+}
+
+impl VideoProfileCaps {
+    pub fn new(max_width: u32, max_height: u32, max_fps: u32) -> Self {
+        Self {
+            max_width: max_width.clamp(640, 3840),
+            max_height: max_height.clamp(360, 2160),
+            max_fps: max_fps.clamp(15, 120),
+        }
+    }
+}
+
 impl Default for VideoProfile {
     fn default() -> Self {
         Self {
@@ -29,18 +56,30 @@ impl Default for VideoProfile {
 
 impl VideoProfile {
     pub fn from_capture(width: u32, height: u32, fps: u32) -> Self {
-        let input_fps = fps.clamp(30, 60);
+        Self::from_capture_with_caps(width, height, fps, VideoProfileCaps::default())
+    }
+
+    pub fn from_capture_with_caps(
+        width: u32,
+        height: u32,
+        fps: u32,
+        caps: VideoProfileCaps,
+    ) -> Self {
+        let input_fps = fps.clamp(15, 120);
         // Keep RTMP output at the actual capture tier. Upscaling a 720p
         // browser feed to 1080p made Fargate/libx264 fall below realtime until
-        // FFmpeg stopped draining stdin/FIFO and the idle watchdog restarted
-        // the stream. FFmpeg still owns the CFR clock via fps=30; it should
-        // duplicate cadence, not manufacture extra pixels.
-        let output_fps = 30;
-        let (max_width, max_height, bitrate_kbps) = if width >= 1920 && height >= 1080 {
-            (1920, 1080, 6_000)
+        // FFmpeg stopped draining stdin/FIFO. Cap by server/runtime tier so
+        // Fargate can stay conservative while GPU nodes can opt into 4K/high
+        // fps without changing media code.
+        let output_fps = input_fps.min(caps.max_fps);
+        let (max_width, max_height) = if width >= 3840 && height >= 2160 {
+            (3840.min(caps.max_width), 2160.min(caps.max_height))
+        } else if width >= 1920 && height >= 1080 {
+            (1920.min(caps.max_width), 1080.min(caps.max_height))
         } else {
-            (1280, 720, 3_500)
+            (1280.min(caps.max_width), 720.min(caps.max_height))
         };
+        let bitrate_kbps = bitrate_for(max_width, max_height, output_fps);
         Self {
             input_fps,
             output_fps,
@@ -50,6 +89,17 @@ impl VideoProfile {
             maxrate_kbps: bitrate_kbps + bitrate_kbps / 2,
             bufsize_kbps: bitrate_kbps * 3,
         }
+    }
+}
+
+fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
+    match (width, height, fps) {
+        (w, h, f) if w >= 3840 && h >= 2160 && f > 60 => 35_000,
+        (w, h, _) if w >= 3840 && h >= 2160 => 24_000,
+        (w, h, f) if w >= 1920 && h >= 1080 && f > 60 => 12_000,
+        (w, h, _) if w >= 1920 && h >= 1080 => 6_000,
+        (_, _, f) if f > 60 => 6_000,
+        _ => 3_500,
     }
 }
 
@@ -520,11 +570,41 @@ mod tests {
     #[test]
     fn video_profile_uses_720p30_for_720p_capture() {
         let profile = VideoProfile::from_capture(1280, 720, 15);
-        assert_eq!(profile.input_fps, 30);
-        assert_eq!(profile.output_fps, 30);
+        assert_eq!(profile.input_fps, 15);
+        assert_eq!(profile.output_fps, 15);
         assert_eq!(profile.max_width, 1280);
         assert_eq!(profile.max_height, 720);
         assert_eq!(profile.bitrate_kbps, 3_500);
+    }
+
+    #[test]
+    fn video_profile_can_preserve_4k120_when_runtime_caps_allow_it() {
+        let profile = VideoProfile::from_capture_with_caps(
+            3840,
+            2160,
+            120,
+            VideoProfileCaps::new(3840, 2160, 120),
+        );
+        assert_eq!(profile.input_fps, 120);
+        assert_eq!(profile.output_fps, 120);
+        assert_eq!(profile.max_width, 3840);
+        assert_eq!(profile.max_height, 2160);
+        assert_eq!(profile.bitrate_kbps, 35_000);
+    }
+
+    #[test]
+    fn video_profile_caps_high_capture_to_runtime_tier() {
+        let profile = VideoProfile::from_capture_with_caps(
+            3840,
+            2160,
+            120,
+            VideoProfileCaps::new(1920, 1080, 60),
+        );
+        assert_eq!(profile.input_fps, 120);
+        assert_eq!(profile.output_fps, 60);
+        assert_eq!(profile.max_width, 1920);
+        assert_eq!(profile.max_height, 1080);
+        assert_eq!(profile.bitrate_kbps, 6_000);
     }
 
     #[test]

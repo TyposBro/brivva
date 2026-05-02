@@ -45,6 +45,9 @@ pub struct BroadcastState {
     pub v2_encoded_fanout: bool,
     /// FFmpeg video encoder backend for live outputs.
     pub video_encoder: VideoEncoderKind,
+    pub video_max_width: u32,
+    pub video_max_height: u32,
+    pub video_max_fps: u32,
 }
 
 impl BroadcastState {
@@ -70,6 +73,9 @@ impl BroadcastState {
             v2_gpu_workers: false,
             v2_encoded_fanout: false,
             video_encoder: VideoEncoderKind::X264,
+            video_max_width: 1920,
+            video_max_height: 1080,
+            video_max_fps: 30,
         }
     }
 }
@@ -106,6 +112,9 @@ mod tests {
         assert!(!s.v2_gpu_workers);
         assert!(!s.v2_encoded_fanout);
         assert_eq!(s.video_encoder, VideoEncoderKind::X264);
+        assert_eq!(s.video_max_width, 1920);
+        assert_eq!(s.video_max_height, 1080);
+        assert_eq!(s.video_max_fps, 30);
         assert!(s.live_sessions.is_empty());
     }
 
