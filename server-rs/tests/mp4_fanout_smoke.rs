@@ -153,19 +153,11 @@ fn parse_args() -> Result<Args, String> {
     let max_width = env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920);
     let max_height = env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080);
     let max_fps = env_u32("BRIVVA_VIDEO_MAX_FPS", 30);
-    let detected = probe_mp4_video(&mp4);
-    let capture_width = env_u32(
-        "MP4_FANOUT_SMOKE_CAPTURE_WIDTH",
-        detected.map(|video| video.width).unwrap_or(max_width),
-    );
-    let capture_height = env_u32(
-        "MP4_FANOUT_SMOKE_CAPTURE_HEIGHT",
-        detected.map(|video| video.height).unwrap_or(max_height),
-    );
-    let capture_fps = env_u32(
-        "MP4_FANOUT_SMOKE_CAPTURE_FPS",
-        detected.map(|video| video.fps).unwrap_or(30),
-    );
+    let detected = probe_mp4_video(&mp4)
+        .ok_or_else(|| format!("MP4_FANOUT_SMOKE_MP4 is not a readable video file: {mp4}"))?;
+    let capture_width = env_u32("MP4_FANOUT_SMOKE_CAPTURE_WIDTH", detected.width);
+    let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", detected.height);
+    let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", detected.fps);
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
     let video_mode = parse_video_mode();
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
