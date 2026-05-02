@@ -46,7 +46,7 @@ Default full sequence:
 - `cpu_720p30`: CPU fallback ceiling, one output.
 - `many_outputs_1080p30`: all available per-language YouTube outputs.
 - `low_quality`: 720p15 input with 1080p30 caps, verifies no bad upscale/stutter.
-- `backlog_catchup`: explicit 3s audio/video catch-up window; validates backlog policy logs.
+- `backlog_catchup`: translated output with explicit 3s audio/video catch-up window; validates host audio, video, and TTS backlog policy logs.
 - `single_4k30`: one 4K output, requires `--4k-mp4`.
 - `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
 - `high_res_capped`: 4K input capped to 1080p30.
@@ -212,8 +212,9 @@ Pass: logs show degraded output clearly; process does not deadlock.
 
 ### 6. Backlog Catch-Up
 
-Goal: verify short FFmpeg/RTMP stalls preserve audio, video, and TTS within the
-live lag window before any forced drop.
+Goal: verify short FFmpeg/RTMP stalls preserve original audio, video, and TTS
+within the live lag window before any forced drop. This scenario intentionally
+selects a translated output, not `pass`, when a translated YouTube key exists.
 
 ```bash
 infisical run --env=dev --path=/ -- \

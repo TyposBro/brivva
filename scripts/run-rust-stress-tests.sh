@@ -166,6 +166,16 @@ first_available_output() {
 	return 1
 }
 
+first_translated_output() {
+	for output in ja zh en ko; do
+		if [[ "$output" != "$SOURCE_LANG" ]] && have_output_key "$output"; then
+			echo "$output"
+			return 0
+		fi
+	done
+	return 1
+}
+
 all_available_outputs() {
 	local outputs=()
 	for output in pass ko en ja zh; do
@@ -221,6 +231,7 @@ common_env=(
 )
 
 SINGLE_OUTPUT="$(first_available_output || true)"
+TRANSLATED_OUTPUT="$(first_translated_output || true)"
 MULTI_OUTPUTS="$(all_available_outputs)"
 
 if [[ -z "$SINGLE_OUTPUT" ]]; then
@@ -289,17 +300,21 @@ run_case low_quality \
 	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 	"BRIVVA_VIDEO_MAX_FPS=30"
 
-run_case backlog_catchup \
-	"${common_env[@]}" \
-	"MP4_FANOUT_SMOKE_MP4=$MP4" \
-	"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
-	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
-	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
-	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
-	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
-	"BRIVVA_VIDEO_MAX_FPS=30" \
-	"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
-	"BRIVVA_AUDIO_MAX_LAG_MS=3000"
+if [[ -z "$TRANSLATED_OUTPUT" ]]; then
+	should_run backlog_catchup && record_skip backlog_catchup "need a translated STREAM_KEY_YOUTUBE_{EN,KO,JA,ZH} different from --source"
+else
+	run_case backlog_catchup \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$TRANSLATED_OUTPUT" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
+		"BRIVVA_AUDIO_MAX_LAG_MS=3000"
+fi
 
 if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res_capped; then
 	if [[ -z "$FOUR_K_MP4" || ! -f "$FOUR_K_MP4" ]]; then
