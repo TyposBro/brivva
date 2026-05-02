@@ -25,12 +25,19 @@ struct Args {
     capture_height: u32,
     capture_fps: u32,
     subtitle: Option<String>,
+    video_mode: VideoFeedMode,
     source_lang: Lang,
     target_lang: Option<Lang>,
     soniox_api_key: String,
     soniox_ws_url: String,
     elevenlabs_api_key: String,
     elevenlabs_base_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoFeedMode {
+    CopyH264,
+    TranscodeX264,
 }
 
 #[tokio::test]
@@ -84,7 +91,7 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_health_monitor(manager.clone(), stop.clone());
-    let mut video = spawn_video_ffmpeg(&args.mp4)?;
+    let mut video = spawn_video_ffmpeg(&args.mp4, args.video_mode)?;
     let mut audio = spawn_audio_ffmpeg(&args.mp4)?;
     let video_stdout = video.stdout.take().ok_or("video ffmpeg stdout missing")?;
     let audio_stdout = audio.stdout.take().ok_or("audio ffmpeg stdout missing")?;
@@ -123,10 +130,21 @@ fn parse_args() -> Result<Args, String> {
     let max_width = env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920);
     let max_height = env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080);
     let max_fps = env_u32("BRIVVA_VIDEO_MAX_FPS", 30);
-    let capture_width = env_u32("MP4_FANOUT_SMOKE_CAPTURE_WIDTH", max_width);
-    let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", max_height);
-    let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", max_fps);
+    let detected = probe_mp4_video(&mp4);
+    let capture_width = env_u32(
+        "MP4_FANOUT_SMOKE_CAPTURE_WIDTH",
+        detected.map(|video| video.width).unwrap_or(max_width),
+    );
+    let capture_height = env_u32(
+        "MP4_FANOUT_SMOKE_CAPTURE_HEIGHT",
+        detected.map(|video| video.height).unwrap_or(max_height),
+    );
+    let capture_fps = env_u32(
+        "MP4_FANOUT_SMOKE_CAPTURE_FPS",
+        detected.map(|video| video.fps).unwrap_or(30),
+    );
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
+    let video_mode = parse_video_mode();
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
     let target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
     let soniox_api_key = std::env::var("SONIOX_API_KEY").unwrap_or_default();
@@ -168,6 +186,7 @@ fn parse_args() -> Result<Args, String> {
         capture_height,
         capture_fps,
         subtitle,
+        video_mode,
         source_lang,
         target_lang,
         soniox_api_key,
@@ -175,6 +194,68 @@ fn parse_args() -> Result<Args, String> {
         elevenlabs_api_key,
         elevenlabs_base_url,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProbedVideo {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+fn probe_mp4_video(mp4: &str) -> Option<ProbedVideo> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate",
+            "-of",
+            "csv=p=0",
+            mp4,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ffprobe_video(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_ffprobe_video(output: &str) -> Option<ProbedVideo> {
+    let line = output.lines().next()?.trim();
+    let mut parts = line.split(',');
+    let width = parts.next()?.parse().ok()?;
+    let height = parts.next()?.parse().ok()?;
+    let fps = parse_frame_rate(parts.next()?)?.clamp(15, 120);
+    Some(ProbedVideo { width, height, fps })
+}
+
+fn parse_frame_rate(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let Some((num, den)) = value.split_once('/') else {
+        return value.parse().ok();
+    };
+    let num: f64 = num.parse().ok()?;
+    let den: f64 = den.parse().ok()?;
+    if den == 0.0 {
+        return None;
+    }
+    Some((num / den).round() as u32)
+}
+
+fn parse_video_mode() -> VideoFeedMode {
+    match std::env::var("MP4_FANOUT_SMOKE_VIDEO_MODE")
+        .unwrap_or_else(|_| "copy-h264".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "transcode" | "x264" | "transcode-x264" => VideoFeedMode::TranscodeX264,
+        _ => VideoFeedMode::CopyH264,
+    }
 }
 
 fn spawn_translation_pipeline(
@@ -240,28 +321,42 @@ fn env_u32(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-fn spawn_video_ffmpeg(mp4: &str) -> std::io::Result<tokio::process::Child> {
-    Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-re",
-            "-stream_loop",
-            "-1",
-            "-i",
-            mp4,
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-f",
-            "h264",
-            "pipe:1",
-        ])
+fn spawn_video_ffmpeg(mp4: &str, mode: VideoFeedMode) -> std::io::Result<tokio::process::Child> {
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-re",
+        "-stream_loop",
+        "-1",
+        "-i",
+        mp4,
+        "-an",
+    ]);
+    match mode {
+        VideoFeedMode::CopyH264 => {
+            // Best isolation mode for H.264 MP4 fixtures: avoid burning CPU
+            // on a pre-server encode, feed Annex-B into RtmpManager, then let
+            // the server's FFmpeg path own the only RTMP encode.
+            command.args(["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]);
+        }
+        VideoFeedMode::TranscodeX264 => {
+            // Fallback for non-H.264 source files. This is intentionally
+            // labelled as less ideal because it adds a decode+encode before
+            // the server path and can starve YouTube on weak machines.
+            command.args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+            ]);
+        }
+    }
+    command
+        .args(["-f", "h264", "pipe:1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()

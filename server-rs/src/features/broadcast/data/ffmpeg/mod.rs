@@ -344,10 +344,26 @@ impl RtmpManager {
     }
 
     pub fn set_capture_video_profile(&mut self, width: u32, height: u32, fps: u32) -> VideoProfile {
-        let profile =
-            VideoProfile::from_capture_with_caps(width, height, fps, self.video_profile_caps);
+        let caps = self.effective_video_profile_caps();
+        let profile = VideoProfile::from_capture_with_caps(width, height, fps, caps);
         self.set_video_profile(profile);
         profile
+    }
+
+    fn effective_video_profile_caps(&self) -> VideoProfileCaps {
+        if self.video_encoder == VideoEncoderKind::X264 && self.video_profile_caps.max_fps > 30 {
+            tracing::warn!(
+                requested_max_fps = self.video_profile_caps.max_fps,
+                effective_max_fps = 30,
+                video_encoder = self.video_encoder.codec_name(),
+                "x264 live encode capped to 30fps; use BRIVVA_VIDEO_ENCODER=nvenc for high-fps output"
+            );
+            return VideoProfileCaps {
+                max_fps: 30,
+                ..self.video_profile_caps
+            };
+        }
+        self.video_profile_caps
     }
 
     pub fn set_video_profile(&mut self, profile: VideoProfile) {
