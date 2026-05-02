@@ -15,7 +15,7 @@ use tokio::process::Command;
 #[derive(Debug)]
 struct Args {
     mp4: String,
-    rtmp: Vec<RtmpDestination>,
+    outputs: Vec<SmokeOutput>,
     duration_secs: u64,
     encoder: VideoEncoderKind,
     max_width: u32,
@@ -27,11 +27,30 @@ struct Args {
     subtitle: Option<String>,
     video_mode: VideoFeedMode,
     source_lang: Lang,
-    target_lang: Option<Lang>,
     soniox_api_key: String,
     soniox_ws_url: String,
     elevenlabs_api_key: String,
     elevenlabs_base_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct SmokeOutput {
+    label: String,
+    lang: Option<Lang>,
+    destinations: Vec<RtmpDestination>,
+}
+
+impl SmokeOutput {
+    fn is_passthrough(&self, source_lang: &Lang) -> bool {
+        self.lang.as_ref().is_none_or(|lang| lang == source_lang)
+    }
+
+    fn output_lang(&self) -> String {
+        self.lang
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "pass".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,39 +74,44 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
         args.max_fps,
     ));
     manager.set_capture_video_profile(args.capture_width, args.capture_height, args.capture_fps);
-    let output_lang = args
-        .target_lang
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "pass".to_string());
-    let is_passthrough = args.target_lang.is_none();
-    manager.start_stream_group(StartStreamGroupArgs {
-        stream_id: "mp4-fanout-smoke",
-        lang: &output_lang,
-        rtmp_urls: args.rtmp.iter().map(|dest| dest.url.clone()).collect(),
-        destinations: args.rtmp.clone(),
-        delay_ms: 0,
-        is_source: is_passthrough,
-        host_gain: if is_passthrough { 1.0 } else { 0.2 },
-        output_id: None,
-        destination_platform: "mp4-smoke",
-        output_controls_enabled: true,
-        render_graph_node: None,
-        passthrough: is_passthrough,
-    })?;
-    if let Some(subtitle) = &args.subtitle {
-        manager.push_subtitle(&output_lang, subtitle);
+    for output in &args.outputs {
+        let output_lang = output.output_lang();
+        let is_passthrough = output.is_passthrough(&args.source_lang);
+        manager.start_stream_group(StartStreamGroupArgs {
+            stream_id: &format!("mp4-fanout-smoke-{}", output.label),
+            lang: &output_lang,
+            rtmp_urls: output
+                .destinations
+                .iter()
+                .map(|dest| dest.url.clone())
+                .collect(),
+            destinations: output.destinations.clone(),
+            delay_ms: 0,
+            is_source: is_passthrough,
+            host_gain: if is_passthrough { 1.0 } else { 0.2 },
+            output_id: None,
+            destination_platform: &output.label,
+            output_controls_enabled: true,
+            render_graph_node: None,
+            passthrough: is_passthrough,
+        })?;
+        if let Some(subtitle) = &args.subtitle
+            && !is_passthrough
+        {
+            manager.push_subtitle(&output_lang, subtitle);
+        }
     }
 
     let manager: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(manager));
-    let stt_tx = if let Some(target_lang) = args.target_lang.clone() {
+    let target_langs = target_langs_for_translation(&args.outputs, &args.source_lang);
+    let stt_tx = if target_langs.is_empty() {
+        None
+    } else {
         Some(spawn_translation_pipeline(
             &args,
             manager.clone(),
-            target_lang,
+            target_langs,
         ))
-    } else {
-        None
     };
     let stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_health_monitor(manager.clone(), stop.clone());
@@ -122,7 +146,6 @@ fn init_tracing() {
 fn parse_args() -> Result<Args, String> {
     let mp4 = std::env::var("MP4_FANOUT_SMOKE_MP4")
         .map_err(|_| "MP4_FANOUT_SMOKE_MP4 env var required".to_string())?;
-    let mut rtmp = Vec::new();
     let duration_secs = env_u32("MP4_FANOUT_SMOKE_DURATION", 180) as u64;
     let encoder = VideoEncoderKind::from_wire(
         &std::env::var("MP4_FANOUT_SMOKE_ENCODER").unwrap_or_else(|_| "x264".to_string()),
@@ -146,7 +169,8 @@ fn parse_args() -> Result<Args, String> {
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
     let video_mode = parse_video_mode();
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
-    let target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
+    let explicit_target_langs = parse_target_langs_env("MP4_FANOUT_SMOKE_TARGET_LANGS")?;
+    let legacy_target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
     let soniox_api_key = std::env::var("SONIOX_API_KEY").unwrap_or_default();
     let soniox_ws_url = std::env::var("SONIOX_WS_URL")
         .unwrap_or_else(|_| "wss://stt-rt.soniox.com/transcribe-websocket".to_string());
@@ -155,11 +179,10 @@ fn parse_args() -> Result<Args, String> {
         .unwrap_or_else(|_| "https://api.elevenlabs.io".to_string());
     let youtube_url = std::env::var("YOUTUBE_RTMP_URL")
         .unwrap_or_else(|_| "rtmp://a.rtmp.youtube.com/live2".to_string());
+    let mut outputs = youtube_outputs(&youtube_url, &source_lang, &explicit_target_langs);
+    let mut legacy_rtmp = Vec::new();
     if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
-        rtmp.push(RtmpDestination::new(
-            "youtube",
-            format!("{}/{}", youtube_url.trim_end_matches('/'), key),
-        ));
+        legacy_rtmp.push(youtube_destination("youtube", &youtube_url, &key));
     }
     for (idx, url) in std::env::var("MP4_FANOUT_SMOKE_RTMP_URLS")
         .unwrap_or_default()
@@ -168,15 +191,26 @@ fn parse_args() -> Result<Args, String> {
         .filter(|url| !url.is_empty())
         .enumerate()
     {
-        rtmp.push(RtmpDestination::new(format!("rtmp{idx}"), url.to_string()));
+        legacy_rtmp.push(RtmpDestination::new(format!("rtmp{idx}"), url.to_string()));
     }
 
-    if rtmp.is_empty() {
-        return Err("provide STREAM_KEY_YOUTUBE or MP4_FANOUT_SMOKE_RTMP_URLS".to_string());
+    if !legacy_rtmp.is_empty() {
+        outputs.push(SmokeOutput {
+            label: "legacy".to_string(),
+            lang: legacy_target_lang,
+            destinations: legacy_rtmp,
+        });
+    }
+
+    if outputs.is_empty() {
+        return Err(
+            "provide STREAM_KEY_YOUTUBE, STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}, or MP4_FANOUT_SMOKE_RTMP_URLS"
+                .to_string(),
+        );
     }
     Ok(Args {
         mp4,
-        rtmp,
+        outputs,
         duration_secs,
         encoder,
         max_width,
@@ -188,12 +222,69 @@ fn parse_args() -> Result<Args, String> {
         subtitle,
         video_mode,
         source_lang,
-        target_lang,
         soniox_api_key,
         soniox_ws_url,
         elevenlabs_api_key,
         elevenlabs_base_url,
     })
+}
+
+fn youtube_outputs(
+    youtube_url: &str,
+    source_lang: &Lang,
+    explicit_target_langs: &[Lang],
+) -> Vec<SmokeOutput> {
+    let mut outputs = Vec::new();
+    if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE_PASS") {
+        outputs.push(SmokeOutput {
+            label: "youtube-pass".to_string(),
+            lang: None,
+            destinations: vec![youtube_destination("youtube-pass", youtube_url, &key)],
+        });
+    }
+    for lang in [Lang::Ko, Lang::En, Lang::Ja, Lang::Zh] {
+        let key = format!(
+            "STREAM_KEY_YOUTUBE_{}",
+            lang.to_string().to_ascii_uppercase()
+        );
+        let should_include = std::env::var(&key).is_ok()
+            || explicit_target_langs.contains(&lang)
+            || (&lang == source_lang && explicit_target_langs.is_empty());
+        if !should_include {
+            continue;
+        }
+        let Ok(stream_key) = std::env::var(&key) else {
+            continue;
+        };
+        let label = format!("youtube-{}", lang);
+        outputs.push(SmokeOutput {
+            label: label.clone(),
+            lang: Some(lang),
+            destinations: vec![youtube_destination(&label, youtube_url, &stream_key)],
+        });
+    }
+    outputs
+}
+
+fn youtube_destination(platform: &str, youtube_url: &str, key: &str) -> RtmpDestination {
+    RtmpDestination::new(
+        platform,
+        format!("{}/{}", youtube_url.trim_end_matches('/'), key),
+    )
+}
+
+fn target_langs_for_translation(outputs: &[SmokeOutput], source_lang: &Lang) -> Vec<Lang> {
+    let mut langs = Vec::new();
+    for output in outputs {
+        let Some(lang) = &output.lang else {
+            continue;
+        };
+        if lang == source_lang || langs.contains(lang) {
+            continue;
+        }
+        langs.push(lang.clone());
+    }
+    langs
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -261,7 +352,7 @@ fn parse_video_mode() -> VideoFeedMode {
 fn spawn_translation_pipeline(
     args: &Args,
     manager: SharedRtmpManager,
-    target_lang: Lang,
+    target_langs: Vec<Lang>,
 ) -> tokio::sync::mpsc::Sender<Vec<u8>> {
     let sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
     let mut live = LiveSession::new(
@@ -282,7 +373,7 @@ fn spawn_translation_pipeline(
     let session = PipelineSession {
         handle: LiveSessionHandle::new("mp4-fanout-smoke".to_string(), sessions),
         source_lang: args.source_lang.clone(),
-        target_langs: vec![target_lang],
+        target_langs,
         config: Arc::new(PipelineConfig {
             soniox_api_key: args.soniox_api_key.clone(),
             soniox_ws_url: args.soniox_ws_url.clone(),
@@ -312,6 +403,27 @@ fn parse_optional_lang_env(key: &str) -> Result<Option<Lang>, String> {
     Lang::from_str(&value)
         .map(Some)
         .ok_or_else(|| format!("{key} must be pass|en|ko|ja|zh"))
+}
+
+fn parse_target_langs_env(key: &str) -> Result<Vec<Lang>, String> {
+    let Ok(value) = std::env::var(key) else {
+        return Ok(Vec::new());
+    };
+    let mut langs = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if part.eq_ignore_ascii_case("pass") {
+            continue;
+        }
+        let lang = Lang::from_str(part).ok_or_else(|| format!("{key} must contain en,ko,ja,zh"))?;
+        if !langs.contains(&lang) {
+            langs.push(lang);
+        }
+    }
+    Ok(langs)
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
