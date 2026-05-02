@@ -66,6 +66,10 @@ STREAM_KEY_YOUTUBE_ZH
 `MP4_FANOUT_SMOKE_SOURCE_LANG=ko`, is also original. Other languages use
 translated TTS and burned subtitles.
 
+The smoke feeder auto-detects the MP4 video codec. H.264 fixtures use copy mode.
+AV1/HEVC/other fixtures transcode to H.264 before entering the Rust server path;
+with `MP4_FANOUT_SMOKE_ENCODER=nvenc`, that feeder transcode uses `h264_nvenc`.
+
 ## Signals
 
 Good:

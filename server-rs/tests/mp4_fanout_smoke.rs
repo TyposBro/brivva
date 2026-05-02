@@ -57,6 +57,7 @@ impl SmokeOutput {
 enum VideoFeedMode {
     CopyH264,
     TranscodeX264,
+    TranscodeNvenc,
 }
 
 #[tokio::test]
@@ -159,7 +160,7 @@ fn parse_args() -> Result<Args, String> {
     let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", detected.height);
     let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", detected.fps);
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
-    let video_mode = parse_video_mode();
+    let video_mode = parse_video_mode(&detected.codec, encoder);
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
     let explicit_target_langs = parse_target_langs_env("MP4_FANOUT_SMOKE_TARGET_LANGS")?;
     let legacy_target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
@@ -279,8 +280,9 @@ fn target_langs_for_translation(outputs: &[SmokeOutput], source_lang: &Lang) -> 
     langs
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ProbedVideo {
+    codec: String,
     width: u32,
     height: u32,
     fps: u32,
@@ -294,7 +296,7 @@ fn probe_mp4_video(mp4: &str) -> Option<ProbedVideo> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,avg_frame_rate",
+            "stream=codec_name,width,height,avg_frame_rate",
             "-of",
             "csv=p=0",
             mp4,
@@ -310,10 +312,16 @@ fn probe_mp4_video(mp4: &str) -> Option<ProbedVideo> {
 fn parse_ffprobe_video(output: &str) -> Option<ProbedVideo> {
     let line = output.lines().next()?.trim();
     let mut parts = line.split(',');
+    let codec = parts.next()?.to_string();
     let width = parts.next()?.parse().ok()?;
     let height = parts.next()?.parse().ok()?;
     let fps = parse_frame_rate(parts.next()?)?.clamp(15, 120);
-    Some(ProbedVideo { width, height, fps })
+    Some(ProbedVideo {
+        codec,
+        width,
+        height,
+        fps,
+    })
 }
 
 fn parse_frame_rate(value: &str) -> Option<u32> {
@@ -329,13 +337,14 @@ fn parse_frame_rate(value: &str) -> Option<u32> {
     Some((num / den).round() as u32)
 }
 
-fn parse_video_mode() -> VideoFeedMode {
-    match std::env::var("MP4_FANOUT_SMOKE_VIDEO_MODE")
-        .unwrap_or_else(|_| "copy-h264".to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+fn parse_video_mode(codec: &str, encoder: VideoEncoderKind) -> VideoFeedMode {
+    let mode = std::env::var("MP4_FANOUT_SMOKE_VIDEO_MODE").unwrap_or_default();
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" if codec.eq_ignore_ascii_case("h264") => VideoFeedMode::CopyH264,
+        "" if encoder == VideoEncoderKind::Nvenc => VideoFeedMode::TranscodeNvenc,
+        "" => VideoFeedMode::TranscodeX264,
+        "copy" | "h264" | "copy-h264" => VideoFeedMode::CopyH264,
+        "nvenc" | "transcode-nvenc" | "h264_nvenc" => VideoFeedMode::TranscodeNvenc,
         "transcode" | "x264" | "transcode-x264" => VideoFeedMode::TranscodeX264,
         _ => VideoFeedMode::CopyH264,
     }
@@ -456,6 +465,24 @@ fn spawn_video_ffmpeg(mp4: &str, mode: VideoFeedMode) -> std::io::Result<tokio::
                 "ultrafast",
                 "-tune",
                 "zerolatency",
+            ]);
+        }
+        VideoFeedMode::TranscodeNvenc => {
+            command.args([
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-tune",
+                "ll",
+                "-rc",
+                "cbr",
+                "-b:v",
+                "24M",
+                "-maxrate",
+                "24M",
+                "-bufsize",
+                "48M",
             ]);
         }
     }
