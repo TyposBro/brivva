@@ -224,6 +224,7 @@ async fn forward_track_rtp(
     let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
     let mut depacketizer = H264AnnexBDepacketizer::default();
     let mut clock = VideoRtpClock::default();
+    let mut fps_estimator = VideoFpsEstimator::default();
     let mut timeline_shadow = timeline_shadow.then(VideoTimelineShadow::default);
     while let Ok((packet, _)) = track.read_rtp().await {
         let Some(annex_b) = depacketizer.depacketize(&packet) else {
@@ -251,6 +252,16 @@ async fn forward_track_rtp(
         let Some(manager) = manager else {
             break;
         };
+        if let Some(fps) = fps_estimator.observe(packet.header.timestamp) {
+            let profile = manager.lock().await.set_observed_video_fps(fps);
+            tracing::info!(
+                live_session_id = %live_session_id,
+                observed_fps = fps,
+                input_fps = profile.input_fps,
+                output_fps = profile.output_fps,
+                "webrtc video fps corrected from RTP timestamps"
+            );
+        }
         manager
             .lock()
             .await
@@ -288,6 +299,47 @@ fn spawn_periodic_pli(
             );
         }
     })
+}
+
+#[derive(Default)]
+struct VideoFpsEstimator {
+    first_rtp_ts: Option<u32>,
+    last_rtp_ts: Option<u32>,
+    access_units: u32,
+    applied_fps: Option<u32>,
+}
+
+impl VideoFpsEstimator {
+    const RTP_HZ: f64 = 90_000.0;
+    const MIN_ACCESS_UNITS: u32 = 60;
+
+    fn observe(&mut self, rtp_ts: u32) -> Option<u32> {
+        if self.last_rtp_ts == Some(rtp_ts) {
+            return None;
+        }
+        let first = *self.first_rtp_ts.get_or_insert(rtp_ts);
+        self.last_rtp_ts = Some(rtp_ts);
+        self.access_units = self.access_units.saturating_add(1);
+        if self.access_units < Self::MIN_ACCESS_UNITS {
+            return None;
+        }
+        let elapsed_ticks = rtp_ts.wrapping_sub(first);
+        if elapsed_ticks == 0 {
+            return None;
+        }
+        let fps = ((self.access_units.saturating_sub(1)) as f64 * Self::RTP_HZ
+            / elapsed_ticks as f64)
+            .round() as u32;
+        let fps = fps.clamp(15, 120);
+        if self
+            .applied_fps
+            .is_some_and(|applied| applied.abs_diff(fps) < 2)
+        {
+            return None;
+        }
+        self.applied_fps = Some(fps);
+        Some(fps)
+    }
 }
 
 #[derive(Default)]
@@ -513,6 +565,28 @@ mod tests {
         let first = clock.instant_for(10_000);
         let second = clock.instant_for(13_000);
         assert_eq!(second.duration_since(first), Duration::from_micros(33_333));
+    }
+
+    #[test]
+    fn video_fps_estimator_derives_fps_from_rtp_timestamps() {
+        let mut estimator = VideoFpsEstimator::default();
+        let mut observed = None;
+        for frame in 0..60 {
+            observed = estimator.observe(10_000 + frame * 3_000).or(observed);
+        }
+        assert_eq!(observed, Some(30));
+    }
+
+    #[test]
+    fn video_fps_estimator_ignores_duplicate_access_unit_timestamp() {
+        let mut estimator = VideoFpsEstimator::default();
+        let mut observed = None;
+        for frame in 0..60 {
+            let ts = 10_000 + frame * 1_500;
+            observed = estimator.observe(ts).or(observed);
+            observed = estimator.observe(ts).or(observed);
+        }
+        assert_eq!(observed, Some(60));
     }
 
     #[test]
