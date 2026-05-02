@@ -1,7 +1,11 @@
 use server_rs::features::broadcast::data::ffmpeg::{
-    RtmpDestination, RtmpManager, StartStreamGroupArgs, VideoProfileCaps, spawn_health_monitor,
+    RtmpDestination, RtmpManager, SharedRtmpManager, StartStreamGroupArgs, VideoProfileCaps,
+    spawn_health_monitor,
 };
-use server_rs::features::broadcast::domain::VideoEncoderKind;
+use server_rs::features::broadcast::data::pipeline::{PipelineSession, start_stt_pipelines};
+use server_rs::features::broadcast::domain::{
+    Lang, LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig, VideoEncoderKind,
+};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -21,6 +25,12 @@ struct Args {
     capture_height: u32,
     capture_fps: u32,
     subtitle: Option<String>,
+    source_lang: Lang,
+    target_lang: Option<Lang>,
+    soniox_api_key: String,
+    soniox_ws_url: String,
+    elevenlabs_api_key: String,
+    elevenlabs_base_url: String,
 }
 
 #[tokio::test]
@@ -38,25 +48,40 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
         args.max_fps,
     ));
     manager.set_capture_video_profile(args.capture_width, args.capture_height, args.capture_fps);
+    let output_lang = args
+        .target_lang
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "pass".to_string());
+    let is_passthrough = args.target_lang.is_none();
     manager.start_stream_group(StartStreamGroupArgs {
         stream_id: "mp4-fanout-smoke",
-        lang: "pass",
+        lang: &output_lang,
         rtmp_urls: args.rtmp.iter().map(|dest| dest.url.clone()).collect(),
         destinations: args.rtmp.clone(),
         delay_ms: 0,
-        is_source: true,
-        host_gain: 1.0,
+        is_source: is_passthrough,
+        host_gain: if is_passthrough { 1.0 } else { 0.2 },
         output_id: None,
         destination_platform: "mp4-smoke",
         output_controls_enabled: true,
         render_graph_node: None,
-        passthrough: true,
+        passthrough: is_passthrough,
     })?;
     if let Some(subtitle) = &args.subtitle {
-        manager.push_subtitle("pass", subtitle);
+        manager.push_subtitle(&output_lang, subtitle);
     }
 
-    let manager = Arc::new(tokio::sync::Mutex::new(manager));
+    let manager: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(manager));
+    let stt_tx = if let Some(target_lang) = args.target_lang.clone() {
+        Some(spawn_translation_pipeline(
+            &args,
+            manager.clone(),
+            target_lang,
+        ))
+    } else {
+        None
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_health_monitor(manager.clone(), stop.clone());
     let mut video = spawn_video_ffmpeg(&args.mp4)?;
@@ -64,7 +89,7 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let video_stdout = video.stdout.take().ok_or("video ffmpeg stdout missing")?;
     let audio_stdout = audio.stdout.take().ok_or("audio ffmpeg stdout missing")?;
     let video_task = tokio::spawn(feed_h264(manager.clone(), video_stdout));
-    let audio_task = tokio::spawn(feed_pcm(manager.clone(), audio_stdout));
+    let audio_task = tokio::spawn(feed_pcm(manager.clone(), stt_tx, audio_stdout));
 
     tokio::time::sleep(Duration::from_secs(args.duration_secs)).await;
     stop.store(true, std::sync::atomic::Ordering::Release);
@@ -102,6 +127,14 @@ fn parse_args() -> Result<Args, String> {
     let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", max_height);
     let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", max_fps);
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
+    let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
+    let target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
+    let soniox_api_key = std::env::var("SONIOX_API_KEY").unwrap_or_default();
+    let soniox_ws_url = std::env::var("SONIOX_WS_URL")
+        .unwrap_or_else(|_| "wss://stt-rt.soniox.com/transcribe-websocket".to_string());
+    let elevenlabs_api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+    let elevenlabs_base_url = std::env::var("ELEVENLABS_BASE_URL")
+        .unwrap_or_else(|_| "https://api.elevenlabs.io".to_string());
     let youtube_url = std::env::var("YOUTUBE_RTMP_URL")
         .unwrap_or_else(|_| "rtmp://a.rtmp.youtube.com/live2".to_string());
     if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
@@ -135,7 +168,69 @@ fn parse_args() -> Result<Args, String> {
         capture_height,
         capture_fps,
         subtitle,
+        source_lang,
+        target_lang,
+        soniox_api_key,
+        soniox_ws_url,
+        elevenlabs_api_key,
+        elevenlabs_base_url,
     })
+}
+
+fn spawn_translation_pipeline(
+    args: &Args,
+    manager: SharedRtmpManager,
+    target_lang: Lang,
+) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+    let sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
+    let mut live = LiveSession::new(
+        "mp4-fanout-smoke".to_string(),
+        args.source_lang.clone(),
+        None,
+        Arc::new(PipelineConfig {
+            soniox_api_key: args.soniox_api_key.clone(),
+            soniox_ws_url: args.soniox_ws_url.clone(),
+            elevenlabs_api_key: args.elevenlabs_api_key.clone(),
+            elevenlabs_base_url: args.elevenlabs_base_url.clone(),
+            ..Default::default()
+        }),
+    );
+    live.rtmp_manager = Some(manager);
+    sessions.insert("mp4-fanout-smoke".to_string(), live);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let session = PipelineSession {
+        handle: LiveSessionHandle::new("mp4-fanout-smoke".to_string(), sessions),
+        source_lang: args.source_lang.clone(),
+        target_langs: vec![target_lang],
+        config: Arc::new(PipelineConfig {
+            soniox_api_key: args.soniox_api_key.clone(),
+            soniox_ws_url: args.soniox_ws_url.clone(),
+            elevenlabs_api_key: args.elevenlabs_api_key.clone(),
+            elevenlabs_base_url: args.elevenlabs_base_url.clone(),
+            ..Default::default()
+        }),
+    };
+    tokio::spawn(start_stt_pipelines(session, rx));
+    tx
+}
+
+fn parse_lang_env(key: &str, default: Lang) -> Result<Lang, String> {
+    match std::env::var(key) {
+        Ok(value) => Lang::from_str(&value).ok_or_else(|| format!("{key} must be en|ko|ja|zh")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_optional_lang_env(key: &str) -> Result<Option<Lang>, String> {
+    let Ok(value) = std::env::var(key) else {
+        return Ok(None);
+    };
+    if value == "pass" || value.is_empty() {
+        return Ok(None);
+    }
+    Lang::from_str(&value)
+        .map(Some)
+        .ok_or_else(|| format!("{key} must be pass|en|ko|ja|zh"))
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
@@ -216,6 +311,7 @@ async fn feed_h264(
 
 async fn feed_pcm(
     manager: Arc<tokio::sync::Mutex<RtmpManager>>,
+    stt_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     stdout: tokio::process::ChildStdout,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -224,6 +320,10 @@ async fn feed_pcm(
         if reader.read_exact(&mut buf).await.is_err() {
             break;
         }
-        manager.lock().await.push_host_audio(&buf);
+        let chunk = buf.clone();
+        manager.lock().await.push_host_audio(&chunk);
+        if let Some(tx) = &stt_tx {
+            let _ = tx.try_send(chunk);
+        }
     }
 }
