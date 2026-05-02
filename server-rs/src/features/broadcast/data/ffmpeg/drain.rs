@@ -21,6 +21,7 @@ fn now_unix_ms() -> i64 {
 }
 
 use super::mixer::{apply_gain, mix_pcm_s16le};
+use super::{TtsSegment, tts_queue_bytes};
 use crate::features::broadcast::domain::SessionMetrics;
 
 /// Audio: 20 ms per tick.
@@ -44,6 +45,9 @@ const DEFAULT_AUDIO_MAX_READY_TICKS: usize = 150;
 /// next tick continue on wall clock instead of accumulating seconds of stale
 /// audio that later replays late.
 const AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(18);
+const TTS_CATCHUP_START_BYTES: usize = 2 * 88_200;
+const TTS_CATCHUP_STRONG_BYTES: usize = 5 * 88_200;
+const TTS_CATCHUP_CRITICAL_BYTES: usize = 10 * 88_200;
 
 pub(super) type TimedChunk = (Instant, Arc<[u8]>);
 
@@ -276,7 +280,7 @@ fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
 pub(super) struct AudioDrainCtx {
     pub stream_id: String,
     pub host_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    pub tts_queue: Arc<StdMutex<VecDeque<u8>>>,
+    pub tts_queue: Arc<StdMutex<VecDeque<TtsSegment>>>,
     pub fifo_path: String,
     pub delay: Duration,
     pub is_source: bool,
@@ -331,14 +335,21 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
         tick_count += 1;
         if actual.duration_since(last_stats) >= Duration::from_secs(1) {
             let host_buffered_chunks = host_buf.lock().unwrap().len();
-            let tts_buffered_bytes = tts_queue.lock().unwrap().len();
+            let (tts_buffered_bytes, tts_buffered_segments) = {
+                let q = tts_queue.lock().unwrap();
+                (tts_queue_bytes(&q), q.len())
+            };
+            let tts_playback_speed = tts_catchup_speed(tts_buffered_bytes);
             eprintln!(
-                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} fifo_would_blocks={} fifo_skipped_ticks={} host_audio_stale_chunks_dropped={} ready_host_bytes_dropped={}",
+                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} tts_buffered_segments={} tts_playback_speed={:.2} tts_catchup_active={} fifo_would_blocks={} fifo_skipped_ticks={} host_audio_stale_chunks_dropped={} ready_host_bytes_dropped={}",
                 stream_id,
                 tick_count,
                 host_buffered_chunks,
                 ready_host.len(),
                 tts_buffered_bytes,
+                tts_buffered_segments,
+                tts_playback_speed,
+                tts_playback_speed > 1.0,
                 fifo_would_blocks,
                 fifo_skipped_ticks,
                 host_stale_chunks_dropped,
@@ -593,7 +604,7 @@ struct TickOutputArgs<'a> {
     host_chunk: Vec<u8>,
     is_source: bool,
     host_gain: f32,
-    tts_queue: &'a StdMutex<VecDeque<u8>>,
+    tts_queue: &'a StdMutex<VecDeque<TtsSegment>>,
 }
 
 struct TickOutput {
@@ -622,8 +633,13 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
     } else {
         let (mut tts_padded, tts_bytes_consumed): (Vec<u8>, usize) = {
             let q = tts_queue.lock().unwrap();
-            let n = AUDIO_BYTES_PER_TICK.min(q.len());
-            (q.iter().take(n).copied().collect(), n)
+            let backlog_bytes = tts_queue_bytes(&q);
+            let speed = tts_catchup_speed(backlog_bytes);
+            let consume = ((AUDIO_BYTES_PER_TICK as f32) * speed).round() as usize;
+            let consume = consume.max(AUDIO_BYTES_PER_TICK);
+            let raw = peek_tts_bytes(&q, consume);
+            let out = resample_pcm_s16le_mono_nearest(&raw, AUDIO_BYTES_PER_TICK);
+            (out, raw.len())
         };
         if tts_padded.len() < AUDIO_BYTES_PER_TICK {
             tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
@@ -635,13 +651,79 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
     }
 }
 
-fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<u8>>, bytes: usize) {
+fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<TtsSegment>>, bytes: usize) {
     if bytes == 0 {
         return;
     }
     let mut q = tts_queue.lock().unwrap();
-    let drain = bytes.min(q.len());
-    q.drain(..drain);
+    drain_tts_segment_bytes(&mut q, bytes);
+}
+
+fn tts_catchup_speed(backlog_bytes: usize) -> f32 {
+    if backlog_bytes >= TTS_CATCHUP_CRITICAL_BYTES {
+        1.5
+    } else if backlog_bytes >= TTS_CATCHUP_STRONG_BYTES {
+        1.35
+    } else if backlog_bytes >= TTS_CATCHUP_START_BYTES {
+        1.15
+    } else {
+        1.0
+    }
+}
+
+fn peek_tts_bytes(queue: &VecDeque<TtsSegment>, bytes: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes);
+    for segment in queue {
+        let remaining = bytes.saturating_sub(out.len());
+        if remaining == 0 {
+            break;
+        }
+        out.extend_from_slice(&segment.pcm[..remaining.min(segment.pcm.len())]);
+    }
+    out
+}
+
+fn drain_tts_segment_bytes(queue: &mut VecDeque<TtsSegment>, mut bytes: usize) {
+    while bytes > 0 {
+        let Some(front) = queue.pop_front() else {
+            break;
+        };
+        if bytes >= front.pcm.len() {
+            bytes -= front.pcm.len();
+            continue;
+        }
+        let remaining = front.pcm[bytes..].to_vec();
+        queue.push_front(TtsSegment::new(
+            front.utterance_id,
+            front.sentence_id,
+            front.lang,
+            front.text,
+            remaining,
+        ));
+        break;
+    }
+}
+
+fn resample_pcm_s16le_mono_nearest(input: &[u8], output_bytes: usize) -> Vec<u8> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    let output_bytes = output_bytes - (output_bytes % 2);
+    let in_samples = input.len() / 2;
+    let out_samples = output_bytes / 2;
+    if in_samples == 0 || out_samples == 0 {
+        return Vec::new();
+    }
+    if in_samples == out_samples {
+        return input[..output_bytes.min(input.len())].to_vec();
+    }
+    let mut out = Vec::with_capacity(output_bytes);
+    for i in 0..out_samples {
+        let src_sample = i.saturating_mul(in_samples) / out_samples;
+        let src = (src_sample * 2).min(input.len().saturating_sub(2));
+        out.extend_from_slice(&input[src..src + 2]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -653,6 +735,14 @@ mod tests {
 
     fn chunk(bytes: Vec<u8>) -> Arc<[u8]> {
         Arc::from(bytes)
+    }
+
+    fn tts(bytes: Vec<u8>) -> TtsSegment {
+        TtsSegment::new(1, 1, "ja".into(), "hello".into(), bytes)
+    }
+
+    fn tts_queue(bytes: Vec<u8>) -> StdMutex<VecDeque<TtsSegment>> {
+        StdMutex::new(VecDeque::from(vec![tts(bytes)]))
     }
 
     #[test]
@@ -685,7 +775,7 @@ mod tests {
 
     #[test]
     fn build_tick_output_source_stream_bypasses_mix_at_unit_gain() {
-        let q: StdMutex<VecDeque<u8>> = StdMutex::new(VecDeque::new());
+        let q: StdMutex<VecDeque<TtsSegment>> = StdMutex::new(VecDeque::new());
         let host = vec![0x10, 0x27];
         let out = build_tick_output(TickOutputArgs {
             host_chunk: host.clone(),
@@ -699,7 +789,7 @@ mod tests {
 
     #[test]
     fn build_tick_output_source_stream_applies_gain_when_not_unit() {
-        let q: StdMutex<VecDeque<u8>> = StdMutex::new(VecDeque::new());
+        let q: StdMutex<VecDeque<TtsSegment>> = StdMutex::new(VecDeque::new());
         let out = build_tick_output(TickOutputArgs {
             host_chunk: vec![0x10, 0x27], // 10_000 → *0.5 = 5_000
             is_source: true,
@@ -713,11 +803,9 @@ mod tests {
 
     #[test]
     fn build_tick_output_target_stream_mixes_host_with_tts_queue() {
-        let mut q: VecDeque<u8> = VecDeque::new();
         // 5_000 (le) as a single sample in the TTS queue, then empty → resize
         // to full tick with zeros.
-        q.extend(5_000_i16.to_le_bytes());
-        let queue = StdMutex::new(q);
+        let queue = tts_queue(5_000_i16.to_le_bytes().to_vec());
 
         let host_chunk = vec![0x10, 0x27]; // 10_000
         let out = build_tick_output(TickOutputArgs {
@@ -728,15 +816,15 @@ mod tests {
         });
         // host 10_000 * 0.2 = 2_000; plus TTS 5_000 = 7_000.
         assert_eq!(i16::from_le_bytes([out.bytes[0], out.bytes[1]]), 7_000);
-        // Remaining bytes padded to tick width with tts zeros + host zeros.
-        assert_eq!(out.bytes.len(), AUDIO_BYTES_PER_TICK.min(2));
+        // Host chunk controls mixed length; real drain passes a full tick.
+        assert_eq!(out.bytes.len(), 2);
         assert_eq!(out.tts_bytes_consumed, 2);
-        assert_eq!(queue.lock().unwrap().len(), 2);
+        assert_eq!(tts_queue_bytes(&queue.lock().unwrap()), 2);
     }
 
     #[test]
     fn build_tick_output_target_stream_peeks_one_tick_from_tts_queue() {
-        let queue = StdMutex::new(VecDeque::from(vec![0u8; AUDIO_BYTES_PER_TICK * 2]));
+        let queue = tts_queue(vec![0u8; AUDIO_BYTES_PER_TICK * 2]);
         let host_chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
         let out = build_tick_output(TickOutputArgs {
             host_chunk,
@@ -745,14 +833,20 @@ mod tests {
             tts_queue: &queue,
         });
         assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
-        assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+        assert_eq!(
+            tts_queue_bytes(&queue.lock().unwrap()),
+            AUDIO_BYTES_PER_TICK * 2
+        );
         commit_tts_drain(&queue, out.tts_bytes_consumed);
-        assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK);
+        assert_eq!(
+            tts_queue_bytes(&queue.lock().unwrap()),
+            AUDIO_BYTES_PER_TICK
+        );
     }
 
     #[test]
     fn backpressure_requeues_host_audio_and_keeps_tts_until_success() {
-        let tts_queue = StdMutex::new(VecDeque::from(vec![7u8; AUDIO_BYTES_PER_TICK * 2]));
+        let tts_queue = tts_queue(vec![7u8; AUDIO_BYTES_PER_TICK * 2]);
         let mut ready_host = vec![1u8; AUDIO_BYTES_PER_TICK];
         let host_real_bytes = ready_host.len().min(AUDIO_BYTES_PER_TICK);
         let host_chunk = take_tick_sample(&mut ready_host);
@@ -766,7 +860,10 @@ mod tests {
 
         assert!(ready_host.is_empty());
         assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
-        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+        assert_eq!(
+            tts_queue_bytes(&tts_queue.lock().unwrap()),
+            AUDIO_BYTES_PER_TICK * 2
+        );
 
         let dropped = requeue_host_audio_after_backpressure(
             &mut ready_host,
@@ -776,10 +873,16 @@ mod tests {
 
         assert_eq!(dropped, 0);
         assert_eq!(ready_host, vec![1u8; AUDIO_BYTES_PER_TICK]);
-        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+        assert_eq!(
+            tts_queue_bytes(&tts_queue.lock().unwrap()),
+            AUDIO_BYTES_PER_TICK * 2
+        );
 
         commit_tts_drain(&tts_queue, out.tts_bytes_consumed);
-        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK);
+        assert_eq!(
+            tts_queue_bytes(&tts_queue.lock().unwrap()),
+            AUDIO_BYTES_PER_TICK
+        );
     }
 
     #[test]

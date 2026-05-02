@@ -99,6 +99,8 @@ Good:
 - `drop_frames=0` or rare.
 - `buffered_chunks` stays near `0`.
 - `tts_buffered_bytes` drains instead of growing forever.
+- `tts_playback_speed` returns to `1.00` after catch-up.
+- No `tts segment queue overflow` in normal healthy runs.
 - YouTube shows healthy stream.
 
 Bad:
@@ -108,8 +110,146 @@ Bad:
 - `host_audio_stale_chunks_dropped`, `ready_host_bytes_dropped`, or
   `video_stale_chunks_dropped` grow during normal healthy runs.
 - `tts_buffered_bytes` grows forever.
+- `tts_playback_speed` stays above `1.00` for the whole run.
+- `tts segment queue overflow` appears repeatedly.
 - Repeated FFmpeg restarts.
 - YouTube says not enough video or viewers buffer.
+
+## Live Failure Policy
+
+Brivva is a live-commerce streamer. Correct behavior is not "never drop
+anything"; correct behavior is "keep the show live, preserve meaning, and make
+every degradation visible in logs." A translated sentence arriving one minute
+late can be worse than a missing sentence because price, inventory, and CTA may
+already have changed.
+
+### Normal Speech
+
+Host speaks in short product sentences.
+
+Policy:
+
+- Let Soniox endpoint detection finalize naturally.
+- Flush translated text after punctuation.
+- Send up to three short sentences per TTS request.
+- Keep TTS playback at normal speed when translated audio backlog is under 2s.
+
+Expected user experience: translated audio is smooth and slightly delayed.
+
+### Long Ramble / No Pause
+
+Host talks continuously, reads a long paragraph, or counts from 1 to 100.
+
+Risk: Soniox may wait for a pause and hold one giant utterance. One giant TTS
+request returns late, then the translated stream falls behind.
+
+Policy:
+
+- Send Soniox manual finalize every `BRIVVA_STT_FORCE_FINALIZE_MS` of active
+  audio. Default: `3000`.
+- Flush translated text after three sentence boundaries.
+- Force-flush translated text by length at roughly 100 chars.
+
+Expected user experience: translation arrives in live chunks. It may sound a
+little less literary, but it does not freeze for a full monologue.
+
+### Slight TTS Backlog
+
+TTS is 2-5s behind because ElevenLabs returned a chunk late.
+
+Policy:
+
+- Keep host audio/video on time.
+- Drain translated audio faster until it catches up.
+- Log `tts_buffered_bytes`, `tts_buffered_segments`, `tts_playback_speed`,
+  and `tts_catchup_active`.
+
+Expected user experience: translated voice gets slightly faster for a short
+period, then returns to normal.
+
+### Severe TTS Backlog
+
+TTS is more than 10-15s behind.
+
+Risk: even if every translated sentence is preserved, viewers hear stale product
+information.
+
+Policy:
+
+- Prefer whole translated sentence/chunk drops over raw PCM byte drops.
+- Never cut a translated word mid-audio.
+- Log language, utterance/chunk id, text length, duration, and reason.
+
+Implemented server behavior: RTMP TTS queue stores `TtsSegment` entries, catches
+up by consuming translated PCM faster when backlog grows, and only drops whole
+segments when the hard live cap is exceeded.
+
+### ElevenLabs Slow Or Down
+
+Risk: TTS request times out or returns non-2xx.
+
+Policy:
+
+- Drop only that TTS request.
+- Keep source/original stream alive.
+- Keep translated subtitles if Soniox translation succeeded.
+- Log `utterance_id`, language, deadline, and provider error.
+
+Expected user experience: translated voice may disappear briefly; original show
+continues.
+
+### Soniox Slow Or Down
+
+Risk: no STT, no subtitles, no translated TTS.
+
+Policy:
+
+- Keep original stream alive.
+- Reconnect Soniox up to configured retries.
+- Log provider error and reconnect count.
+
+Expected user experience: original show continues; translation temporarily stops.
+
+### FFmpeg Or RTMP Backpressure
+
+Risk: encoder or platform upload stalls.
+
+Policy:
+
+- Keep audio and video together inside the short lag window.
+- Catch up by draining faster when FFmpeg accepts writes again.
+- Drop only after max lag.
+- For video, resume on IDR/keyframe when stale packets were dropped.
+- Log exact dropped counters.
+
+Expected user experience: short stalls recover; severe stalls may create a
+visible jump instead of endless buffering.
+
+### Too Many Outputs
+
+Risk: GPU/CPU/network cannot handle every language/platform encoder.
+
+Policy:
+
+- Detect `speed < 0.95` and growing buffers.
+- Prefer lowering resolution/FPS or disabling lower-priority outputs over
+  letting every stream degrade.
+- Long-term: use per-language encoded fanout so one encode feeds multiple RTMP
+  publishers for the same language.
+
+Expected user experience: high-priority streams stay healthy first.
+
+### Browser Cannot Provide H.264
+
+Risk: browser/device sends unsupported codec. RTMP platforms require H.264.
+
+Policy:
+
+- Server accepts H.264 only.
+- Frontend requests H.264 preferred codec.
+- If unavailable, fail before going live with a clear browser/device error.
+
+Expected user experience: clear early failure instead of broken livestream.
 
 ## Scenarios
 
@@ -243,6 +383,9 @@ Pass:
 
 - All available outputs start.
 - Translated outputs show TTS activity and eventually drain `tts_buffered_bytes`.
+- `tts_playback_speed` may rise above `1.00` during backlog, then returns to
+  `1.00`.
+- No repeated `tts segment queue overflow` during healthy 1080p30 fanout.
 - Per-output `video_stale_chunks_dropped`, `host_audio_stale_chunks_dropped`,
   and `ready_host_bytes_dropped` stay `0` unless total load exceeds the lag window.
 - If a drop happens, logs identify which output/lang dropped.

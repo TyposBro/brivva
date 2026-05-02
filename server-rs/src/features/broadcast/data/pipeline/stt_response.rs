@@ -157,21 +157,31 @@ fn flush_reason(endpoint_hit: bool, final_text: &str) -> Option<&'static str> {
     // utterances cost as much as long ones to synthesize and piling up tiny
     // chunks shreds ElevenLabs concurrency limits.
     const FLUSH_MIN_CHARS: usize = 30;
-    // Hard ceiling. 120 chars ≈ 6-12 seconds of synth at Flash v2.5 rates,
+    // Hard ceiling. 100 chars ≈ 5-10 seconds of synth at Flash v2.5 rates,
     // which fits comfortably under the 30s TTS deadline.
-    const FLUSH_MAX_CHARS: usize = 120;
+    const FLUSH_MAX_CHARS: usize = 100;
     if char_count < FLUSH_MIN_CHARS {
         return None;
+    }
+    const SENTENCE_ENDERS: &[char] = &['.', '!', '?', '。', '！', '？'];
+    if final_text
+        .chars()
+        .filter(|c| SENTENCE_ENDERS.contains(c))
+        .count()
+        >= 3
+    {
+        return Some("sentence_count");
     }
     if char_count >= FLUSH_MAX_CHARS {
         return Some("length");
     }
-    const SENTENCE_ENDERS: &[char] = &['.', '!', '?', '。', '！', '？', ',', '，', ';', '；', '、'];
+    const SOFT_SENTENCE_ENDERS: &[char] =
+        &['.', '!', '?', '。', '！', '？', ',', '，', ';', '；', '、'];
     if final_text
         .chars()
         .rev()
         .take(3)
-        .any(|c| SENTENCE_ENDERS.contains(&c))
+        .any(|c| SOFT_SENTENCE_ENDERS.contains(&c))
     {
         return Some("punctuation");
     }
@@ -791,11 +801,18 @@ mod tests {
 
     #[test]
     fn flush_reason_returns_length_when_text_exceeds_hard_ceiling() {
-        // 120 chars with no punctuation — force-flush on length alone so
+        // 100 chars with no punctuation — force-flush on length alone so
         // long pauseless monologues don't accumulate into one giant chunk
         // that then blows the TTS deadline.
-        assert_eq!(flush_reason(false, &"a".repeat(120)), Some("length"));
+        assert_eq!(flush_reason(false, &"a".repeat(100)), Some("length"));
         assert_eq!(flush_reason(false, &"b".repeat(500)), Some("length"));
+    }
+
+    #[test]
+    fn flush_reason_returns_sentence_count_after_three_sentences() {
+        let text = "One good deal. Two left now. Three sold fast.";
+        assert!(text.chars().count() >= 30);
+        assert_eq!(flush_reason(false, text), Some("sentence_count"));
     }
 
     #[test]

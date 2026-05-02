@@ -53,13 +53,11 @@ const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
 /// create visible gaps, but this path no longer uses localhost UDP, so overflow
 /// should only happen if FFmpeg/RTMP is truly slower than real time.
 const HOST_VIDEO_H264_CAP_CHUNKS: usize = 120_000;
-/// Cap the TTS queue at 60 s of PCM. Oldest bytes are dropped on overflow so
-/// the translated speech stays fresh rather than falling further behind.
-/// Raised from 5 s in April 2026: a single 291-char Korean utterance renders
-/// to ~15 s of PCM, which at the old 5 s cap got its head silently chopped
-/// off — listeners heard translations starting mid-sentence. 60 s gives a
-/// 3x margin over worst-case ElevenLabs slowdown backlog.
-const TTS_QUEUE_CAP_BYTES: usize = 60 * 88_200;
+const PCM_BYTES_PER_SECOND: usize = 88_200;
+/// Live-commerce translated audio should not silently drift by tens of
+/// seconds. Keep a firm 15s cap and shed whole TTS segments if forced; never
+/// chop raw PCM from the middle of a sentence.
+const TTS_QUEUE_CAP_BYTES: usize = 15 * PCM_BYTES_PER_SECOND;
 /// Max FFmpeg restart attempts per stream.
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
@@ -84,10 +82,49 @@ fn now_unix_ms() -> i64 {
 /// becomes eligible for emission at `received_at + stream.delay`.
 type TimedChunk = (Instant, Arc<[u8]>);
 
+#[derive(Clone, Debug)]
+pub(crate) struct TtsSegment {
+    pub utterance_id: u64,
+    pub sentence_id: u32,
+    pub lang: String,
+    pub text: String,
+    pub pcm: Arc<[u8]>,
+}
+
+impl TtsSegment {
+    pub(crate) fn new(
+        utterance_id: u64,
+        sentence_id: u32,
+        lang: String,
+        text: String,
+        pcm: Vec<u8>,
+    ) -> Self {
+        Self {
+            utterance_id,
+            sentence_id,
+            lang,
+            text,
+            pcm: Arc::from(pcm),
+        }
+    }
+
+    pub(crate) fn byte_len(&self) -> usize {
+        self.pcm.len()
+    }
+
+    pub(crate) fn duration_ms(&self) -> u64 {
+        (self.byte_len() as u64).saturating_mul(1_000) / PCM_BYTES_PER_SECOND as u64
+    }
+}
+
+pub(crate) fn tts_queue_bytes(queue: &VecDeque<TtsSegment>) -> usize {
+    queue.iter().map(TtsSegment::byte_len).sum()
+}
+
 pub(crate) struct StreamBuffers {
     audio: Arc<StdMutex<VecDeque<TimedChunk>>>,
     video_h264: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    tts: Arc<StdMutex<VecDeque<u8>>>,
+    tts: Arc<StdMutex<VecDeque<TtsSegment>>>,
 }
 
 impl StreamBuffers {
@@ -593,34 +630,39 @@ impl RtmpManager {
     }
 
     /// Append translated PCM for a specific language to that stream's TTS queue.
-    /// No timestamps — the mixer plays it in arrival order and the queue is
-    /// capped so a slow target can't fall arbitrarily behind.
+    /// Compatibility wrapper for tests and older call sites that do not carry
+    /// utterance metadata.
+    #[cfg(test)]
+    pub fn push_tts(&self, lang: &str, pcm: Vec<u8>) {
+        self.push_tts_segment(TtsSegment::new(0, 0, lang.to_string(), String::new(), pcm));
+    }
+
+    /// Append a translated TTS segment to matching target streams.
     ///
     /// Both `is_source` and `passthrough` streams are skipped: neither carries
     /// a translated track, so enqueueing PCM would leak memory up to the cap
     /// and never play back.
-    pub fn push_tts(&self, lang: &str, pcm: Vec<u8>) {
+    pub(crate) fn push_tts_segment(&self, segment: TtsSegment) {
         if let Some(m) = &self.metrics {
-            m.record_tts_pcm(lang, pcm.len() as u64);
+            m.record_tts_pcm(&segment.lang, segment.byte_len() as u64);
         }
         for stream in self.streams.values() {
-            if stream.lang == lang && !stream.is_source && !stream.passthrough {
+            if stream.lang == segment.lang && !stream.is_source && !stream.passthrough {
                 let mut q = stream.buffers.tts.lock().unwrap();
-                q.extend(pcm.iter().copied());
-                let before = q.len();
-                while q.len() > TTS_QUEUE_CAP_BYTES {
-                    q.pop_front();
-                }
-                let dropped = before.saturating_sub(q.len());
-                // §0.5.4: head-chop was silent before April 2026. A listener
-                // would hear a translation starting mid-sentence with no log
-                // line anywhere. Now every overflow leaves a greppable trace.
-                if dropped > 0 {
+                q.push_back(segment.clone());
+                while tts_queue_bytes(&q) > TTS_QUEUE_CAP_BYTES {
+                    let Some(dropped) = q.pop_front() else {
+                        break;
+                    };
                     tracing::warn!(
-                        lang = %lang,
-                        dropped_bytes = dropped,
+                        lang = %dropped.lang,
+                        utterance_id = dropped.utterance_id,
+                        sentence_id = dropped.sentence_id,
+                        dropped_bytes = dropped.byte_len(),
+                        dropped_duration_ms = dropped.duration_ms(),
+                        text_chars = dropped.text.chars().count(),
                         cap_bytes = TTS_QUEUE_CAP_BYTES,
-                        "tts pcm queue overflow — head bytes dropped"
+                        "tts segment queue overflow — whole segment dropped"
                     );
                 }
             }

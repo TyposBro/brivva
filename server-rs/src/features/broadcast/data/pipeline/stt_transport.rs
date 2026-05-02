@@ -9,6 +9,7 @@ use tokio_tungstenite::{
     tungstenite::{self, Message},
 };
 
+use super::soniox::HOST_SAMPLE_RATE;
 use super::soniox::SonioxMode;
 
 pub(super) const STT_RECONNECT_MAX: u32 = 5;
@@ -115,7 +116,10 @@ pub(super) fn spawn_audio_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut audio_rx = audio_rx.lock().await;
+        let force_finalize_ms = stt_force_finalize_ms_from_env();
+        let mut audio_since_finalize_ms: u64 = 0;
         while let Some(data) = audio_rx.recv().await {
+            let data_ms = pcm_s16le_mono_duration_ms(data.len());
             if stt_sink
                 .send(tungstenite::Message::Binary(data.into()))
                 .await
@@ -123,8 +127,45 @@ pub(super) fn spawn_audio_forwarder(
             {
                 break;
             }
+            if force_finalize_ms == 0 {
+                continue;
+            }
+            audio_since_finalize_ms = audio_since_finalize_ms.saturating_add(data_ms);
+            if audio_since_finalize_ms >= force_finalize_ms {
+                if stt_sink
+                    .send(tungstenite::Message::Text(
+                        r#"{"type":"finalize"}"#.to_string().into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tracing::debug!(
+                    force_finalize_ms,
+                    audio_since_finalize_ms,
+                    "stt manual finalize sent"
+                );
+                audio_since_finalize_ms = 0;
+            }
         }
     })
+}
+
+fn stt_force_finalize_ms_from_env() -> u64 {
+    std::env::var("BRIVVA_STT_FORCE_FINALIZE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(3_000)
+        .clamp(0, 10_000)
+}
+
+fn pcm_s16le_mono_duration_ms(bytes: usize) -> u64 {
+    let bytes_per_second = HOST_SAMPLE_RATE as u64 * 2;
+    if bytes_per_second == 0 {
+        return 0;
+    }
+    ((bytes as u64).saturating_mul(1_000) / bytes_per_second).max(1)
 }
 
 #[cfg(test)]
@@ -217,6 +258,33 @@ mod tests {
         (addr, handle)
     }
 
+    async fn spawn_ws_frame_collector() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<(usize, Vec<String>)>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            use futures_util::StreamExt as _;
+            let mut binary_count = 0;
+            let mut texts = Vec::new();
+            while let Some(msg) = ws.next().await {
+                let Ok(msg) = msg else {
+                    break;
+                };
+                match msg {
+                    tungstenite::Message::Binary(_) => binary_count += 1,
+                    tungstenite::Message::Text(text) => texts.push(text.to_string()),
+                    _ => {}
+                }
+            }
+            (binary_count, texts)
+        });
+        (addr, handle)
+    }
+
     #[tokio::test]
     async fn send_soniox_config_serializes_and_sends_text_frame() {
         let (addr, server) = spawn_ws_echo_server().await;
@@ -303,5 +371,41 @@ mod tests {
             .await
             .expect("forwarder exits when rx closes")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_audio_forwarder_sends_manual_finalize_after_active_audio_window() {
+        let (addr, server) = spawn_ws_frame_collector().await;
+        let url = format!("ws://{}", addr);
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (sink, _) = ws.split();
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        let handle = spawn_audio_forwarder(rx, sink);
+
+        tx.send(vec![0; 88_200 * 3]).await.unwrap();
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("forwarder exits when rx closes")
+            .unwrap();
+
+        let (binary_count, texts) = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("collector exits")
+            .unwrap();
+        assert_eq!(binary_count, 1);
+        assert!(
+            texts.iter().any(|text| text == r#"{"type":"finalize"}"#),
+            "manual finalize frame should be sent after default 3s active audio window: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn pcm_s16le_mono_duration_uses_44_1k_sample_rate() {
+        assert_eq!(pcm_s16le_mono_duration_ms(88_200), 1_000);
+        assert_eq!(pcm_s16le_mono_duration_ms(1_764), 20);
     }
 }

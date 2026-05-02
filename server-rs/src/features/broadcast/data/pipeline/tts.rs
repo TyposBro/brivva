@@ -1,3 +1,4 @@
+use crate::features::broadcast::data::ffmpeg::TtsSegment;
 pub use crate::features::broadcast::domain::TtsRequest;
 use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg, VoicePreset};
 use futures_util::StreamExt;
@@ -225,7 +226,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     let pcm_bytes = audio_buffer.len();
-    push_tts_into_rtmp(&req.target_lang, &req.handle, &audio_buffer).await;
+    push_tts_into_rtmp(&req, &audio_buffer).await;
     notify_host_tts_complete(NotifyCompleteArgs {
         lang: &req.target_lang,
         utterance_id: req.utterance_id,
@@ -405,18 +406,19 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
     }
 }
 
-async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffer: &[u8]) {
-    let rtmp_manager = handle
+async fn push_tts_into_rtmp(req: &TtsRequest, audio_buffer: &[u8]) {
+    let rtmp_manager = req
+        .handle
         .sessions
-        .get(&handle.id)
+        .get(&req.handle.id)
         .and_then(|session| session.rtmp_manager.clone());
     let Some(manager) = rtmp_manager else {
         // §0.5.4: session carries no rtmp_manager (session bundle had no
         // streams, or manager was cleared during teardown). TTS was
         // produced but will land nowhere — operators need to see this.
         tracing::warn!(
-            live_session_id = %handle.id,
-            target_lang = %lang,
+            live_session_id = %req.handle.id,
+            target_lang = %req.target_lang,
             audio_bytes = audio_buffer.len(),
             "tts audio produced but session has no rtmp_manager — dropping"
         );
@@ -431,11 +433,17 @@ async fn push_tts_into_rtmp(lang: &Lang, handle: &LiveSessionHandle, audio_buffe
     match crate::features::broadcast::data::ffmpeg::decode_mp3_to_pcm(audio_buffer).await {
         Ok(pcm) => {
             let manager = manager.lock().await;
-            manager.push_tts(&lang.to_string(), pcm);
+            manager.push_tts_segment(TtsSegment::new(
+                req.utterance_id,
+                0,
+                req.target_lang.to_string(),
+                req.text.clone(),
+                pcm,
+            ));
         }
         Err(error) => tracing::warn!(
-            live_session_id = %handle.id,
-            target_lang = %lang,
+            live_session_id = %req.handle.id,
+            target_lang = %req.target_lang,
             error = %error,
             "tts mp3→pcm decode failed — audio dropped"
         ),
