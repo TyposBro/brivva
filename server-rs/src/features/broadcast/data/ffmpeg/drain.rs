@@ -32,12 +32,13 @@ const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// chunks are dropped and the drain resumes at an IDR/keyframe.
 const DEFAULT_VIDEO_MAX_LAG: Duration = Duration::from_secs(3);
 const MAX_VIDEO_MAX_LAG: Duration = Duration::from_secs(5);
-const AUDIO_MAX_LAG: Duration = Duration::from_millis(250);
+const DEFAULT_AUDIO_MAX_LAG: Duration = Duration::from_secs(3);
+const MAX_AUDIO_MAX_LAG: Duration = Duration::from_secs(5);
 /// Ready-host audio can normally exceed one 20ms tick because browsers send
-/// microphone PCM in larger chunks (ScriptProcessor 4096 frames ≈93ms). Only
-/// cap when it grows beyond the live-lag budget; capping to one tick chops most
-/// original audio and makes it sound like low-FPS/stuttered speech.
-const AUDIO_MAX_READY_TICKS: usize = 13;
+/// microphone PCM in larger chunks (ScriptProcessor 4096 frames ≈93ms). Keep a
+/// multi-second catch-up window before forced host-audio drops.
+#[cfg(test)]
+const DEFAULT_AUDIO_MAX_READY_TICKS: usize = 150;
 /// Audio drain must never wait longer than one output tick on a full FFmpeg
 /// FIFO. If the muxer is blocked, skip the current 20 ms slice and let the
 /// next tick continue on wall clock instead of accumulating seconds of stale
@@ -237,6 +238,19 @@ fn video_max_lag_from_env() -> Duration {
     Duration::from_millis(millis)
 }
 
+fn audio_max_lag_from_env() -> Duration {
+    let millis = std::env::var("BRIVVA_AUDIO_MAX_LAG_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AUDIO_MAX_LAG.as_millis() as u64)
+        .clamp(250, MAX_AUDIO_MAX_LAG.as_millis() as u64);
+    Duration::from_millis(millis)
+}
+
+fn audio_max_ready_ticks(max_lag: Duration) -> usize {
+    (max_lag.as_millis() / AUDIO_TICK.as_millis()).max(1) as usize
+}
+
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
     let mut i = 0;
     while i + 3 < packet.len() {
@@ -297,8 +311,12 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
     let mut tick_count: u64 = 0;
     let mut fifo_would_blocks: u64 = 0;
     let mut fifo_skipped_ticks: u64 = 0;
+    let mut host_stale_chunks_dropped: u64 = 0;
+    let mut ready_host_bytes_dropped: u64 = 0;
     let mut last_stats = Instant::now();
     let mut next_tick = Instant::now() + AUDIO_TICK;
+    let max_lag = audio_max_lag_from_env();
+    let max_ready_ticks = audio_max_ready_ticks(max_lag);
 
     eprintln!(
         "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2})",
@@ -315,31 +333,47 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             let host_buffered_chunks = host_buf.lock().unwrap().len();
             let tts_buffered_bytes = tts_queue.lock().unwrap().len();
             eprintln!(
-                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} fifo_would_blocks={} fifo_skipped_ticks={}",
+                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} fifo_would_blocks={} fifo_skipped_ticks={} host_audio_stale_chunks_dropped={} ready_host_bytes_dropped={}",
                 stream_id,
                 tick_count,
                 host_buffered_chunks,
                 ready_host.len(),
                 tts_buffered_bytes,
                 fifo_would_blocks,
-                fifo_skipped_ticks
+                fifo_skipped_ticks,
+                host_stale_chunks_dropped,
+                ready_host_bytes_dropped
             );
             last_stats = actual;
         }
 
-        drain_aged_host_audio(DrainHostArgs {
+        let host_dropped = drain_aged_host_audio(DrainHostArgs {
             host_buf: &host_buf,
             ready_host: &mut ready_host,
             now: actual,
             delay,
-            max_lag: AUDIO_MAX_LAG,
+            max_lag,
         });
-        // If FFmpeg/RTMP stalls, ready_host can contain old audio waiting to
-        // be replayed. Live output should drop stale audio rather than drift
-        // farther behind; silence padding below keeps the RTMP audio clock
-        // continuous.
-        cap_ready_audio_to_live(&mut ready_host);
+        if host_dropped > 0 {
+            host_stale_chunks_dropped += host_dropped as u64;
+            eprintln!(
+                "[AUDIO:{}] host_audio_stale_chunks_dropped={} max_lag_ms={}",
+                stream_id,
+                host_dropped,
+                max_lag.as_millis()
+            );
+        }
+        let ready_dropped = cap_ready_audio_to_live(&mut ready_host, max_ready_ticks);
+        if ready_dropped > 0 {
+            ready_host_bytes_dropped += ready_dropped as u64;
+            eprintln!(
+                "[AUDIO:{}] ready_host_bytes_dropped={} max_ready_ticks={}",
+                stream_id, ready_dropped, max_ready_ticks
+            );
+        }
+        let host_real_bytes = ready_host.len().min(AUDIO_BYTES_PER_TICK);
         let host_chunk = take_tick_sample(&mut ready_host);
+        let host_requeue = host_chunk[..host_real_bytes].to_vec();
         let output = build_tick_output(TickOutputArgs {
             host_chunk,
             is_source,
@@ -347,10 +381,10 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             tts_queue: &tts_queue,
         });
 
-        let bytes = if output.is_empty() {
+        let bytes = if output.bytes.is_empty() {
             &silence_chunk
         } else {
-            &output
+            &output.bytes
         };
         let n = bytes.len() as u64;
         match fifo_write_nonblocking(&mut fifo, bytes, &stop) {
@@ -363,6 +397,7 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
                     );
                 }
                 last_write_ms.store(now_unix_ms(), Ordering::Release);
+                commit_tts_drain(&tts_queue, output.tts_bytes_consumed);
                 if let Some(m) = &metrics {
                     m.record_bytes_out(n);
                 }
@@ -373,11 +408,20 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             } => {
                 fifo_would_blocks += would_blocks;
                 fifo_skipped_ticks += 1;
+                if !host_requeue.is_empty() {
+                    ready_host.splice(0..0, host_requeue);
+                    let ready_dropped = cap_ready_audio_to_live(&mut ready_host, max_ready_ticks);
+                    if ready_dropped > 0 {
+                        ready_host_bytes_dropped += ready_dropped as u64;
+                    }
+                }
                 eprintln!(
-                    "[AUDIO:{}] fifo write skipped live tick would_blocks={} elapsed_ms={}",
+                    "[AUDIO:{}] fifo write skipped live tick would_blocks={} elapsed_ms={} requeued_host_bytes={} ready_host_bytes_dropped={}",
                     stream_id,
                     would_blocks,
-                    elapsed.as_millis()
+                    elapsed.as_millis(),
+                    host_real_bytes,
+                    ready_host_bytes_dropped
                 );
             }
             FifoWrite::Stopped => break,
@@ -481,9 +525,10 @@ struct DrainHostArgs<'a> {
     max_lag: Duration,
 }
 
-fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
+fn drain_aged_host_audio(args: DrainHostArgs<'_>) -> usize {
     let mut buf = args.host_buf.lock().unwrap();
     let live_cutoff = args.now.checked_sub(args.max_lag).unwrap_or(args.now);
+    let mut dropped = 0usize;
 
     // Same live policy as video: if old host-audio chunks piled up while
     // FFmpeg/RTMP was blocked, drop them instead of replaying delayed audio.
@@ -494,6 +539,7 @@ fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
             break;
         }
         buf.pop_front();
+        dropped += 1;
     }
 
     while let Some((ts, _)) = buf.front() {
@@ -504,16 +550,20 @@ fn drain_aged_host_audio(args: DrainHostArgs<'_>) {
             break;
         }
     }
+    dropped
 }
 
-fn cap_ready_audio_to_live(ready_host: &mut Vec<u8>) {
+fn cap_ready_audio_to_live(ready_host: &mut Vec<u8>, max_ready_ticks: usize) -> usize {
     // Browser mic chunks are often ~93ms, so keeping only one 20ms tick causes
-    // regular audio loss. Keep up to ~250ms and only shed oldest audio when a
-    // real write stall lets ready_host exceed the live lag budget.
-    let max_ready_bytes = AUDIO_BYTES_PER_TICK * AUDIO_MAX_READY_TICKS;
+    // regular audio loss. Keep a catch-up window and only shed oldest original
+    // host audio when a real write stall exceeds the live lag budget.
+    let max_ready_bytes = AUDIO_BYTES_PER_TICK * max_ready_ticks.max(1);
     if ready_host.len() > max_ready_bytes {
         let keep_from = ready_host.len() - max_ready_bytes;
         ready_host.drain(..keep_from);
+        keep_from
+    } else {
+        0
     }
 }
 
@@ -533,7 +583,12 @@ struct TickOutputArgs<'a> {
     tts_queue: &'a StdMutex<VecDeque<u8>>,
 }
 
-fn build_tick_output(args: TickOutputArgs<'_>) -> Vec<u8> {
+struct TickOutput {
+    bytes: Vec<u8>,
+    tts_bytes_consumed: usize,
+}
+
+fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
     let TickOutputArgs {
         host_chunk,
         is_source,
@@ -542,22 +597,38 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> Vec<u8> {
     } = args;
     if is_source {
         // Source streams never queue TTS — skip the mix entirely.
-        if (host_gain - 1.0).abs() < f32::EPSILON {
+        let bytes = if (host_gain - 1.0).abs() < f32::EPSILON {
             host_chunk
         } else {
             apply_gain(&host_chunk, host_gain)
+        };
+        TickOutput {
+            bytes,
+            tts_bytes_consumed: 0,
         }
     } else {
-        let mut tts_padded: Vec<u8> = {
-            let mut q = tts_queue.lock().unwrap();
+        let (mut tts_padded, tts_bytes_consumed): (Vec<u8>, usize) = {
+            let q = tts_queue.lock().unwrap();
             let n = AUDIO_BYTES_PER_TICK.min(q.len());
-            q.drain(..n).collect()
+            (q.iter().take(n).copied().collect(), n)
         };
         if tts_padded.len() < AUDIO_BYTES_PER_TICK {
             tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
         }
-        mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0)
+        TickOutput {
+            bytes: mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0),
+            tts_bytes_consumed,
+        }
     }
+}
+
+fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<u8>>, bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    let mut q = tts_queue.lock().unwrap();
+    let drain = bytes.min(q.len());
+    q.drain(..drain);
 }
 
 #[cfg(test)]
@@ -609,7 +680,8 @@ mod tests {
             host_gain: 1.0,
             tts_queue: &q,
         });
-        assert_eq!(out, host);
+        assert_eq!(out.bytes, host);
+        assert_eq!(out.tts_bytes_consumed, 0);
     }
 
     #[test]
@@ -621,8 +693,9 @@ mod tests {
             host_gain: 0.5,
             tts_queue: &q,
         });
-        let sample = i16::from_le_bytes([out[0], out[1]]);
+        let sample = i16::from_le_bytes([out.bytes[0], out.bytes[1]]);
         assert_eq!(sample, 5_000);
+        assert_eq!(out.tts_bytes_consumed, 0);
     }
 
     #[test]
@@ -641,21 +714,26 @@ mod tests {
             tts_queue: &queue,
         });
         // host 10_000 * 0.2 = 2_000; plus TTS 5_000 = 7_000.
-        assert_eq!(i16::from_le_bytes([out[0], out[1]]), 7_000);
+        assert_eq!(i16::from_le_bytes([out.bytes[0], out.bytes[1]]), 7_000);
         // Remaining bytes padded to tick width with tts zeros + host zeros.
-        assert_eq!(out.len(), AUDIO_BYTES_PER_TICK.min(2));
+        assert_eq!(out.bytes.len(), AUDIO_BYTES_PER_TICK.min(2));
+        assert_eq!(out.tts_bytes_consumed, 2);
+        assert_eq!(queue.lock().unwrap().len(), 2);
     }
 
     #[test]
-    fn build_tick_output_target_stream_drains_up_to_one_tick_from_tts_queue() {
+    fn build_tick_output_target_stream_peeks_one_tick_from_tts_queue() {
         let queue = StdMutex::new(VecDeque::from(vec![0u8; AUDIO_BYTES_PER_TICK * 2]));
         let host_chunk = vec![0u8; AUDIO_BYTES_PER_TICK];
-        let _ = build_tick_output(TickOutputArgs {
+        let out = build_tick_output(TickOutputArgs {
             host_chunk,
             is_source: false,
             host_gain: 0.2,
             tts_queue: &queue,
         });
+        assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
+        assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+        commit_tts_drain(&queue, out.tts_bytes_consumed);
         assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK);
     }
 
@@ -833,13 +911,14 @@ mod tests {
             b.push_back((now + Duration::from_millis(50), chunk(vec![0xcc])));
         }
         let mut ready = Vec::new();
-        drain_aged_host_audio(DrainHostArgs {
+        let dropped = drain_aged_host_audio(DrainHostArgs {
             host_buf: &host_buf,
             ready_host: &mut ready,
             now,
             delay,
             max_lag: Duration::from_millis(250),
         });
+        assert_eq!(dropped, 0);
         assert_eq!(ready, vec![0xbb]);
         assert_eq!(host_buf.lock().unwrap().len(), 1);
     }
@@ -857,13 +936,14 @@ mod tests {
             b.push_back((now + Duration::from_millis(50), chunk(vec![0xdd])));
         }
         let mut ready = Vec::new();
-        drain_aged_host_audio(DrainHostArgs {
+        let dropped = drain_aged_host_audio(DrainHostArgs {
             host_buf: &host_buf,
             ready_host: &mut ready,
             now,
             delay,
             max_lag: Duration::from_millis(250),
         });
+        assert_eq!(dropped, 2);
         assert_eq!(ready, vec![0xcc]);
         assert_eq!(host_buf.lock().unwrap().len(), 1);
     }
@@ -873,16 +953,19 @@ mod tests {
         // ScriptProcessor 4096 frames at s16le mono ≈93ms = 8192 bytes. This
         // must survive intact; otherwise original host audio sounds choppy.
         let mut ready = vec![1u8; 8192];
-        cap_ready_audio_to_live(&mut ready);
+        let dropped = cap_ready_audio_to_live(&mut ready, DEFAULT_AUDIO_MAX_READY_TICKS);
+        assert_eq!(dropped, 0);
         assert_eq!(ready, vec![1u8; 8192]);
     }
 
     #[test]
     fn cap_ready_audio_to_live_drops_only_when_ready_exceeds_live_budget() {
-        let max_ready_bytes = AUDIO_BYTES_PER_TICK * AUDIO_MAX_READY_TICKS;
+        let max_ready_ticks = 13;
+        let max_ready_bytes = AUDIO_BYTES_PER_TICK * max_ready_ticks;
         let mut ready = vec![1u8; AUDIO_BYTES_PER_TICK * 2];
         ready.extend(vec![2u8; max_ready_bytes]);
-        cap_ready_audio_to_live(&mut ready);
+        let dropped = cap_ready_audio_to_live(&mut ready, max_ready_ticks);
+        assert_eq!(dropped, AUDIO_BYTES_PER_TICK * 2);
         assert_eq!(ready, vec![2u8; max_ready_bytes]);
     }
 
