@@ -90,6 +90,7 @@ struct EncodedFanoutSpawn {
     stream_id: String,
     lang: String,
     rtmp_urls: Vec<String>,
+    destinations: Vec<crate::features::broadcast::data::ffmpeg::RtmpDestination>,
     delay_ms: u64,
     is_source: bool,
     host_gain: f32,
@@ -127,7 +128,14 @@ fn build_encoded_fanout_spawns(
                 && group.passthrough == flags.passthrough
         };
         if let Some(group) = groups.iter_mut().find(|group| key_matches(group)) {
+            let destination_url = full_url.clone();
             group.rtmp_urls.push(full_url);
+            group.destinations.push(
+                crate::features::broadcast::data::ffmpeg::RtmpDestination::new(
+                    &stream.platform,
+                    destination_url,
+                ),
+            );
             group.destination_label = format!("{},{}", group.destination_label, stream.platform);
             continue;
         }
@@ -145,7 +153,13 @@ fn build_encoded_fanout_spawns(
         groups.push(EncodedFanoutSpawn {
             stream_id: group_stream_id,
             lang: stream.lang.clone(),
-            rtmp_urls: vec![full_url],
+            rtmp_urls: vec![full_url.clone()],
+            destinations: vec![
+                crate::features::broadcast::data::ffmpeg::RtmpDestination::new(
+                    &stream.platform,
+                    full_url,
+                ),
+            ],
             delay_ms: stream.delay_ms,
             is_source: flags.is_source,
             host_gain: flags.host_gain,
@@ -276,6 +290,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
                     stream_id: &group.stream_id,
                     lang: &group.lang,
                     rtmp_urls: group.rtmp_urls,
+                    destinations: group.destinations,
                     delay_ms: group.delay_ms,
                     is_source: group.is_source,
                     host_gain: group.host_gain,

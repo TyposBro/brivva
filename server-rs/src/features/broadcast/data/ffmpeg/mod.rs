@@ -20,7 +20,7 @@ mod drain;
 mod mixer;
 mod orphan;
 
-use args::{FfmpegProgressAlert, FfmpegProgressMonitor};
+use args::{FfmpegProgressAlert, FfmpegProgressMonitor, parse_tee_slave_muxer_index};
 pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
@@ -109,6 +109,7 @@ struct RtmpStream {
 
     lang: String,
     rtmp_urls: Vec<String>,
+    destinations: Vec<RtmpDestination>,
     delay: Duration,
     is_source: bool,
     host_gain: f32,
@@ -138,6 +139,21 @@ struct RtmpStream {
     last_write_ms: Arc<AtomicI64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RtmpDestination {
+    pub platform: String,
+    pub url: String,
+}
+
+impl RtmpDestination {
+    pub fn new(platform: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            platform: platform.into(),
+            url: url.into(),
+        }
+    }
+}
+
 pub struct RtmpManager {
     streams: HashMap<String, RtmpStream>,
     video_profile: VideoProfile,
@@ -162,6 +178,7 @@ type CrashedStreamSnapshot = (
     bool,
     Option<RenderGraphOutputNode>,
     u32,
+    Vec<RtmpDestination>,
     StreamBuffers,
 );
 
@@ -178,6 +195,7 @@ struct RestartStreamArgs {
     output_controls_enabled: bool,
     render_graph_node: Option<RenderGraphOutputNode>,
     prev_count: u32,
+    destinations: Vec<RtmpDestination>,
     buffers: StreamBuffers,
 }
 
@@ -191,6 +209,7 @@ struct StreamSpawnArgs {
     passthrough: bool,
     output_id: Option<OutputId>,
     destination_platform: String,
+    destinations: Vec<RtmpDestination>,
     output_controls_enabled: bool,
     render_graph_node: Option<RenderGraphOutputNode>,
     existing_buffers: Option<StreamBuffers>,
@@ -223,6 +242,7 @@ pub struct StartStreamGroupArgs<'a> {
     pub stream_id: &'a str,
     pub lang: &'a str,
     pub rtmp_urls: Vec<String>,
+    pub destinations: Vec<RtmpDestination>,
     pub delay_ms: u64,
     pub is_source: bool,
     pub host_gain: f32,
@@ -362,6 +382,10 @@ impl RtmpManager {
             stream_id: args.stream_id,
             lang: args.lang,
             rtmp_urls: vec![args.rtmp_url.to_string()],
+            destinations: vec![RtmpDestination::new(
+                args.destination_platform,
+                args.rtmp_url,
+            )],
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
@@ -395,6 +419,7 @@ impl RtmpManager {
             stream_id: args.stream_id.to_string(),
             lang: args.lang.to_string(),
             rtmp_urls: args.rtmp_urls.clone(),
+            destinations: args.destinations.clone(),
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
@@ -450,6 +475,10 @@ impl RtmpManager {
             stream_id = %args.stream_id,
             lang = %args.lang,
             rtmp_urls = ?args.rtmp_urls.iter().map(|url| redact_rtmp_secrets(url)).collect::<Vec<_>>(),
+            destinations = ?args.destinations.iter().map(|dest| serde_json::json!({
+                "platform": dest.platform,
+                "url": redact_rtmp_secrets(&dest.url),
+            })).collect::<Vec<_>>(),
             rtmp_destination_count = args.rtmp_urls.len(),
             delay_ms = args.delay_ms,
             is_source = args.is_source,
@@ -701,6 +730,7 @@ impl RtmpManager {
                     old.output_controls_enabled,
                     old.render_graph_node,
                     old.restart_count,
+                    old.destinations,
                     old.buffers,
                 ));
             }
@@ -732,6 +762,7 @@ impl RtmpManager {
             stream_id: args.id.clone(),
             lang: args.lang.clone(),
             rtmp_urls: args.rtmp_urls.clone(),
+            destinations: args.destinations.clone(),
             delay_ms: args.delay_ms,
             is_source: args.is_source,
             host_gain: args.host_gain,
@@ -853,6 +884,7 @@ impl RtmpManager {
             let lang_for_log = args.lang.clone();
             let output_id_for_log = args.output_id.clone();
             let platform_for_log = args.destination_platform.clone();
+            let destinations_for_log = args.destinations.clone();
             let output_controls_for_log = args.output_controls_enabled;
             let thread_name = format!("stderr-drain-{}", args.stream_id);
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
@@ -915,6 +947,18 @@ impl RtmpManager {
                                 );
                             }
                         }
+                    }
+                    if let Some(index) = parse_tee_slave_muxer_index(&line)
+                        && let Some(destination) = destinations_for_log.get(index)
+                    {
+                        tracing::warn!(
+                            stream_id = %sid_for_log,
+                            lang = %lang_for_log,
+                            destination_index = index,
+                            destination_platform = %destination.platform,
+                            destination_url = %redact_rtmp_secrets(&destination.url),
+                            "ffmpeg tee destination reported failure"
+                        );
                     }
                     tracing::warn!(
                         stream_id = %sid_for_log,
@@ -998,6 +1042,7 @@ impl RtmpManager {
                 subtitle_textfile,
                 lang: args.lang,
                 rtmp_urls: args.rtmp_urls,
+                destinations: args.destinations,
                 delay,
                 is_source: args.is_source,
                 host_gain: args.host_gain,
@@ -1113,6 +1158,7 @@ pub fn spawn_health_monitor(
                 output_controls_enabled,
                 render_graph_node,
                 prev_count,
+                destinations,
                 buffers,
             ) in crashed
             {
@@ -1134,6 +1180,7 @@ pub fn spawn_health_monitor(
                     output_controls_enabled,
                     render_graph_node,
                     prev_count,
+                    destinations,
                     buffers,
                 });
             }

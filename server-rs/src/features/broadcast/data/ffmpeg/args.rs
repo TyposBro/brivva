@@ -290,6 +290,19 @@ where
     }
 }
 
+pub(super) fn parse_tee_slave_muxer_index(line: &str) -> Option<usize> {
+    let marker = "Slave muxer #";
+    let start = line.find(marker)? + marker.len();
+    let digits = line[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct FfmpegProgressSnapshot {
     pub fps: Option<f64>,
@@ -585,6 +598,15 @@ mod tests {
         assert!(joined.contains("[f=flv:onfail=ignore]rtmp://a/live/key-a"));
         assert!(joined.contains("|[f=flv:onfail=ignore]rtmp://b/live/key-b"));
         assert!(!joined.contains("-f flv rtmp://a/live/key-a"));
+    }
+
+    #[test]
+    fn parse_tee_slave_muxer_index_extracts_failed_destination_index() {
+        assert_eq!(
+            parse_tee_slave_muxer_index("[tee @ 0x1] Slave muxer #1 failed: Broken pipe"),
+            Some(1)
+        );
+        assert_eq!(parse_tee_slave_muxer_index("ordinary ffmpeg stderr"), None);
     }
 
     #[test]

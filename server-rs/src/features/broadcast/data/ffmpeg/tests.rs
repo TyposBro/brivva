@@ -142,6 +142,7 @@ fn fake_exited_stream_full(id: &str, lang: &str, is_source: bool, passthrough: b
         subtitle_textfile: format!("/tmp/brivva_subtitle_fake_{id}.txt"),
         lang: lang.to_string(),
         rtmp_urls: vec!["rtmp://fake".into()],
+        destinations: vec![RtmpDestination::new("fake", "rtmp://fake")],
         delay: Duration::from_millis(1000),
         is_source,
         host_gain: 1.0,
