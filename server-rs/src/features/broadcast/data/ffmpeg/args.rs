@@ -245,16 +245,39 @@ fn video_filter(profile: VideoProfile, subtitle_textfile: Option<&str>) -> Strin
     let Some(textfile) = subtitle_textfile else {
         return base;
     };
+    let fontfile = subtitle_fontfile();
     format!(
-        "{base},drawtext=textfile={}:reload=1:x=(w-text_w)/2:y=h-(text_h*3):fontcolor=white:fontsize=44:box=1:boxcolor=black@0.55:boxborderw=18",
-        escape_drawtext_path(textfile)
+        "{base},drawtext=textfile={}:fontfile={}:reload=1:x=(w-text_w)/2:y=h-(text_h*3):fontcolor=white:fontsize=44:box=1:boxcolor=black@0.55:boxborderw=18",
+        escape_drawtext_value(textfile),
+        escape_drawtext_value(&fontfile)
     )
 }
 
-fn escape_drawtext_path(path: &str) -> String {
-    path.replace('\\', "\\\\")
+fn subtitle_fontfile() -> String {
+    if let Ok(path) = std::env::var("BRIVVA_SUBTITLE_FONTFILE")
+        && !path.trim().is_empty()
+    {
+        return path;
+    }
+    for path in [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".to_string()
+}
+
+fn escape_drawtext_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace('\'', "\\'")
+        .replace(',', "\\,")
 }
 
 fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<String> {
@@ -657,7 +680,9 @@ mod tests {
             VideoEncoderKind::X264,
         );
         let joined = args.join(" ");
-        assert!(joined.contains("drawtext=textfile=/tmp/brivva_subtitle_stream-1.txt:reload=1"));
+        assert!(joined.contains("drawtext=textfile=/tmp/brivva_subtitle_stream-1.txt"));
+        assert!(joined.contains(":fontfile="));
+        assert!(joined.contains(":reload=1"));
         assert!(joined.contains("box=1"));
     }
 
