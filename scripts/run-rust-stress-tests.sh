@@ -37,7 +37,7 @@ Expected to be run inside Infisical:
 Scenario names:
   single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
   single_4k30 many_outputs_4k30 high_res_capped low_quality
-  bad_destination tts_failure stt_failure long_run difficult_audio network
+  backlog_catchup bad_destination tts_failure stt_failure long_run difficult_audio network
 EOF
 }
 
@@ -288,6 +288,18 @@ run_case low_quality \
 	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
 	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 	"BRIVVA_VIDEO_MAX_FPS=30"
+
+run_case backlog_catchup \
+	"${common_env[@]}" \
+	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$SINGLE_OUTPUT" \
+	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+	"BRIVVA_VIDEO_MAX_FPS=30" \
+	"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
+	"BRIVVA_AUDIO_MAX_LAG_MS=3000"
 
 if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res_capped; then
 	if [[ -z "$FOUR_K_MP4" || ! -f "$FOUR_K_MP4" ]]; then

@@ -408,19 +408,21 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             } => {
                 fifo_would_blocks += would_blocks;
                 fifo_skipped_ticks += 1;
-                if !host_requeue.is_empty() {
-                    ready_host.splice(0..0, host_requeue);
-                    let ready_dropped = cap_ready_audio_to_live(&mut ready_host, max_ready_ticks);
-                    if ready_dropped > 0 {
-                        ready_host_bytes_dropped += ready_dropped as u64;
-                    }
+                let requeued_host_bytes = host_requeue.len();
+                let ready_dropped = requeue_host_audio_after_backpressure(
+                    &mut ready_host,
+                    host_requeue,
+                    max_ready_ticks,
+                );
+                if ready_dropped > 0 {
+                    ready_host_bytes_dropped += ready_dropped as u64;
                 }
                 eprintln!(
                     "[AUDIO:{}] fifo write skipped live tick would_blocks={} elapsed_ms={} requeued_host_bytes={} ready_host_bytes_dropped={}",
                     stream_id,
                     would_blocks,
                     elapsed.as_millis(),
-                    host_real_bytes,
+                    requeued_host_bytes,
                     ready_host_bytes_dropped
                 );
             }
@@ -565,6 +567,17 @@ fn cap_ready_audio_to_live(ready_host: &mut Vec<u8>, max_ready_ticks: usize) -> 
     } else {
         0
     }
+}
+
+fn requeue_host_audio_after_backpressure(
+    ready_host: &mut Vec<u8>,
+    host_requeue: Vec<u8>,
+    max_ready_ticks: usize,
+) -> usize {
+    if !host_requeue.is_empty() {
+        ready_host.splice(0..0, host_requeue);
+    }
+    cap_ready_audio_to_live(ready_host, max_ready_ticks)
 }
 
 fn take_tick_sample(ready_host: &mut Vec<u8>) -> Vec<u8> {
@@ -735,6 +748,38 @@ mod tests {
         assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
         commit_tts_drain(&queue, out.tts_bytes_consumed);
         assert_eq!(queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK);
+    }
+
+    #[test]
+    fn backpressure_requeues_host_audio_and_keeps_tts_until_success() {
+        let tts_queue = StdMutex::new(VecDeque::from(vec![7u8; AUDIO_BYTES_PER_TICK * 2]));
+        let mut ready_host = vec![1u8; AUDIO_BYTES_PER_TICK];
+        let host_real_bytes = ready_host.len().min(AUDIO_BYTES_PER_TICK);
+        let host_chunk = take_tick_sample(&mut ready_host);
+        let host_requeue = host_chunk[..host_real_bytes].to_vec();
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk,
+            is_source: false,
+            host_gain: 0.2,
+            tts_queue: &tts_queue,
+        });
+
+        assert!(ready_host.is_empty());
+        assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
+        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+
+        let dropped = requeue_host_audio_after_backpressure(
+            &mut ready_host,
+            host_requeue,
+            DEFAULT_AUDIO_MAX_READY_TICKS,
+        );
+
+        assert_eq!(dropped, 0);
+        assert_eq!(ready_host, vec![1u8; AUDIO_BYTES_PER_TICK]);
+        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK * 2);
+
+        commit_tts_drain(&tts_queue, out.tts_bytes_consumed);
+        assert_eq!(tts_queue.lock().unwrap().len(), AUDIO_BYTES_PER_TICK);
     }
 
     #[test]

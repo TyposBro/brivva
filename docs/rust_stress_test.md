@@ -46,6 +46,7 @@ Default full sequence:
 - `cpu_720p30`: CPU fallback ceiling, one output.
 - `many_outputs_1080p30`: all available per-language YouTube outputs.
 - `low_quality`: 720p15 input with 1080p30 caps, verifies no bad upscale/stutter.
+- `backlog_catchup`: explicit 3s audio/video catch-up window; validates backlog policy logs.
 - `single_4k30`: one 4K output, requires `--4k-mp4`.
 - `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
 - `high_res_capped`: 4K input capped to 1080p30.
@@ -103,6 +104,8 @@ Bad:
 
 - `speed <0.95x` for more than 30 seconds.
 - `fifo_would_blocks` grows nonstop.
+- `host_audio_stale_chunks_dropped`, `ready_host_bytes_dropped`, or
+  `video_stale_chunks_dropped` grow during normal healthy runs.
 - `tts_buffered_bytes` grows forever.
 - Repeated FFmpeg restarts.
 - YouTube says not enough video or viewers buffer.
@@ -207,7 +210,25 @@ sudo tc qdisc del dev <iface> root
 
 Pass: logs show degraded output clearly; process does not deadlock.
 
-### 6. One Bad Destination
+### 6. Backlog Catch-Up
+
+Goal: verify short FFmpeg/RTMP stalls preserve audio, video, and TTS within the
+live lag window before any forced drop.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only backlog_catchup
+```
+
+Pass:
+
+- `BRIVVA_VIDEO_MAX_LAG_MS=3000` and `BRIVVA_AUDIO_MAX_LAG_MS=3000` are active.
+- Brief `fifo_would_blocks` does not consume TTS; `tts_buffered_bytes` later drains.
+- `requeued_host_bytes` appears only during FIFO backpressure.
+- `host_audio_stale_chunks_dropped`, `ready_host_bytes_dropped`, and
+  `video_stale_chunks_dropped` stay `0` unless the stream exceeds the lag window.
+
+### 7. One Bad Destination
 
 Goal: one failed platform must not kill others.
 
@@ -219,7 +240,7 @@ Run base command with normal YouTube keys too.
 
 Pass: bad destination logs failure; valid YouTube outputs remain live.
 
-### 7. TTS Failure
+### 8. TTS Failure
 
 Goal: translated audio failure must not kill original stream.
 
@@ -232,7 +253,7 @@ ELEVENLABS_API_KEY=bad
 Pass: source/pass streams continue. Translated streams show subtitle/TTS failure
 logs, but video does not stall.
 
-### 8. STT Failure
+### 9. STT Failure
 
 Goal: STT failure must not kill original stream.
 
