@@ -21,7 +21,10 @@ use webrtc::rtp::codecs::h264::{
 };
 use webrtc::rtp::packet::Packet;
 use webrtc::rtp::packetizer::Depacketizer;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc::rtp_transceiver::RTCPFeedback;
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+};
 use webrtc::track::track_remote::TrackRemote;
 
 use crate::features::broadcast::domain::LiveSessions;
@@ -60,6 +63,16 @@ pub(super) async fn handle_webrtc_offer(
                 error = %error,
                 "webrtc offer rejected"
             );
+            if let Some(session) = live_sessions.get(live_session_id) {
+                session.send_to_host(Message::Text(
+                    serde_json::json!({
+                        "type": "webrtc:error",
+                        "message": error.to_string(),
+                    })
+                    .to_string()
+                    .into(),
+                ));
+            }
         }
     }
 }
@@ -72,7 +85,7 @@ async fn accept_webrtc_video(
 ) -> WebRtcResult<Arc<RTCPeerConnection>> {
     apply_video_profile(&offer, live_sessions, live_session_id).await;
     let mut media = MediaEngine::default();
-    media.register_default_codecs()?;
+    register_h264_only_video_codecs(&mut media)?;
     let registry = register_default_interceptors(Registry::new(), &mut media)?;
     let mut settings = SettingEngine::default();
     settings.set_udp_network(UDPNetwork::Ephemeral(EphemeralUDP::new(
@@ -114,6 +127,46 @@ async fn accept_webrtc_video(
     }
 
     Ok(peer)
+}
+
+fn register_h264_only_video_codecs(media: &mut MediaEngine) -> WebRtcResult<()> {
+    let video_rtcp_feedback = vec![
+        RTCPFeedback {
+            typ: "goog-remb".to_owned(),
+            parameter: "".to_owned(),
+        },
+        RTCPFeedback {
+            typ: "ccm".to_owned(),
+            parameter: "fir".to_owned(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_owned(),
+            parameter: "".to_owned(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_owned(),
+            parameter: "pli".to_owned(),
+        },
+    ];
+    for (payload_type, profile_level_id) in [(102, "42001f"), (125, "42e01f"), (123, "640032")] {
+        media.register_codec(
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_H264.to_owned(),
+                    clock_rate: 90_000,
+                    channels: 0,
+                    sdp_fmtp_line: format!(
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile_level_id}"
+                    ),
+                    rtcp_feedback: video_rtcp_feedback.clone(),
+                },
+                payload_type,
+                ..Default::default()
+            },
+            RTPCodecType::Video,
+        )?;
+    }
+    Ok(())
 }
 
 async fn apply_video_profile(

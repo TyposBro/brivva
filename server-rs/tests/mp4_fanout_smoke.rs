@@ -25,7 +25,6 @@ struct Args {
     capture_height: u32,
     capture_fps: u32,
     subtitle: Option<String>,
-    video_mode: VideoFeedMode,
     source_lang: Lang,
     soniox_api_key: String,
     soniox_ws_url: String,
@@ -51,13 +50,6 @@ impl SmokeOutput {
             .map(ToString::to_string)
             .unwrap_or_else(|| "pass".to_string())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VideoFeedMode {
-    CopyH264,
-    TranscodeX264,
-    TranscodeNvenc,
 }
 
 #[tokio::test]
@@ -116,7 +108,7 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_health_monitor(manager.clone(), stop.clone());
-    let mut video = spawn_video_ffmpeg(&args.mp4, args.video_mode)?;
+    let mut video = spawn_video_ffmpeg(&args.mp4)?;
     let mut audio = spawn_audio_ffmpeg(&args.mp4)?;
     let video_stdout = video.stdout.take().ok_or("video ffmpeg stdout missing")?;
     let audio_stdout = audio.stdout.take().ok_or("audio ffmpeg stdout missing")?;
@@ -156,11 +148,16 @@ fn parse_args() -> Result<Args, String> {
     let max_fps = env_u32("BRIVVA_VIDEO_MAX_FPS", 30);
     let detected = probe_mp4_video(&mp4)
         .ok_or_else(|| format!("MP4_FANOUT_SMOKE_MP4 is not a readable video file: {mp4}"))?;
+    if !detected.codec.eq_ignore_ascii_case("h264") {
+        return Err(format!(
+            "MP4_FANOUT_SMOKE_MP4 must be H.264 for this smoke test, got {}. Convert fixture once with ffmpeg before running.",
+            detected.codec
+        ));
+    }
     let capture_width = env_u32("MP4_FANOUT_SMOKE_CAPTURE_WIDTH", detected.width);
     let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", detected.height);
     let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", detected.fps);
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
-    let video_mode = parse_video_mode(&detected.codec, encoder);
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
     let explicit_target_langs = parse_target_langs_env("MP4_FANOUT_SMOKE_TARGET_LANGS")?;
     let legacy_target_lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_TARGET_LANG")?;
@@ -213,7 +210,6 @@ fn parse_args() -> Result<Args, String> {
         capture_height,
         capture_fps,
         subtitle,
-        video_mode,
         source_lang,
         soniox_api_key,
         soniox_ws_url,
@@ -337,19 +333,6 @@ fn parse_frame_rate(value: &str) -> Option<u32> {
     Some((num / den).round() as u32)
 }
 
-fn parse_video_mode(codec: &str, encoder: VideoEncoderKind) -> VideoFeedMode {
-    let mode = std::env::var("MP4_FANOUT_SMOKE_VIDEO_MODE").unwrap_or_default();
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "" if codec.eq_ignore_ascii_case("h264") => VideoFeedMode::CopyH264,
-        "" if encoder == VideoEncoderKind::Nvenc => VideoFeedMode::TranscodeNvenc,
-        "" => VideoFeedMode::TranscodeX264,
-        "copy" | "h264" | "copy-h264" => VideoFeedMode::CopyH264,
-        "nvenc" | "transcode-nvenc" | "h264_nvenc" => VideoFeedMode::TranscodeNvenc,
-        "transcode" | "x264" | "transcode-x264" => VideoFeedMode::TranscodeX264,
-        _ => VideoFeedMode::CopyH264,
-    }
-}
-
 fn spawn_translation_pipeline(
     args: &Args,
     manager: SharedRtmpManager,
@@ -434,7 +417,7 @@ fn env_u32(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-fn spawn_video_ffmpeg(mp4: &str, mode: VideoFeedMode) -> std::io::Result<tokio::process::Child> {
+fn spawn_video_ffmpeg(mp4: &str) -> std::io::Result<tokio::process::Child> {
     let mut command = Command::new("ffmpeg");
     command.args([
         "-hide_banner",
@@ -446,46 +429,11 @@ fn spawn_video_ffmpeg(mp4: &str, mode: VideoFeedMode) -> std::io::Result<tokio::
         "-i",
         mp4,
         "-an",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "h264_mp4toannexb",
     ]);
-    match mode {
-        VideoFeedMode::CopyH264 => {
-            // Best isolation mode for H.264 MP4 fixtures: avoid burning CPU
-            // on a pre-server encode, feed Annex-B into RtmpManager, then let
-            // the server's FFmpeg path own the only RTMP encode.
-            command.args(["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]);
-        }
-        VideoFeedMode::TranscodeX264 => {
-            // Fallback for non-H.264 source files. This is intentionally
-            // labelled as less ideal because it adds a decode+encode before
-            // the server path and can starve YouTube on weak machines.
-            command.args([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-tune",
-                "zerolatency",
-            ]);
-        }
-        VideoFeedMode::TranscodeNvenc => {
-            command.args([
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p4",
-                "-tune",
-                "ll",
-                "-rc",
-                "cbr",
-                "-b:v",
-                "24M",
-                "-maxrate",
-                "24M",
-                "-bufsize",
-                "48M",
-            ]);
-        }
-    }
     command
         .args(["-f", "h264", "pipe:1"])
         .stdout(std::process::Stdio::piped())
