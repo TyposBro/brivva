@@ -359,6 +359,14 @@ impl RtmpManager {
         profile
     }
 
+    pub fn set_observed_video_dimensions(&mut self, width: u32, height: u32) -> VideoProfile {
+        let current = self.video_profile;
+        let caps = self.effective_video_profile_caps();
+        let profile = VideoProfile::from_capture_with_caps(width, height, current.input_fps, caps);
+        self.set_video_profile(profile);
+        profile
+    }
+
     fn effective_video_profile_caps(&self) -> VideoProfileCaps {
         if self.video_encoder == VideoEncoderKind::X264 && self.video_profile_caps.max_fps > 30 {
             tracing::warn!(

@@ -225,6 +225,7 @@ async fn forward_track_rtp(
     let mut depacketizer = H264AnnexBDepacketizer::default();
     let mut clock = VideoRtpClock::default();
     let mut fps_estimator = VideoFpsEstimator::default();
+    let mut observed_dimensions: Option<(u32, u32)> = None;
     let mut timeline_shadow = timeline_shadow.then(VideoTimelineShadow::default);
     while let Ok((packet, _)) = track.read_rtp().await {
         let Some(annex_b) = depacketizer.depacketize(&packet) else {
@@ -252,6 +253,25 @@ async fn forward_track_rtp(
         let Some(manager) = manager else {
             break;
         };
+        if let Some(dimensions) = h264_annex_b_dimensions(&annex_b)
+            && observed_dimensions != Some((dimensions.width, dimensions.height))
+        {
+            observed_dimensions = Some((dimensions.width, dimensions.height));
+            let profile = manager
+                .lock()
+                .await
+                .set_observed_video_dimensions(dimensions.width, dimensions.height);
+            tracing::info!(
+                live_session_id = %live_session_id,
+                observed_width = dimensions.width,
+                observed_height = dimensions.height,
+                input_fps = profile.input_fps,
+                output_fps = profile.output_fps,
+                output_width = profile.max_width,
+                output_height = profile.max_height,
+                "webrtc video dimensions corrected from H.264 SPS"
+            );
+        }
         if let Some(fps) = fps_estimator.observe(packet.header.timestamp) {
             let profile = manager.lock().await.set_observed_video_fps(fps);
             tracing::info!(
@@ -505,6 +525,193 @@ fn annex_b_contains_type(access_unit: &[u8], needle: u8) -> bool {
         .any(|(_, _, nalu_type)| nalu_type == needle)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct H264Dimensions {
+    width: u32,
+    height: u32,
+}
+
+fn h264_annex_b_dimensions(access_unit: &[u8]) -> Option<H264Dimensions> {
+    for (start, end, nalu_type) in annex_b_nalus(access_unit) {
+        if nalu_type != SPS_NALU_TYPE {
+            continue;
+        }
+        let nalu = &access_unit[start..end];
+        let payload_start = annex_b_start_codes(nalu).first()?.1 + 1;
+        if payload_start >= nalu.len() {
+            continue;
+        }
+        if let Some(dimensions) = parse_h264_sps_dimensions(&nalu[payload_start..]) {
+            return Some(dimensions);
+        }
+    }
+    None
+}
+
+fn parse_h264_sps_dimensions(sps: &[u8]) -> Option<H264Dimensions> {
+    let rbsp = h264_rbsp(sps);
+    let mut bits = BitReader::new(&rbsp);
+    let profile_idc = bits.read_bits(8)? as u8;
+    bits.read_bits(8)?; // constraint flags + reserved bits
+    bits.read_bits(8)?; // level_idc
+    bits.read_ue()?; // seq_parameter_set_id
+
+    let mut chroma_format_idc = 1;
+    let mut separate_colour_plane_flag = false;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
+        chroma_format_idc = bits.read_ue()?;
+        if chroma_format_idc == 3 {
+            separate_colour_plane_flag = bits.read_bool()?;
+        }
+        bits.read_ue()?; // bit_depth_luma_minus8
+        bits.read_ue()?; // bit_depth_chroma_minus8
+        bits.read_bool()?; // qpprime_y_zero_transform_bypass_flag
+        if bits.read_bool()? {
+            let scaling_lists = if chroma_format_idc != 3 { 8 } else { 12 };
+            for idx in 0..scaling_lists {
+                if bits.read_bool()? {
+                    skip_scaling_list(&mut bits, if idx < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+
+    bits.read_ue()?; // log2_max_frame_num_minus4
+    let pic_order_cnt_type = bits.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        bits.read_ue()?; // log2_max_pic_order_cnt_lsb_minus4
+    } else if pic_order_cnt_type == 1 {
+        bits.read_bool()?; // delta_pic_order_always_zero_flag
+        bits.read_se()?;
+        bits.read_se()?;
+        let cycle = bits.read_ue()?;
+        for _ in 0..cycle {
+            bits.read_se()?;
+        }
+    }
+    bits.read_ue()?; // max_num_ref_frames
+    bits.read_bool()?; // gaps_in_frame_num_value_allowed_flag
+    let pic_width_in_mbs_minus1 = bits.read_ue()?;
+    let pic_height_in_map_units_minus1 = bits.read_ue()?;
+    let frame_mbs_only_flag = bits.read_bool()?;
+    if !frame_mbs_only_flag {
+        bits.read_bool()?; // mb_adaptive_frame_field_flag
+    }
+    bits.read_bool()?; // direct_8x8_inference_flag
+
+    let mut crop_left = 0;
+    let mut crop_right = 0;
+    let mut crop_top = 0;
+    let mut crop_bottom = 0;
+    if bits.read_bool()? {
+        crop_left = bits.read_ue()?;
+        crop_right = bits.read_ue()?;
+        crop_top = bits.read_ue()?;
+        crop_bottom = bits.read_ue()?;
+    }
+
+    let width = (pic_width_in_mbs_minus1 + 1) * 16;
+    let mut height = (pic_height_in_map_units_minus1 + 1) * 16;
+    if !frame_mbs_only_flag {
+        height *= 2;
+    }
+    let (sub_width_c, sub_height_c) = match chroma_format_idc {
+        0 | 3 if separate_colour_plane_flag => (1, 1),
+        1 => (2, 2),
+        2 => (2, 1),
+        3 => (1, 1),
+        _ => (2, 2),
+    };
+    let crop_unit_x = sub_width_c;
+    let crop_unit_y = sub_height_c * if frame_mbs_only_flag { 1 } else { 2 };
+    Some(H264Dimensions {
+        width: width.saturating_sub((crop_left + crop_right) * crop_unit_x),
+        height: height.saturating_sub((crop_top + crop_bottom) * crop_unit_y),
+    })
+}
+
+fn h264_rbsp(nalu_payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nalu_payload.len());
+    let mut zeros = 0;
+    for &byte in nalu_payload {
+        if zeros >= 2 && byte == 0x03 {
+            zeros = 0;
+            continue;
+        }
+        out.push(byte);
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+    }
+    out
+}
+
+fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Option<()> {
+    let mut last_scale = 8i32;
+    let mut next_scale = 8i32;
+    for _ in 0..size {
+        if next_scale != 0 {
+            let delta_scale = bits.read_se()?;
+            next_scale = (last_scale + delta_scale + 256) % 256;
+        }
+        last_scale = if next_scale == 0 {
+            last_scale
+        } else {
+            next_scale
+        };
+    }
+    Some(())
+}
+
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, bit_pos: 0 }
+    }
+
+    fn read_bool(&mut self) -> Option<bool> {
+        Some(self.read_bits(1)? != 0)
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..count {
+            let byte = *self.bytes.get(self.bit_pos / 8)?;
+            let bit = (byte >> (7 - (self.bit_pos % 8))) & 1;
+            self.bit_pos += 1;
+            value = (value << 1) | bit as u32;
+        }
+        Some(value)
+    }
+
+    fn read_ue(&mut self) -> Option<u32> {
+        let mut zeros = 0usize;
+        while !self.read_bool()? {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        let suffix = if zeros == 0 {
+            0
+        } else {
+            self.read_bits(zeros)?
+        };
+        Some((1u32 << zeros) - 1 + suffix)
+    }
+
+    fn read_se(&mut self) -> Option<i32> {
+        let code = self.read_ue()? as i32;
+        let sign = if code % 2 == 0 { -1 } else { 1 };
+        Some(sign * ((code + 1) / 2))
+    }
+}
+
 fn annex_b_nalus(access_unit: &[u8]) -> Vec<(usize, usize, u8)> {
     let starts = annex_b_start_codes(access_unit);
     let mut nalus = Vec::new();
@@ -587,6 +794,18 @@ mod tests {
             observed = estimator.observe(ts).or(observed);
         }
         assert_eq!(observed, Some(60));
+    }
+
+    #[test]
+    fn h264_annex_b_dimensions_reads_sps_size() {
+        let access_unit = annex_b_sps_for_dimensions(1920, 1080);
+        assert_eq!(
+            h264_annex_b_dimensions(&access_unit),
+            Some(H264Dimensions {
+                width: 1920,
+                height: 1080
+            })
+        );
     }
 
     #[test]
@@ -688,5 +907,80 @@ mod tests {
             payload: vec![0x7c, 0x01, 9, 9, 9].into(),
         };
         assert!(depacketizer.depacketize(&mid_fu_a).is_none());
+    }
+
+    fn annex_b_sps_for_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let coded_width = width.next_multiple_of(16);
+        let coded_height = height.next_multiple_of(16);
+        let crop_right = (coded_width - width) / 2;
+        let crop_bottom = (coded_height - height) / 2;
+        let mut bits = TestBitWriter::default();
+        bits.write_bits(66, 8); // profile_idc: baseline
+        bits.write_bits(0, 8); // constraint flags
+        bits.write_bits(31, 8); // level_idc
+        bits.write_ue(0); // seq_parameter_set_id
+        bits.write_ue(0); // log2_max_frame_num_minus4
+        bits.write_ue(0); // pic_order_cnt_type
+        bits.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        bits.write_ue(1); // max_num_ref_frames
+        bits.write_bit(false); // gaps_in_frame_num_value_allowed_flag
+        bits.write_ue(coded_width / 16 - 1);
+        bits.write_ue(coded_height / 16 - 1);
+        bits.write_bit(true); // frame_mbs_only_flag
+        bits.write_bit(true); // direct_8x8_inference_flag
+        bits.write_bit(crop_right > 0 || crop_bottom > 0);
+        if crop_right > 0 || crop_bottom > 0 {
+            bits.write_ue(0);
+            bits.write_ue(crop_right);
+            bits.write_ue(0);
+            bits.write_ue(crop_bottom);
+        }
+        bits.write_bit(false); // vui_parameters_present_flag
+        bits.finish_rbsp();
+
+        let mut out = vec![0, 0, 0, 1, 0x67];
+        out.extend(bits.bytes);
+        out
+    }
+
+    #[derive(Default)]
+    struct TestBitWriter {
+        bytes: Vec<u8>,
+        bit_pos: usize,
+    }
+
+    impl TestBitWriter {
+        fn write_bit(&mut self, bit: bool) {
+            if self.bit_pos % 8 == 0 {
+                self.bytes.push(0);
+            }
+            if bit {
+                let last = self.bytes.len() - 1;
+                self.bytes[last] |= 1 << (7 - (self.bit_pos % 8));
+            }
+            self.bit_pos += 1;
+        }
+
+        fn write_bits(&mut self, value: u32, count: usize) {
+            for shift in (0..count).rev() {
+                self.write_bit(((value >> shift) & 1) != 0);
+            }
+        }
+
+        fn write_ue(&mut self, value: u32) {
+            let code_num = value + 1;
+            let bits = 32 - code_num.leading_zeros();
+            for _ in 0..bits - 1 {
+                self.write_bit(false);
+            }
+            self.write_bits(code_num, bits as usize);
+        }
+
+        fn finish_rbsp(&mut self) {
+            self.write_bit(true);
+            while !self.bit_pos.is_multiple_of(8) {
+                self.write_bit(false);
+            }
+        }
     }
 }
