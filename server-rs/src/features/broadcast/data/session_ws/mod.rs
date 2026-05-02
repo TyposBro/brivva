@@ -100,6 +100,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         v2_render_graph: state.v2_render_graph,
         v2_shared_decode: state.v2_shared_decode,
         v2_gpu_workers: state.v2_gpu_workers,
+        video_encoder: state.video_encoder,
     })
 }
 

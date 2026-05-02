@@ -43,6 +43,9 @@ pub struct AppConfig {
     pub v2_shared_decode: bool,
     /// V2 Phase 6A GPU worker shadow proof. Logs/contracts only; no live routing.
     pub v2_gpu_workers: bool,
+    /// FFmpeg encoder backend. `x264` is portable; `nvenc` enables NVIDIA GPU
+    /// encode on GPU hosts with an FFmpeg build that includes h264_nvenc.
+    pub video_encoder: crate::features::broadcast::domain::VideoEncoderKind,
 }
 
 impl AppConfig {
@@ -69,6 +72,9 @@ impl AppConfig {
             v2_render_graph: env_flag("BRIVVA_V2_RENDER_GRAPH"),
             v2_shared_decode: env_flag("BRIVVA_V2_SHARED_DECODE"),
             v2_gpu_workers: env_flag("BRIVVA_V2_GPU_WORKERS"),
+            video_encoder: crate::features::broadcast::domain::VideoEncoderKind::from_wire(
+                &env_or_default("BRIVVA_VIDEO_ENCODER", "x264"),
+            ),
         })
     }
 }
@@ -119,6 +125,7 @@ mod tests {
                 "BRIVVA_V2_RENDER_GRAPH",
                 "BRIVVA_V2_SHARED_DECODE",
                 "BRIVVA_V2_GPU_WORKERS",
+                "BRIVVA_VIDEO_ENCODER",
             ] {
                 std::env::remove_var(key);
             }
@@ -134,6 +141,10 @@ mod tests {
         assert!(!cfg.v2_render_graph);
         assert!(!cfg.v2_shared_decode);
         assert!(!cfg.v2_gpu_workers);
+        assert_eq!(
+            cfg.video_encoder,
+            crate::features::broadcast::domain::VideoEncoderKind::X264
+        );
     }
 
     #[test]
@@ -214,6 +225,7 @@ mod tests {
             std::env::set_var("BRIVVA_V2_RENDER_GRAPH", "1");
             std::env::set_var("BRIVVA_V2_SHARED_DECODE", "on");
             std::env::set_var("BRIVVA_V2_GPU_WORKERS", "yes");
+            std::env::set_var("BRIVVA_VIDEO_ENCODER", "h264_nvenc");
         }
 
         let cfg = AppConfig::from_env();
@@ -233,6 +245,10 @@ mod tests {
         assert!(cfg.v2_render_graph);
         assert!(cfg.v2_shared_decode);
         assert!(cfg.v2_gpu_workers);
+        assert_eq!(
+            cfg.video_encoder,
+            crate::features::broadcast::domain::VideoEncoderKind::Nvenc
+        );
 
         unsafe {
             for key in [
@@ -252,6 +268,7 @@ mod tests {
                 "BRIVVA_V2_RENDER_GRAPH",
                 "BRIVVA_V2_SHARED_DECODE",
                 "BRIVVA_V2_GPU_WORKERS",
+                "BRIVVA_VIDEO_ENCODER",
             ] {
                 std::env::remove_var(key);
             }

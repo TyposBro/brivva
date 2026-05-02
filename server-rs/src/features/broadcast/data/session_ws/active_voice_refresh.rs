@@ -216,6 +216,7 @@ mod tests {
                 v2_render_graph: false,
                 v2_shared_decode: false,
                 v2_gpu_workers: false,
+                video_encoder: Default::default(),
             }),
         );
         live.selected_voice_id = voice_id;

@@ -311,6 +311,13 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
             target_lang: target_lang.to_string(),
             translate_ms: 0,
         }));
+        if let Some(manager) = live_session.rtmp_manager.clone() {
+            let lang = target_lang.to_string();
+            let subtitle = committed.to_string();
+            tokio::spawn(async move {
+                manager.lock().await.push_subtitle(&lang, &subtitle);
+            });
+        }
     }
 
     dispatch_tts_to_worker(DispatchTtsArgs {

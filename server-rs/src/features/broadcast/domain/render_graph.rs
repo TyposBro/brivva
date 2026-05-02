@@ -85,6 +85,73 @@ impl RenderGraphSpec {
             .iter()
             .find(|output| &output.output_id == output_id)
     }
+
+    /// Plan the future "encode once per language, publish to many platforms"
+    /// shape. The current FFmpeg adapter still spawns one process per
+    /// destination; this planner makes the grouping explicit and testable so
+    /// the runtime can graduate without changing session/domain contracts.
+    pub fn encoded_fanout_plan(&self) -> EncodedFanOutPlan {
+        EncodedFanOutPlan::from_outputs(&self.outputs)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedFanOutPlan {
+    pub groups: Vec<EncodedFanOutGroup>,
+}
+
+impl EncodedFanOutPlan {
+    pub fn from_outputs(outputs: &[OutputPipelineSpec]) -> Self {
+        let mut groups: Vec<EncodedFanOutGroup> = Vec::new();
+        for output in outputs {
+            let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.language_code == output.language_code)
+            else {
+                groups.push(EncodedFanOutGroup {
+                    language_code: output.language_code.clone(),
+                    destinations: vec![EncodedFanOutDestination::from(output)],
+                });
+                continue;
+            };
+            group
+                .destinations
+                .push(EncodedFanOutDestination::from(output));
+        }
+        Self { groups }
+    }
+
+    pub fn encoder_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn destination_count(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| group.destinations.len())
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedFanOutGroup {
+    pub language_code: String,
+    pub destinations: Vec<EncodedFanOutDestination>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedFanOutDestination {
+    pub output_id: OutputId,
+    pub destination_label: String,
+}
+
+impl From<&OutputPipelineSpec> for EncodedFanOutDestination {
+    fn from(output: &OutputPipelineSpec) -> Self {
+        Self {
+            output_id: output.output_id.clone(),
+            destination_label: output.destination_label.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,6 +641,27 @@ mod tests {
                 .language_code,
             "ja"
         );
+    }
+
+    #[test]
+    fn encoded_fanout_plan_groups_destinations_by_language() {
+        let graph = RenderGraphSpec::new(
+            SourceVideoMode::DecodeNormalizeOnce,
+            vec![
+                OutputPipelineSpec::new("ja-youtube", "ja", "YouTube", vec![]),
+                OutputPipelineSpec::new("ja-grip", "ja", "Grip", vec![]),
+                OutputPipelineSpec::new("ko-youtube", "ko", "YouTube", vec![]),
+            ],
+        );
+
+        let plan = graph.encoded_fanout_plan();
+
+        assert_eq!(plan.encoder_count(), 2);
+        assert_eq!(plan.destination_count(), 3);
+        assert_eq!(plan.groups[0].language_code, "ja");
+        assert_eq!(plan.groups[0].destinations.len(), 2);
+        assert_eq!(plan.groups[1].language_code, "ko");
+        assert_eq!(plan.groups[1].destinations.len(), 1);
     }
 
     #[test]

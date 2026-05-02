@@ -5,7 +5,8 @@ use std::sync::atomic::AtomicBool;
 use crate::core::contracts::workers::{SessionBundle, Stream};
 use crate::features::broadcast::domain::output_health::OutputId;
 use crate::features::broadcast::domain::render_graph::{
-    RenderGraphId, RenderGraphNodeKind, RenderGraphOutputNode,
+    EncodedFanOutPlan, OutputPipelineSpec, RenderGraphId, RenderGraphNodeKind,
+    RenderGraphOutputNode, RenderGraphSpec, SourceVideoMode,
 };
 use crate::features::broadcast::domain::{Lang, LiveSession, SessionMetrics};
 
@@ -73,6 +74,44 @@ pub fn output_id_for_stream(
     OutputId::new(session_id, &stream.lang, &stream.platform, *index)
 }
 
+fn render_graph_spec_for_streams(
+    session_id: &str,
+    streams: &[Stream],
+) -> Result<RenderGraphSpec, crate::features::broadcast::domain::output_health::OutputHealthError> {
+    let mut seen = HashMap::new();
+    let mut outputs = Vec::new();
+    for stream in streams {
+        let output_id = output_id_for_stream(session_id, stream, &mut seen)?;
+        outputs.push(OutputPipelineSpec::new(
+            output_id.as_str(),
+            &stream.lang,
+            &stream.platform,
+            vec![],
+        ));
+    }
+    Ok(RenderGraphSpec::new(
+        SourceVideoMode::EncodedPassthrough,
+        outputs,
+    ))
+}
+
+fn log_ffmpeg_backed_render_graph(
+    session_id: &str,
+    encoder: crate::features::broadcast::domain::VideoEncoderKind,
+    plan: &EncodedFanOutPlan,
+    live_fanout: bool,
+) {
+    tracing::info!(
+        session_id,
+        backend = "ffmpeg-processes",
+        video_encoder = encoder.codec_name(),
+        planned_encoder_count = plan.encoder_count(),
+        destination_count = plan.destination_count(),
+        per_language_encoded_fanout_live = live_fanout,
+        "render graph planned"
+    );
+}
+
 pub(super) struct RtmpStartArgs<'a> {
     pub bundle: &'a SessionBundle,
     pub source_lang: &'a Lang,
@@ -96,6 +135,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     }
     let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
     manager.set_metrics(metrics);
+    manager.set_video_encoder(live_session.pipeline_config.video_encoder);
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
     let output_controls_enabled = live_session.pipeline_config.v2_output_controls;
@@ -112,6 +152,24 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
             live_routed = false,
             "graph.shared_decode.planned"
         );
+    }
+    if render_graph_enabled {
+        match render_graph_spec_for_streams(sid, &bundle.streams) {
+            Ok(spec) => {
+                let plan = spec.encoded_fanout_plan();
+                log_ffmpeg_backed_render_graph(
+                    sid,
+                    live_session.pipeline_config.video_encoder,
+                    &plan,
+                    false,
+                );
+            }
+            Err(error) => tracing::error!(
+                session_id = %sid,
+                error = ?error,
+                "render graph planning failed"
+            ),
+        }
     }
     let mut output_indexes = HashMap::new();
     for s in &bundle.streams {

@@ -157,6 +157,37 @@ pub struct PipelineConfig {
     pub v2_shared_decode: bool,
     /// V2 Phase 6A GPU worker shadow proof. Logs/contracts only; no live route.
     pub v2_gpu_workers: bool,
+    /// FFmpeg video encoder backend for this session. Injected from
+    /// orchestration so the media layer does not read env vars.
+    pub video_encoder: VideoEncoderKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEncoderKind {
+    X264,
+    Nvenc,
+}
+
+impl Default for VideoEncoderKind {
+    fn default() -> Self {
+        Self::X264
+    }
+}
+
+impl VideoEncoderKind {
+    pub fn from_wire(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "nvenc" | "h264_nvenc" => Self::Nvenc,
+            _ => Self::X264,
+        }
+    }
+
+    pub fn codec_name(self) -> &'static str {
+        match self {
+            Self::X264 => "libx264",
+            Self::Nvenc => "h264_nvenc",
+        }
+    }
 }
 
 /// Handle to a single live session — the pair every pipeline function needs

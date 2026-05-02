@@ -1,31 +1,6 @@
 use std::io::BufRead;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoEncoder {
-    X264,
-    Nvenc,
-}
-
-impl VideoEncoder {
-    pub fn from_env() -> Self {
-        match std::env::var("BRIVVA_VIDEO_ENCODER") {
-            Ok(value)
-                if value.eq_ignore_ascii_case("nvenc")
-                    || value.eq_ignore_ascii_case("h264_nvenc") =>
-            {
-                Self::Nvenc
-            }
-            _ => Self::X264,
-        }
-    }
-
-    pub fn codec_name(self) -> &'static str {
-        match self {
-            Self::X264 => "libx264",
-            Self::Nvenc => "h264_nvenc",
-        }
-    }
-}
+use crate::features::broadcast::domain::VideoEncoderKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoProfile {
@@ -82,27 +57,37 @@ impl VideoProfile {
 /// so tests can pin the command shape without spawning an FFmpeg child.
 #[cfg(test)]
 pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String> {
-    build_ffmpeg_args_with_profile(audio_fifo, rtmp_url, VideoProfile::default())
+    build_ffmpeg_args_with_profile(
+        audio_fifo,
+        None,
+        rtmp_url,
+        VideoProfile::default(),
+        VideoEncoderKind::X264,
+    )
 }
 
 pub(super) fn build_ffmpeg_args_with_profile(
     audio_fifo: &str,
+    subtitle_textfile: Option<&str>,
     rtmp_url: &str,
     profile: VideoProfile,
+    encoder: VideoEncoderKind,
 ) -> Vec<String> {
     build_ffmpeg_args_with_profile_and_encoder(
         audio_fifo,
+        subtitle_textfile,
         rtmp_url,
         profile,
-        VideoEncoder::from_env(),
+        encoder,
     )
 }
 
 pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
     audio_fifo: &str,
+    subtitle_textfile: Option<&str>,
     rtmp_url: &str,
     profile: VideoProfile,
-    encoder: VideoEncoder,
+    encoder: VideoEncoderKind,
 ) -> Vec<String> {
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".into(),
@@ -155,10 +140,7 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         // lower-level drain/backpressure fixes and revisit copy once we can
         // guarantee parameter sets/keyframes across restarts.
         "-vf".into(),
-        format!(
-            "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
-            profile.output_fps, profile.max_width, profile.max_height
-        ),
+        video_filter(profile, subtitle_textfile),
     ]);
     ffmpeg_args.extend_from_slice(&video_encoder_args(encoder, profile));
     ffmpeg_args.extend_from_slice(&[
@@ -183,10 +165,30 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
     ffmpeg_args
 }
 
-fn video_encoder_args(encoder: VideoEncoder, profile: VideoProfile) -> Vec<String> {
+fn video_filter(profile: VideoProfile, subtitle_textfile: Option<&str>) -> String {
+    let base = format!(
+        "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+        profile.output_fps, profile.max_width, profile.max_height
+    );
+    let Some(textfile) = subtitle_textfile else {
+        return base;
+    };
+    format!(
+        "{base},drawtext=textfile={}:reload=1:x=(w-text_w)/2:y=h-(text_h*3):fontcolor=white:fontsize=44:box=1:boxcolor=black@0.55:boxborderw=18",
+        escape_drawtext_path(textfile)
+    )
+}
+
+fn escape_drawtext_path(path: &str) -> String {
+    path.replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "\\'")
+}
+
+fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<String> {
     let mut args = vec!["-c:v".into()];
     match encoder {
-        VideoEncoder::X264 => args.extend_from_slice(&[
+        VideoEncoderKind::X264 => args.extend_from_slice(&[
             "libx264".into(),
             "-preset".into(),
             "ultrafast".into(),
@@ -197,7 +199,7 @@ fn video_encoder_args(encoder: VideoEncoder, profile: VideoProfile) -> Vec<Strin
             "-bf".into(),
             "0".into(),
         ]),
-        VideoEncoder::Nvenc => args.extend_from_slice(&[
+        VideoEncoderKind::Nvenc => args.extend_from_slice(&[
             "h264_nvenc".into(),
             // Premium live path: keep latency bounded, but spend RTX GPU
             // budget on quality via HQ tuning + adaptive quantization.
@@ -494,8 +496,10 @@ mod tests {
     fn build_ffmpeg_args_uses_capture_clock_for_reencode_profile() {
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
+            None,
             "rtmp://x/y",
             VideoProfile::from_capture(3840, 2160, 60),
+            VideoEncoderKind::X264,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-r 60 -i pipe:0"));
@@ -511,9 +515,10 @@ mod tests {
     fn build_ffmpeg_args_can_use_nvenc_for_gpu_launch_path() {
         let args = build_ffmpeg_args_with_profile_and_encoder(
             "/tmp/fifo",
+            None,
             "rtmp://x/y",
             VideoProfile::default(),
-            VideoEncoder::Nvenc,
+            VideoEncoderKind::Nvenc,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-c:v h264_nvenc"));
@@ -525,6 +530,20 @@ mod tests {
         assert!(joined.contains("-temporal-aq 1"));
         assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
         assert!(!joined.contains("-c:v libx264"));
+    }
+
+    #[test]
+    fn build_ffmpeg_args_can_burn_subtitles_from_reloadable_textfile() {
+        let args = build_ffmpeg_args_with_profile(
+            "/tmp/fifo",
+            Some("/tmp/brivva_subtitle_stream-1.txt"),
+            "rtmp://x/y",
+            VideoProfile::default(),
+            VideoEncoderKind::X264,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("drawtext=textfile=/tmp/brivva_subtitle_stream-1.txt:reload=1"));
+        assert!(joined.contains("box=1"));
     }
 
     #[test]

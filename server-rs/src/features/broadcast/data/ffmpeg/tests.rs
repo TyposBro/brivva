@@ -139,6 +139,7 @@ fn fake_exited_stream_full(id: &str, lang: &str, is_source: bool, passthrough: b
         video_handle: Some(thread::spawn(|| {})),
         audio_handle: Some(thread::spawn(|| {})),
         audio_fifo: format!("/tmp/brivva_audio_fake_{id}"),
+        subtitle_textfile: format!("/tmp/brivva_subtitle_fake_{id}.txt"),
         lang: lang.to_string(),
         rtmp_url: "rtmp://fake".into(),
         delay: Duration::from_millis(1000),

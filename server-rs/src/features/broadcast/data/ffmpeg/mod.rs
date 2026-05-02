@@ -20,7 +20,7 @@ mod drain;
 mod mixer;
 mod orphan;
 
-use args::{FfmpegProgressAlert, FfmpegProgressMonitor, VideoEncoder};
+use args::{FfmpegProgressAlert, FfmpegProgressMonitor};
 pub use args::{VideoProfile, drain_stderr_lines, redact_rtmp_secrets};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 
@@ -28,6 +28,7 @@ use args::build_ffmpeg_args_with_profile;
 use drain::{AudioDrainCtx, VideoDrainCtx, audio_drain_loop, video_drain_loop};
 
 use crate::features::broadcast::domain::SessionMetrics;
+use crate::features::broadcast::domain::VideoEncoderKind;
 use crate::features::broadcast::domain::output_health::{
     OutputDegradationLabel, OutputHealthSnapshot, OutputHealthState, OutputId,
 };
@@ -104,6 +105,7 @@ struct RtmpStream {
     video_handle: Option<thread::JoinHandle<()>>,
     audio_handle: Option<thread::JoinHandle<()>>,
     audio_fifo: String,
+    subtitle_textfile: String,
 
     lang: String,
     rtmp_url: String,
@@ -144,6 +146,7 @@ pub struct RtmpManager {
     /// `set_metrics`. Cloned into each drain thread so increments stay
     /// lock-free.
     metrics: Option<Arc<SessionMetrics>>,
+    video_encoder: VideoEncoderKind,
 }
 
 type CrashedStreamSnapshot = (
@@ -292,7 +295,12 @@ impl RtmpManager {
             streams: HashMap::new(),
             video_profile: VideoProfile::default(),
             metrics: None,
+            video_encoder: VideoEncoderKind::X264,
         }
+    }
+
+    pub fn set_video_encoder(&mut self, encoder: VideoEncoderKind) {
+        self.video_encoder = encoder;
     }
 
     pub fn set_video_profile(&mut self, profile: VideoProfile) {
@@ -502,6 +510,24 @@ impl RtmpManager {
         }
     }
 
+    /// Update burned subtitle text for every target stream in `lang`.
+    /// FFmpeg's drawtext filter reads this file with `reload=1`, so the
+    /// output process stays alive while subtitles change per utterance.
+    pub fn push_subtitle(&self, lang: &str, text: &str) {
+        for stream in self.streams.values() {
+            if stream.lang == lang && !stream.is_source && !stream.passthrough {
+                if let Err(error) = std::fs::write(&stream.subtitle_textfile, text) {
+                    tracing::warn!(
+                        lang = %lang,
+                        path = %stream.subtitle_textfile,
+                        error = %error,
+                        "subtitle textfile update failed"
+                    );
+                }
+            }
+        }
+    }
+
     /// Kill FFmpeg children that have gone silent (no drain writes in
     /// `IDLE_RESTART_THRESHOLD`). We only send the kill here; `detect_crashed`
     /// on the next monitor tick sees the exit and runs the normal restart
@@ -629,6 +655,7 @@ impl RtmpManager {
                 let _ = old.child.kill();
                 let _ = old.child.wait();
                 let _ = std::fs::remove_file(&old.audio_fifo);
+                let _ = std::fs::remove_file(&old.subtitle_textfile);
 
                 result.push((
                     id,
@@ -746,16 +773,23 @@ impl RtmpManager {
 
     fn spawn_stream_inner(&mut self, args: StreamSpawnArgs) -> Result<(), String> {
         let audio_fifo = format!("/tmp/brivva_audio_{}", args.stream_id);
+        let subtitle_textfile = format!("/tmp/brivva_subtitle_{}.txt", args.stream_id);
 
         let _ = std::fs::remove_file(&audio_fifo);
+        let _ = std::fs::write(&subtitle_textfile, "");
         std::process::Command::new("mkfifo")
             .arg(&audio_fifo)
             .output()
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
-        let encoder = VideoEncoder::from_env();
-        let ffmpeg_args =
-            build_ffmpeg_args_with_profile(&audio_fifo, &args.rtmp_url, self.video_profile);
+        let encoder = self.video_encoder;
+        let ffmpeg_args = build_ffmpeg_args_with_profile(
+            &audio_fifo,
+            Some(&subtitle_textfile),
+            &args.rtmp_url,
+            self.video_profile,
+            encoder,
+        );
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
@@ -930,6 +964,7 @@ impl RtmpManager {
                 video_handle: Some(video_handle),
                 audio_handle: Some(audio_handle),
                 audio_fifo,
+                subtitle_textfile,
                 lang: args.lang,
                 rtmp_url: args.rtmp_url,
                 delay,
@@ -1011,6 +1046,7 @@ impl RtmpManager {
                 }
             }
             let _ = std::fs::remove_file(&stream.audio_fifo);
+            let _ = std::fs::remove_file(&stream.subtitle_textfile);
         }
     }
 }
