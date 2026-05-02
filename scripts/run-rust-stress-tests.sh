@@ -37,7 +37,7 @@ Expected to be run inside Infisical:
 Scenario names:
   single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
   single_4k30 many_outputs_4k30 high_res_capped low_quality
-  backlog_catchup bad_destination tts_failure stt_failure long_run difficult_audio network
+  backlog_catchup backlog_catchup_many_outputs bad_destination tts_failure stt_failure long_run difficult_audio network
 EOF
 }
 
@@ -307,6 +307,22 @@ else
 		"${common_env[@]}" \
 		"MP4_FANOUT_SMOKE_MP4=$MP4" \
 		"MP4_FANOUT_SMOKE_OUTPUTS=$TRANSLATED_OUTPUT" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
+		"BRIVVA_AUDIO_MAX_LAG_MS=3000"
+fi
+
+if [[ -z "$MULTI_OUTPUTS" || "$MULTI_OUTPUTS" != *,* ]]; then
+	should_run backlog_catchup_many_outputs && record_skip backlog_catchup_many_outputs "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+else
+	run_case backlog_catchup_many_outputs \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
 		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
 		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
 		"BRIVVA_VIDEO_MAX_WIDTH=1920" \

@@ -47,6 +47,7 @@ Default full sequence:
 - `many_outputs_1080p30`: all available per-language YouTube outputs.
 - `low_quality`: 720p15 input with 1080p30 caps, verifies no bad upscale/stutter.
 - `backlog_catchup`: translated output with explicit 3s audio/video catch-up window; validates host audio, video, and TTS backlog policy logs.
+- `backlog_catchup_many_outputs`: all available outputs with explicit 3s audio/video catch-up window.
 - `single_4k30`: one 4K output, requires `--4k-mp4`.
 - `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
 - `high_res_capped`: 4K input capped to 1080p30.
@@ -229,7 +230,24 @@ Pass:
 - `host_audio_stale_chunks_dropped`, `ready_host_bytes_dropped`, and
   `video_stale_chunks_dropped` stay `0` unless the stream exceeds the lag window.
 
-### 7. One Bad Destination
+### 7. Backlog Catch-Up With All Outputs
+
+Goal: verify the same 3s backlog policy under real fanout load.
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only backlog_catchup_many_outputs
+```
+
+Pass:
+
+- All available outputs start.
+- Translated outputs show TTS activity and eventually drain `tts_buffered_bytes`.
+- Per-output `video_stale_chunks_dropped`, `host_audio_stale_chunks_dropped`,
+  and `ready_host_bytes_dropped` stay `0` unless total load exceeds the lag window.
+- If a drop happens, logs identify which output/lang dropped.
+
+### 8. One Bad Destination
 
 Goal: one failed platform must not kill others.
 
@@ -241,7 +259,7 @@ Run base command with normal YouTube keys too.
 
 Pass: bad destination logs failure; valid YouTube outputs remain live.
 
-### 8. TTS Failure
+### 9. TTS Failure
 
 Goal: translated audio failure must not kill original stream.
 
@@ -254,7 +272,7 @@ ELEVENLABS_API_KEY=bad
 Pass: source/pass streams continue. Translated streams show subtitle/TTS failure
 logs, but video does not stall.
 
-### 9. STT Failure
+### 10. STT Failure
 
 Goal: STT failure must not kill original stream.
 
