@@ -215,6 +215,37 @@ count_log_matches() {
 	rg -c "$pattern" "$logfile" 2>/dev/null || true
 }
 
+max_log_counter() {
+	local key="$1"
+	local logfile="$2"
+	local max=0
+	local value
+	while IFS= read -r value; do
+		value="${value#*=}"
+		if (( value > max )); then
+			max="$value"
+		fi
+	done < <(rg -o "${key}=[0-9]+" "$logfile" 2>/dev/null || true)
+	echo "$max"
+}
+
+assert_counter_at_most() {
+	local name="$1"
+	local logfile="$2"
+	local label="$3"
+	local key="$4"
+	local max_allowed="$5"
+	local max_seen
+	max_seen="$(max_log_counter "$key" "$logfile")"
+	if (( max_seen > max_allowed )); then
+		echo "ASSERT FAIL $name: $label max_seen=$max_seen max=$max_allowed"
+		echo "  grep: rg '${key}=[1-9]' '$logfile'"
+		return 1
+	fi
+	echo "ASSERT OK $name: $label max_seen=$max_seen max=$max_allowed"
+	return 0
+}
+
 assert_count_at_most() {
 	local name="$1"
 	local logfile="$2"
@@ -237,14 +268,16 @@ analyze_log() {
 	local logfile="$2"
 	local failed=0
 
-	assert_count_at_most "$name" "$logfile" "video stale drops" \
-		"video_stale_chunks_dropped=[1-9]" 0 || failed=1
-	assert_count_at_most "$name" "$logfile" "video keyframe wait drops" \
-		"video_keyframe_wait_chunks_dropped=[1-9]" 0 || failed=1
-	assert_count_at_most "$name" "$logfile" "host audio stale drops" \
-		"host_audio_stale_chunks_dropped=[1-9]" 0 || failed=1
-	assert_count_at_most "$name" "$logfile" "ready host audio drops" \
-		"ready_host_bytes_dropped=[1-9]" 0 || failed=1
+	assert_counter_at_most "$name" "$logfile" "video stale drops" \
+		"video_stale_chunks_dropped" 0 || failed=1
+	assert_counter_at_most "$name" "$logfile" "video keyframe wait drops" \
+		"video_keyframe_wait_chunks_dropped" 0 || failed=1
+	assert_counter_at_most "$name" "$logfile" "host audio stale drops" \
+		"host_audio_stale_chunks_dropped" 0 || failed=1
+	assert_counter_at_most "$name" "$logfile" "ready host audio drops" \
+		"ready_host_bytes_dropped" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "FFmpeg process crash/restart" \
+		"ffmpeg rtmp process crashed" 0 || failed=1
 	assert_count_at_most "$name" "$logfile" "sustained below-realtime encode" \
 		"encode below realtime" 0 || failed=1
 	assert_count_at_most "$name" "$logfile" "whole TTS segment overflow" \
@@ -377,7 +410,9 @@ else
 		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 		"BRIVVA_VIDEO_MAX_FPS=30" \
 		"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
-		"BRIVVA_AUDIO_MAX_LAG_MS=3000" \
+		"BRIVVA_AUDIO_MAX_LAG_MS=5000" \
+		"BRIVVA_AUDIO_FIFO_WRITE_BUDGET_MS=60" \
+		"BRIVVA_TTS_QUEUE_CAP_MS=30000" \
 		"BRIVVA_STT_FORCE_FINALIZE_MS=3000"
 fi
 
@@ -394,7 +429,9 @@ else
 		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 		"BRIVVA_VIDEO_MAX_FPS=30" \
 		"BRIVVA_VIDEO_MAX_LAG_MS=3000" \
-		"BRIVVA_AUDIO_MAX_LAG_MS=3000" \
+		"BRIVVA_AUDIO_MAX_LAG_MS=5000" \
+		"BRIVVA_AUDIO_FIFO_WRITE_BUDGET_MS=60" \
+		"BRIVVA_TTS_QUEUE_CAP_MS=30000" \
 		"BRIVVA_STT_FORCE_FINALIZE_MS=3000"
 fi
 

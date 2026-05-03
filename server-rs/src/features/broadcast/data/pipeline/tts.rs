@@ -84,7 +84,7 @@ pub fn compute_tts_deadline(text: &str) -> Duration {
 const TTS_EXPANSION_NORMAL_MILLI: u32 = 1_200;
 const TTS_EXPANSION_CATCHUP_MILLI: u32 = 1_500;
 const TTS_CONCISE_BACKLOG_MS: u64 = 5_000;
-const TTS_HARD_RECOVERY_BACKLOG_MS: u64 = 10_000;
+const TTS_HARD_RECOVERY_BACKLOG_MS: u64 = 15_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TtsExpansionPolicy {
@@ -949,6 +949,10 @@ mod tests {
         );
         assert_eq!(
             classify_tts_expansion(Some(1_000), 10_000),
+            TtsExpansionPolicy::Concise
+        );
+        assert_eq!(
+            classify_tts_expansion(Some(1_000), 15_000),
             TtsExpansionPolicy::HardRecovery
         );
     }

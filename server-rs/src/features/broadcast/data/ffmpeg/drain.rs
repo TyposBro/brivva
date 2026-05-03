@@ -33,21 +33,21 @@ const AUDIO_BYTES_PER_TICK: usize = 1764;
 /// chunks are dropped and the drain resumes at an IDR/keyframe.
 const DEFAULT_VIDEO_MAX_LAG: Duration = Duration::from_secs(3);
 const MAX_VIDEO_MAX_LAG: Duration = Duration::from_secs(5);
-const DEFAULT_AUDIO_MAX_LAG: Duration = Duration::from_secs(3);
+const DEFAULT_AUDIO_MAX_LAG: Duration = Duration::from_secs(5);
 const MAX_AUDIO_MAX_LAG: Duration = Duration::from_secs(5);
 /// Ready-host audio can normally exceed one 20ms tick because browsers send
 /// microphone PCM in larger chunks (ScriptProcessor 4096 frames ≈93ms). Keep a
 /// multi-second catch-up window before forced host-audio drops.
 #[cfg(test)]
 const DEFAULT_AUDIO_MAX_READY_TICKS: usize = 150;
-/// Audio drain must never wait longer than one output tick on a full FFmpeg
-/// FIFO. If the muxer is blocked, skip the current 20 ms slice and let the
-/// next tick continue on wall clock instead of accumulating seconds of stale
-/// audio that later replays late.
-const AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(18);
-const TTS_CATCHUP_START_BYTES: usize = 2 * 88_200;
-const TTS_CATCHUP_STRONG_BYTES: usize = 5 * 88_200;
-const TTS_CATCHUP_CRITICAL_BYTES: usize = 10 * 88_200;
+/// Audio drain waits briefly on a full FFmpeg FIFO before skipping the current
+/// live tick. A budget above one tick lets short encoder cold-start stalls
+/// preserve host audio, while the lag cap still prevents unbounded replay.
+const DEFAULT_AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(40);
+const MAX_AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(100);
+const TTS_CATCHUP_START_BYTES: usize = 88_200;
+const TTS_CATCHUP_STRONG_BYTES: usize = 3 * 88_200;
+const TTS_CATCHUP_CRITICAL_BYTES: usize = 5 * 88_200;
 
 pub(super) type TimedChunk = (Instant, Arc<[u8]>);
 
@@ -255,6 +255,15 @@ fn audio_max_ready_ticks(max_lag: Duration) -> usize {
     (max_lag.as_millis() / AUDIO_TICK.as_millis()).max(1) as usize
 }
 
+fn audio_fifo_write_budget_from_env() -> Duration {
+    let millis = std::env::var("BRIVVA_AUDIO_FIFO_WRITE_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AUDIO_FIFO_WRITE_BUDGET.as_millis() as u64)
+        .clamp(1, MAX_AUDIO_FIFO_WRITE_BUDGET.as_millis() as u64);
+    Duration::from_millis(millis)
+}
+
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
     let mut i = 0;
     while i + 3 < packet.len() {
@@ -321,13 +330,16 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
     let mut next_tick = Instant::now() + AUDIO_TICK;
     let max_lag = audio_max_lag_from_env();
     let max_ready_ticks = audio_max_ready_ticks(max_lag);
+    let fifo_write_budget = audio_fifo_write_budget_from_env();
 
     eprintln!(
-        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2})",
+        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2}, max_lag_ms={}, fifo_write_budget_ms={})",
         stream_id,
         delay.as_millis(),
         is_source,
-        host_gain
+        host_gain,
+        max_lag.as_millis(),
+        fifo_write_budget.as_millis()
     );
 
     while !stop.load(Ordering::Acquire) {
@@ -398,7 +410,7 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             &output.bytes
         };
         let n = bytes.len() as u64;
-        match fifo_write_nonblocking(&mut fifo, bytes, &stop) {
+        match fifo_write_nonblocking(&mut fifo, bytes, &stop, fifo_write_budget) {
             FifoWrite::Ok { would_blocks } => {
                 fifo_would_blocks += would_blocks;
                 if would_blocks > 0 {
@@ -493,7 +505,12 @@ enum FifoWrite {
 /// Write one live audio tick to a non-blocking FIFO. On WouldBlock, retry only
 /// inside the current 20 ms media-clock budget. A blocked muxer must drop/skips
 /// live ticks, not hold this thread and replay stale audio later.
-fn fifo_write_nonblocking(fifo: &mut std::fs::File, bytes: &[u8], stop: &AtomicBool) -> FifoWrite {
+fn fifo_write_nonblocking(
+    fifo: &mut std::fs::File,
+    bytes: &[u8],
+    stop: &AtomicBool,
+    budget: Duration,
+) -> FifoWrite {
     let started = Instant::now();
     let mut written = 0usize;
     let mut would_blocks = 0u64;
@@ -501,7 +518,7 @@ fn fifo_write_nonblocking(fifo: &mut std::fs::File, bytes: &[u8], stop: &AtomicB
         if stop.load(Ordering::Acquire) {
             return FifoWrite::Stopped;
         }
-        if started.elapsed() >= AUDIO_FIFO_WRITE_BUDGET {
+        if started.elapsed() >= budget {
             return FifoWrite::Backpressured {
                 would_blocks,
                 elapsed: started.elapsed(),
@@ -665,7 +682,7 @@ fn tts_catchup_speed(backlog_bytes: usize) -> f32 {
     } else if backlog_bytes >= TTS_CATCHUP_STRONG_BYTES {
         1.35
     } else if backlog_bytes >= TTS_CATCHUP_START_BYTES {
-        1.15
+        1.25
     } else {
         1.0
     }
@@ -844,6 +861,14 @@ mod tests {
             tts_queue_bytes(&queue.lock().unwrap()),
             AUDIO_BYTES_PER_TICK
         );
+    }
+
+    #[test]
+    fn tts_catchup_speed_reaches_emergency_rate_before_hard_recovery_backlog() {
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES - 1), 1.0);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES), 1.25);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_STRONG_BYTES), 1.35);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_CRITICAL_BYTES), 1.5);
     }
 
     #[test]

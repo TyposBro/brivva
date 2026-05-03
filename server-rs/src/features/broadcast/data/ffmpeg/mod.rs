@@ -55,9 +55,10 @@ const HOST_AUDIO_CAP_BYTES: usize = 20 * 88_200;
 const HOST_VIDEO_H264_CAP_CHUNKS: usize = 120_000;
 const PCM_BYTES_PER_SECOND: usize = 88_200;
 /// Live-commerce translated audio should not silently drift by tens of
-/// seconds. Keep a firm 15s cap and shed whole TTS segments if forced; never
-/// chop raw PCM from the middle of a sentence.
-const TTS_QUEUE_CAP_BYTES: usize = 15 * PCM_BYTES_PER_SECOND;
+/// seconds. Keep a firm default cap and shed whole TTS segments if forced;
+/// never chop raw PCM from the middle of a sentence.
+const DEFAULT_TTS_QUEUE_CAP_MS: u64 = 15_000;
+const MAX_TTS_QUEUE_CAP_MS: u64 = 30_000;
 /// Max FFmpeg restart attempts per stream.
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
@@ -150,6 +151,15 @@ impl TtsSegment {
 
 pub(crate) fn tts_queue_bytes(queue: &VecDeque<TtsSegment>) -> usize {
     queue.iter().map(TtsSegment::byte_len).sum()
+}
+
+fn tts_queue_cap_bytes_from_env() -> usize {
+    let millis = std::env::var("BRIVVA_TTS_QUEUE_CAP_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TTS_QUEUE_CAP_MS)
+        .clamp(1_000, MAX_TTS_QUEUE_CAP_MS);
+    millis.saturating_mul(PCM_BYTES_PER_SECOND as u64) as usize / 1_000
 }
 
 pub(crate) struct StreamBuffers {
@@ -681,7 +691,8 @@ impl RtmpManager {
             if stream.lang == segment.lang && !stream.is_source && !stream.passthrough {
                 let mut q = stream.buffers.tts.lock().unwrap();
                 q.push_back(segment.clone());
-                while tts_queue_bytes(&q) > TTS_QUEUE_CAP_BYTES {
+                let cap_bytes = tts_queue_cap_bytes_from_env();
+                while tts_queue_bytes(&q) > cap_bytes {
                     let Some(dropped) = q.pop_front() else {
                         break;
                     };
@@ -695,7 +706,7 @@ impl RtmpManager {
                         expansion_ratio_milli = dropped.expansion_ratio_milli,
                         policy = %dropped.policy,
                         text_chars = dropped.text.chars().count(),
-                        cap_bytes = TTS_QUEUE_CAP_BYTES,
+                        cap_bytes,
                         "tts segment queue overflow — whole segment dropped"
                     );
                 }

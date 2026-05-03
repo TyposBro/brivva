@@ -8,7 +8,9 @@ fn timing_constants_match_documented_values() {
     assert_eq!(IDLE_RESTART_THRESHOLD, Duration::from_secs(25));
     assert_eq!(HOST_AUDIO_CAP_BYTES, 20 * 88_200);
     assert_eq!(HOST_VIDEO_H264_CAP_CHUNKS, 120_000);
-    assert_eq!(TTS_QUEUE_CAP_BYTES, 15 * 88_200);
+    assert_eq!(DEFAULT_TTS_QUEUE_CAP_MS, 15_000);
+    assert_eq!(MAX_TTS_QUEUE_CAP_MS, 30_000);
+    assert_eq!(tts_queue_cap_bytes_from_env(), 15 * 88_200);
 }
 
 #[test]
@@ -257,7 +259,7 @@ fn push_tts_caps_queue_by_dropping_whole_oldest_segments() {
         vec![2u8; 10 * 88_200],
     ));
     let q = m.streams["t"].buffers.tts.lock().unwrap();
-    assert!(tts_queue_bytes(&q) <= TTS_QUEUE_CAP_BYTES);
+    assert!(tts_queue_bytes(&q) <= tts_queue_cap_bytes_from_env());
     assert_eq!(q.len(), 1);
     assert_eq!(q.front().unwrap().utterance_id, 2);
 }

@@ -18,6 +18,7 @@ Status values:
 | RS-002 | watch | Current concision fallback is deterministic and hand-authored; it should remain safety net, not main quality layer. | Code now removes filler and preserves commerce clauses, but phrase lists are not infinitely scalable. | Soniox context now requests concise style upstream; later add feature-flag rewrite provider only if needed. | [TTS Concision: Better Than Hand Rules](tts_concision.md#better-than-hand-rules) |
 | RS-003 | open | Product/brand/offer terms are not yet fed into Soniox context. | `translation_terms` documented by Soniox, but server config does not populate them from session metadata. | Extend session/admin model to carry product terms; serialize into Soniox `terms`/`translation_terms`. | [TTS Concision: Implementation Proposal](tts_concision.md#implementation-proposal) |
 | RS-004 | watch | 4K and many-output paths can exceed machine/GPU/network budget. | 1080p30 many-output passed; 4K path was previously not fully proven under all variants. | Keep scenarios split: 1080p many-output, 4K capped-to-1080, true 4K where GPU budget allows. | [Scenarios: High-Resolution Input](scenarios.md#high-resolution-input), [Scenarios: Many Outputs](scenarios.md#many-outputs) |
+| RS-005 | open | A translated FFmpeg/RTMP publisher can crash/restart under many-output stress. | 2026-05-03 run showed ZH publisher write errors and restart around 90s while other streams continued. | Add crash buffer-state logs and local RTMP sink scenario; keep production stress failing on restart. | [Production Readiness: Publisher Crash Diagnostics](production_readiness.md#publisher-crash-diagnostics) |
 
 ## Media Pipeline
 
@@ -34,7 +35,7 @@ Status values:
 | ID | Status | Risk | Current Signal | Next Patch | Deep Link |
 | --- | --- | --- | --- | --- | --- |
 | RS-020 | patched | Long host rambles can become one giant TTS request. | Response processor flushes on endpoint, punctuation, three sentences, and length. | Tune only from logs; avoid tiny chunks that overload ElevenLabs. | [Live Failure Policy: Long Ramble / No Pause](live_failure_policy.md#long-ramble--no-pause) |
-| RS-021 | patched | TTS backlog may grow briefly even when media pipeline is healthy. | TTS playback speed rises during catch-up and should return to `1.00`. | Watch `tts_playback_speed` and `tts_buffered_bytes` in every e2e. | [Signals](signals.md), [Live Failure Policy: Slight TTS Backlog](live_failure_policy.md#slight-tts-backlog) |
+| RS-021 | patched | TTS backlog may grow briefly even when media pipeline is healthy. | TTS playback speed rises during catch-up and should return to `1.00`; max catch-up is now bounded for intelligibility. | Watch `tts_playback_speed`, `tts_buffered_bytes`, and human listening quality in every e2e. | [Signals](signals.md), [Live Failure Policy: Slight TTS Backlog](live_failure_policy.md#slight-tts-backlog) |
 | RS-022 | patched | Severe TTS backlog should not cut words mid-audio. | Queue drops whole `TtsSegment`s at hard cap. | Keep whole-segment metadata logs stable for debugging. | [Live Failure Policy: Severe TTS Backlog](live_failure_policy.md#severe-tts-backlog) |
 | RS-023 | open | Translated tokens have no timestamps, so source-duration estimates are imperfect. | Soniox docs say original tokens have timestamps; translation tokens do not. | Carry source/original token timing into `TtsRequest` instead of estimating from translated text chars. | [TTS Concision: Soniox Findings](tts_concision.md#soniox-findings) |
 | RS-024 | blocked | Provider-level TTS speaking-rate control may reduce backlog better than text shortening. | Not confirmed for current ElevenLabs model/voice path. | Check ElevenLabs docs before adding request fields. | [Live Failure Policy: Translated Audio Too Long](live_failure_policy.md#translated-audio-too-long) |
@@ -53,6 +54,7 @@ Status values:
 | --- | --- | --- | --- |
 | `c610e7b` | patched | Tightened TTS concise/hard-recovery fallback before ElevenLabs. | Rerun e2e and compare JA overflow count against 25 baseline. |
 | `9a28d54` | patched | Added TTS concision strategy docs and Soniox exploration notes. | Use tracker item RS-001 before adding Soniox context code. |
+| pending | patched | Bounded TTS catch-up speed after Japanese became unintelligible at `3.0x`; expanded backlog windows and stress assertions. | Rerun many-output e2e and verify by ear, not only by logs. |
 
 ## Standard Triage Flow
 

@@ -24,12 +24,17 @@ Good enough for controlled pilot:
 - H.264-only browser/RTMP direction is correct.
 - Server owns FPS/resolution caps rather than trusting frontend claims.
 - Original audio/video drops are observable.
-- Translated TTS backlog has catch-up, whole-segment drops, and metadata logs.
+- Translated TTS backlog has bounded catch-up, whole-segment drops, and
+  metadata logs.
 - Per-language fanout has been proven under ideal local conditions.
 
 Not yet set-and-forget:
 
-- JA/ZH/other translated TTS expansion needs another e2e after Soniox context.
+- JA/ZH/other translated TTS needs another e2e plus human listening after
+  bounded catch-up and Soniox context.
+- Latest many-output stress showed a real FFmpeg/RTMP publisher crash/restart
+  on one translated stream; this must be treated as an output health failure,
+  not hidden as normal backlog behavior.
 - Stress assertions now exist, but JSON summaries and CI dashboards do not.
 - Bad-network and one-bad-destination chaos are not fully automated without
   external tools/platform behavior.
@@ -42,10 +47,12 @@ Not yet set-and-forget:
    - `video_stale_chunks_dropped=0`;
    - `host_audio_stale_chunks_dropped=0`;
    - `ready_host_bytes_dropped=0`;
-   - no `encode below realtime`;
+   - no FFmpeg publisher crash/restart;
+   - no sustained below-realtime encode beyond the configured warm-up window;
    - `tts segment queue overflow=0`;
    - `final_policy="hard_recovery"=0` unless explicitly allowed for a stress
      scenario.
+   - translated audio remains intelligible in human listening checks.
 2. One bad destination does not kill valid destinations.
 3. Bad Soniox key keeps source/pass stream live.
 4. Bad ElevenLabs key keeps source/pass stream live.
@@ -61,6 +68,7 @@ Not yet set-and-forget:
   - video keyframe-wait drops;
   - host/original audio stale drops;
   - ready host audio drops;
+  - FFmpeg publisher crash/restart;
   - sustained below-realtime encode;
   - whole TTS segment overflow above `RUST_STRESS_MAX_TTS_OVERFLOWS`;
   - hard-recovery policy above `RUST_STRESS_MAX_HARD_RECOVERY`.
@@ -69,6 +77,9 @@ Not yet set-and-forget:
   - setting: `real-time sales livestream`;
   - instructions to preserve prices/product names/stock/discounts/dates/CTA and
     avoid filler/excessive politeness.
+- TTS catch-up speed is capped for intelligibility. The translated lane should
+  stay near-live as continuous speech; it should not squeeze every generated
+  utterance into the exact original utterance duration.
 
 ## Remaining Patches
 
@@ -107,6 +118,26 @@ The runner should write `summary.json` per run:
 ```
 
 This lets future dashboards and CI read results without scraping prose.
+
+### Publisher Crash Diagnostics
+
+Latest stress finding:
+
+- scenario: `backlog_catchup_many_outputs`;
+- media backlog policy was mostly healthy;
+- one translated FFmpeg/RTMP publisher exited and restarted;
+- that stream then reported host-audio stale drops after restart;
+- FFmpeg stderr did not include a clear platform/network reason at the crash
+  point.
+
+Needed patches:
+
+- log per-stream buffer state when a publisher crashes and before restart;
+- include exit status, last successful write age, queued video chunks, queued
+  host-audio chunks/bytes, queued TTS bytes/segments, and destination platform;
+- keep the stress runner failing on publisher restarts for production profiles;
+- add a local RTMP sink scenario so YouTube/platform/network instability can be
+  separated from Rust/FFmpeg instability.
 
 ### Product Terms
 

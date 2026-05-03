@@ -19,6 +19,12 @@ It is cheap, local, testable, and preserves critical commerce markers better
 than dropping arbitrary PCM bytes. It is still hand-written logic and should not
 become the main quality layer.
 
+Important timing principle: translated TTS is a continuous live speech lane. It
+does not need to fit perfectly inside the exact original utterance duration.
+The target is understandable translated speech close to the live edge, normally
+around one second behind. If the queue grows, prefer better chunking and concise
+translation over making the voice too fast to understand.
+
 The deterministic fallback does three things:
 
 - removes common filler or polite phrases for the target language;
@@ -127,6 +133,11 @@ The current patch implements level 4 because it is reliable today. The next
 implementation should try level 2, because it uses a documented Soniox feature
 without adding another provider.
 
+Extreme playback speed is not an acceptable primary layer. A previous stress
+iteration used up to `3.0x` TTS catch-up speed to avoid backlog, but Japanese
+became effectively unintelligible. The server now keeps playback catch-up
+bounded and pushes hard cases into concision/recovery instead.
+
 ## Implementation Proposal
 
 Add context to `SonioxConfig` for translate sessions:
@@ -170,3 +181,7 @@ from the session or admin data model.
 
 Success is not "zero concision." Success is fewer hard-recovery and queue
 overflow events while video and original audio remain at zero drops.
+
+Also validate by ear for each launch language. A run can look healthy in logs
+while the translated voice is too fast, too choppy, or too late for shoppers to
+trust prices and stock counts.

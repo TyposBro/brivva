@@ -15,9 +15,42 @@ Policy:
 - Let Soniox endpoint detection finalize naturally.
 - Flush translated text after punctuation.
 - Send up to three short sentences per TTS request.
-- Keep TTS playback at normal speed when translated audio backlog is under 2s.
+- Treat translated TTS as a continuous live speech lane, not a strict
+  one-to-one replacement for each original utterance.
+- Keep TTS playback at normal speed when translated audio backlog is low.
 
 Expected user experience: translated audio is smooth and slightly delayed.
+
+## Translated Speech Timing Model
+
+Translated audio does not have to fit exactly inside the source utterance that
+created it. Natural hosts pause, repeat, breathe, show products, and wait for
+chat. A good live-commerce dub should use those gaps to keep a continuous
+translated speech lane roughly behind the host, not squeeze every translated
+sentence into the exact original duration.
+
+Target behavior:
+
+- translated audio should normally trail the host by about 1s;
+- short spikes can use the live backlog window;
+- translated speech should remain intelligible before it tries to be perfectly
+  synced;
+- the source/pass stream remains the truth for timing and fallback.
+
+Wrong behavior:
+
+- speeding TTS so much that viewers cannot understand it;
+- matching each translated segment to the source duration at any cost;
+- chopping translated PCM in the middle of words;
+- replaying very stale product/pricing information just because it was
+  technically preserved.
+
+Current implementation implication:
+
+- TTS catch-up playback has a conservative cap. It may run slightly faster, but
+  it must not become unintelligible. If backlog still grows, the system should
+  use upstream concise translation, sentence chunking, and whole-segment
+  recovery instead of extreme playback speed.
 
 ## Long Ramble / No Pause
 
@@ -43,7 +76,9 @@ TTS is 2-5s behind because ElevenLabs returned a chunk late.
 Policy:
 
 - Keep host audio/video on time.
-- Drain translated audio faster until it catches up.
+- Drain translated audio slightly faster until it catches up.
+- Keep speed bounded for intelligibility; for Japanese, aggressive speed-up was
+  observed to make TTS effectively inaudible/unusable.
 - Log `tts_buffered_bytes`, `tts_buffered_segments`, `tts_playback_speed`,
   and `tts_catchup_active`.
 
@@ -61,11 +96,19 @@ Policy:
 
 - Prefer whole translated sentence/chunk drops over raw PCM byte drops.
 - Never cut a translated word mid-audio.
+- Do not use extreme playback speed as the primary recovery mechanism.
 - Log language, utterance/chunk id, text length, duration, and reason.
 
 Implemented server behavior: RTMP TTS queue stores `TtsSegment` entries, catches
 up by consuming translated PCM faster when backlog grows, and only drops whole
 segments when the hard live cap is exceeded.
+
+Current catch-up speed policy:
+
+- mild translated backlog: `1.25x`;
+- stronger translated backlog: `1.35x`;
+- critical translated backlog: `1.5x`;
+- above that, prefer concise/hard-recovery policy over faster playback.
 
 ## Translated Audio Too Long
 
@@ -143,6 +186,10 @@ Remaining recommended improvement:
   text reaches TTS. If Soniox cannot do this, add a dedicated low-latency rewrite
   step that preserves prices, product names, stock counts, discounts, dates, and
   CTA exactly, then feeds the shorter text to ElevenLabs.
+- Keep translated audio as continuous speech around the live edge. The goal is
+  not exact utterance-duration matching; the goal is understandable translated
+  commerce speech with low enough delay that price, stock, and CTA are still
+  current.
 
 Language implications:
 
