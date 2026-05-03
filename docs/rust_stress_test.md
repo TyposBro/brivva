@@ -9,6 +9,8 @@ section instead of reading one large doc.
 - [Commands](rust-stress-test/commands.md): how to run full or single scenarios.
 - [Tracker](rust-stress-test/tracker.md): compact list of known risks,
   candidate bugs, and patches to make.
+- [Production Readiness](rust-stress-test/production_readiness.md): what
+  "set it and forget it" means for the Rust streaming server.
 - [Signals](rust-stress-test/signals.md): what log lines mean healthy vs bad.
 - [Live Failure Policy](rust-stress-test/live_failure_policy.md): product/media
   behavior for STT, TTS, FFmpeg, browser codec, and language expansion issues.

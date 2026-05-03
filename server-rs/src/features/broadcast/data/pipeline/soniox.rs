@@ -15,7 +15,22 @@ pub struct SonioxConfig<'a> {
     pub language_hints: Vec<String>,
     pub enable_endpoint_detection: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_endpoint_delay_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<SonioxContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<SonioxTranslation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SonioxContext {
+    pub general: Vec<SonioxContextItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SonioxContextItem {
+    pub key: &'static str,
+    pub value: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,8 +142,8 @@ impl SonioxMode {
     }
 
     pub fn build_config<'a>(&self, api_key: &'a str) -> SonioxConfig<'a> {
-        let (hint_lang, translation) = match self {
-            SonioxMode::Source { lang } => (lang.to_string(), None),
+        let (hint_lang, translation, context) = match self {
+            SonioxMode::Source { lang } => (lang.to_string(), None, None),
             SonioxMode::Translate {
                 source_lang,
                 target_lang,
@@ -138,6 +153,7 @@ impl SonioxMode {
                     kind: "one_way",
                     target_language: target_lang.to_string(),
                 }),
+                Some(live_commerce_translation_context()),
             ),
         };
 
@@ -149,6 +165,8 @@ impl SonioxMode {
             num_channels: 1,
             language_hints: vec![hint_lang],
             enable_endpoint_detection: true,
+            max_endpoint_delay_ms: Some(500),
+            context,
             translation,
         }
     }
@@ -164,6 +182,25 @@ impl SonioxMode {
                 matches!(token.translation_status.as_deref(), Some("translation"))
             }
         }
+    }
+}
+
+fn live_commerce_translation_context() -> SonioxContext {
+    SonioxContext {
+        general: vec![
+            SonioxContextItem {
+                key: "domain",
+                value: "live commerce",
+            },
+            SonioxContextItem {
+                key: "setting",
+                value: "real-time sales livestream",
+            },
+            SonioxContextItem {
+                key: "instructions",
+                value: "Translate in concise spoken live-commerce style. Preserve prices, product names, stock counts, discounts, dates, and calls to action exactly. Avoid filler, repeated greetings, and excessive politeness.",
+            },
+        ],
     }
 }
 
@@ -237,6 +274,8 @@ mod tests {
         assert_eq!(config.num_channels, 1);
         assert_eq!(config.language_hints, vec!["ja".to_string()]);
         assert!(config.enable_endpoint_detection);
+        assert_eq!(config.max_endpoint_delay_ms, Some(500));
+        assert!(config.context.is_none());
         assert!(config.translation.is_none());
     }
 
@@ -252,6 +291,14 @@ mod tests {
         let translation = config.translation.expect("translate mode has block");
         assert_eq!(translation.kind, "one_way");
         assert_eq!(translation.target_language, "zh");
+        let context = config.context.expect("translate mode has context");
+        let instructions = context
+            .general
+            .iter()
+            .find(|item| item.key == "instructions")
+            .expect("has instructions");
+        assert!(instructions.value.contains("concise"));
+        assert!(instructions.value.contains("Preserve prices"));
     }
 
     #[test]
@@ -259,6 +306,23 @@ mod tests {
         let mode = SonioxMode::Source { lang: Lang::En };
         let json = serde_json::to_string(&mode.build_config("k")).unwrap();
         assert!(!json.contains("translation"), "serialized: {json}");
+        assert!(!json.contains("context"), "serialized: {json}");
+    }
+
+    #[test]
+    fn translate_config_serializes_context_instructions() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::Ko,
+            target_lang: Lang::Ja,
+        };
+        let json = serde_json::to_string(&mode.build_config("k")).unwrap();
+        assert!(json.contains("\"context\""), "serialized: {json}");
+        assert!(json.contains("live commerce"), "serialized: {json}");
+        assert!(json.contains("concise spoken"), "serialized: {json}");
+        assert!(
+            json.contains("\"max_endpoint_delay_ms\":500"),
+            "serialized: {json}"
+        );
     }
 
     #[test]

@@ -10,6 +10,8 @@ DURATION="${RUST_STRESS_DURATION:-180}"
 LONG_DURATION="${RUST_STRESS_LONG_DURATION:-900}"
 FOUR_K_MP4="${RUST_STRESS_4K_MP4:-}"
 AUDIO_MP4="${RUST_STRESS_AUDIO_MP4:-}"
+MAX_TTS_OVERFLOWS="${RUST_STRESS_MAX_TTS_OVERFLOWS:-0}"
+MAX_HARD_RECOVERY="${RUST_STRESS_MAX_HARD_RECOVERY:-0}"
 INCLUDE_NETWORK=0
 NET_IFACE="${RUST_STRESS_NET_IFACE:-}"
 ONLY=""
@@ -30,6 +32,10 @@ Flags:
   --include-network          Enable sudo tc netem scenario
   --iface name               Network interface for --include-network
   --only name                Run one scenario by name
+
+Environment assertions:
+  RUST_STRESS_MAX_TTS_OVERFLOWS   Allowed whole-segment TTS drops. Default: 0
+  RUST_STRESS_MAX_HARD_RECOVERY   Allowed hard-recovery TTS events. Default: 0
 
 Expected to be run inside Infisical:
   infisical run --env=dev --path=/ -- ./scripts/run-rust-stress-tests.sh
@@ -108,6 +114,11 @@ esac
 
 if ! [[ "$DURATION" =~ ^[0-9]+$ && "$LONG_DURATION" =~ ^[0-9]+$ ]]; then
 	echo "--duration and --long-duration must be integer seconds" >&2
+	exit 2
+fi
+
+if ! [[ "$MAX_TTS_OVERFLOWS" =~ ^[0-9]+$ && "$MAX_HARD_RECOVERY" =~ ^[0-9]+$ ]]; then
+	echo "RUST_STRESS_MAX_TTS_OVERFLOWS and RUST_STRESS_MAX_HARD_RECOVERY must be integer counts" >&2
 	exit 2
 fi
 
@@ -198,6 +209,55 @@ record_skip() {
 	RESULTS+=("SKIP $name: $reason")
 }
 
+count_log_matches() {
+	local pattern="$1"
+	local logfile="$2"
+	rg -c "$pattern" "$logfile" 2>/dev/null || true
+}
+
+assert_count_at_most() {
+	local name="$1"
+	local logfile="$2"
+	local label="$3"
+	local pattern="$4"
+	local max="$5"
+	local count
+	count="$(count_log_matches "$pattern" "$logfile")"
+	if (( count > max )); then
+		echo "ASSERT FAIL $name: $label count=$count max=$max"
+		echo "  grep: rg '$pattern' '$logfile'"
+		return 1
+	fi
+	echo "ASSERT OK $name: $label count=$count max=$max"
+	return 0
+}
+
+analyze_log() {
+	local name="$1"
+	local logfile="$2"
+	local failed=0
+
+	assert_count_at_most "$name" "$logfile" "video stale drops" \
+		"video_stale_chunks_dropped=[1-9]" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "video keyframe wait drops" \
+		"video_keyframe_wait_chunks_dropped=[1-9]" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "host audio stale drops" \
+		"host_audio_stale_chunks_dropped=[1-9]" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "ready host audio drops" \
+		"ready_host_bytes_dropped=[1-9]" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "sustained below-realtime encode" \
+		"encode below realtime" 0 || failed=1
+	assert_count_at_most "$name" "$logfile" "whole TTS segment overflow" \
+		"tts segment queue overflow" "$MAX_TTS_OVERFLOWS" || failed=1
+	assert_count_at_most "$name" "$logfile" "TTS hard recovery" \
+		"final_policy=\"hard_recovery\"" "$MAX_HARD_RECOVERY" || failed=1
+
+	if (( failed != 0 )); then
+		return 1
+	fi
+	return 0
+}
+
 run_case() {
 	local name="$1"
 	shift
@@ -218,7 +278,11 @@ run_case() {
 	) 2>&1 | tee "$logfile"
 	local status="${PIPESTATUS[0]}"
 	if [[ "$status" == "0" ]]; then
-		RESULTS+=("PASS $name")
+		if analyze_log "$name" "$logfile"; then
+			RESULTS+=("PASS $name")
+		else
+			RESULTS+=("FAIL $name assertions log=$logfile")
+		fi
 	else
 		RESULTS+=("FAIL $name status=$status log=$logfile")
 	fi
