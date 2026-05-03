@@ -10,6 +10,8 @@ section instead of reading one large doc.
 - [Signals](rust-stress-test/signals.md): what log lines mean healthy vs bad.
 - [Live Failure Policy](rust-stress-test/live_failure_policy.md): product/media
   behavior for STT, TTS, FFmpeg, browser codec, and language expansion issues.
+- [TTS Concision](rust-stress-test/tts_concision.md): how translated text is
+  shortened today, why it is a fallback, and Soniox-backed options to explore.
 - [Scenarios](rust-stress-test/scenarios.md): scenario-by-scenario stress plan.
 - [Future Automation](rust-stress-test/future_automation.md): repeatable chaos
   flags still worth adding.
