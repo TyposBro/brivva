@@ -159,14 +159,26 @@ pub(crate) fn expansion_ratio_milli(
 }
 
 pub(crate) fn concise_live_commerce_text(text: &str, target_lang: &Lang) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let max_chars = match target_lang {
-        Lang::Ja | Lang::Zh => 90,
-        Lang::Ko => 110,
-        Lang::En => 130,
-    };
+    live_commerce_text_for_policy(text, target_lang, TtsExpansionPolicy::Concise)
+}
+
+pub(crate) fn live_commerce_text_for_policy(
+    text: &str,
+    target_lang: &Lang,
+    policy: TtsExpansionPolicy,
+) -> String {
+    let collapsed = remove_live_commerce_filler(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        target_lang,
+    );
+    let max_chars = max_tts_text_chars(target_lang, policy);
     if collapsed.chars().count() <= max_chars {
         return collapsed;
+    }
+
+    let important = important_live_commerce_clauses(&collapsed, max_chars);
+    if !important.is_empty() {
+        return important;
     }
 
     let mut out = String::new();
@@ -195,6 +207,186 @@ pub(crate) fn concise_live_commerce_text(text: &str, target_lang: &Lang) -> Stri
     }
 }
 
+fn max_tts_text_chars(target_lang: &Lang, policy: TtsExpansionPolicy) -> usize {
+    match (target_lang, policy) {
+        (Lang::Ja | Lang::Zh, TtsExpansionPolicy::HardRecovery) => 34,
+        (Lang::Ja | Lang::Zh, TtsExpansionPolicy::Concise) => 48,
+        (Lang::Ko, TtsExpansionPolicy::HardRecovery) => 42,
+        (Lang::Ko, TtsExpansionPolicy::Concise) => 58,
+        (Lang::En, TtsExpansionPolicy::HardRecovery) => 58,
+        (Lang::En, TtsExpansionPolicy::Concise) => 78,
+        (Lang::Ja | Lang::Zh, _) => 90,
+        (Lang::Ko, _) => 110,
+        (Lang::En, _) => 130,
+    }
+}
+
+fn remove_live_commerce_filler(text: &str, target_lang: &Lang) -> String {
+    let fillers: &[&str] = match target_lang {
+        Lang::Ja => &[
+            "皆さん",
+            "みなさん",
+            "本当に",
+            "ぜひ",
+            "どうぞ",
+            "お願いいたします",
+            "お願いします",
+            "させていただきます",
+            "させていただいております",
+            "となっております",
+            "でございます",
+            "ございます",
+            "くださいませ",
+            "ください",
+        ],
+        Lang::Zh => &[
+            "大家",
+            "真的",
+            "非常",
+            "特别",
+            "赶快",
+            "现在就",
+            "请大家",
+            "一定要",
+            "不要错过",
+        ],
+        Lang::Ko => &[
+            "여러분",
+            "정말",
+            "진짜",
+            "너무",
+            "꼭",
+            "지금 바로",
+            "부탁드립니다",
+            "해주시고요",
+            "해주시면 됩니다",
+            "되겠습니다",
+            "입니다",
+        ],
+        Lang::En => &[
+            "everyone",
+            "really",
+            "very",
+            "please",
+            "make sure to",
+            "go ahead and",
+            "right now",
+            "don't miss it",
+        ],
+    };
+
+    let mut out = text.to_string();
+    for filler in fillers {
+        out = out.replace(filler, "");
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn important_live_commerce_clauses(text: &str, max_chars: usize) -> String {
+    let mut selected = String::new();
+    for clause in split_live_commerce_clauses(text) {
+        let clause = clause.trim();
+        if clause.is_empty() || !is_important_live_commerce_clause(clause) {
+            continue;
+        }
+        append_clause_with_cap(&mut selected, clause, max_chars);
+        if selected.chars().count() >= max_chars {
+            break;
+        }
+    }
+    selected.trim().to_string()
+}
+
+fn split_live_commerce_clauses(text: &str) -> Vec<String> {
+    let mut clauses = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        let prev = idx.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(idx + 1).copied();
+        let numeric_separator = matches!(ch, ',' | '，')
+            && prev.is_some_and(|prev| prev.is_ascii_digit())
+            && next.is_some_and(|next| next.is_ascii_digit());
+        if !numeric_separator
+            && matches!(
+                ch,
+                '.' | '!' | '?' | '。' | '！' | '？' | ',' | '，' | ';' | '；' | '、'
+            )
+        {
+            if !current.trim().is_empty() {
+                clauses.push(current.trim().to_string());
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.trim().is_empty() {
+        clauses.push(current.trim().to_string());
+    }
+    clauses
+}
+
+fn is_important_live_commerce_clause(clause: &str) -> bool {
+    clause.chars().any(|ch| ch.is_ascii_digit())
+        || [
+            "원",
+            "원에",
+            "원만",
+            "円",
+            "¥",
+            "₩",
+            "$",
+            "%",
+            "퍼센트",
+            "割",
+            "折",
+            "折扣",
+            "할인",
+            "세일",
+            "sale",
+            "discount",
+            "off",
+            "재고",
+            "수량",
+            "남았",
+            "개",
+            "点",
+            "個",
+            "剩",
+            "库存",
+            "stock",
+            "left",
+            "오늘",
+            "今",
+            "今天",
+            "today",
+            "마감",
+            "締切",
+            "结束",
+            "ends",
+            "구매",
+            "주문",
+            "購入",
+            "下单",
+            "buy",
+            "order",
+        ]
+        .iter()
+        .any(|marker| clause.to_lowercase().contains(marker))
+}
+
+fn append_clause_with_cap(out: &mut String, clause: &str, max_chars: usize) {
+    if !out.is_empty() {
+        if out.chars().count() + 1 >= max_chars {
+            return;
+        }
+        out.push(' ');
+    }
+    let remaining = max_chars.saturating_sub(out.chars().count());
+    out.extend(clause.chars().take(remaining));
+}
+
 async fn current_tts_backlog_ms(req: &TtsRequest) -> u64 {
     let rtmp_manager = req
         .handle
@@ -219,7 +411,11 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         initial_policy,
         TtsExpansionPolicy::Concise | TtsExpansionPolicy::HardRecovery
     ) {
-        let concise = concise_live_commerce_text(&req.text, &req.target_lang);
+        let concise = if initial_policy == TtsExpansionPolicy::Concise {
+            concise_live_commerce_text(&req.text, &req.target_lang)
+        } else {
+            live_commerce_text_for_policy(&req.text, &req.target_lang, initial_policy)
+        };
         if concise != req.text {
             tracing::warn!(
                 live_session_id = %req.handle.id,
@@ -768,8 +964,35 @@ mod tests {
     fn concise_live_commerce_text_caps_long_text_by_language() {
         let text = "첫번째 문장은 오늘 가격과 재고를 설명합니다. 두번째 문장은 할인 조건을 설명합니다. 세번째 문장은 너무 긴 반복 설명입니다. 네번째 문장은 더 이상 필요 없습니다.";
         let concise = concise_live_commerce_text(text, &Lang::Ko);
-        assert!(concise.chars().count() <= 110);
+        assert!(concise.chars().count() <= 58);
         assert!(concise.contains("가격"));
+    }
+
+    #[test]
+    fn concise_live_commerce_text_selects_price_stock_and_cta() {
+        let text = "皆さん本当にありがとうございます。こちらの商品は今日だけ29,000ウォンで、在庫は50個です。ぜひ今すぐ購入してください。";
+        let concise = concise_live_commerce_text(text, &Lang::Ja);
+        assert!(concise.chars().count() <= 48, "{concise}");
+        assert!(concise.contains("29,000"));
+        assert!(concise.contains("50"));
+        assert!(!concise.contains("皆さん"));
+        assert!(!concise.contains("ぜひ"));
+    }
+
+    #[test]
+    fn hard_recovery_uses_tighter_text_cap_than_concise() {
+        let text = "오늘만 29,000원이고 재고는 50개 남았습니다. 지금 주문하면 무료 배송이고 추가 할인도 있습니다.";
+        let concise = live_commerce_text_for_policy(text, &Lang::Ko, TtsExpansionPolicy::Concise);
+        let hard = live_commerce_text_for_policy(text, &Lang::Ko, TtsExpansionPolicy::HardRecovery);
+        assert!(hard.chars().count() <= 42, "{hard}");
+        assert!(hard.chars().count() <= concise.chars().count());
+        assert!(hard.contains("29,000"));
+    }
+
+    #[test]
+    fn concise_mode_does_not_drop_short_unimportant_text() {
+        let text = "오늘 방송 시작합니다";
+        assert_eq!(concise_live_commerce_text(text, &Lang::Ko), text);
     }
 
     #[test]

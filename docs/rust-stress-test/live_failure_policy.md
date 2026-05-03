@@ -74,6 +74,25 @@ healthy, but Japanese TTS repeatedly hit the 15s live cap. That means the issue
 was no longer FFmpeg, RTMP, or Rust queue safety; the translated Japanese audio
 was longer than live playback could drain.
 
+Follow-up e2e on 2026-05-03 after adding expansion observability:
+
+- Test: `backlog_catchup_many_outputs`
+- Result: passed in 180.58s.
+- FFmpeg stayed realtime near the end: `speed=1x`, `drop_frames=0`.
+- Video stale drops: `0`.
+- Host/original audio drops: `0`.
+- `tts concise live-commerce mode applied`: 50 times.
+- `final_policy="catch_up"`: 13 times.
+- `final_policy="concise"`: 61 times.
+- `final_policy="hard_recovery"`: 6 times.
+- `tts segment queue overflow`: 25 times, all Japanese.
+
+Conclusion: the queue and media transport are healthy enough for this scenario,
+but Japanese text/audio expansion still exceeds the live window. The first
+concise implementation mostly removed whitespace and capped long paragraphs;
+many real Japanese chunks only shrank by one character, so it did not materially
+reduce ElevenLabs output duration.
+
 Risk: a language can be technically "working" while the viewer hears old
 product information because translated speech is too verbose or synthesized too
 slowly.
@@ -102,6 +121,28 @@ Recommended patch path:
 3. Add provider-level TTS speed controls if ElevenLabs supports stable
    per-request speaking-rate control for the selected model/voice.
 4. Keep playback catch-up and whole-segment dropping as safety nets.
+
+Implemented patch path:
+
+1. Per-segment timing and policy metadata is logged and stored with queued TTS
+   segments.
+2. Catch-up playback drains translated PCM faster while backlog is moderate.
+3. Whole-segment TTS drops are used at the hard cap instead of cutting PCM in
+   the middle of a word.
+4. Concise mode now performs deterministic live-commerce shortening before
+   ElevenLabs:
+   - remove common filler/polite phrases by target language;
+   - prefer clauses containing prices, numbers, discounts, stock, dates, or CTA;
+   - apply tighter caps during hard recovery than normal concise mode.
+
+Remaining recommended improvement:
+
+- Move concision upstream into translation style when possible. Soniox
+  translation currently returns final translated text; if it supports style or
+  glossary instructions, request "short live-commerce translation" before the
+  text reaches TTS. If Soniox cannot do this, add a dedicated low-latency rewrite
+  step that preserves prices, product names, stock counts, discounts, dates, and
+  CTA exactly, then feeds the shorter text to ElevenLabs.
 
 Language implications:
 
