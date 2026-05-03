@@ -202,6 +202,34 @@ all_available_outputs() {
 	(IFS=,; echo "${outputs[*]}")
 }
 
+output_secret_name() {
+	local output="$1"
+	case "$output" in
+		pass) echo "STREAM_KEY_YOUTUBE_PASS" ;;
+		ko) echo "STREAM_KEY_YOUTUBE_KO" ;;
+		en) echo "STREAM_KEY_YOUTUBE_EN" ;;
+		ja) echo "STREAM_KEY_YOUTUBE_JA" ;;
+		zh) echo "STREAM_KEY_YOUTUBE_ZH" ;;
+		legacy) echo "STREAM_KEY_YOUTUBE or MP4_FANOUT_SMOKE_RTMP_URLS" ;;
+		*) echo "unknown" ;;
+	esac
+}
+
+print_output_mapping() {
+	local csv="$1"
+	echo "Output mapping (no stream keys printed):"
+	if [[ -z "$csv" ]]; then
+		echo "  none"
+		return 0
+	fi
+	local IFS=,
+	local output
+	for output in $csv; do
+		[[ -z "$output" ]] && continue
+		echo "  $output -> $(output_secret_name "$output")"
+	done
+}
+
 should_run() {
 	local name="$1"
 	[[ -z "$ONLY" || "$ONLY" == "$name" ]]
@@ -338,6 +366,17 @@ common_env=(
 SINGLE_OUTPUT="$(first_available_output || true)"
 TRANSLATED_OUTPUT="$(first_translated_output || true)"
 MULTI_OUTPUTS="$(all_available_outputs)"
+
+echo "Stress config:"
+echo "  source_lang=$SOURCE_LANG"
+echo "  translated_delay_ms=$TRANSLATED_DELAY_MS"
+print_output_mapping "$MULTI_OUTPUTS"
+if [[ -n "$SINGLE_OUTPUT" ]]; then
+	echo "  first_single_output=$SINGLE_OUTPUT -> $(output_secret_name "$SINGLE_OUTPUT")"
+fi
+if [[ -n "$TRANSLATED_OUTPUT" ]]; then
+	echo "  first_translated_output=$TRANSLATED_OUTPUT -> $(output_secret_name "$TRANSLATED_OUTPUT")"
+fi
 
 if [[ -z "$SINGLE_OUTPUT" ]]; then
 	should_run single_720p15 && record_skip single_720p15 "no YouTube/RTMP destination secrets"
