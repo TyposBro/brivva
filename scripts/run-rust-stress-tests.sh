@@ -178,7 +178,7 @@ have_grip_output() {
 }
 
 first_available_output() {
-	for output in pass "$SOURCE_LANG" en ko ja zh legacy; do
+	for output in grip pass "$SOURCE_LANG" en ko ja zh legacy; do
 		if have_output_key "$output"; then
 			echo "$output"
 			return 0

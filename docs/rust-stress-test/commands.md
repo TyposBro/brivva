@@ -61,6 +61,11 @@ latency.
 - `difficult_audio`: optional, requires `--audio-mp4`.
 - `network`: optional, requires `--include-network --iface <iface>`.
 
+When `STREAM_URL_GRIP` and `STREAM_KEY_GRIP` are present, one-output scenarios
+prefer `grip` because Brivva's live-commerce audience is phone-first.
+Many-output scenarios stay YouTube-only by default so a one-shot Grip key is
+not consumed before `grip_smoke`.
+
 ## Manual Smoke Base
 
 ```bash

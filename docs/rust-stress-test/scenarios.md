@@ -227,6 +227,10 @@ Important: `backlog_catchup_many_outputs` is YouTube-only by design. It does
 not prove Grip, even if it passes. Use `--only grip_smoke` when watching Grip
 Studio.
 
+Default: if Grip creds exist, single-output stress scenarios use Grip first.
+This matches the phone-first production audience. Many-output scenarios still
+avoid Grip by default because Grip stream keys are one-shot.
+
 ## TTS Failure
 
 Goal: translated audio failure must not kill original stream.
