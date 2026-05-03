@@ -77,6 +77,15 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn align_pcm_s16le_len(len: usize) -> usize {
+    len - (len % 2)
+}
+
+fn truncate_pcm_s16le(mut pcm: Vec<u8>) -> Vec<u8> {
+    pcm.truncate(align_pcm_s16le_len(pcm.len()));
+    pcm
+}
+
 // ── Per-stream shared state ───────────────────────────────
 
 /// Timestamped chunk of host media. The tuple is (received_at, bytes). A chunk
@@ -117,6 +126,7 @@ impl TtsSegment {
         estimated_source_duration_ms: Option<u64>,
         policy: impl Into<String>,
     ) -> Self {
+        let pcm = truncate_pcm_s16le(pcm);
         let tts_duration_ms =
             (pcm.len() as u64).saturating_mul(1_000) / PCM_BYTES_PER_SECOND as u64;
         let expansion_ratio_milli = estimated_source_duration_ms
@@ -650,11 +660,12 @@ impl RtmpManager {
 
     /// Push raw host PCM (s16le 44.1 kHz mono) into every stream's delay buffer.
     pub fn push_host_audio(&self, pcm: &[u8]) {
-        if pcm.is_empty() {
+        let even_len = align_pcm_s16le_len(pcm.len());
+        if even_len == 0 {
             return;
         }
         let now = Instant::now();
-        let shared_pcm: Arc<[u8]> = Arc::from(pcm);
+        let shared_pcm: Arc<[u8]> = Arc::from(&pcm[..even_len]);
         for stream in self.streams.values() {
             let mut buf = stream.buffers.audio.lock().unwrap();
             buf.push_back((now, shared_pcm.clone()));
@@ -684,6 +695,9 @@ impl RtmpManager {
     /// a translated track, so enqueueing PCM would leak memory up to the cap
     /// and never play back.
     pub(crate) fn push_tts_segment(&self, segment: TtsSegment) {
+        if segment.byte_len() == 0 {
+            return;
+        }
         if let Some(m) = &self.metrics {
             m.record_tts_pcm(&segment.lang, segment.byte_len() as u64);
         }

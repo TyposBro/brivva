@@ -228,6 +228,43 @@ fn push_tts_delivers_into_matching_target_stream_queue() {
 }
 
 #[test]
+fn tts_segment_truncates_odd_pcm_byte() {
+    let segment = TtsSegment::new(1, 1, "ja".into(), "odd".into(), vec![1u8; 101]);
+
+    assert_eq!(segment.byte_len(), 100);
+    assert_eq!(segment.byte_len() % 2, 0);
+}
+
+#[test]
+fn push_tts_segment_skips_empty_pcm_after_alignment() {
+    let mut m = RtmpManager::new();
+    m.streams
+        .insert("target".into(), fake_exited_stream("target", "ja", false));
+
+    m.push_tts_segment(TtsSegment::new(
+        1,
+        1,
+        "ja".into(),
+        "empty".into(),
+        vec![1u8; 1],
+    ));
+    let q = m.streams["target"].buffers.tts.lock().unwrap();
+    assert!(q.is_empty());
+}
+
+#[test]
+fn push_host_audio_truncates_odd_pcm_byte() {
+    let mut m = RtmpManager::new();
+    m.streams
+        .insert("target".into(), fake_exited_stream("target", "ja", false));
+
+    m.push_host_audio(&[1, 2, 3]);
+    let q = m.streams["target"].buffers.audio.lock().unwrap();
+    assert_eq!(q.len(), 1);
+    assert_eq!(q.front().unwrap().1.len(), 2);
+}
+
+#[test]
 fn push_tts_skips_source_streams_even_when_lang_matches() {
     let mut m = RtmpManager::new();
     m.streams

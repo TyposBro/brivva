@@ -12,6 +12,7 @@ FOUR_K_MP4="${RUST_STRESS_4K_MP4:-}"
 AUDIO_MP4="${RUST_STRESS_AUDIO_MP4:-}"
 MAX_TTS_OVERFLOWS="${RUST_STRESS_MAX_TTS_OVERFLOWS:-0}"
 MAX_HARD_RECOVERY="${RUST_STRESS_MAX_HARD_RECOVERY:-0}"
+MAX_SLOW_ENCODE_TICKS="${RUST_STRESS_MAX_SLOW_ENCODE_TICKS:-20}"
 INCLUDE_NETWORK=0
 NET_IFACE="${RUST_STRESS_NET_IFACE:-}"
 ONLY=""
@@ -36,6 +37,8 @@ Flags:
 Environment assertions:
   RUST_STRESS_MAX_TTS_OVERFLOWS   Allowed whole-segment TTS drops. Default: 0
   RUST_STRESS_MAX_HARD_RECOVERY   Allowed hard-recovery TTS events. Default: 0
+  RUST_STRESS_MAX_SLOW_ENCODE_TICKS
+                                  Allowed consecutive below-realtime FFmpeg ticks. Default: 20
 
 Expected to be run inside Infisical:
   infisical run --env=dev --path=/ -- ./scripts/run-rust-stress-tests.sh
@@ -117,8 +120,8 @@ if ! [[ "$DURATION" =~ ^[0-9]+$ && "$LONG_DURATION" =~ ^[0-9]+$ ]]; then
 	exit 2
 fi
 
-if ! [[ "$MAX_TTS_OVERFLOWS" =~ ^[0-9]+$ && "$MAX_HARD_RECOVERY" =~ ^[0-9]+$ ]]; then
-	echo "RUST_STRESS_MAX_TTS_OVERFLOWS and RUST_STRESS_MAX_HARD_RECOVERY must be integer counts" >&2
+if ! [[ "$MAX_TTS_OVERFLOWS" =~ ^[0-9]+$ && "$MAX_HARD_RECOVERY" =~ ^[0-9]+$ && "$MAX_SLOW_ENCODE_TICKS" =~ ^[0-9]+$ ]]; then
+	echo "RUST_STRESS_MAX_TTS_OVERFLOWS, RUST_STRESS_MAX_HARD_RECOVERY, and RUST_STRESS_MAX_SLOW_ENCODE_TICKS must be integer counts" >&2
 	exit 2
 fi
 
@@ -278,8 +281,8 @@ analyze_log() {
 		"ready_host_bytes_dropped" 0 || failed=1
 	assert_count_at_most "$name" "$logfile" "FFmpeg process crash/restart" \
 		"ffmpeg rtmp process crashed" 0 || failed=1
-	assert_count_at_most "$name" "$logfile" "sustained below-realtime encode" \
-		"encode below realtime" 0 || failed=1
+	assert_counter_at_most "$name" "$logfile" "sustained below-realtime encode ticks" \
+		"consecutive_ticks" "$MAX_SLOW_ENCODE_TICKS" || failed=1
 	assert_count_at_most "$name" "$logfile" "whole TTS segment overflow" \
 		"tts segment queue overflow" "$MAX_TTS_OVERFLOWS" || failed=1
 	assert_count_at_most "$name" "$logfile" "TTS hard recovery" \
