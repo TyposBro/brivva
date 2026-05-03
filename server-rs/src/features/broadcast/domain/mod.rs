@@ -254,6 +254,78 @@ pub struct TtsRequest {
     pub voice_preset: VoicePreset,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderHealthEvent {
+    pub provider: String,
+    pub state: String,
+    pub recoverable: bool,
+    pub billable: bool,
+    pub reason: String,
+    pub target_lang: Option<String>,
+    pub status_code: Option<u16>,
+    pub error_code: Option<String>,
+    pub message: String,
+    pub scope: String,
+    pub output_id: Option<String>,
+    pub platform: Option<String>,
+    pub started_at_ms: i64,
+    pub recovered_at_ms: Option<i64>,
+}
+
+impl ProviderHealthEvent {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider: impl Into<String>,
+        state: impl Into<String>,
+        recoverable: bool,
+        billable: bool,
+        reason: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            state: state.into(),
+            recoverable,
+            billable,
+            reason: reason.into(),
+            target_lang: None,
+            status_code: None,
+            error_code: None,
+            message: message.into(),
+            scope: "session".into(),
+            output_id: None,
+            platform: None,
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            recovered_at_ms: None,
+        }
+    }
+
+    pub fn target_lang(mut self, lang: Option<String>) -> Self {
+        self.target_lang = lang;
+        self
+    }
+
+    pub fn status_code(mut self, status_code: Option<u16>) -> Self {
+        self.status_code = status_code;
+        self
+    }
+
+    pub fn error_code(mut self, error_code: Option<String>) -> Self {
+        self.error_code = error_code;
+        self
+    }
+
+    pub fn output(mut self, output_id: Option<String>, platform: Option<String>) -> Self {
+        self.scope = "output".into();
+        self.output_id = output_id;
+        self.platform = platform;
+        self
+    }
+}
+
 // ── Live Session Runtime ──────────────────────────────────
 
 pub struct LiveSession {
@@ -296,6 +368,7 @@ pub struct LiveSession {
     /// drops every `Sender`, which closes the channels and lets workers exit
     /// naturally on `recv() == None`.
     pub tts_workers: HashMap<Lang, mpsc::Sender<TtsRequest>>,
+    pub provider_health_tx: Option<mpsc::UnboundedSender<ProviderHealthEvent>>,
 }
 
 impl LiveSession {
@@ -319,6 +392,7 @@ impl LiveSession {
             pipeline_config,
             metrics: None,
             tts_workers: HashMap::new(),
+            provider_health_tx: None,
         }
     }
 
@@ -338,6 +412,27 @@ impl LiveSession {
     pub fn send_to_host(&self, msg: Message) {
         if let Some(tx) = &self.host_tx {
             let _ = tx.send(msg);
+        }
+    }
+
+    pub fn emit_provider_health(&self, event: ProviderHealthEvent) {
+        self.send_to_host(Message::Text(
+            serde_json::to_string(&ServerMsg::ProviderHealth {
+                provider: event.provider.clone(),
+                state: event.state.clone(),
+                recoverable: event.recoverable,
+                billable: event.billable,
+                reason: event.reason.clone(),
+                target_lang: event.target_lang.clone(),
+                status_code: event.status_code,
+                error_code: event.error_code.clone(),
+                message: event.message.clone(),
+            })
+            .expect("provider health serializes")
+            .into(),
+        ));
+        if let Some(tx) = &self.provider_health_tx {
+            let _ = tx.send(event);
         }
     }
 }

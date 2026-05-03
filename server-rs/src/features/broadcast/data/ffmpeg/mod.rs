@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 
 // ── Timing + format constants ─────────────────────────────
 
@@ -251,6 +252,7 @@ pub struct RtmpManager {
     /// `set_metrics`. Cloned into each drain thread so increments stay
     /// lock-free.
     metrics: Option<Arc<SessionMetrics>>,
+    output_health_tx: Option<mpsc::UnboundedSender<OutputHealthSnapshot>>,
     video_encoder: VideoEncoderKind,
 }
 
@@ -343,6 +345,7 @@ pub struct StartStreamGroupArgs<'a> {
 }
 
 fn emit_output_health(
+    tx: Option<&mpsc::UnboundedSender<OutputHealthSnapshot>>,
     enabled: bool,
     output_id: &Option<OutputId>,
     stream_id: &str,
@@ -382,6 +385,9 @@ fn emit_output_health(
         snapshot = ?snapshot,
         "v2 output health event"
     );
+    if let Some(tx) = tx {
+        let _ = tx.send(snapshot);
+    }
 }
 
 fn emit_render_graph_adapter_event(
@@ -419,6 +425,7 @@ impl RtmpManager {
             video_profile: VideoProfile::default(),
             video_profile_caps: VideoProfileCaps::default(),
             metrics: None,
+            output_health_tx: None,
             video_encoder: VideoEncoderKind::X264,
         }
     }
@@ -505,6 +512,10 @@ impl RtmpManager {
         self.metrics = Some(metrics);
     }
 
+    pub fn set_output_health_tx(&mut self, tx: mpsc::UnboundedSender<OutputHealthSnapshot>) {
+        self.output_health_tx = Some(tx);
+    }
+
     /// Start an FFmpeg RTMP process with dedicated video + audio drain threads.
     ///
     /// `host_gain` is the multiplier applied to the delayed host audio before
@@ -533,6 +544,7 @@ impl RtmpManager {
 
     pub fn start_stream_group(&mut self, args: StartStreamGroupArgs<'_>) -> Result<(), String> {
         emit_output_health(
+                self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             args.stream_id,
@@ -565,6 +577,7 @@ impl RtmpManager {
             existing_buffers: None,
         }) {
             emit_output_health(
+                self.output_health_tx.as_ref(),
                 args.output_controls_enabled,
                 &args.output_id,
                 args.stream_id,
@@ -584,6 +597,7 @@ impl RtmpManager {
             return Err(e);
         }
         emit_output_health(
+                self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             args.stream_id,
@@ -792,6 +806,7 @@ impl RtmpManager {
                 "ffmpeg idle beyond threshold, killing to trigger restart"
             );
             emit_output_health(
+                self.output_health_tx.as_ref(),
                 stream.output_controls_enabled,
                 &stream.output_id,
                 id,
@@ -836,6 +851,7 @@ impl RtmpManager {
                         "ffmpeg rtmp process crashed, scheduling restart"
                     );
                     emit_output_health(
+                self.output_health_tx.as_ref(),
                         stream.output_controls_enabled,
                         &stream.output_id,
                         id,
@@ -854,6 +870,7 @@ impl RtmpManager {
                             "ffmpeg rtmp giving up after max restart attempts"
                         );
                         emit_output_health(
+                self.output_health_tx.as_ref(),
                             stream.output_controls_enabled,
                             &stream.output_id,
                             id,
@@ -912,6 +929,7 @@ impl RtmpManager {
     /// media + TTS survive the FFmpeg restart.
     fn restart_stream(&mut self, args: RestartStreamArgs) {
         emit_output_health(
+                self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             &args.id,
@@ -951,6 +969,7 @@ impl RtmpManager {
                     }
                 }
                 emit_output_health(
+                self.output_health_tx.as_ref(),
                     args.output_controls_enabled,
                     &args.output_id,
                     &args.id,
@@ -977,6 +996,7 @@ impl RtmpManager {
             }
             Err(e) => {
                 emit_output_health(
+                self.output_health_tx.as_ref(),
                     args.output_controls_enabled,
                     &args.output_id,
                     &args.id,
@@ -1056,6 +1076,7 @@ impl RtmpManager {
             let platform_for_log = args.destination_platform.clone();
             let destinations_for_log = args.destinations.clone();
             let output_controls_for_log = args.output_controls_enabled;
+            let output_health_tx_for_log = self.output_health_tx.clone();
             let thread_name = format!("stderr-drain-{}", args.stream_id);
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
                 let mut progress = FfmpegProgressMonitor::default();
@@ -1078,6 +1099,7 @@ impl RtmpManager {
                                     "ffmpeg encode below realtime"
                                 );
                                 emit_output_health(
+                                    output_health_tx_for_log.as_ref(),
                                     output_controls_for_log,
                                     &output_id_for_log,
                                     &sid_for_log,
@@ -1103,6 +1125,7 @@ impl RtmpManager {
                                     "ffmpeg output dropped frames"
                                 );
                                 emit_output_health(
+                                    output_health_tx_for_log.as_ref(),
                                     output_controls_for_log,
                                     &output_id_for_log,
                                     &sid_for_log,
@@ -1235,6 +1258,7 @@ impl RtmpManager {
         for (id, mut stream) in self.streams.drain() {
             stream.stop_flag.store(true, Ordering::Release);
             emit_output_health(
+                self.output_health_tx.as_ref(),
                 stream.output_controls_enabled,
                 &stream.output_id,
                 &id,

@@ -13,6 +13,7 @@ import type {
   Session,
   SessionLogEvent,
   SessionMetrics,
+  SessionProviderFailure,
   StreamRecord,
   User,
   Voice,
@@ -264,6 +265,18 @@ export async function hardDeleteUserCascade(
     )
     .run();
   await d
+    .delete(schema.session_provider_failures)
+    .where(
+      inArray(
+        schema.session_provider_failures.session_id,
+        d
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(eq(schema.sessions.user_id, userId)),
+      ),
+    )
+    .run();
+  await d
     .delete(schema.session_metrics)
     .where(
       inArray(
@@ -402,6 +415,10 @@ export async function deleteSessionRow(
   await d
     .delete(schema.session_log_events)
     .where(eq(schema.session_log_events.session_id, id))
+    .run();
+  await d
+    .delete(schema.session_provider_failures)
+    .where(eq(schema.session_provider_failures.session_id, id))
     .run();
   await d
     .delete(schema.session_metrics)
@@ -759,5 +776,65 @@ export async function listSessionLogEvents(
     where: eq(schema.session_log_events.session_id, sessionId),
     orderBy: schema.session_log_events.ts_ms,
     limit,
+  });
+}
+
+// ── provider failures ─────────────────────────────────────
+
+export type AppendProviderFailure = {
+  sessionId: string;
+  liveSessionId: string | null;
+  outputId: string | null;
+  provider: string;
+  scope: string;
+  state: string;
+  reason: string;
+  recoverable: boolean;
+  billable: boolean;
+  lang: string | null;
+  platform: string | null;
+  statusCode: number | null;
+  errorCode: string | null;
+  message: string | null;
+  startedAtMs: number;
+  recoveredAtMs: number | null;
+};
+
+export async function appendProviderFailure(
+  db: D1Database,
+  failure: AppendProviderFailure,
+): Promise<SessionProviderFailure> {
+  const row: SessionProviderFailure = {
+    id: uuid(),
+    session_id: failure.sessionId,
+    live_session_id: failure.liveSessionId,
+    output_id: failure.outputId,
+    provider: failure.provider,
+    scope: failure.scope,
+    state: failure.state,
+    reason: failure.reason,
+    recoverable: failure.recoverable,
+    billable: failure.billable,
+    lang: failure.lang,
+    platform: failure.platform,
+    status_code: failure.statusCode,
+    error_code: failure.errorCode,
+    message: failure.message,
+    started_at_ms: Math.trunc(failure.startedAtMs),
+    recovered_at_ms:
+      failure.recoveredAtMs == null ? null : Math.trunc(failure.recoveredAtMs),
+    created_at: now(),
+  };
+  await wrap(db).insert(schema.session_provider_failures).values(row).run();
+  return row;
+}
+
+export async function listProviderFailures(
+  db: D1Database,
+  sessionId: string,
+): Promise<SessionProviderFailure[]> {
+  return await wrap(db).query.session_provider_failures.findMany({
+    where: eq(schema.session_provider_failures.session_id, sessionId),
+    orderBy: schema.session_provider_failures.started_at_ms,
   });
 }

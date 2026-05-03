@@ -13,6 +13,7 @@ beforeEach(async () => {
   env.SESSION_LOG_CONSOLE = "0";
   await env.DB.batch([
     env.DB.prepare("DELETE FROM session_log_events"),
+    env.DB.prepare("DELETE FROM session_provider_failures"),
     env.DB.prepare("DELETE FROM platform_credentials"),
     env.DB.prepare("DELETE FROM session_metrics"),
     env.DB.prepare("DELETE FROM streams"),

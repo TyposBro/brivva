@@ -12,6 +12,7 @@
 //! never reads process env vars directly.
 
 use crate::core::contracts::workers::{SessionBundle, SessionStatusUpdate};
+use crate::features::broadcast::domain::ProviderHealthEvent;
 
 /// Outcome of a `report_session_metrics` call. We keep the 404 branch typed
 /// so the metrics reporter can detect "session no longer exists server-side"
@@ -109,6 +110,57 @@ impl WorkersApi {
         if !status.is_success() {
             return Err(MetricsReportError::Other(format!(
                 "workers metrics {} → {}",
+                session_id, status
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn report_provider_failure(
+        &self,
+        session_id: &str,
+        live_session_id: Option<&str>,
+        event: &ProviderHealthEvent,
+    ) -> Result<(), MetricsReportError> {
+        if self.base_url.is_empty() {
+            return Err(MetricsReportError::Other("WORKERS_API_URL not set".into()));
+        }
+        let url = format!(
+            "{}/internal/sessions/{}/provider-failures",
+            self.base_url, session_id
+        );
+        let payload = serde_json::json!({
+            "live_session_id": live_session_id,
+            "output_id": event.output_id,
+            "provider": event.provider,
+            "scope": event.scope,
+            "state": event.state,
+            "reason": event.reason,
+            "recoverable": event.recoverable,
+            "billable": event.billable,
+            "lang": event.target_lang,
+            "platform": event.platform,
+            "status_code": event.status_code,
+            "error_code": event.error_code,
+            "message": event.message,
+            "started_at_ms": event.started_at_ms,
+            "recovered_at_ms": event.recovered_at_ms,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-Internal-Secret", &self.internal_secret)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MetricsReportError::Other(format!("workers provider failure error: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(MetricsReportError::NotFound);
+        }
+        if !status.is_success() {
+            return Err(MetricsReportError::Other(format!(
+                "workers provider failure {} → {}",
                 session_id, status
             )));
         }

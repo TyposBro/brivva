@@ -174,7 +174,7 @@ have_output_key() {
 }
 
 have_grip_output() {
-	[[ -n "${GRIP_RTMP_URL:-}" && -n "${STREAM_KEY_GRIP:-}" ]]
+	[[ -n "${STREAM_URL_GRIP:-}" && -n "${STREAM_KEY_GRIP:-}" ]]
 }
 
 first_available_output() {
@@ -215,7 +215,7 @@ output_secret_name() {
 		en) echo "STREAM_KEY_YOUTUBE_EN" ;;
 		ja) echo "STREAM_KEY_YOUTUBE_JA" ;;
 		zh) echo "STREAM_KEY_YOUTUBE_ZH" ;;
-		grip) echo "GRIP_RTMP_URL + STREAM_KEY_GRIP" ;;
+		grip) echo "STREAM_URL_GRIP + STREAM_KEY_GRIP" ;;
 		legacy) echo "STREAM_KEY_YOUTUBE or MP4_FANOUT_SMOKE_RTMP_URLS" ;;
 		*) echo "unknown" ;;
 	esac
@@ -378,7 +378,7 @@ echo "  source_lang=$SOURCE_LANG"
 echo "  translated_delay_ms=$TRANSLATED_DELAY_MS"
 print_output_mapping "$MULTI_OUTPUTS"
 if have_grip_output; then
-	echo "  grip_smoke=available -> GRIP_RTMP_URL + STREAM_KEY_GRIP"
+	echo "  grip_smoke=available -> STREAM_URL_GRIP + STREAM_KEY_GRIP"
 fi
 if [[ -n "$SINGLE_OUTPUT" ]]; then
 	echo "  first_single_output=$SINGLE_OUTPUT -> $(output_secret_name "$SINGLE_OUTPUT")"
@@ -502,7 +502,7 @@ if have_grip_output; then
 		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 		"BRIVVA_VIDEO_MAX_FPS=30"
 else
-	should_run grip_smoke && record_skip grip_smoke "need GRIP_RTMP_URL + STREAM_KEY_GRIP"
+	should_run grip_smoke && record_skip grip_smoke "need STREAM_URL_GRIP + STREAM_KEY_GRIP"
 fi
 
 if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res_capped; then

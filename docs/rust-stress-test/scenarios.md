@@ -175,7 +175,7 @@ Goal: prove Grip RTMP/RTMPS publish works with a fresh one-shot Grip stream key.
 
 Required secrets/env:
 
-- `GRIP_RTMP_URL`: Grip server URL from PC 송출.
+- `STREAM_URL_GRIP`: Grip server URL from PC 송출.
 - `STREAM_KEY_GRIP`: fresh Grip stream key for this broadcast.
 - Optional `MP4_FANOUT_SMOKE_GRIP_LANG`: output language; defaults to source
   language.

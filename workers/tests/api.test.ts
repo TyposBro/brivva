@@ -2520,6 +2520,65 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
     expect(afterBody.output_minutes_by_lang.ja).toBe(2);
   });
 
+  it("POST provider failure persists unbillable windows for billing audit (happy)", async () => {
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-provider-failure", Math.floor(Date.now() / 1000))
+      .run();
+    const create = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-provider-failure",
+        title: "PF",
+        source_lang: "en",
+        target_langs: ["ja"],
+      }),
+    });
+    const { session } = (await create.json()) as { session: { id: string } };
+
+    const res = await call(`/internal/sessions/${session.id}/provider-failures`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        live_session_id: "live-1",
+        output_id: "out-ja",
+        provider: "elevenlabs",
+        scope: "lang",
+        state: "degraded",
+        reason: "rate_limited",
+        recoverable: true,
+        billable: false,
+        lang: "ja",
+        status_code: 429,
+        message: "not billable while rate limited",
+        started_at_ms: 1000,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const row = await env.DB.prepare(
+      "SELECT provider, billable, reason, lang, status_code FROM session_provider_failures WHERE session_id = ?",
+    )
+      .bind(session.id)
+      .first<{
+        provider: string;
+        billable: number;
+        reason: string;
+        lang: string;
+        status_code: number;
+      }>();
+    expect(row).toMatchObject({
+      provider: "elevenlabs",
+      billable: 0,
+      reason: "rate_limited",
+      lang: "ja",
+      status_code: 429,
+    });
+  });
+
   it("PATCH merges per-lang outputs without clobbering prior langs (edge)", async () => {
     await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
       .bind("u-merge", Math.floor(Date.now() / 1000))

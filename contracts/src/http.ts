@@ -267,6 +267,24 @@ export const InternalSessionMetricsUpdateSchema = z.object({
   output_seconds_by_lang: z.record(z.string(), z.number().nonnegative()).optional(),
 });
 
+export const InternalProviderFailureSchema = z.object({
+  live_session_id: z.string().min(1).nullable().optional(),
+  output_id: z.string().min(1).nullable().optional(),
+  provider: z.string().min(1),
+  scope: z.string().min(1).default("session"),
+  state: z.string().min(1),
+  reason: z.string().min(1),
+  recoverable: z.boolean(),
+  billable: z.boolean(),
+  lang: z.string().min(1).nullable().optional(),
+  platform: z.string().min(1).nullable().optional(),
+  status_code: z.number().int().nullable().optional(),
+  error_code: z.string().min(1).nullable().optional(),
+  message: z.string().nullable().optional(),
+  started_at_ms: z.number().int(),
+  recovered_at_ms: z.number().int().nullable().optional(),
+});
+
 export const CompleteOnboardingRequestSchema = z.object({
   user_id: z.string().min(1),
 });
@@ -354,6 +372,7 @@ export type TikTokAuthRequest = z.infer<typeof TikTokAuthRequestSchema>;
 export type BillingSummaryResponse = z.infer<typeof BillingSummaryResponseSchema>;
 export type SessionUsageResponse = z.infer<typeof SessionUsageResponseSchema>;
 export type InternalSessionMetricsUpdate = z.infer<typeof InternalSessionMetricsUpdateSchema>;
+export type InternalProviderFailure = z.infer<typeof InternalProviderFailureSchema>;
 export type InternalSessionBundle = z.infer<typeof InternalSessionBundleSchema>;
 export type InternalSessionStatusUpdate = z.infer<typeof InternalSessionStatusUpdateSchema>;
 export type CompleteOnboardingRequest = z.infer<typeof CompleteOnboardingRequestSchema>;

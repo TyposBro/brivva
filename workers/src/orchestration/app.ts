@@ -6,6 +6,7 @@ import {
 	CompleteOnboardingRequestSchema,
 	CreateSessionRequestSchema,
 	CreateVoiceRequestSchema,
+	InternalProviderFailureSchema,
 	InternalSessionMetricsUpdateSchema,
 	InternalSessionStatusUpdateSchema,
 	PlatformQuerySchema,
@@ -1239,6 +1240,11 @@ app.post("/test/reset-dev-user", async (c) => {
 		.bind(DEV_USER_ID)
 		.run();
 	await c.env.DB.prepare(
+		"DELETE FROM session_provider_failures WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)",
+	)
+		.bind(DEV_USER_ID)
+		.run();
+	await c.env.DB.prepare(
 		"DELETE FROM session_metrics WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)",
 	)
 		.bind(DEV_USER_ID)
@@ -1523,6 +1529,44 @@ app.patch("/internal/sessions/:id/metrics", async (c) => {
 		outputSecondsByLang: body.output_seconds_by_lang,
 	});
 	return c.json({ status: "ok" });
+});
+
+app.post("/internal/sessions/:id/provider-failures", async (c) => {
+	const err = requireInternal(c);
+	if (err) return err;
+	const params = parseWithSchema(c, SessionIdParamsSchema, {
+		id: c.req.param("id"),
+	});
+	if (params instanceof Response) return params;
+	const body = parseWithSchema(
+		c,
+		InternalProviderFailureSchema,
+		await c.req.json(),
+	);
+	if (body instanceof Response) return body;
+
+	const session = await db.getSession(c.env.DB, params.id);
+	if (!session) return c.json({ error: "not found" }, 404);
+
+	const row = await db.appendProviderFailure(c.env.DB, {
+		sessionId: params.id,
+		liveSessionId: body.live_session_id ?? null,
+		outputId: body.output_id ?? null,
+		provider: body.provider,
+		scope: body.scope,
+		state: body.state,
+		reason: body.reason,
+		recoverable: body.recoverable,
+		billable: body.billable,
+		lang: body.lang ?? null,
+		platform: body.platform ?? null,
+		statusCode: body.status_code ?? null,
+		errorCode: body.error_code ?? null,
+		message: body.message ?? null,
+		startedAtMs: body.started_at_ms,
+		recoveredAtMs: body.recovered_at_ms ?? null,
+	});
+	return c.json({ status: "ok", id: row.id });
 });
 
 app.post("/internal/session-logs", async (c) => {

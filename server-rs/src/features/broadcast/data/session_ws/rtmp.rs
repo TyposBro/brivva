@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::core::contracts::workers::{SessionBundle, Stream};
-use crate::features::broadcast::domain::output_health::OutputId;
+use crate::features::broadcast::domain::output_health::{
+    OutputDegradationLabel, OutputHealthSnapshot, OutputHealthState, OutputId,
+};
+use crate::features::broadcast::domain::{ProviderHealthEvent, ServerMsg};
 use crate::features::broadcast::domain::render_graph::{
     EncodedFanOutPlan, OutputPipelineSpec, RenderGraphId, RenderGraphNodeKind,
     RenderGraphOutputNode, RenderGraphSpec, SourceVideoMode,
@@ -254,6 +257,9 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         return;
     }
     let mut manager = crate::features::broadcast::data::ffmpeg::RtmpManager::new();
+    if let Some(health_tx) = spawn_rtmp_health_bridge(live_session) {
+        manager.set_output_health_tx(health_tx);
+    }
     manager.set_metrics(metrics);
     manager.set_video_encoder(live_session.pipeline_config.video_encoder);
     manager.set_video_profile_caps(
@@ -265,7 +271,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
     );
     let mut rtmp_langs = Vec::new();
     let force_rtmp = live_session.pipeline_config.force_rtmp_not_rtmps;
-    let output_controls_enabled = live_session.pipeline_config.v2_output_controls;
+    let output_controls_enabled = true;
     let render_graph_enabled = live_session.pipeline_config.v2_render_graph;
     let shared_decode_enabled =
         shared_decode_shadow_enabled(live_session.pipeline_config.v2_shared_decode);
@@ -485,6 +491,104 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         shared_mgr,
         ffmpeg_monitor_stop,
     );
+}
+
+fn spawn_rtmp_health_bridge(
+    live_session: &LiveSession,
+) -> Option<tokio::sync::mpsc::UnboundedSender<OutputHealthSnapshot>> {
+    let host_tx = live_session.host_tx.clone();
+    let provider_tx = live_session.provider_health_tx.clone();
+    if host_tx.is_none() && provider_tx.is_none() {
+        return None;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutputHealthSnapshot>();
+    tokio::spawn(async move {
+        while let Some(snapshot) = rx.recv().await {
+            let Some(event) = rtmp_snapshot_to_provider_health(snapshot) else {
+                continue;
+            };
+            if let Some(host_tx) = &host_tx {
+                let _ = host_tx.send(axum::extract::ws::Message::Text(
+                    serde_json::to_string(&ServerMsg::ProviderHealth {
+                        provider: event.provider.clone(),
+                        state: event.state.clone(),
+                        recoverable: event.recoverable,
+                        billable: event.billable,
+                        reason: event.reason.clone(),
+                        target_lang: event.target_lang.clone(),
+                        status_code: event.status_code,
+                        error_code: event.error_code.clone(),
+                        message: event.message.clone(),
+                    })
+                    .expect("provider health serializes")
+                    .into(),
+                ));
+            }
+            if let Some(provider_tx) = &provider_tx {
+                let _ = provider_tx.send(event);
+            }
+        }
+    });
+    Some(tx)
+}
+
+fn rtmp_snapshot_to_provider_health(snapshot: OutputHealthSnapshot) -> Option<ProviderHealthEvent> {
+    let (state, recoverable, billable, reason) = match snapshot.state {
+        OutputHealthState::Starting | OutputHealthState::Live => return None,
+        OutputHealthState::Degraded => (
+            "degraded",
+            true,
+            false,
+            snapshot
+                .degradation
+                .as_ref()
+                .map(rtmp_degradation_reason)
+                .unwrap_or("rtmp_degraded"),
+        ),
+        OutputHealthState::Restarting => ("reconnecting", true, false, "rtmp_restarting"),
+        OutputHealthState::Failed => (
+            "failed",
+            false,
+            false,
+            snapshot
+                .degradation
+                .as_ref()
+                .map(rtmp_degradation_reason)
+                .unwrap_or("rtmp_failed"),
+        ),
+        OutputHealthState::Stopped => return None,
+    };
+    Some(
+        ProviderHealthEvent::new(
+            "rtmp",
+            state,
+            recoverable,
+            billable,
+            reason,
+            snapshot.message.unwrap_or_else(|| {
+                format!(
+                    "{} output {} is {state}; this output is not billable while unhealthy.",
+                    snapshot.destination_platform, snapshot.stream_id
+                )
+            }),
+        )
+        .target_lang(Some(snapshot.lang))
+        .output(
+            Some(snapshot.output_id.as_str().to_string()),
+            Some(snapshot.destination_platform),
+        ),
+    )
+}
+
+fn rtmp_degradation_reason(label: &OutputDegradationLabel) -> &'static str {
+    match label {
+        OutputDegradationLabel::SlowEncode => "slow_encode",
+        OutputDegradationLabel::DroppedFrames => "dropped_frames",
+        OutputDegradationLabel::IdleNoWrites => "idle_no_writes",
+        OutputDegradationLabel::FfmpegCrash => "ffmpeg_crash",
+        OutputDegradationLabel::RestartLimitReached => "restart_limit_reached",
+        OutputDegradationLabel::RtmpPublishError => "rtmp_publish_error",
+    }
 }
 
 #[cfg(test)]

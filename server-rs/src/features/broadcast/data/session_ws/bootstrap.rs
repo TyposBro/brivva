@@ -95,6 +95,40 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
 
     let metrics = SessionMetrics::new();
     live_session.metrics = Some(metrics.clone());
+    let (provider_tx, mut provider_rx) = tokio::sync::mpsc::unbounded_channel();
+    live_session.provider_health_tx = Some(provider_tx);
+    let provider_workers_api = workers_api.clone();
+    let provider_sid = sid.to_string();
+    let provider_live_session_id = live_session_id.to_string();
+    let provider_stop = ffmpeg_monitor_stop.clone();
+    let _provider_failure_reporter = tokio::spawn(async move {
+        while !provider_stop.load(std::sync::atomic::Ordering::Acquire) {
+            let Some(event) = provider_rx.recv().await else {
+                break;
+            };
+            if event.billable && event.state == "live" {
+                continue;
+            }
+            match provider_workers_api
+                .report_provider_failure(
+                    &provider_sid,
+                    Some(&provider_live_session_id),
+                    &event,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(
+                    session_id = %provider_sid,
+                    provider = %event.provider,
+                    state = %event.state,
+                    reason = %event.reason,
+                    error = %error,
+                    "provider failure report failed"
+                ),
+            }
+        }
+    });
 
     start_rtmp_streams(RtmpStartArgs {
         bundle: &bundle,

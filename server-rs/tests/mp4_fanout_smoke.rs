@@ -257,7 +257,7 @@ fn parse_args() -> Result<Args, String> {
 
     if outputs.is_empty() {
         return Err(
-            "provide STREAM_KEY_YOUTUBE, STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}, GRIP_RTMP_URL + STREAM_KEY_GRIP, or MP4_FANOUT_SMOKE_RTMP_URLS"
+            "provide STREAM_KEY_YOUTUBE, STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}, STREAM_URL_GRIP + STREAM_KEY_GRIP, or MP4_FANOUT_SMOKE_RTMP_URLS"
                 .to_string(),
         );
     }
@@ -369,13 +369,13 @@ fn youtube_destination(platform: &str, youtube_url: &str, key: &str) -> RtmpDest
 }
 
 fn grip_output(source_lang: &Lang) -> Result<Option<SmokeOutput>, String> {
-    let rtmp_url = std::env::var("GRIP_RTMP_URL").unwrap_or_default();
+    let rtmp_url = std::env::var("STREAM_URL_GRIP").unwrap_or_default();
     let stream_key = std::env::var("STREAM_KEY_GRIP").unwrap_or_default();
     if rtmp_url.trim().is_empty() && stream_key.trim().is_empty() {
         return Ok(None);
     }
     if rtmp_url.trim().is_empty() || stream_key.trim().is_empty() {
-        return Err("GRIP_RTMP_URL and STREAM_KEY_GRIP must be provided together".to_string());
+        return Err("STREAM_URL_GRIP and STREAM_KEY_GRIP must be provided together".to_string());
     }
     let lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_GRIP_LANG")?
         .unwrap_or_else(|| source_lang.clone());

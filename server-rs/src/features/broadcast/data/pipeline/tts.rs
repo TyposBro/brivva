@@ -1,7 +1,11 @@
 use crate::features::broadcast::data::ffmpeg::TtsSegment;
 pub use crate::features::broadcast::domain::TtsRequest;
-use crate::features::broadcast::domain::{Lang, LiveSessionHandle, ServerMsg, VoicePreset};
+use crate::features::broadcast::domain::{
+    Lang, LiveSessionHandle, ProviderHealthEvent, ServerMsg, VoicePreset,
+};
 use futures_util::StreamExt;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::to_ws;
@@ -588,6 +592,16 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         );
         return;
     };
+    if elevenlabs_circuit_is_open(&req.target_lang) {
+        emit_tts_provider_health(&req, "circuit_open", true, None);
+        tracing::warn!(
+            live_session_id = %req.handle.id,
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            "tts dispatch skipped because ElevenLabs circuit is open"
+        );
+        return;
+    }
 
     let resolved = resolve_voice(ResolveVoiceArgs {
         selected_voice_id: req.selected_voice_id.as_deref(),
@@ -640,6 +654,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         TtsFetchResult::VoiceNotFound if is_cloned => None,
         TtsFetchResult::VoiceNotFound => {
             emit_tts_provider_health(&req, "voice_not_found", false, None);
+            record_elevenlabs_failure(&req.target_lang, false);
             emit_tts_drop(&req, &tts_deadline);
             return;
         }
@@ -650,6 +665,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
                 failure.recoverable,
                 failure.status_code,
             );
+            record_elevenlabs_failure(&req.target_lang, failure.recoverable);
             emit_tts_drop(&req, &tts_deadline);
             return;
         }
@@ -686,6 +702,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             TtsFetchResult::Audio(buf) => Some(buf),
             TtsFetchResult::VoiceNotFound => {
                 emit_tts_provider_health(&req, "voice_not_found", false, None);
+                record_elevenlabs_failure(&req.target_lang, false);
                 None
             }
             TtsFetchResult::Failure(failure) => {
@@ -695,6 +712,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
                     failure.recoverable,
                     failure.status_code,
                 );
+                record_elevenlabs_failure(&req.target_lang, failure.recoverable);
                 None
             }
         };
@@ -714,9 +732,11 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
                 target_lang = %req.target_lang,
                 "tts dispatch produced no audio — utterance dropped"
             );
+            record_elevenlabs_failure(&req.target_lang, true);
             return;
         }
     };
+    record_elevenlabs_success(&req.target_lang);
 
     let tts_ms = tts_start.elapsed().as_millis() as u64;
     let pcm_bytes = audio_buffer.len();
@@ -757,24 +777,21 @@ fn emit_tts_provider_health(
     status_code: Option<u16>,
 ) {
     if let Some(live_session) = req.handle.sessions.get(&req.handle.id) {
-        live_session.send_to_host(to_ws(&ServerMsg::ProviderHealth {
-            provider: "elevenlabs".to_string(),
-            state: if recoverable {
-                "degraded".to_string()
-            } else {
-                "failed".to_string()
-            },
-            recoverable,
-            billable: false,
-            reason: reason.to_string(),
-            target_lang: Some(req.target_lang.to_string()),
-            status_code,
-            error_code: None,
-            message: format!(
-                "ElevenLabs TTS is unavailable for {}; translated audio is not billable while this is failing.",
-                req.target_lang
-            ),
-        }));
+        live_session.emit_provider_health(
+            ProviderHealthEvent::new(
+                "elevenlabs",
+                if recoverable { "degraded" } else { "failed" },
+                recoverable,
+                false,
+                reason,
+                format!(
+                    "ElevenLabs TTS is unavailable for {}; translated audio is not billable while this is failing.",
+                    req.target_lang
+                ),
+            )
+            .target_lang(Some(req.target_lang.to_string()))
+            .status_code(status_code),
+        );
     }
 }
 
@@ -1044,6 +1061,52 @@ async fn push_tts_into_rtmp(args: PushTtsArgs<'_>) {
             "tts mp3→pcm decode failed — audio dropped"
         ),
     }
+}
+
+#[derive(Default, Clone)]
+struct CircuitState {
+    failures: u32,
+    open_until_ms: i64,
+}
+
+fn elevenlabs_circuits() -> &'static Mutex<HashMap<String, CircuitState>> {
+    static CIRCUITS: OnceLock<Mutex<HashMap<String, CircuitState>>> = OnceLock::new();
+    CIRCUITS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn elevenlabs_circuit_is_open(lang: &Lang) -> bool {
+    let Ok(circuits) = elevenlabs_circuits().lock() else {
+        return false;
+    };
+    circuits
+        .get(&lang.to_string())
+        .map(|state| state.open_until_ms > now_ms())
+        .unwrap_or(false)
+}
+
+fn record_elevenlabs_failure(lang: &Lang, recoverable: bool) {
+    let Ok(mut circuits) = elevenlabs_circuits().lock() else {
+        return;
+    };
+    let state = circuits.entry(lang.to_string()).or_default();
+    state.failures = state.failures.saturating_add(1);
+    if !recoverable || state.failures >= 3 {
+        state.open_until_ms = now_ms() + if recoverable { 30_000 } else { 300_000 };
+    }
+}
+
+fn record_elevenlabs_success(lang: &Lang) {
+    let Ok(mut circuits) = elevenlabs_circuits().lock() else {
+        return;
+    };
+    circuits.remove(&lang.to_string());
 }
 
 struct NotifyCompleteArgs<'a> {

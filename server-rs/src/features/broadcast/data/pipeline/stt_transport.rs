@@ -1,4 +1,4 @@
-use crate::features::broadcast::domain::LiveSessionHandle;
+use crate::features::broadcast::domain::{LiveSessionHandle, ProviderHealthEvent};
 use futures_util::SinkExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,6 +77,18 @@ pub(super) async fn connect_soniox(args: ConnectArgs<'_>) -> Option<SonioxWs> {
         max_attempts,
         "stt giving up connect loop after exhausting attempts"
     );
+    if let Some(session) = handle.sessions.get(&handle.id) {
+        session.emit_provider_health(ProviderHealthEvent::new(
+            "soniox",
+            "failed",
+            false,
+            false,
+            "connect_exhausted",
+            format!(
+                "Soniox connection failed after {max_attempts} attempts for {tag}; translation is not billable while unavailable."
+            ),
+        ));
+    }
     None
 }
 

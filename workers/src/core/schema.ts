@@ -166,6 +166,36 @@ export const session_log_events = sqliteTable(
   ],
 );
 
+export const session_provider_failures = sqliteTable(
+  "session_provider_failures",
+  {
+    id: text("id").primaryKey(),
+    session_id: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    live_session_id: text("live_session_id"),
+    output_id: text("output_id"),
+    provider: text("provider").notNull(),
+    scope: text("scope").notNull(),
+    state: text("state").notNull(),
+    reason: text("reason").notNull(),
+    recoverable: integer("recoverable", { mode: "boolean" }).notNull(),
+    billable: integer("billable", { mode: "boolean" }).notNull(),
+    lang: text("lang"),
+    platform: text("platform"),
+    status_code: integer("status_code"),
+    error_code: text("error_code"),
+    message: text("message"),
+    started_at_ms: integer("started_at_ms").notNull(),
+    recovered_at_ms: integer("recovered_at_ms"),
+    created_at: integer("created_at").notNull(),
+  },
+  (t) => [
+    index("session_provider_failures_session_idx").on(t.session_id, t.started_at_ms),
+    index("session_provider_failures_provider_idx").on(t.session_id, t.provider, t.state),
+  ],
+);
+
 // Row types inferred directly from schema. Use these in handler signatures
 // instead of hand-written mirror types.
 export type User = typeof users.$inferSelect;
@@ -175,6 +205,7 @@ export type StreamRecord = typeof streams.$inferSelect;
 export type PlatformCredential = typeof platform_credentials.$inferSelect;
 export type SessionMetrics = typeof session_metrics.$inferSelect;
 export type SessionLogEvent = typeof session_log_events.$inferSelect;
+export type SessionProviderFailure = typeof session_provider_failures.$inferSelect;
 
 // Used below if/when we need a raw-SQL escape hatch from inside Drizzle land.
 export const _sqlEscape = sql;
