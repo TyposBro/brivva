@@ -83,6 +83,7 @@ pub fn compute_tts_deadline(text: &str) -> Duration {
 
 const TTS_EXPANSION_NORMAL_MILLI: u32 = 1_200;
 const TTS_EXPANSION_CATCHUP_MILLI: u32 = 1_500;
+const TTS_EXPANSION_HARD_PREDICTED_MILLI: u32 = 2_200;
 const TTS_CONCISE_BACKLOG_MS: u64 = 5_000;
 const TTS_HARD_RECOVERY_BACKLOG_MS: u64 = 15_000;
 
@@ -143,6 +144,26 @@ pub(crate) fn estimate_source_duration_ms(text: &str, lang: &Lang) -> u64 {
         .clamp(1_000, 15_000)
 }
 
+pub(crate) fn estimate_tts_duration_ms(text: &str, lang: &Lang) -> u64 {
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count() as u64;
+    if chars == 0 {
+        return 1_000;
+    }
+    let chars_per_second = match lang {
+        // ElevenLabs Japanese output in live runs was materially slower than
+        // text density suggested; predict conservatively so we shorten before
+        // synthesis instead of overflowing the live translated-audio queue.
+        Lang::Ja => 5,
+        Lang::Zh => 7,
+        Lang::Ko => 6,
+        Lang::En => 12,
+    };
+    chars
+        .saturating_mul(1_000)
+        .saturating_div(chars_per_second)
+        .clamp(1_000, 30_000)
+}
+
 pub(crate) fn expansion_ratio_milli(
     tts_duration_ms: u64,
     estimated_source_duration_ms: u64,
@@ -158,20 +179,74 @@ pub(crate) fn expansion_ratio_milli(
     )
 }
 
+fn tts_policy_rank(policy: TtsExpansionPolicy) -> u8 {
+    match policy {
+        TtsExpansionPolicy::Normal => 0,
+        TtsExpansionPolicy::CatchUp => 1,
+        TtsExpansionPolicy::Concise => 2,
+        TtsExpansionPolicy::HardRecovery => 3,
+    }
+}
+
+fn stricter_tts_policy(a: TtsExpansionPolicy, b: TtsExpansionPolicy) -> TtsExpansionPolicy {
+    if tts_policy_rank(a) >= tts_policy_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+pub(crate) fn predict_tts_policy(
+    text: &str,
+    lang: &Lang,
+    estimated_source_duration_ms: u64,
+    backlog_ms: u64,
+) -> (TtsExpansionPolicy, Option<u32>, u64) {
+    let backlog_policy = classify_tts_expansion(None, backlog_ms);
+    let predicted_duration_ms = estimate_tts_duration_ms(text, lang);
+    let predicted_ratio =
+        expansion_ratio_milli(predicted_duration_ms, estimated_source_duration_ms);
+    let ratio_policy = match predicted_ratio {
+        Some(ratio) if ratio > TTS_EXPANSION_HARD_PREDICTED_MILLI => {
+            TtsExpansionPolicy::HardRecovery
+        }
+        Some(ratio) => classify_tts_expansion(Some(ratio), 0),
+        None => TtsExpansionPolicy::Normal,
+    };
+    (
+        stricter_tts_policy(backlog_policy, ratio_policy),
+        predicted_ratio,
+        predicted_duration_ms,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn concise_live_commerce_text(text: &str, target_lang: &Lang) -> String {
     live_commerce_text_for_policy(text, target_lang, TtsExpansionPolicy::Concise)
 }
 
+#[cfg(test)]
 pub(crate) fn live_commerce_text_for_policy(
     text: &str,
     target_lang: &Lang,
     policy: TtsExpansionPolicy,
 ) -> String {
+    live_commerce_text_for_policy_with_budget(text, target_lang, policy, None)
+}
+
+pub(crate) fn live_commerce_text_for_policy_with_budget(
+    text: &str,
+    target_lang: &Lang,
+    policy: TtsExpansionPolicy,
+    estimated_source_duration_ms: Option<u64>,
+) -> String {
     let collapsed = remove_live_commerce_filler(
         &text.split_whitespace().collect::<Vec<_>>().join(" "),
         target_lang,
     );
-    let max_chars = max_tts_text_chars(target_lang, policy);
+    let max_chars = estimated_source_duration_ms
+        .map(|source_ms| max_tts_text_chars_for_budget(target_lang, policy, source_ms))
+        .unwrap_or_else(|| max_tts_text_chars(target_lang, policy));
     if collapsed.chars().count() <= max_chars {
         return collapsed;
     }
@@ -205,6 +280,36 @@ pub(crate) fn live_commerce_text_for_policy(
     } else {
         trimmed
     }
+}
+
+fn max_tts_text_chars_for_budget(
+    target_lang: &Lang,
+    policy: TtsExpansionPolicy,
+    estimated_source_duration_ms: u64,
+) -> usize {
+    let static_cap = max_tts_text_chars(target_lang, policy);
+    let chars_per_second = match target_lang {
+        Lang::Ja => 5,
+        Lang::Zh => 7,
+        Lang::Ko => 6,
+        Lang::En => 12,
+    };
+    let ratio_milli = match policy {
+        TtsExpansionPolicy::Normal => 1_200,
+        TtsExpansionPolicy::CatchUp => 1_000,
+        TtsExpansionPolicy::Concise => 900,
+        TtsExpansionPolicy::HardRecovery => 650,
+    };
+    let budget_cap = estimated_source_duration_ms
+        .saturating_mul(chars_per_second)
+        .saturating_mul(ratio_milli)
+        .saturating_div(1_000_000) as usize;
+    let floor = match target_lang {
+        Lang::Ja | Lang::Zh => 16,
+        Lang::Ko => 20,
+        Lang::En => 28,
+    };
+    static_cap.min(budget_cap.max(floor))
 }
 
 fn max_tts_text_chars(target_lang: &Lang, policy: TtsExpansionPolicy) -> usize {
@@ -406,22 +511,34 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
     let initial_backlog_ms = current_tts_backlog_ms(&req).await;
     let estimated_source_duration_ms = estimate_source_duration_ms(&req.text, &req.target_lang);
-    let initial_policy = classify_tts_expansion(None, initial_backlog_ms);
+    let (initial_policy, predicted_expansion_ratio_milli, predicted_tts_duration_ms) =
+        predict_tts_policy(
+            &req.text,
+            &req.target_lang,
+            estimated_source_duration_ms,
+            initial_backlog_ms,
+        );
     let tts_text = if matches!(
         initial_policy,
-        TtsExpansionPolicy::Concise | TtsExpansionPolicy::HardRecovery
+        TtsExpansionPolicy::CatchUp
+            | TtsExpansionPolicy::Concise
+            | TtsExpansionPolicy::HardRecovery
     ) {
-        let concise = if initial_policy == TtsExpansionPolicy::Concise {
-            concise_live_commerce_text(&req.text, &req.target_lang)
-        } else {
-            live_commerce_text_for_policy(&req.text, &req.target_lang, initial_policy)
-        };
+        let concise = live_commerce_text_for_policy_with_budget(
+            &req.text,
+            &req.target_lang,
+            initial_policy,
+            Some(estimated_source_duration_ms),
+        );
         if concise != req.text {
             tracing::warn!(
                 live_session_id = %req.handle.id,
                 utterance_id = req.utterance_id,
                 target_lang = %req.target_lang,
                 backlog_ms = initial_backlog_ms,
+                estimated_source_duration_ms,
+                predicted_tts_duration_ms,
+                predicted_expansion_ratio_milli,
                 original_chars = req.text.chars().count(),
                 concise_chars = concise.chars().count(),
                 policy = initial_policy.as_str(),
@@ -445,6 +562,8 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         estimated_source_duration_ms,
         initial_backlog_ms,
         initial_policy = initial_policy.as_str(),
+        predicted_tts_duration_ms,
+        predicted_expansion_ratio_milli,
         deadline_ms = tts_deadline.as_millis() as u64,
         "tts dispatch starting"
     );
@@ -962,6 +1081,55 @@ mod tests {
         assert_eq!(expansion_ratio_milli(4_800, 4_000), Some(1_200));
         assert_eq!(expansion_ratio_milli(9_000, 5_000), Some(1_800));
         assert_eq!(expansion_ratio_milli(1_000, 0), None);
+    }
+
+    #[test]
+    fn predict_tts_policy_catches_slow_ja_before_backlog_exists() {
+        let text =
+            "こちらの商品は今日だけ29,000ウォンで在庫は50個です。今注文すると追加割引があります。";
+        let source_ms = estimate_source_duration_ms(text, &Lang::Ja);
+        let (policy, ratio, predicted_ms) = predict_tts_policy(text, &Lang::Ja, source_ms, 0);
+
+        assert_eq!(policy, TtsExpansionPolicy::Concise);
+        assert!(ratio.unwrap() > TTS_EXPANSION_CATCHUP_MILLI, "{ratio:?}");
+        assert!(predicted_ms > source_ms);
+    }
+
+    #[test]
+    fn budgeted_concise_text_caps_ja_by_time_budget() {
+        let text = "皆さん本当にありがとうございます。こちらの商品は今日だけ29,000ウォンで、在庫は50個です。ぜひ今すぐ購入してください。";
+        let concise = live_commerce_text_for_policy_with_budget(
+            text,
+            &Lang::Ja,
+            TtsExpansionPolicy::Concise,
+            Some(6_500),
+        );
+
+        assert!(concise.chars().count() <= 29, "{concise}");
+        assert!(concise.contains("29,000"));
+        assert!(concise.contains("50"));
+        assert!(!concise.contains("皆さん"));
+        assert!(!concise.contains("ぜひ"));
+    }
+
+    #[test]
+    fn hard_recovery_budget_is_tighter_than_concise_budget() {
+        let text = "오늘만 29,000원이고 재고는 50개 남았습니다. 지금 주문하면 무료 배송이고 추가 할인도 있습니다.";
+        let concise = live_commerce_text_for_policy_with_budget(
+            text,
+            &Lang::Ko,
+            TtsExpansionPolicy::Concise,
+            Some(6_000),
+        );
+        let hard = live_commerce_text_for_policy_with_budget(
+            text,
+            &Lang::Ko,
+            TtsExpansionPolicy::HardRecovery,
+            Some(6_000),
+        );
+
+        assert!(hard.chars().count() <= concise.chars().count());
+        assert!(hard.contains("29,000"));
     }
 
     #[test]
