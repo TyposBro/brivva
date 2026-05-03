@@ -116,7 +116,11 @@ const mockedCloneSessionVoice = api.cloneSessionVoice as unknown as ReturnType<
 >;
 
 function installMedia() {
-  const track = { kind: "video", stop: vi.fn() };
+  const track = {
+    kind: "video",
+    stop: vi.fn(),
+    getSettings: () => ({ width: 720, height: 1280, frameRate: 30 }),
+  };
   const stream = {
     getTracks: () => [track],
     getVideoTracks: () => [track],
@@ -162,11 +166,19 @@ function installMedia() {
   class FakeRTCPeerConnection extends EventTarget {
     localDescription: RTCSessionDescriptionInit | null = null;
     iceGatheringState: RTCIceGatheringState = "complete";
+    transceiver = {
+      sender: {
+        track,
+        getParameters: () => ({ encodings: [] }),
+        setParameters: vi.fn(async () => undefined),
+      },
+      setCodecPreferences: vi.fn(),
+    };
     addTrack() {
-      return { track, getParameters: () => ({ encodings: [] }) };
+      return this.transceiver.sender;
     }
     getTransceivers() {
-      return [];
+      return [this.transceiver];
     }
     getSenders() {
       return [];
@@ -186,7 +198,16 @@ function installMedia() {
   });
   Object.defineProperty(globalThis, "RTCRtpSender", {
     configurable: true,
-    value: { getCapabilities: vi.fn(() => ({ codecs: [] })) },
+    value: {
+      getCapabilities: vi.fn(() => ({
+        codecs: [
+          {
+            mimeType: "video/H264",
+            sdpFmtpLine: "packetization-mode=1;profile-level-id=42e01f",
+          },
+        ],
+      })),
+    },
   });
 }
 
@@ -332,7 +353,7 @@ describe("useHostSession", () => {
     expect(socketInstances[0].sent).toContainEqual({
       type: "webrtc:offer",
       sdp: "offer-sdp",
-      videoProfile: { width: 1920, height: 1080, fps: 30 },
+      videoProfile: { width: 720, height: 1280, fps: 30 },
     });
   });
 

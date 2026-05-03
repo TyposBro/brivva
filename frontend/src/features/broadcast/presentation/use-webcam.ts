@@ -1,12 +1,12 @@
 import { useCallback, useRef } from "react";
 
-const HOST_VIDEO_MIN_WIDTH = 1920;
-const HOST_VIDEO_MIN_HEIGHT = 1080;
-const HOST_VIDEO_IDEAL_WIDTH = 1920;
-const HOST_VIDEO_IDEAL_HEIGHT = 1080;
+const HOST_VIDEO_MIN_WIDTH = 720;
+const HOST_VIDEO_MIN_HEIGHT = 1280;
+const HOST_VIDEO_IDEAL_WIDTH = 720;
+const HOST_VIDEO_IDEAL_HEIGHT = 1280;
 const HOST_VIDEO_MIN_FPS = 30;
 const HOST_VIDEO_IDEAL_FPS = 30;
-const HOST_VIDEO_MAX_BITRATE_BPS = 9_000_000;
+const HOST_VIDEO_MAX_BITRATE_BPS = 2_800_000;
 
 type VideoProfile = {
   width: number;
@@ -59,11 +59,9 @@ export function useWebcam(
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          // Prefer the built-in/default camera at 1080p30. Do not make 4K60 a
-          // getUserMedia ideal here: virtual cameras such as OBS can advertise
-          // the strongest profile and win browser auto-selection over the
-          // MacBook camera. Server-side media quality checks still enforce the
-          // 1080p30 production floor once a stream is selected.
+          // Phone-first live commerce output is a 720x1280 portrait canvas.
+          // This is an ideal, not exact: laptops usually capture landscape,
+          // and the server pads that source into the same portrait canvas.
           width: { ideal: HOST_VIDEO_IDEAL_WIDTH },
           height: { ideal: HOST_VIDEO_IDEAL_HEIGHT },
           frameRate: { ideal: HOST_VIDEO_IDEAL_FPS },

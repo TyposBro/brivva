@@ -189,13 +189,15 @@ export function BroadcastView({
         )}
 
         <div className={cn("flex flex-col items-center gap-2", isReady ? "block" : "hidden")}>
-          <video
-            ref={videoRef}
-            autoPlay
-            muted
-            playsInline
-            className="w-64 h-64 object-cover -scale-x-100 rounded-xl border-2 border-surface-container-highest"
-          />
+          <div className="h-80 aspect-[9/16] overflow-hidden rounded-xl border-2 border-surface-container-highest bg-black">
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className="h-full w-full object-contain -scale-x-100"
+            />
+          </div>
           <span className="text-on-surface-variant text-xs font-label">
             Your camera (mirrored)
           </span>
