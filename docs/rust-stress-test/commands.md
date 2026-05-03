@@ -36,6 +36,10 @@ infisical run --env=dev --path=/ -- \
 
 The runner writes per-scenario logs under `tmp/rust-stress-logs/`.
 
+Default translated-output media delay is `4000ms`. Override with
+`RUST_STRESS_TRANSLATED_DELAY_MS=<ms>` when testing tighter or looser live
+latency.
+
 ## Default Sequence
 
 - `single_720p15`: weak camera profile, one output.

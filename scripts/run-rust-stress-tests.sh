@@ -13,6 +13,7 @@ AUDIO_MP4="${RUST_STRESS_AUDIO_MP4:-}"
 MAX_TTS_OVERFLOWS="${RUST_STRESS_MAX_TTS_OVERFLOWS:-0}"
 MAX_HARD_RECOVERY="${RUST_STRESS_MAX_HARD_RECOVERY:-0}"
 MAX_SLOW_ENCODE_TICKS="${RUST_STRESS_MAX_SLOW_ENCODE_TICKS:-20}"
+TRANSLATED_DELAY_MS="${RUST_STRESS_TRANSLATED_DELAY_MS:-4000}"
 INCLUDE_NETWORK=0
 NET_IFACE="${RUST_STRESS_NET_IFACE:-}"
 ONLY=""
@@ -39,6 +40,7 @@ Environment assertions:
   RUST_STRESS_MAX_HARD_RECOVERY   Allowed hard-recovery TTS events. Default: 0
   RUST_STRESS_MAX_SLOW_ENCODE_TICKS
                                   Allowed consecutive below-realtime FFmpeg ticks. Default: 20
+  RUST_STRESS_TRANSLATED_DELAY_MS Translated output media delay. Default: 4000
 
 Expected to be run inside Infisical:
   infisical run --env=dev --path=/ -- ./scripts/run-rust-stress-tests.sh
@@ -120,8 +122,8 @@ if ! [[ "$DURATION" =~ ^[0-9]+$ && "$LONG_DURATION" =~ ^[0-9]+$ ]]; then
 	exit 2
 fi
 
-if ! [[ "$MAX_TTS_OVERFLOWS" =~ ^[0-9]+$ && "$MAX_HARD_RECOVERY" =~ ^[0-9]+$ && "$MAX_SLOW_ENCODE_TICKS" =~ ^[0-9]+$ ]]; then
-	echo "RUST_STRESS_MAX_TTS_OVERFLOWS, RUST_STRESS_MAX_HARD_RECOVERY, and RUST_STRESS_MAX_SLOW_ENCODE_TICKS must be integer counts" >&2
+if ! [[ "$MAX_TTS_OVERFLOWS" =~ ^[0-9]+$ && "$MAX_HARD_RECOVERY" =~ ^[0-9]+$ && "$MAX_SLOW_ENCODE_TICKS" =~ ^[0-9]+$ && "$TRANSLATED_DELAY_MS" =~ ^[0-9]+$ ]]; then
+	echo "RUST_STRESS_MAX_TTS_OVERFLOWS, RUST_STRESS_MAX_HARD_RECOVERY, RUST_STRESS_MAX_SLOW_ENCODE_TICKS, and RUST_STRESS_TRANSLATED_DELAY_MS must be integer counts" >&2
 	exit 2
 fi
 
@@ -329,6 +331,8 @@ common_env=(
 	"MP4_FANOUT_SMOKE_SOURCE_LANG=$SOURCE_LANG"
 	"BRIVVA_SUBTITLE_FONTFILE=${BRIVVA_SUBTITLE_FONTFILE:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
 	"BRIVVA_DEBUG_VIDEO_CLOCK=${BRIVVA_DEBUG_VIDEO_CLOCK:-1}"
+	"BRIVVA_TRANSLATED_STREAM_DELAY_MS=$TRANSLATED_DELAY_MS"
+	"MP4_FANOUT_SMOKE_TRANSLATED_DELAY_MS=$TRANSLATED_DELAY_MS"
 )
 
 SINGLE_OUTPUT="$(first_available_output || true)"

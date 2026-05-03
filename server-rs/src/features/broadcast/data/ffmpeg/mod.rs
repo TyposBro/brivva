@@ -8,12 +8,12 @@
 //! decodes or re-encodes frames, and no localhost UDP hop can drop RTP.
 //!
 //! Why this is simpler than the previous utterance-timestamp scheduler:
-//! - No global clock, no `BROADCAST_DELAY_MS` env.
+//! - No global playback clock; each output owns its delay buffer.
 //! - No per-utterance truncation / fade-out / alignment.
 //! - Source-language streams are just `is_source = true` → skip the TTS mix.
 //! - Different target languages can have different delays (tuned to their
-//!   expected STT+translate+TTS latency) — frontend decides, D1 persists,
-//!   Fargate reads via the session bundle.
+//!   expected STT+translate+TTS latency) — server enforces a translated
+//!   minimum, D1 persists stream hints, Fargate reads via the session bundle.
 
 mod args;
 mod drain;

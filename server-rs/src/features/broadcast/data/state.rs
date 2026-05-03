@@ -48,6 +48,7 @@ pub struct BroadcastState {
     pub video_max_width: u32,
     pub video_max_height: u32,
     pub video_max_fps: u32,
+    pub translated_stream_delay_ms: u64,
 }
 
 impl BroadcastState {
@@ -76,6 +77,7 @@ impl BroadcastState {
             video_max_width: 1920,
             video_max_height: 1080,
             video_max_fps: 30,
+            translated_stream_delay_ms: 4000,
         }
     }
 }
@@ -115,6 +117,7 @@ mod tests {
         assert_eq!(s.video_max_width, 1920);
         assert_eq!(s.video_max_height, 1080);
         assert_eq!(s.video_max_fps, 30);
+        assert_eq!(s.translated_stream_delay_ms, 4000);
         assert!(s.live_sessions.is_empty());
     }
 

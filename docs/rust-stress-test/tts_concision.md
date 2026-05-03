@@ -21,9 +21,12 @@ become the main quality layer.
 
 Important timing principle: translated TTS is a continuous live speech lane. It
 does not need to fit perfectly inside the exact original utterance duration.
-The target is understandable translated speech close to the live edge, normally
-around one second behind. If the queue grows, prefer better chunking and concise
-translation over making the voice too fast to understand.
+Translated RTMP outputs delay original host video/audio before playback so TTS
+has time to arrive. Current production default is `4000ms`, enforced by the
+Rust server through `BRIVVA_TRANSLATED_STREAM_DELAY_MS` with
+`BROADCAST_DELAY_MS` as a legacy fallback. Source/pass-through outputs stay at
+zero delay. If the queue still grows after this delay, prefer better chunking
+and concise translation over making the voice too fast to understand.
 
 The deterministic fallback does three things:
 

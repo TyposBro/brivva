@@ -105,6 +105,7 @@ fn pipeline_config_from(state: &BroadcastState) -> Arc<PipelineConfig> {
         video_max_width: state.video_max_width,
         video_max_height: state.video_max_height,
         video_max_fps: state.video_max_fps,
+        translated_stream_delay_ms: state.translated_stream_delay_ms,
     })
 }
 

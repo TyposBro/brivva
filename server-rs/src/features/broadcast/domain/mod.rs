@@ -168,6 +168,7 @@ pub struct PipelineConfig {
     pub video_max_width: u32,
     pub video_max_height: u32,
     pub video_max_fps: u32,
+    pub translated_stream_delay_ms: u64,
 }
 
 impl Default for PipelineConfig {
@@ -188,6 +189,7 @@ impl Default for PipelineConfig {
             video_max_width: 1920,
             video_max_height: 1080,
             video_max_fps: 30,
+            translated_stream_delay_ms: 4000,
         }
     }
 }

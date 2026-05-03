@@ -36,5 +36,6 @@ pub fn broadcast_state() -> BroadcastState {
         video_max_width: cfg.video_max_width,
         video_max_height: cfg.video_max_height,
         video_max_fps: cfg.video_max_fps,
+        translated_stream_delay_ms: cfg.translated_stream_delay_ms,
     }
 }

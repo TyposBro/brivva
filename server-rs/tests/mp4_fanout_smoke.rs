@@ -24,6 +24,7 @@ struct Args {
     capture_width: u32,
     capture_height: u32,
     capture_fps: u32,
+    translated_delay_ms: u64,
     subtitle: Option<String>,
     source_lang: Lang,
     soniox_api_key: String,
@@ -70,6 +71,11 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     for output in &args.outputs {
         let output_lang = output.output_lang();
         let is_passthrough = output.is_passthrough(&args.source_lang);
+        let delay_ms = if is_passthrough {
+            0
+        } else {
+            args.translated_delay_ms
+        };
         manager.start_stream_group(StartStreamGroupArgs {
             stream_id: &format!("mp4-fanout-smoke-{}", output.label),
             lang: &output_lang,
@@ -79,7 +85,7 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|dest| dest.url.clone())
                 .collect(),
             destinations: output.destinations.clone(),
-            delay_ms: 0,
+            delay_ms,
             is_source: is_passthrough,
             host_gain: if is_passthrough { 1.0 } else { 0.2 },
             output_id: None,
@@ -155,6 +161,7 @@ fn log_smoke_args(args: &Args) {
         capture_width = args.capture_width,
         capture_height = args.capture_height,
         capture_fps = args.capture_fps,
+        translated_delay_ms = args.translated_delay_ms,
         subtitle_enabled = args.subtitle.is_some(),
         source_lang = %args.source_lang,
         soniox_api_key_present = !args.soniox_api_key.trim().is_empty(),
@@ -195,6 +202,7 @@ fn parse_args() -> Result<Args, String> {
     let capture_width = env_u32("MP4_FANOUT_SMOKE_CAPTURE_WIDTH", detected.width);
     let capture_height = env_u32("MP4_FANOUT_SMOKE_CAPTURE_HEIGHT", detected.height);
     let capture_fps = env_u32("MP4_FANOUT_SMOKE_CAPTURE_FPS", detected.fps);
+    let translated_delay_ms = env_u32("MP4_FANOUT_SMOKE_TRANSLATED_DELAY_MS", 4000) as u64;
     let subtitle = std::env::var("MP4_FANOUT_SMOKE_SUBTITLE").ok();
     let source_lang = parse_lang_env("MP4_FANOUT_SMOKE_SOURCE_LANG", Lang::Ko)?;
     let explicit_target_langs = parse_target_langs_env("MP4_FANOUT_SMOKE_TARGET_LANGS")?;
@@ -259,6 +267,7 @@ fn parse_args() -> Result<Args, String> {
         capture_width,
         capture_height,
         capture_fps,
+        translated_delay_ms,
         subtitle,
         source_lang,
         soniox_api_key,
@@ -440,6 +449,7 @@ fn spawn_translation_pipeline(
             soniox_ws_url: args.soniox_ws_url.clone(),
             elevenlabs_api_key: args.elevenlabs_api_key.clone(),
             elevenlabs_base_url: args.elevenlabs_base_url.clone(),
+            translated_stream_delay_ms: args.translated_delay_ms,
             ..Default::default()
         }),
     );
@@ -455,6 +465,7 @@ fn spawn_translation_pipeline(
             soniox_ws_url: args.soniox_ws_url.clone(),
             elevenlabs_api_key: args.elevenlabs_api_key.clone(),
             elevenlabs_base_url: args.elevenlabs_base_url.clone(),
+            translated_stream_delay_ms: args.translated_delay_ms,
             ..Default::default()
         }),
     };

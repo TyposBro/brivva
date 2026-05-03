@@ -107,6 +107,7 @@ fn build_encoded_fanout_spawns(
     force_rtmp: bool,
     render_graph_id: Option<&RenderGraphId>,
     output_ids_enabled: bool,
+    translated_min_delay_ms: u64,
 ) -> Vec<EncodedFanoutSpawn> {
     let mut output_indexes = HashMap::new();
     let mut groups: Vec<EncodedFanoutSpawn> = Vec::new();
@@ -115,6 +116,13 @@ fn build_encoded_fanout_spawns(
             continue;
         };
         let flags = resolve_stream_flags(&stream.lang, source_lang, stream.host_gain);
+        let delay_ms = effective_stream_delay_ms(
+            stream.delay_ms,
+            flags.passthrough,
+            source_lang,
+            &stream.lang,
+            translated_min_delay_ms,
+        );
         let output_id = if output_ids_enabled {
             output_id_for_stream(sid, stream, &mut output_indexes).ok()
         } else {
@@ -122,7 +130,7 @@ fn build_encoded_fanout_spawns(
         };
         let key_matches = |group: &EncodedFanoutSpawn| {
             group.lang == stream.lang
-                && group.delay_ms == stream.delay_ms
+                && group.delay_ms == delay_ms
                 && group.is_source == flags.is_source
                 && (group.host_gain - flags.host_gain).abs() < f32::EPSILON
                 && group.passthrough == flags.passthrough
@@ -160,7 +168,7 @@ fn build_encoded_fanout_spawns(
                     full_url,
                 ),
             ],
-            delay_ms: stream.delay_ms,
+            delay_ms,
             is_source: flags.is_source,
             host_gain: flags.host_gain,
             passthrough: flags.passthrough,
@@ -170,6 +178,20 @@ fn build_encoded_fanout_spawns(
         });
     }
     groups
+}
+
+fn effective_stream_delay_ms(
+    requested_delay_ms: u64,
+    passthrough: bool,
+    source_lang: &Lang,
+    stream_lang: &str,
+    translated_min_delay_ms: u64,
+) -> u64 {
+    if passthrough || stream_lang == source_lang.to_string() {
+        requested_delay_ms
+    } else {
+        requested_delay_ms.max(translated_min_delay_ms)
+    }
 }
 
 fn render_graph_spec_for_streams(
@@ -284,6 +306,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
             force_rtmp,
             render_graph_id.as_ref(),
             output_controls_enabled || render_graph_enabled || shared_decode_enabled,
+            live_session.pipeline_config.translated_stream_delay_ms,
         );
         for group in groups {
             if !group.passthrough
@@ -540,6 +563,7 @@ mod tests {
             false,
             None,
             false,
+            0,
         );
 
         assert_eq!(groups.len(), 2);
@@ -561,11 +585,27 @@ mod tests {
         slow.delay_ms = 2500;
 
         let groups =
-            build_encoded_fanout_spawns(&[fast, slow], &Lang::En, "sess-1", false, None, false);
+            build_encoded_fanout_spawns(&[fast, slow], &Lang::En, "sess-1", false, None, false, 0);
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].rtmp_urls.len(), 1);
         assert_eq!(groups[1].rtmp_urls.len(), 1);
+    }
+
+    #[test]
+    fn encoded_fanout_enforces_server_min_delay_for_translated_streams() {
+        let mut ja = stream("a", "ja", "youtube");
+        ja.delay_ms = 1000;
+        let mut en = stream("b", "en", "youtube");
+        en.delay_ms = 0;
+
+        let groups =
+            build_encoded_fanout_spawns(&[ja, en], &Lang::En, "sess-1", false, None, false, 4000);
+
+        assert_eq!(groups[0].lang, "ja");
+        assert_eq!(groups[0].delay_ms, 4000);
+        assert_eq!(groups[1].lang, "en");
+        assert_eq!(groups[1].delay_ms, 0);
     }
 
     #[test]

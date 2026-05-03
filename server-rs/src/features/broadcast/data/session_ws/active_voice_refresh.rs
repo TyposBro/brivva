@@ -221,6 +221,7 @@ mod tests {
                 video_max_width: 1920,
                 video_max_height: 1080,
                 video_max_fps: 30,
+                translated_stream_delay_ms: 4000,
             }),
         );
         live.selected_voice_id = voice_id;

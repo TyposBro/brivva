@@ -52,6 +52,9 @@ pub struct AppConfig {
     pub video_max_width: u32,
     pub video_max_height: u32,
     pub video_max_fps: u32,
+    /// Minimum delay applied by server to translated RTMP outputs so STT,
+    /// translation, and TTS can land before delayed host media is emitted.
+    pub translated_stream_delay_ms: u64,
 }
 
 impl AppConfig {
@@ -85,6 +88,11 @@ impl AppConfig {
             video_max_width: env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920).clamp(640, 3840),
             video_max_height: env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080).clamp(360, 2160),
             video_max_fps: env_u32("BRIVVA_VIDEO_MAX_FPS", 30).clamp(15, 120),
+            translated_stream_delay_ms: env_u64_any(
+                &["BRIVVA_TRANSLATED_STREAM_DELAY_MS", "BROADCAST_DELAY_MS"],
+                4000,
+            )
+            .clamp(0, 15_000),
         })
     }
 }
@@ -109,6 +117,12 @@ fn env_u32(key: &str, default: u32) -> u32 {
     std::env::var(key)
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64_any(keys: &[&str], default: u64) -> u64 {
+    keys.iter()
+        .find_map(|key| std::env::var(key).ok()?.trim().parse::<u64>().ok())
         .unwrap_or(default)
 }
 
@@ -147,6 +161,8 @@ mod tests {
                 "BRIVVA_VIDEO_MAX_WIDTH",
                 "BRIVVA_VIDEO_MAX_HEIGHT",
                 "BRIVVA_VIDEO_MAX_FPS",
+                "BRIVVA_TRANSLATED_STREAM_DELAY_MS",
+                "BROADCAST_DELAY_MS",
             ] {
                 std::env::remove_var(key);
             }
@@ -170,6 +186,7 @@ mod tests {
         assert_eq!(cfg.video_max_width, 1920);
         assert_eq!(cfg.video_max_height, 1080);
         assert_eq!(cfg.video_max_fps, 30);
+        assert_eq!(cfg.translated_stream_delay_ms, 4000);
     }
 
     #[test]
@@ -183,6 +200,22 @@ mod tests {
         let cfg = AppConfig::from_env();
         assert_eq!(cfg.workers_api_url, "https://example.com");
         assert_eq!(cfg.elevenlabs_base_url, "https://el.example.com");
+    }
+
+    #[test]
+    fn translated_stream_delay_uses_legacy_broadcast_delay_fallback() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("BRIVVA_TRANSLATED_STREAM_DELAY_MS");
+            std::env::set_var("BROADCAST_DELAY_MS", "6000");
+        }
+
+        let cfg = AppConfig::from_env();
+        assert_eq!(cfg.translated_stream_delay_ms, 6000);
+
+        unsafe {
+            std::env::remove_var("BROADCAST_DELAY_MS");
+        }
     }
 
     #[test]
@@ -255,6 +288,7 @@ mod tests {
             std::env::set_var("BRIVVA_VIDEO_MAX_WIDTH", "3840");
             std::env::set_var("BRIVVA_VIDEO_MAX_HEIGHT", "2160");
             std::env::set_var("BRIVVA_VIDEO_MAX_FPS", "120");
+            std::env::set_var("BRIVVA_TRANSLATED_STREAM_DELAY_MS", "5500");
         }
 
         let cfg = AppConfig::from_env();
@@ -282,6 +316,7 @@ mod tests {
         assert_eq!(cfg.video_max_width, 3840);
         assert_eq!(cfg.video_max_height, 2160);
         assert_eq!(cfg.video_max_fps, 120);
+        assert_eq!(cfg.translated_stream_delay_ms, 5500);
 
         unsafe {
             for key in [
@@ -306,6 +341,8 @@ mod tests {
                 "BRIVVA_VIDEO_MAX_WIDTH",
                 "BRIVVA_VIDEO_MAX_HEIGHT",
                 "BRIVVA_VIDEO_MAX_FPS",
+                "BRIVVA_TRANSLATED_STREAM_DELAY_MS",
+                "BROADCAST_DELAY_MS",
             ] {
                 std::env::remove_var(key);
             }

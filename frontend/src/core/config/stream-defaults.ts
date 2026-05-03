@@ -1,11 +1,8 @@
 // Stream timing defaults keyed by (source_lang, target_lang).
 //
-// Numbers below are product-curated baselines per language pair: more
-// agglutinative source languages (Korean) still hold slightly longer
-// because the STT/translate pipeline emits later in the utterance, but
-// the overall range is tight (500–1000 ms) so the dub tracks the host
-// closely. The under-voice mix (`host_gain`) sits at 3% so the original
-// is barely audible and does not fight the cloned dub.
+// Translated streams hold host media long enough for STT, translation, and
+// TTS to land before playback. Server also enforces this as a minimum, so
+// frontend hints cannot make production streams race the TTS pipeline.
 //
 // Source-equal-target streams are passthrough — no translation overlay,
 // full original audio, zero added delay.
@@ -16,7 +13,7 @@ export interface StreamDefault {
 }
 
 const PASSTHROUGH: StreamDefault = { delay_ms: 0, host_gain: 1.0 };
-const BASELINE: StreamDefault = { delay_ms: 750, host_gain: 0.03 };
+const TRANSLATED: StreamDefault = { delay_ms: 4000, host_gain: 0.03 };
 
 /** Sentinel target-lang code for explicit source passthrough. Kept in sync
  *  with `@brivva/contracts/platforms` PASS_LANG_CODE. */
@@ -24,34 +21,34 @@ export const PASS_LANG_CODE = "pass";
 
 const TABLE: Record<string, Record<string, StreamDefault>> = {
   ko: {
-    zh: { delay_ms: 1000, host_gain: 0.03 },
-    ja: { delay_ms: 1000, host_gain: 0.03 },
-    en: { delay_ms: 1000, host_gain: 0.03 },
-    th: { delay_ms: 750, host_gain: 0.03 },
-    vi: { delay_ms: 750, host_gain: 0.03 },
-    id: { delay_ms: 750, host_gain: 0.03 },
+    zh: TRANSLATED,
+    ja: TRANSLATED,
+    en: TRANSLATED,
+    th: TRANSLATED,
+    vi: TRANSLATED,
+    id: TRANSLATED,
   },
   en: {
-    ja: { delay_ms: 750, host_gain: 0.03 },
-    zh: { delay_ms: 750, host_gain: 0.03 },
-    ko: { delay_ms: 750, host_gain: 0.03 },
+    ja: TRANSLATED,
+    zh: TRANSLATED,
+    ko: TRANSLATED,
   },
   ja: {
-    en: { delay_ms: 750, host_gain: 0.03 },
-    ko: { delay_ms: 750, host_gain: 0.03 },
-    zh: { delay_ms: 750, host_gain: 0.03 },
+    en: TRANSLATED,
+    ko: TRANSLATED,
+    zh: TRANSLATED,
   },
   zh: {
-    en: { delay_ms: 750, host_gain: 0.03 },
-    ja: { delay_ms: 750, host_gain: 0.03 },
-    ko: { delay_ms: 750, host_gain: 0.03 },
+    en: TRANSLATED,
+    ja: TRANSLATED,
+    ko: TRANSLATED,
   },
 };
 
 export function streamDefault(sourceLang: string, targetLang: string): StreamDefault {
   if (targetLang === PASS_LANG_CODE) return PASSTHROUGH;
   if (sourceLang === targetLang) return PASSTHROUGH;
-  return TABLE[sourceLang]?.[targetLang] ?? BASELINE;
+  return TABLE[sourceLang]?.[targetLang] ?? TRANSLATED;
 }
 
 export function isStreamDefault(
