@@ -653,7 +653,7 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
             let backlog_bytes = tts_queue_bytes(&q);
             let speed = tts_catchup_speed(backlog_bytes);
             let consume = ((AUDIO_BYTES_PER_TICK as f32) * speed).round() as usize;
-            let consume = consume.max(AUDIO_BYTES_PER_TICK);
+            let consume = align_pcm_s16le_bytes(consume.max(AUDIO_BYTES_PER_TICK));
             let raw = peek_tts_bytes(&q, consume);
             let out = resample_pcm_s16le_mono_nearest(&raw, AUDIO_BYTES_PER_TICK);
             (out, raw.len())
@@ -669,6 +669,7 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
 }
 
 fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<TtsSegment>>, bytes: usize) {
+    let bytes = align_pcm_s16le_bytes(bytes);
     if bytes == 0 {
         return;
     }
@@ -678,11 +679,11 @@ fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<TtsSegment>>, bytes: usize) {
 
 fn tts_catchup_speed(backlog_bytes: usize) -> f32 {
     if backlog_bytes >= TTS_CATCHUP_CRITICAL_BYTES {
-        1.5
+        1.3
     } else if backlog_bytes >= TTS_CATCHUP_STRONG_BYTES {
-        1.35
+        1.3
     } else if backlog_bytes >= TTS_CATCHUP_START_BYTES {
-        1.25
+        1.15
     } else {
         1.0
     }
@@ -721,6 +722,10 @@ fn drain_tts_segment_bytes(queue: &mut VecDeque<TtsSegment>, mut bytes: usize) {
         ));
         break;
     }
+}
+
+fn align_pcm_s16le_bytes(bytes: usize) -> usize {
+    bytes - (bytes % 2)
 }
 
 fn resample_pcm_s16le_mono_nearest(input: &[u8], output_bytes: usize) -> Vec<u8> {
@@ -866,9 +871,25 @@ mod tests {
     #[test]
     fn tts_catchup_speed_reaches_emergency_rate_before_hard_recovery_backlog() {
         assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES - 1), 1.0);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES), 1.25);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_STRONG_BYTES), 1.35);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_CRITICAL_BYTES), 1.5);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES), 1.15);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_STRONG_BYTES), 1.3);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_CRITICAL_BYTES), 1.3);
+    }
+
+    #[test]
+    fn tts_catchup_consumes_whole_pcm_samples() {
+        let queue = tts_queue(vec![0u8; TTS_CATCHUP_STRONG_BYTES]);
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk: vec![0u8; AUDIO_BYTES_PER_TICK],
+            is_source: false,
+            host_gain: 0.2,
+            tts_queue: &queue,
+        });
+        assert_eq!(out.tts_bytes_consumed % 2, 0);
+        assert_eq!(out.tts_bytes_consumed, 2_292);
+
+        commit_tts_drain(&queue, out.tts_bytes_consumed);
+        assert_eq!(tts_queue_bytes(&queue.lock().unwrap()) % 2, 0);
     }
 
     #[test]

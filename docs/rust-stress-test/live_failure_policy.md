@@ -105,10 +105,14 @@ segments when the hard live cap is exceeded.
 
 Current catch-up speed policy:
 
-- mild translated backlog: `1.25x`;
-- stronger translated backlog: `1.35x`;
-- critical translated backlog: `1.5x`;
+- mild translated backlog: `1.15x`;
+- stronger translated backlog: `1.3x`;
+- critical translated backlog: `1.3x`;
 - above that, prefer concise/hard-recovery policy over faster playback.
+
+Implementation caution: translated audio is PCM `s16le`, so catch-up drain must
+consume only even byte counts. Draining an odd number of bytes shifts the queue
+by half a sample and turns later TTS into harsh noise rather than human speech.
 
 ## Translated Audio Too Long
 
