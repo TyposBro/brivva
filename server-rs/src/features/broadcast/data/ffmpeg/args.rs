@@ -97,10 +97,14 @@ impl VideoProfile {
         }
     }
 
-    pub fn for_destination_platform(self, platform: &str) -> Self {
-        if !is_grip_platform(platform) {
+    pub fn for_destination_platform(self, _platform: &str) -> Self {
+        if !mobile_portrait_output_enabled() {
             return self;
         }
+        self.as_mobile_portrait_output()
+    }
+
+    fn as_mobile_portrait_output(self) -> Self {
         let output_fps = self.output_fps.min(30);
         Self {
             input_fps: self.input_fps,
@@ -131,12 +135,15 @@ fn is_4k_class(width: u32, height: u32) -> bool {
     width >= 3840 && width.saturating_mul(height) >= 3840 * 1600
 }
 
-fn is_grip_platform(platform: &str) -> bool {
-    platform
-        .trim()
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|part| part == "grip")
+fn mobile_portrait_output_enabled() -> bool {
+    !matches!(
+        std::env::var("BRIVVA_RTMP_OUTPUT_LAYOUT")
+            .unwrap_or_else(|_| "mobile_portrait".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "source" | "source_aspect" | "landscape" | "desktop"
+    )
 }
 
 /// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
@@ -197,8 +204,8 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         "h264".into(),
         // Raw H.264 is timestampless, so FFmpeg needs the expected input rate.
         // The browser sends its actual capture profile before WebRTC starts;
-        // 1080p30 is the floor, and 4K60 is preserved when the host can
-        // hardware-encode it.
+        // output layout is selected later per destination. Launch defaults are
+        // mobile portrait because live-commerce viewers are phone-first.
         "-r".into(),
         profile.input_fps.to_string(),
         "-i".into(),
@@ -716,14 +723,14 @@ mod tests {
     }
 
     #[test]
-    fn video_profile_for_grip_matches_prod_broadcast_caps() {
+    fn video_profile_for_rtmp_platforms_defaults_to_mobile_portrait() {
         let profile = VideoProfile::from_capture_with_caps(
             1920,
             1080,
             60,
             VideoProfileCaps::new(1920, 1080, 60),
         )
-        .for_destination_platform("grip");
+        .for_destination_platform("youtube-ja");
 
         assert_eq!(profile.input_fps, 60);
         assert_eq!(profile.output_fps, 30);
@@ -736,12 +743,12 @@ mod tests {
     }
 
     #[test]
-    fn build_ffmpeg_args_for_grip_pads_to_portrait_canvas() {
-        let profile = VideoProfile::default().for_destination_platform("prod-grip");
+    fn build_ffmpeg_args_for_mobile_rtmp_pads_to_portrait_canvas() {
+        let profile = VideoProfile::default().for_destination_platform("youtube-ja");
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
             None,
-            &["rtmp://grip/live/key".to_string()],
+            &["rtmp://youtube/live/key".to_string()],
             profile,
             VideoEncoderKind::Nvenc,
         );

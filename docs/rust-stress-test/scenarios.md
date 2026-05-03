@@ -169,11 +169,9 @@ Run base command with normal YouTube keys too.
 
 Pass: bad destination logs failure; valid YouTube outputs remain live.
 
-## Grip Smoke
+## Mobile-First RTMP Output
 
-Goal: prove Grip RTMP/RTMPS publish works with a fresh one-shot Grip stream key.
-
-Grip ingest profile:
+Default RTMP output profile for YouTube, Grip, TikTok, and generic RTMP:
 
 - Codec: H.264.
 - Canvas: exact `720x1280` portrait. Landscape source is fit inside this
@@ -181,6 +179,20 @@ Grip ingest profile:
 - Keyframe interval: 1 second.
 - Video bitrate: `2500k`, maxrate `2800k`; with AAC audio this stays below
   Grip's "less than 3 Mbps" requirement.
+
+Reason: Brivva's launch use case is live commerce, and most viewers are on
+phones. YouTube can accept both portrait and landscape, so portrait is the safer
+default across platforms.
+
+Override only for explicit desktop/4K experiments:
+
+```bash
+BRIVVA_RTMP_OUTPUT_LAYOUT=source
+```
+
+## Grip Smoke
+
+Goal: prove Grip RTMP/RTMPS publish works with a fresh one-shot Grip stream key.
 
 Required secrets/env:
 

@@ -66,6 +66,11 @@ prefer `grip` because Brivva's live-commerce audience is phone-first.
 Many-output scenarios stay YouTube-only by default so a one-shot Grip key is
 not consumed before `grip_smoke`.
 
+All RTMP platforms default to phone-first output: H.264 on a `720x1280`
+portrait canvas with padding. That applies to YouTube, Grip, TikTok, and
+generic RTMP. Use `BRIVVA_RTMP_OUTPUT_LAYOUT=source` only for explicit
+landscape/desktop/4K experiments.
+
 ## Manual Smoke Base
 
 ```bash

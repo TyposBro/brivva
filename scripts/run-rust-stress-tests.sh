@@ -177,6 +177,10 @@ have_grip_output() {
 	[[ -n "${STREAM_URL_GRIP:-}" && -n "${STREAM_KEY_GRIP:-}" ]]
 }
 
+have_any_output() {
+	have_youtube_output || have_grip_output || [[ -n "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]]
+}
+
 first_available_output() {
 	for output in grip pass "$SOURCE_LANG" en ko ja zh legacy; do
 		if have_output_key "$output"; then
@@ -337,8 +341,8 @@ run_case() {
 	if ! should_run "$name"; then
 		return 0
 	fi
-	if [[ "$name" != "grip_smoke" ]] && ! have_youtube_output && [[ -z "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]]; then
-		record_skip "$name" "no YouTube/RTMP destination secrets"
+	if [[ "$name" != "grip_smoke" ]] && ! have_any_output; then
+		record_skip "$name" "no YouTube/Grip/RTMP destination secrets"
 		return 0
 	fi
 	echo
