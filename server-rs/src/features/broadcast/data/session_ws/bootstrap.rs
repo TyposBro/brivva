@@ -110,11 +110,7 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
                 continue;
             }
             match provider_workers_api
-                .report_provider_failure(
-                    &provider_sid,
-                    Some(&provider_live_session_id),
-                    &event,
-                )
+                .report_provider_failure(&provider_sid, Some(&provider_live_session_id), &event)
                 .await
             {
                 Ok(()) => {}

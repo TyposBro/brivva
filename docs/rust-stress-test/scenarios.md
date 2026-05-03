@@ -173,6 +173,15 @@ Pass: bad destination logs failure; valid YouTube outputs remain live.
 
 Goal: prove Grip RTMP/RTMPS publish works with a fresh one-shot Grip stream key.
 
+Grip ingest profile:
+
+- Codec: H.264.
+- Canvas: exact `720x1280` portrait. Landscape source is fit inside this
+  portrait canvas with padding.
+- Keyframe interval: 1 second.
+- Video bitrate: `2500k`, maxrate `2800k`; with AAC audio this stays below
+  Grip's "less than 3 Mbps" requirement.
+
 Required secrets/env:
 
 - `STREAM_URL_GRIP`: Grip server URL from PC 송출.
@@ -204,12 +213,19 @@ infisical run --env=dev --path=/ -- \
 Pass:
 
 - Rust logs show Grip output started and `chunks_written` increases.
+- `ffmpeg spawn` for `destination_platform=grip` shows `max_width=720`,
+  `max_height=1280`, `bitrate_kbps=2500`, and
+  `keyframe_interval_frames=30`.
 - FFmpeg stderr stays near realtime.
 - Grip Studio monitor shows video and audio.
 - No `ffmpeg rtmp process crashed`.
 
 Important: Grip stream keys are one-shot. Do not reuse an old key for this
 test.
+
+Important: `backlog_catchup_many_outputs` is YouTube-only by design. It does
+not prove Grip, even if it passes. Use `--only grip_smoke` when watching Grip
+Studio.
 
 ## TTS Failure
 

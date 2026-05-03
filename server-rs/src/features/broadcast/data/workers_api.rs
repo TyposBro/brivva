@@ -153,7 +153,9 @@ impl WorkersApi {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MetricsReportError::Other(format!("workers provider failure error: {e}")))?;
+            .map_err(|e| {
+                MetricsReportError::Other(format!("workers provider failure error: {e}"))
+            })?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(MetricsReportError::NotFound);

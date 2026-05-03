@@ -544,7 +544,7 @@ impl RtmpManager {
 
     pub fn start_stream_group(&mut self, args: StartStreamGroupArgs<'_>) -> Result<(), String> {
         emit_output_health(
-                self.output_health_tx.as_ref(),
+            self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             args.stream_id,
@@ -597,7 +597,7 @@ impl RtmpManager {
             return Err(e);
         }
         emit_output_health(
-                self.output_health_tx.as_ref(),
+            self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             args.stream_id,
@@ -851,7 +851,7 @@ impl RtmpManager {
                         "ffmpeg rtmp process crashed, scheduling restart"
                     );
                     emit_output_health(
-                self.output_health_tx.as_ref(),
+                        self.output_health_tx.as_ref(),
                         stream.output_controls_enabled,
                         &stream.output_id,
                         id,
@@ -870,7 +870,7 @@ impl RtmpManager {
                             "ffmpeg rtmp giving up after max restart attempts"
                         );
                         emit_output_health(
-                self.output_health_tx.as_ref(),
+                            self.output_health_tx.as_ref(),
                             stream.output_controls_enabled,
                             &stream.output_id,
                             id,
@@ -929,7 +929,7 @@ impl RtmpManager {
     /// media + TTS survive the FFmpeg restart.
     fn restart_stream(&mut self, args: RestartStreamArgs) {
         emit_output_health(
-                self.output_health_tx.as_ref(),
+            self.output_health_tx.as_ref(),
             args.output_controls_enabled,
             &args.output_id,
             &args.id,
@@ -969,7 +969,7 @@ impl RtmpManager {
                     }
                 }
                 emit_output_health(
-                self.output_health_tx.as_ref(),
+                    self.output_health_tx.as_ref(),
                     args.output_controls_enabled,
                     &args.output_id,
                     &args.id,
@@ -996,7 +996,7 @@ impl RtmpManager {
             }
             Err(e) => {
                 emit_output_health(
-                self.output_health_tx.as_ref(),
+                    self.output_health_tx.as_ref(),
                     args.output_controls_enabled,
                     &args.output_id,
                     &args.id,
@@ -1035,22 +1035,29 @@ impl RtmpManager {
             .map_err(|e| format!("mkfifo failed: {}", e))?;
 
         let encoder = self.video_encoder;
+        let video_profile = self
+            .video_profile
+            .for_destination_platform(&args.destination_platform);
         let ffmpeg_args = build_ffmpeg_args_with_profile(
             &audio_fifo,
             Some(&subtitle_textfile),
             &args.rtmp_urls,
-            self.video_profile,
+            video_profile,
             encoder,
         );
         tracing::info!(
             stream_id = %args.stream_id,
             lang = %args.lang,
+            destination_platform = %args.destination_platform,
             video_encoder = encoder.codec_name(),
-            input_fps = self.video_profile.input_fps,
-            output_fps = self.video_profile.output_fps,
-            max_width = self.video_profile.max_width,
-            max_height = self.video_profile.max_height,
-            bitrate_kbps = self.video_profile.bitrate_kbps,
+            input_fps = video_profile.input_fps,
+            output_fps = video_profile.output_fps,
+            max_width = video_profile.max_width,
+            max_height = video_profile.max_height,
+            bitrate_kbps = video_profile.bitrate_kbps,
+            maxrate_kbps = video_profile.maxrate_kbps,
+            keyframe_interval_frames = video_profile.keyframe_interval_frames,
+            pad_to_canvas = video_profile.pad_to_canvas,
             "ffmpeg spawn: WebRTC H.264 pipe re-encode enabled"
         );
 

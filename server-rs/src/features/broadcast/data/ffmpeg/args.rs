@@ -11,6 +11,8 @@ pub struct VideoProfile {
     pub bitrate_kbps: u32,
     pub maxrate_kbps: u32,
     pub bufsize_kbps: u32,
+    pub keyframe_interval_frames: u32,
+    pub pad_to_canvas: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +52,8 @@ impl Default for VideoProfile {
             bitrate_kbps: 6_000,
             maxrate_kbps: 9_000,
             bufsize_kbps: 18_000,
+            keyframe_interval_frames: 60,
+            pad_to_canvas: false,
         }
     }
 }
@@ -88,6 +92,26 @@ impl VideoProfile {
             bitrate_kbps,
             maxrate_kbps: bitrate_kbps + bitrate_kbps / 2,
             bufsize_kbps: bitrate_kbps * 3,
+            keyframe_interval_frames: output_fps * 2,
+            pad_to_canvas: false,
+        }
+    }
+
+    pub fn for_destination_platform(self, platform: &str) -> Self {
+        if !is_grip_platform(platform) {
+            return self;
+        }
+        let output_fps = self.output_fps.min(30);
+        Self {
+            input_fps: self.input_fps,
+            output_fps,
+            max_width: 720,
+            max_height: 1280,
+            bitrate_kbps: 2_500,
+            maxrate_kbps: 2_800,
+            bufsize_kbps: 3_000,
+            keyframe_interval_frames: output_fps,
+            pad_to_canvas: true,
         }
     }
 }
@@ -105,6 +129,14 @@ fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
 
 fn is_4k_class(width: u32, height: u32) -> bool {
     width >= 3840 && width.saturating_mul(height) >= 3840 * 1600
+}
+
+fn is_grip_platform(platform: &str) -> bool {
+    platform
+        .trim()
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == "grip")
 }
 
 /// Pure builder for the FFmpeg CLI args. Factored out of `spawn_stream_inner`
@@ -242,10 +274,21 @@ fn escape_tee_url(url: &str) -> String {
 }
 
 fn video_filter(profile: VideoProfile, subtitle_textfile: Option<&str>) -> String {
-    let mut filter = format!(
-        "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
-        profile.output_fps, profile.max_width, profile.max_height
-    );
+    let mut filter = if profile.pad_to_canvas {
+        format!(
+            "fps={},scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+            profile.output_fps,
+            profile.max_width,
+            profile.max_height,
+            profile.max_width,
+            profile.max_height
+        )
+    } else {
+        format!(
+            "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+            profile.output_fps, profile.max_width, profile.max_height
+        )
+    };
     if debug_video_clock_enabled() {
         filter.push(',');
         filter.push_str(&debug_video_clock_filter());
@@ -347,9 +390,9 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
         "-r".into(),
         profile.output_fps.to_string(),
         "-g".into(),
-        (profile.output_fps * 2).to_string(),
+        profile.keyframe_interval_frames.to_string(),
         "-keyint_min".into(),
-        (profile.output_fps * 2).to_string(),
+        profile.keyframe_interval_frames.to_string(),
         "-sc_threshold".into(),
         "0".into(),
         "-b:v".into(),
@@ -670,6 +713,43 @@ mod tests {
         assert_eq!(profile.max_width, 1920);
         assert_eq!(profile.max_height, 1080);
         assert_eq!(profile.bitrate_kbps, 6_000);
+    }
+
+    #[test]
+    fn video_profile_for_grip_matches_prod_broadcast_caps() {
+        let profile = VideoProfile::from_capture_with_caps(
+            1920,
+            1080,
+            60,
+            VideoProfileCaps::new(1920, 1080, 60),
+        )
+        .for_destination_platform("grip");
+
+        assert_eq!(profile.input_fps, 60);
+        assert_eq!(profile.output_fps, 30);
+        assert_eq!(profile.max_width, 720);
+        assert_eq!(profile.max_height, 1280);
+        assert_eq!(profile.bitrate_kbps, 2_500);
+        assert_eq!(profile.maxrate_kbps, 2_800);
+        assert_eq!(profile.keyframe_interval_frames, 30);
+        assert!(profile.pad_to_canvas);
+    }
+
+    #[test]
+    fn build_ffmpeg_args_for_grip_pads_to_portrait_canvas() {
+        let profile = VideoProfile::default().for_destination_platform("prod-grip");
+        let args = build_ffmpeg_args_with_profile(
+            "/tmp/fifo",
+            None,
+            &["rtmp://grip/live/key".to_string()],
+            profile,
+            VideoEncoderKind::Nvenc,
+        );
+        let joined = args.join(" ");
+
+        assert!(joined.contains("-vf fps=30,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"));
+        assert!(joined.contains("-g 30 -keyint_min 30"));
+        assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 3000k"));
     }
 
     #[test]
