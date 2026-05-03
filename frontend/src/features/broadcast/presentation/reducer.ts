@@ -14,6 +14,18 @@ export interface MediaDiagnostics {
   outbound?: { frameWidth?: number; frameHeight?: number; framesPerSecond?: number; framesSent?: number; qualityLimitationReason?: unknown };
 }
 
+export interface ProviderHealthNotice {
+  provider: string;
+  state: string;
+  recoverable: boolean;
+  billable: boolean;
+  reason: string;
+  targetLang?: string;
+  statusCode?: number;
+  errorCode?: string;
+  message: string;
+}
+
 export interface HostState {
   status: HostStatus;
   liveTranscript: string;
@@ -24,6 +36,7 @@ export interface HostState {
   voiceReady: boolean;
   mediaDiagnostics: MediaDiagnostics | null;
   connectionIssue: string | null;
+  providerHealth: ProviderHealthNotice[];
 }
 
 export type HostAction =
@@ -40,7 +53,8 @@ export type HostAction =
   | { type: "voice_ready" }
   | { type: "skip_voice_setup" }
   | { type: "media_diagnostics"; diagnostics: MediaDiagnostics }
-  | { type: "connection_issue"; message: string };
+  | { type: "connection_issue"; message: string }
+  | { type: "provider_health"; notice: ProviderHealthNotice };
 
 export const INITIAL_STATE: HostState = {
   status: "idle",
@@ -52,6 +66,7 @@ export const INITIAL_STATE: HostState = {
   voiceReady: false,
   mediaDiagnostics: null,
   connectionIssue: null,
+  providerHealth: [],
 };
 
 export function hostReducer(state: HostState, action: HostAction): HostState {
@@ -114,5 +129,14 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
 
     case "connection_issue":
       return { ...state, connectionIssue: action.message };
+
+    case "provider_health": {
+      const key = (notice: ProviderHealthNotice) =>
+        `${notice.provider}:${notice.targetLang ?? ""}:${notice.reason}`;
+      const next = state.providerHealth.filter(
+        (notice) => key(notice) !== key(action.notice),
+      );
+      return { ...state, providerHealth: [...next, action.notice].slice(-10) };
+    }
   }
 }

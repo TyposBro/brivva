@@ -38,12 +38,26 @@ export const HostServerErrorMessageSchema = z.object({
   message: z.string(),
 });
 
+export const HostServerProviderHealthMessageSchema = z.object({
+  type: z.literal("provider_health"),
+  provider: z.string().min(1),
+  state: z.string().min(1),
+  recoverable: z.boolean(),
+  billable: z.boolean(),
+  reason: z.string().min(1),
+  targetLang: z.string().min(1).optional(),
+  statusCode: z.number().int().optional(),
+  errorCode: z.string().min(1).optional(),
+  message: z.string(),
+});
+
 export const HostServerMessageSchema = z.discriminatedUnion("type", [
   HostServerInterimMessageSchema,
   HostServerFinalMessageSchema,
   HostServerTranslationMessageSchema,
   HostServerTtsEndMessageSchema,
   HostServerVideoEndMessageSchema,
+  HostServerProviderHealthMessageSchema,
   HostServerErrorMessageSchema,
 ]);
 

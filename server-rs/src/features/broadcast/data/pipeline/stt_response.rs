@@ -39,6 +39,22 @@ pub(super) fn spawn_response_processor(
                 continue;
             };
             if response.error_code.is_some() {
+                emit_provider_health(
+                    &handle,
+                    ProviderHealthNotice {
+                        provider: "soniox",
+                        state: "reconnecting",
+                        recoverable: true,
+                        billable: false,
+                        reason: "upstream_error",
+                        target_lang: mode.target_lang_string(),
+                        status_code: None,
+                        error_code: response.error_code.clone(),
+                        message: format!(
+                            "Soniox returned an error for {tag}; translation is reconnecting and this period is not billable."
+                        ),
+                    },
+                );
                 tracing::warn!(
                     session_id = %handle.id,
                     tag = %tag,
@@ -106,6 +122,34 @@ async fn read_soniox_message(tag: &str, stt_stream: &mut SonioxStream) -> Option
             None
         }
         _ => Some(String::new()),
+    }
+}
+
+struct ProviderHealthNotice<'a> {
+    provider: &'a str,
+    state: &'a str,
+    recoverable: bool,
+    billable: bool,
+    reason: &'a str,
+    target_lang: Option<String>,
+    status_code: Option<u16>,
+    error_code: Option<String>,
+    message: String,
+}
+
+fn emit_provider_health(handle: &LiveSessionHandle, notice: ProviderHealthNotice<'_>) {
+    if let Some(live_session) = handle.sessions.get(&handle.id) {
+        live_session.send_to_host(to_ws(&ServerMsg::ProviderHealth {
+            provider: notice.provider.to_string(),
+            state: notice.state.to_string(),
+            recoverable: notice.recoverable,
+            billable: notice.billable,
+            reason: notice.reason.to_string(),
+            target_lang: notice.target_lang,
+            status_code: notice.status_code,
+            error_code: notice.error_code,
+            message: notice.message,
+        }));
     }
 }
 

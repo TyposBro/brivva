@@ -55,6 +55,8 @@ latency.
 - `bad_destination`: one good output plus one dead RTMP destination.
 - `tts_failure`: bad ElevenLabs key, original stream should continue.
 - `stt_failure`: bad Soniox key, original stream should continue.
+- `grip_smoke`: fresh Grip RTMP/RTMPS URL + key, verify Grip Studio receives
+  video/audio.
 - `long_run`: longer one-output run.
 - `difficult_audio`: optional, requires `--audio-mp4`.
 - `network`: optional, requires `--include-network --iface <iface>`.

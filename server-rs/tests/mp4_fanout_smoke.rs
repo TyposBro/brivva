@@ -222,6 +222,11 @@ fn parse_args() -> Result<Args, String> {
         &explicit_target_langs,
         output_filter.as_deref(),
     );
+    if output_allowed(output_filter.as_deref(), "grip")
+        && let Some(grip_output) = grip_output(&source_lang)?
+    {
+        outputs.push(grip_output);
+    }
     let mut legacy_rtmp = Vec::new();
     if output_allowed(output_filter.as_deref(), "legacy") {
         if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
@@ -252,7 +257,7 @@ fn parse_args() -> Result<Args, String> {
 
     if outputs.is_empty() {
         return Err(
-            "provide STREAM_KEY_YOUTUBE, STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}, or MP4_FANOUT_SMOKE_RTMP_URLS"
+            "provide STREAM_KEY_YOUTUBE, STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}, GRIP_RTMP_URL + STREAM_KEY_GRIP, or MP4_FANOUT_SMOKE_RTMP_URLS"
                 .to_string(),
         );
     }
@@ -338,10 +343,10 @@ fn parse_output_filter_env(name: &str) -> Result<Option<Vec<String>>, String> {
     {
         let normalized = value.to_ascii_lowercase();
         match normalized.as_str() {
-            "pass" | "ko" | "en" | "ja" | "zh" | "legacy" => outputs.push(normalized),
+            "pass" | "ko" | "en" | "ja" | "zh" | "grip" | "legacy" => outputs.push(normalized),
             _ => {
                 return Err(format!(
-                    "{name} contains unsupported output '{value}', expected pass,ko,en,ja,zh,legacy"
+                    "{name} contains unsupported output '{value}', expected pass,ko,en,ja,zh,grip,legacy"
                 ));
             }
         }
@@ -361,6 +366,25 @@ fn youtube_destination(platform: &str, youtube_url: &str, key: &str) -> RtmpDest
         platform,
         format!("{}/{}", youtube_url.trim_end_matches('/'), key),
     )
+}
+
+fn grip_output(source_lang: &Lang) -> Result<Option<SmokeOutput>, String> {
+    let rtmp_url = std::env::var("GRIP_RTMP_URL").unwrap_or_default();
+    let stream_key = std::env::var("STREAM_KEY_GRIP").unwrap_or_default();
+    if rtmp_url.trim().is_empty() && stream_key.trim().is_empty() {
+        return Ok(None);
+    }
+    if rtmp_url.trim().is_empty() || stream_key.trim().is_empty() {
+        return Err("GRIP_RTMP_URL and STREAM_KEY_GRIP must be provided together".to_string());
+    }
+    let lang = parse_optional_lang_env("MP4_FANOUT_SMOKE_GRIP_LANG")?
+        .unwrap_or_else(|| source_lang.clone());
+    let full_url = format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key);
+    Ok(Some(SmokeOutput {
+        label: "grip".to_string(),
+        lang: Some(lang),
+        destinations: vec![RtmpDestination::new("grip", full_url)],
+    }))
 }
 
 fn target_langs_for_translation(outputs: &[SmokeOutput], source_lang: &Lang) -> Vec<Lang> {

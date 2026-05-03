@@ -92,6 +92,38 @@ describe("createMessageHandler", () => {
     expect(h.dispatch).not.toHaveBeenCalled();
   });
 
+  it("provider_health → stores notice and surfaces unbillable issue", () => {
+    h.handler({
+      type: "provider_health",
+      provider: "elevenlabs",
+      state: "degraded",
+      recoverable: true,
+      billable: false,
+      reason: "rate_limited",
+      targetLang: "ja",
+      statusCode: 429,
+      message: "Japanese TTS not billable while rate limited.",
+    });
+    expect(h.dispatch).toHaveBeenCalledWith({
+      type: "provider_health",
+      notice: {
+        provider: "elevenlabs",
+        state: "degraded",
+        recoverable: true,
+        billable: false,
+        reason: "rate_limited",
+        targetLang: "ja",
+        statusCode: 429,
+        errorCode: undefined,
+        message: "Japanese TTS not billable while rate limited.",
+      },
+    });
+    expect(h.dispatch).toHaveBeenCalledWith({
+      type: "connection_issue",
+      message: "Japanese TTS not billable while rate limited.",
+    });
+  });
+
   it("unknown msg.type → no dispatch, no stopwatch calls (sad)", () => {
     h.handler({ type: "mystery" });
     expect(h.dispatch).not.toHaveBeenCalled();

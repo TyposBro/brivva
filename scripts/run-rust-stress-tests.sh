@@ -48,7 +48,7 @@ Expected to be run inside Infisical:
 Scenario names:
   single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
   single_4k30 many_outputs_4k30 high_res_capped low_quality
-  backlog_catchup backlog_catchup_many_outputs bad_destination tts_failure stt_failure long_run difficult_audio network
+  backlog_catchup backlog_catchup_many_outputs grip_smoke bad_destination tts_failure stt_failure long_run difficult_audio network
 EOF
 }
 
@@ -167,9 +167,14 @@ have_output_key() {
 		en) [[ -n "${STREAM_KEY_YOUTUBE_EN:-}" ]] ;;
 		ja) [[ -n "${STREAM_KEY_YOUTUBE_JA:-}" ]] ;;
 		zh) [[ -n "${STREAM_KEY_YOUTUBE_ZH:-}" ]] ;;
+		grip) have_grip_output ;;
 		legacy) [[ -n "${STREAM_KEY_YOUTUBE:-}" || -n "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]] ;;
 		*) return 1 ;;
 	esac
+}
+
+have_grip_output() {
+	[[ -n "${GRIP_RTMP_URL:-}" && -n "${STREAM_KEY_GRIP:-}" ]]
 }
 
 first_available_output() {
@@ -210,6 +215,7 @@ output_secret_name() {
 		en) echo "STREAM_KEY_YOUTUBE_EN" ;;
 		ja) echo "STREAM_KEY_YOUTUBE_JA" ;;
 		zh) echo "STREAM_KEY_YOUTUBE_ZH" ;;
+		grip) echo "GRIP_RTMP_URL + STREAM_KEY_GRIP" ;;
 		legacy) echo "STREAM_KEY_YOUTUBE or MP4_FANOUT_SMOKE_RTMP_URLS" ;;
 		*) echo "unknown" ;;
 	esac
@@ -331,7 +337,7 @@ run_case() {
 	if ! should_run "$name"; then
 		return 0
 	fi
-	if ! have_youtube_output && [[ -z "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]]; then
+	if [[ "$name" != "grip_smoke" ]] && ! have_youtube_output && [[ -z "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]]; then
 		record_skip "$name" "no YouTube/RTMP destination secrets"
 		return 0
 	fi
@@ -371,6 +377,9 @@ echo "Stress config:"
 echo "  source_lang=$SOURCE_LANG"
 echo "  translated_delay_ms=$TRANSLATED_DELAY_MS"
 print_output_mapping "$MULTI_OUTPUTS"
+if have_grip_output; then
+	echo "  grip_smoke=available -> GRIP_RTMP_URL + STREAM_KEY_GRIP"
+fi
 if [[ -n "$SINGLE_OUTPUT" ]]; then
 	echo "  first_single_output=$SINGLE_OUTPUT -> $(output_secret_name "$SINGLE_OUTPUT")"
 fi
@@ -480,6 +489,20 @@ else
 		"BRIVVA_AUDIO_FIFO_WRITE_BUDGET_MS=60" \
 		"BRIVVA_TTS_QUEUE_CAP_MS=30000" \
 		"BRIVVA_STT_FORCE_FINALIZE_MS=3000"
+fi
+
+if have_grip_output; then
+	run_case grip_smoke \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=grip" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30"
+else
+	should_run grip_smoke && record_skip grip_smoke "need GRIP_RTMP_URL + STREAM_KEY_GRIP"
 fi
 
 if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res_capped; then

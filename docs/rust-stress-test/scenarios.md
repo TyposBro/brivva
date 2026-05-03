@@ -33,6 +33,10 @@ to per-language GPU workers.
 
 Goal: verify 4K/high-FPS sources downscale or preserve correctly.
 
+Current status: not proven. Use this as a validation scenario, not evidence
+that 4K is production-ready. The MP4 fixture must be H.264 because the real
+browser ingest path is H.264-only for RTMP platform compatibility.
+
 ```bash
 infisical run --env=dev --path=/ -- \
   env MP4_FANOUT_SMOKE_MP4=/path/to/h264-4k.mp4 \
@@ -52,6 +56,22 @@ BRIVVA_VIDEO_MAX_WIDTH=1920 BRIVVA_VIDEO_MAX_HEIGHT=1080 BRIVVA_VIDEO_MAX_FPS=30
 ```
 
 Pass: 4K source works when capped, and only uses 4K when GPU capacity is enough.
+
+Fail/unknown:
+
+- zero `chunks_written` means the fixture did not feed browser-like H.264 video
+  into the Rust path;
+- AV1/HEVC fixtures should be converted once to H.264 only to simulate browser
+  ingest, not because production accepts arbitrary codecs;
+- local 4K success still does not prove AWS 4K success.
+
+Before claiming 4K support:
+
+- run true 3840x2160 output profile;
+- run 4K input capped to 1080p output;
+- run all intended language/platform outputs;
+- verify YouTube/Grip/TikTok Studio dashboards, not only Rust logs;
+- repeat on AWS/Fargate exact launch instance and FFmpeg build.
 
 ## Low-Quality Host
 
@@ -148,6 +168,48 @@ MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad
 Run base command with normal YouTube keys too.
 
 Pass: bad destination logs failure; valid YouTube outputs remain live.
+
+## Grip Smoke
+
+Goal: prove Grip RTMP/RTMPS publish works with a fresh one-shot Grip stream key.
+
+Required secrets/env:
+
+- `GRIP_RTMP_URL`: Grip server URL from PC 송출.
+- `STREAM_KEY_GRIP`: fresh Grip stream key for this broadcast.
+- Optional `MP4_FANOUT_SMOKE_GRIP_LANG`: output language; defaults to source
+  language.
+
+Run through the stress wrapper:
+
+```bash
+infisical run --env=dev --path=/ -- \
+  ./scripts/run-rust-stress-tests.sh --only grip_smoke
+```
+
+Or run only the Rust smoke test:
+
+```bash
+infisical run --env=dev --path=/ -- \
+  env MP4_FANOUT_SMOKE_MP4=/home/typosbro/Desktop/text.mp4 \
+      MP4_FANOUT_SMOKE_OUTPUTS=grip \
+      MP4_FANOUT_SMOKE_DURATION=180 \
+      MP4_FANOUT_SMOKE_ENCODER=nvenc \
+      BRIVVA_VIDEO_MAX_WIDTH=1920 \
+      BRIVVA_VIDEO_MAX_HEIGHT=1080 \
+      BRIVVA_VIDEO_MAX_FPS=30 \
+  cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
+```
+
+Pass:
+
+- Rust logs show Grip output started and `chunks_written` increases.
+- FFmpeg stderr stays near realtime.
+- Grip Studio monitor shows video and audio.
+- No `ffmpeg rtmp process crashed`.
+
+Important: Grip stream keys are one-shot. Do not reuse an old key for this
+test.
 
 ## TTS Failure
 

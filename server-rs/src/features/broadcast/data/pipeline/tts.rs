@@ -638,7 +638,18 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     {
         TtsFetchResult::Audio(buf) => Some(buf),
         TtsFetchResult::VoiceNotFound if is_cloned => None,
-        TtsFetchResult::VoiceNotFound | TtsFetchResult::NoAudio => {
+        TtsFetchResult::VoiceNotFound => {
+            emit_tts_provider_health(&req, "voice_not_found", false, None);
+            emit_tts_drop(&req, &tts_deadline);
+            return;
+        }
+        TtsFetchResult::Failure(failure) => {
+            emit_tts_provider_health(
+                &req,
+                failure.reason,
+                failure.recoverable,
+                failure.status_code,
+            );
             emit_tts_drop(&req, &tts_deadline);
             return;
         }
@@ -673,7 +684,19 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         .await
         {
             TtsFetchResult::Audio(buf) => Some(buf),
-            TtsFetchResult::VoiceNotFound | TtsFetchResult::NoAudio => None,
+            TtsFetchResult::VoiceNotFound => {
+                emit_tts_provider_health(&req, "voice_not_found", false, None);
+                None
+            }
+            TtsFetchResult::Failure(failure) => {
+                emit_tts_provider_health(
+                    &req,
+                    failure.reason,
+                    failure.recoverable,
+                    failure.status_code,
+                );
+                None
+            }
         };
     }
 
@@ -725,6 +748,34 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         deadline_ms = tts_deadline.as_millis() as u64,
         "tts complete"
     );
+}
+
+fn emit_tts_provider_health(
+    req: &TtsRequest,
+    reason: &str,
+    recoverable: bool,
+    status_code: Option<u16>,
+) {
+    if let Some(live_session) = req.handle.sessions.get(&req.handle.id) {
+        live_session.send_to_host(to_ws(&ServerMsg::ProviderHealth {
+            provider: "elevenlabs".to_string(),
+            state: if recoverable {
+                "degraded".to_string()
+            } else {
+                "failed".to_string()
+            },
+            recoverable,
+            billable: false,
+            reason: reason.to_string(),
+            target_lang: Some(req.target_lang.to_string()),
+            status_code,
+            error_code: None,
+            message: format!(
+                "ElevenLabs TTS is unavailable for {}; translated audio is not billable while this is failing.",
+                req.target_lang
+            ),
+        }));
+    }
 }
 
 fn emit_tts_drop(req: &TtsRequest, _tts_deadline: &Duration) {
@@ -790,7 +841,13 @@ pub fn build_tts_request_body(
 enum TtsFetchResult {
     Audio(Vec<u8>),
     VoiceNotFound,
-    NoAudio,
+    Failure(TtsFailure),
+}
+
+struct TtsFailure {
+    reason: &'static str,
+    recoverable: bool,
+    status_code: Option<u16>,
 }
 
 async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
@@ -854,16 +911,28 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
                 if voice_not_found {
                     return TtsFetchResult::VoiceNotFound;
                 }
+                return TtsFetchResult::Failure(classify_elevenlabs_status(status.as_u16()));
             }
-            Err(error) => tracing::warn!(
-                target_lang = %lang,
-                error = %error,
-                "tts elevenlabs request error"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    target_lang = %lang,
+                    error = %error,
+                    "tts elevenlabs request error"
+                );
+                return TtsFetchResult::Failure(TtsFailure {
+                    reason: "network_error",
+                    recoverable: true,
+                    status_code: None,
+                });
+            }
         }
 
         if audio_buffer.is_empty() {
-            TtsFetchResult::NoAudio
+            TtsFetchResult::Failure(TtsFailure {
+                reason: "no_audio",
+                recoverable: true,
+                status_code: None,
+            })
         } else {
             TtsFetchResult::Audio(audio_buffer)
         }
@@ -873,15 +942,35 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
     match tts_result {
         Ok(TtsFetchResult::Audio(buffer)) => TtsFetchResult::Audio(buffer),
         Ok(TtsFetchResult::VoiceNotFound) => TtsFetchResult::VoiceNotFound,
-        Ok(TtsFetchResult::NoAudio) => TtsFetchResult::NoAudio,
+        Ok(TtsFetchResult::Failure(failure)) => TtsFetchResult::Failure(failure),
         Err(_) => {
             tracing::warn!(
                 target_lang = %lang,
                 deadline_ms = deadline.as_millis() as u64,
                 "tts elevenlabs request timed out"
             );
-            TtsFetchResult::NoAudio
+            TtsFetchResult::Failure(TtsFailure {
+                reason: "timeout",
+                recoverable: true,
+                status_code: None,
+            })
         }
+    }
+}
+
+fn classify_elevenlabs_status(status: u16) -> TtsFailure {
+    let (reason, recoverable) = match status {
+        401 | 403 => ("auth_failed", false),
+        402 => ("quota_exceeded", false),
+        404 => ("not_found", false),
+        429 => ("rate_limited", true),
+        500..=599 => ("upstream_down", true),
+        _ => ("upstream_error", true),
+    };
+    TtsFailure {
+        reason,
+        recoverable,
+        status_code: Some(status),
     }
 }
 
@@ -1297,6 +1386,26 @@ mod tests {
             default_with_enroll.get("language_code").is_none(),
             "default voice path must not emit language_code even if enrollment_lang supplied"
         );
+    }
+
+    #[test]
+    fn classify_elevenlabs_status_separates_billing_failures() {
+        let auth = classify_elevenlabs_status(401);
+        assert_eq!(auth.reason, "auth_failed");
+        assert!(!auth.recoverable);
+        assert_eq!(auth.status_code, Some(401));
+
+        let quota = classify_elevenlabs_status(402);
+        assert_eq!(quota.reason, "quota_exceeded");
+        assert!(!quota.recoverable);
+
+        let rate = classify_elevenlabs_status(429);
+        assert_eq!(rate.reason, "rate_limited");
+        assert!(rate.recoverable);
+
+        let upstream = classify_elevenlabs_status(503);
+        assert_eq!(upstream.reason, "upstream_down");
+        assert!(upstream.recoverable);
     }
 
     #[tokio::test]

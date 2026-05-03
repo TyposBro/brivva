@@ -69,6 +69,26 @@ export function createMessageHandler(
       case "error":
         dispatch({ type: "error", message: message.message });
         break;
+
+      case "provider_health":
+        dispatch({
+          type: "provider_health",
+          notice: {
+            provider: message.provider,
+            state: message.state,
+            recoverable: message.recoverable,
+            billable: message.billable,
+            reason: message.reason,
+            targetLang: message.targetLang,
+            statusCode: message.statusCode,
+            errorCode: message.errorCode,
+            message: message.message,
+          },
+        });
+        if (!message.billable) {
+          dispatch({ type: "connection_issue", message: message.message });
+        }
+        break;
     }
   };
 }

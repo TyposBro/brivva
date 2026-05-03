@@ -21,6 +21,9 @@ Set-and-forget means:
 Good enough for controlled pilot:
 
 - 1080p30 multi-output path has passed local e2e.
+- Latest `backlog_catchup_many_outputs` run passed local stress assertions with
+  no video drops, no host audio drops, no FFmpeg restart, no sustained
+  below-realtime encode, no TTS overflow, and no hard recovery.
 - H.264-only browser/RTMP direction is correct.
 - Server owns FPS/resolution caps rather than trusting frontend claims.
 - Original audio/video drops are observable.
@@ -30,15 +33,19 @@ Good enough for controlled pilot:
 
 Not yet set-and-forget:
 
-- JA/ZH/other translated TTS needs another e2e plus human listening after
-  bounded catch-up and Soniox context.
-- Latest many-output stress showed a real FFmpeg/RTMP publisher crash/restart
-  on one translated stream; this must be treated as an output health failure,
-  not hidden as normal backlog behavior.
+- Provider failures are not yet billing-safe. Soniox/ElevenLabs/RTMP failures
+  are logged and partly retried, but not fully classified, sent to frontend,
+  persisted as failure windows, or excluded from billing.
+- JA/ZH/KO/other translated TTS needs repeated human listening checks after
+  every timing/concision change.
 - Stress assertions now exist, but JSON summaries and CI dashboards do not.
 - Bad-network and one-bad-destination chaos are not fully automated without
   external tools/platform behavior.
-- 4K path needs explicit launch-tier limits and soak tests.
+- 4K path is not proven. Previous 4K attempts were blocked by fixture/codec
+  issues and later focus was 1080p30. Do not claim 4K production support yet.
+- AWS/Fargate production path is not proven. Local GPU success does not prove
+  AWS GPU/NVENC, FFmpeg build, librtmp, fonts, secrets, network egress, log
+  shipping, or container limits.
 - Operator controls are still thin.
 
 ## Must Pass Before Paid Production
@@ -60,6 +67,15 @@ Not yet set-and-forget:
 6. Operator can disable a target language without stopping the source stream.
 7. Operator can stop/restart one output.
 8. Operator can lower output profile for a stream group.
+9. Provider failure drills pass:
+   - bad Soniox key/down/rate-limit;
+   - bad ElevenLabs key/quota/rate-limit;
+   - bad YouTube/RTMP key;
+   - one bad platform mixed with good platforms.
+10. Billing excludes unbillable failure windows for affected providers,
+    languages, and platform outputs.
+11. AWS launch profile passes dry-run and 30-60 minute soak on the exact
+    instance/container/FFmpeg build.
 
 ## Implemented In This Pass
 
@@ -162,6 +178,25 @@ Required launch soak:
 - 720p15 weak-host scenario, 10 minutes.
 - one bad RTMP destination, 10 minutes.
 - provider failure drills: bad Soniox key and bad ElevenLabs key.
+- AWS/Fargate exact launch task, all secrets, log shipping, and target
+  platforms, 30-60 minutes.
+- 4K only if it is part of the sold launch tier; otherwise explicitly disable
+  4K in product/profile limits.
+
+### Provider Failure And Billing
+
+Current gap: provider failures are not yet first-class billing events. See
+[Provider Failure And Billing Policy](provider_failure_billing.md).
+
+Needed patches:
+
+- add typed provider health events for Soniox, ElevenLabs, FFmpeg, YouTube,
+  Grip, TikTok, and AWS;
+- send provider/output health over WebSocket to frontend;
+- persist failure windows to Workers;
+- compute billable usage from healthy delivered windows;
+- add circuit breakers for rate limits and upstream outages;
+- add explicit frontend states for recoverable vs unrecoverable failures.
 
 ## Launch Recommendation
 
@@ -170,5 +205,7 @@ Until all must-pass items are green, treat production as "operator-supervised":
 - engineer watches logs;
 - start with 1080p30;
 - keep 4K disabled unless explicitly tested that day;
+- do not assume AWS behaves like the local machine until the exact AWS task has
+  passed soak;
 - have a source/pass stream as fallback;
 - have a manual kill/downgrade path ready.

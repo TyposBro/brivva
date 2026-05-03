@@ -141,6 +141,13 @@ impl SonioxMode {
         }
     }
 
+    pub fn target_lang_string(&self) -> Option<String> {
+        match self {
+            SonioxMode::Source { .. } => None,
+            SonioxMode::Translate { target_lang, .. } => Some(target_lang.to_string()),
+        }
+    }
+
     pub fn build_config<'a>(&self, api_key: &'a str) -> SonioxConfig<'a> {
         let (hint_lang, translation, context) = match self {
             SonioxMode::Source { lang } => (lang.to_string(), None, None),

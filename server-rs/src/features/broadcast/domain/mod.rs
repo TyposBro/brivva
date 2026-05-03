@@ -389,6 +389,22 @@ pub enum ServerMsg {
         utterance_id: u64,
     },
 
+    #[serde(rename = "provider_health")]
+    ProviderHealth {
+        provider: String,
+        state: String,
+        recoverable: bool,
+        billable: bool,
+        reason: String,
+        #[serde(rename = "targetLang", skip_serializing_if = "Option::is_none")]
+        target_lang: Option<String>,
+        #[serde(rename = "statusCode", skip_serializing_if = "Option::is_none")]
+        status_code: Option<u16>,
+        #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        message: String,
+    },
+
     #[serde(rename = "error")]
     Error { message: String },
 }
@@ -516,6 +532,29 @@ mod tests {
                 .unwrap()
                 .contains("\"type\":\"interim\"")
         );
+    }
+
+    #[test]
+    fn server_msg_serializes_provider_health_contract() {
+        let msg = ServerMsg::ProviderHealth {
+            provider: "elevenlabs".into(),
+            state: "degraded".into(),
+            recoverable: true,
+            billable: false,
+            reason: "rate_limited".into(),
+            target_lang: Some("ja".into()),
+            status_code: Some(429),
+            error_code: None,
+            message: "TTS rate limited".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"provider_health\""));
+        assert!(json.contains("\"provider\":\"elevenlabs\""));
+        assert!(json.contains("\"recoverable\":true"));
+        assert!(json.contains("\"billable\":false"));
+        assert!(json.contains("\"targetLang\":\"ja\""));
+        assert!(json.contains("\"statusCode\":429"));
+        assert!(!json.contains("errorCode"));
     }
 
     #[test]
