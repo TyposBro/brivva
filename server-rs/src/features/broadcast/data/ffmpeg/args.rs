@@ -242,17 +242,40 @@ fn escape_tee_url(url: &str) -> String {
 }
 
 fn video_filter(profile: VideoProfile, subtitle_textfile: Option<&str>) -> String {
-    let base = format!(
+    let mut filter = format!(
         "fps={},scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
         profile.output_fps, profile.max_width, profile.max_height
     );
-    let Some(textfile) = subtitle_textfile else {
-        return base;
-    };
+    if debug_video_clock_enabled() {
+        filter.push(',');
+        filter.push_str(&debug_video_clock_filter());
+    }
+    if let Some(textfile) = subtitle_textfile {
+        let fontfile = subtitle_fontfile();
+        filter.push_str(&format!(
+            ",drawtext=textfile={}:fontfile={}:reload=1:x=(w-text_w)/2:y=h-(text_h*3):fontcolor=white:fontsize=44:box=1:boxcolor=black@0.55:boxborderw=18",
+            escape_drawtext_value(textfile),
+            escape_drawtext_value(&fontfile)
+        ));
+    }
+    filter
+}
+
+fn debug_video_clock_enabled() -> bool {
+    matches!(
+        std::env::var("BRIVVA_DEBUG_VIDEO_CLOCK")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn debug_video_clock_filter() -> String {
     let fontfile = subtitle_fontfile();
     format!(
-        "{base},drawtext=textfile={}:fontfile={}:reload=1:x=(w-text_w)/2:y=h-(text_h*3):fontcolor=white:fontsize=44:box=1:boxcolor=black@0.55:boxborderw=18",
-        escape_drawtext_value(textfile),
+        "drawtext=text='BRIVVA %{{pts\\:hms}}':fontfile={}:reload=0:x=24:y=24:fontcolor=white:fontsize=34:box=1:boxcolor=black@0.65:boxborderw=12",
         escape_drawtext_value(&fontfile)
     )
 }

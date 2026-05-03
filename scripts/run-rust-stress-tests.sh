@@ -328,6 +328,7 @@ run_case() {
 common_env=(
 	"MP4_FANOUT_SMOKE_SOURCE_LANG=$SOURCE_LANG"
 	"BRIVVA_SUBTITLE_FONTFILE=${BRIVVA_SUBTITLE_FONTFILE:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
+	"BRIVVA_DEBUG_VIDEO_CLOCK=${BRIVVA_DEBUG_VIDEO_CLOCK:-1}"
 )
 
 SINGLE_OUTPUT="$(first_available_output || true)"
