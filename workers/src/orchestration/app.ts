@@ -981,6 +981,48 @@ function estimateCost(outputByLang: Record<string, number>): number {
 	return Math.round(total * PER_OUTPUT_MINUTE_USD * 100) / 100;
 }
 
+function failureSeconds(failure: db.SessionProviderFailure, nowMs: number): number {
+	return Math.max(
+		0,
+		((failure.recovered_at_ms ?? nowMs) - failure.started_at_ms) / 1000,
+	);
+}
+
+function summarizeUnbillableWindows(
+	failures: db.SessionProviderFailure[],
+	nowMs = Date.now(),
+) {
+	const byProvider: Record<string, number> = {};
+	const byLang: Record<string, number> = {};
+	let sourceSeconds = 0;
+	for (const failure of failures) {
+		if (failure.billable) continue;
+		const seconds = failureSeconds(failure, nowMs);
+		if (seconds <= 0) continue;
+		byProvider[failure.provider] = (byProvider[failure.provider] ?? 0) + seconds;
+		if (failure.lang) byLang[failure.lang] = (byLang[failure.lang] ?? 0) + seconds;
+		if (failure.scope === "session" || failure.scope === "source") {
+			sourceSeconds += seconds;
+		}
+	}
+	return {
+		source_seconds: Math.round(sourceSeconds * 1000) / 1000,
+		by_provider_seconds: byProvider,
+		by_lang_seconds: byLang,
+	};
+}
+
+function applyUnbillableLangWindows(
+	outputSecondsByLang: Record<string, number>,
+	unbillableByLangSeconds: Record<string, number>,
+): Record<string, number> {
+	const net: Record<string, number> = {};
+	for (const [lang, seconds] of Object.entries(outputSecondsByLang)) {
+		net[lang] = Math.max(0, seconds - (unbillableByLangSeconds[lang] ?? 0));
+	}
+	return net;
+}
+
 function parseTargetLangs(raw: string): string[] {
 	try {
 		const parsed = JSON.parse(raw);
@@ -1074,8 +1116,14 @@ app.get("/api/sessions/:id/summary", async (c) => {
 	const outputByLangSeconds: Record<string, number> = metrics
 		? (JSON.parse(metrics.output_seconds_json) as Record<string, number>)
 		: {};
+	const failures = await db.listProviderFailures(c.env.DB, params.id);
+	const unbillable = summarizeUnbillableWindows(failures);
+	const billableOutputSeconds = applyUnbillableLangWindows(
+		outputByLangSeconds,
+		unbillable.by_lang_seconds,
+	);
 	const outputByLang: Record<string, number> = {};
-	for (const [k, v] of Object.entries(outputByLangSeconds)) {
+	for (const [k, v] of Object.entries(billableOutputSeconds)) {
 		outputByLang[k] = minutesFromSeconds(v);
 	}
 	const totalMinutes =
@@ -1104,6 +1152,21 @@ app.get("/api/sessions/:id/summary", async (c) => {
 		total_cost_usd: isB2B ? null : estimateCost(outputByLang),
 		rate_usd: isB2B ? null : PER_OUTPUT_MINUTE_USD,
 		billed_to: isB2B ? (owner?.bills_to ?? null) : null,
+		unbillable_windows: {
+			source_minutes: minutesFromSeconds(unbillable.source_seconds),
+			by_provider_minutes: Object.fromEntries(
+				Object.entries(unbillable.by_provider_seconds).map(([k, v]) => [
+					k,
+					minutesFromSeconds(v),
+				]),
+			),
+			by_lang_minutes: Object.fromEntries(
+				Object.entries(unbillable.by_lang_seconds).map(([k, v]) => [
+					k,
+					minutesFromSeconds(v),
+				]),
+			),
+		},
 		updated_at: metrics?.updated_at ?? null,
 	});
 });
@@ -1121,16 +1184,39 @@ app.get("/api/sessions/:id/usage", async (c) => {
 	const outputByLangSeconds: Record<string, number> = metrics
 		? (JSON.parse(metrics.output_seconds_json) as Record<string, number>)
 		: {};
+	const failures = await db.listProviderFailures(c.env.DB, params.id);
+	const unbillable = summarizeUnbillableWindows(failures);
+	const billableOutputSeconds = applyUnbillableLangWindows(
+		outputByLangSeconds,
+		unbillable.by_lang_seconds,
+	);
 	const outputByLangMinutes: Record<string, number> = {};
-	for (const [k, v] of Object.entries(outputByLangSeconds)) {
+	for (const [k, v] of Object.entries(billableOutputSeconds)) {
 		outputByLangMinutes[k] = minutesFromSeconds(v);
 	}
 
 	return c.json({
 		session_id: params.id,
-		source_minutes: minutesFromSeconds(metrics?.source_seconds ?? 0),
+		source_minutes: minutesFromSeconds(
+			Math.max(0, (metrics?.source_seconds ?? 0) - unbillable.source_seconds),
+		),
 		output_minutes_by_lang: outputByLangMinutes,
 		estimated_cost_usd: estimateCost(outputByLangMinutes),
+		unbillable_windows: {
+			source_minutes: minutesFromSeconds(unbillable.source_seconds),
+			by_provider_minutes: Object.fromEntries(
+				Object.entries(unbillable.by_provider_seconds).map(([k, v]) => [
+					k,
+					minutesFromSeconds(v),
+				]),
+			),
+			by_lang_minutes: Object.fromEntries(
+				Object.entries(unbillable.by_lang_seconds).map(([k, v]) => [
+					k,
+					minutesFromSeconds(v),
+				]),
+			),
+		},
 	});
 });
 

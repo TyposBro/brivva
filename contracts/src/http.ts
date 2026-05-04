@@ -257,11 +257,18 @@ export const BillingSummaryResponseSchema = z.object({
   estimated_cost_usd: z.number(),
 });
 
+export const UnbillableWindowsSchema = z.object({
+  source_minutes: z.number(),
+  by_provider_minutes: z.record(z.string(), z.number()),
+  by_lang_minutes: z.record(z.string(), z.number()),
+});
+
 export const SessionUsageResponseSchema = z.object({
   session_id: z.string().min(1),
   source_minutes: z.number(),
   output_minutes_by_lang: z.record(z.string(), z.number()),
   estimated_cost_usd: z.number(),
+  unbillable_windows: UnbillableWindowsSchema.optional(),
 });
 
 export const InternalSessionMetricsUpdateSchema = z.object({

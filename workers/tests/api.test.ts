@@ -2536,6 +2536,18 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
     });
     const { session } = (await create.json()) as { session: { id: string } };
 
+    await call(`/internal/sessions/${session.id}/metrics`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        source_seconds: 180,
+        output_seconds_by_lang: { ja: 120 },
+      }),
+    });
+
     const res = await call(`/internal/sessions/${session.id}/provider-failures`, {
       method: "POST",
       headers: {
@@ -2555,6 +2567,7 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
         status_code: 429,
         message: "not billable while rate limited",
         started_at_ms: 1000,
+        recovered_at_ms: 31000,
       }),
     });
     expect(res.status).toBe(200);
@@ -2577,6 +2590,20 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
       lang: "ja",
       status_code: 429,
     });
+
+    const usage = await call(`/api/sessions/${session.id}/usage`);
+    const usageBody = (await usage.json()) as {
+      output_minutes_by_lang: Record<string, number>;
+      estimated_cost_usd: number;
+      unbillable_windows: {
+        by_provider_minutes: Record<string, number>;
+        by_lang_minutes: Record<string, number>;
+      };
+    };
+    expect(usageBody.output_minutes_by_lang.ja).toBe(1.5);
+    expect(usageBody.estimated_cost_usd).toBe(2.25);
+    expect(usageBody.unbillable_windows.by_provider_minutes.elevenlabs).toBe(0.5);
+    expect(usageBody.unbillable_windows.by_lang_minutes.ja).toBe(0.5);
   });
 
   it("PATCH merges per-lang outputs without clobbering prior langs (edge)", async () => {

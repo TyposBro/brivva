@@ -453,6 +453,20 @@ const schemas = {
         additionalProperties: { type: "number" },
       },
       estimated_cost_usd: { type: "number" },
+      unbillable_windows: {
+        type: "object",
+        properties: {
+          source_minutes: { type: "number" },
+          by_provider_minutes: {
+            type: "object",
+            additionalProperties: { type: "number" },
+          },
+          by_lang_minutes: {
+            type: "object",
+            additionalProperties: { type: "number" },
+          },
+        },
+      },
     },
   },
   CompleteOnboardingRequest: {

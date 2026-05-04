@@ -26,19 +26,19 @@ Implemented:
 - TTS failure does not crash the whole source/pass stream.
 - Workers accepts session metrics through
   `PATCH /internal/sessions/:id/metrics`.
-- Output billing currently tracks delivered TTS PCM seconds per language.
+- Output billing tracks delivered TTS PCM seconds per language.
+- Workers persists provider failure windows from server-rs and usage/summary
+  subtract unbillable source/lang windows from billable minutes while exposing
+  provider/lang audit buckets.
 
 Not implemented enough for set-and-forget production:
 
-- Soniox/ElevenLabs have a first frontend-visible `provider_health` contract,
-  but RTMP/platform/AWS health is still mostly log-only and not fully surfaced
-  through the frontend.
-- There is no provider circuit breaker that stops hammering a down/rate-limited
-  provider.
-- Billing does not explicitly record failure windows, unbillable windows, or
-  per-output platform failure windows.
-- Source billing currently uses elapsed session time, not "viewer-delivered
-  healthy source seconds."
+- Soniox/ElevenLabs/RTMP health now reaches frontend and Workers failure-window
+  persistence, but platform-specific visible-live proof is still incomplete.
+- ElevenLabs has a language-scoped circuit breaker; Soniox/RTMP backoff exists,
+  but broader provider circuit-breaker policy still needs launch tuning.
+- Per-platform invoice policy still needs final product mapping once platform
+  SKUs exist.
 - YouTube RTMP acceptance is not the same as a visible/started YouTube Live
   event. Without YouTube Live API integration, the server can prove bytes were
   pushed but cannot prove Studio published the event.
@@ -217,10 +217,10 @@ Do not bill:
 
 Billing implementation direction:
 
-1. Add provider/output health events with `billable=false`.
-2. Persist failure windows to Workers.
+1. Add provider/output health events with `billable=false`. ✅
+2. Persist failure windows to Workers. ✅
 3. Compute invoice usage from healthy delivered windows, not only expected
-   session duration.
+   session duration. ✅ for source/lang metrics; platform SKU mapping later.
 4. Keep current TTS PCM seconds as a useful lower-level metric, but do not rely
    on it alone for full session billing.
 

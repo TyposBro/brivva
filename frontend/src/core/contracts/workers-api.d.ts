@@ -1921,6 +1921,15 @@ export interface components {
                 [key: string]: number;
             };
             estimated_cost_usd: number;
+            unbillable_windows?: {
+                source_minutes?: number;
+                by_provider_minutes?: {
+                    [key: string]: number;
+                };
+                by_lang_minutes?: {
+                    [key: string]: number;
+                };
+            };
         };
         CompleteOnboardingRequest: {
             user_id: string;

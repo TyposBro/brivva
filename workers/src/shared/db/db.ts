@@ -8,6 +8,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import * as schema from "../../core/schema";
+export type { SessionProviderFailure } from "../../core/schema";
 import type {
   PlatformCredential,
   Session,
