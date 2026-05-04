@@ -167,6 +167,12 @@ MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad
 
 Run base command with normal YouTube keys too.
 
+Runner scenario: `one_bad_destination` starts all configured good YouTube outputs plus a dead legacy RTMP URL and asserts:
+
+- legacy output emits failed health;
+- at least one YouTube sibling emits live health;
+- expected FFmpeg restarts stay within the bad-destination allowance.
+
 Pass: bad destination logs failure; valid YouTube outputs remain live.
 
 ## Mobile-First RTMP Output

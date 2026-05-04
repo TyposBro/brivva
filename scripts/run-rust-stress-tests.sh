@@ -49,7 +49,7 @@ Scenario names:
   single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
   single_4k30 many_outputs_4k30 high_res_capped low_quality
   backlog_catchup backlog_catchup_many_outputs grip_smoke bad_destination
-  audio_delay video_drop audio_drop fake_bad_rtmp tts_delay stt_disabled
+  one_bad_destination audio_delay video_drop audio_drop fake_bad_rtmp tts_delay stt_disabled
   tts_failure stt_failure long_run difficult_audio network
 EOF
 }
@@ -375,10 +375,28 @@ analyze_log() {
 		"ready_host_bytes_dropped" 0 || failed=1
 	local max_ffmpeg_restarts=0
 	case "$name" in
-		fake_bad_rtmp | bad_destination) max_ffmpeg_restarts=2 ;;
+		fake_bad_rtmp | bad_destination | one_bad_destination) max_ffmpeg_restarts=2 ;;
 	esac
 	assert_count_at_most "$name" "$logfile" "FFmpeg process crash/restart" \
 		"ffmpeg rtmp process crashed" "$max_ffmpeg_restarts" || failed=1
+	if [[ "$name" == "one_bad_destination" ]]; then
+		local bad_failed
+		bad_failed="$(count_log_matches "ffmpeg tee destination reported failure.*destination_platform.*rtmp0" "$logfile")"
+		if (( bad_failed < 1 )); then
+			echo "ASSERT FAIL $name: expected bad RTMP tee slave failure"
+			failed=1
+		else
+			echo "ASSERT OK $name: bad RTMP tee slave failures=$bad_failed"
+		fi
+		local sibling_live
+		sibling_live="$(count_log_matches "destination_platform.*youtube-.*state.*Live" "$logfile")"
+		if (( sibling_live < 1 )); then
+			echo "ASSERT FAIL $name: expected sibling YouTube output to remain/live"
+			failed=1
+		else
+			echo "ASSERT OK $name: sibling live health events=$sibling_live"
+		fi
+	fi
 	assert_counter_at_most "$name" "$logfile" "sustained below-realtime encode ticks" \
 		"consecutive_ticks" "$MAX_SLOW_ENCODE_TICKS" || failed=1
 	assert_count_at_most "$name" "$logfile" "whole TTS segment overflow" \
@@ -626,6 +644,21 @@ run_case bad_destination \
 	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
 	"BRIVVA_VIDEO_MAX_FPS=30" \
 	"MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad"
+
+if [[ -z "$MULTI_OUTPUTS" ]]; then
+	should_run one_bad_destination && record_skip one_bad_destination "need at least one STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
+else
+	run_case one_bad_destination \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS,legacy" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"MP4_FANOUT_SMOKE_RTMP_URLS=rtmp://127.0.0.1:1/live/bad"
+fi
 
 if [[ -z "$MULTI_OUTPUTS" || "$MULTI_OUTPUTS" != *,* ]]; then
 	should_run tts_failure && record_skip tts_failure "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"

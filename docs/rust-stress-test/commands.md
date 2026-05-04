@@ -53,6 +53,7 @@ latency.
 - `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
 - `high_res_capped`: 4K input capped to 1080p30.
 - `bad_destination`: one good output plus one dead RTMP destination.
+- `one_bad_destination`: all configured good outputs plus one dead RTMP destination; asserts bad output fails while at least one sibling reaches live.
 - `audio_delay`: feeder delays PCM chunks with `MP4_FANOUT_SMOKE_AUDIO_DELAY_MS`.
 - `video_drop`: feeder drops every Nth H.264 chunk with `MP4_FANOUT_SMOKE_DROP_VIDEO_EVERY_N`.
 - `audio_drop`: feeder drops every Nth PCM chunk with `MP4_FANOUT_SMOKE_DROP_AUDIO_EVERY_N`.

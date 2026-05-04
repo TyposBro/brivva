@@ -5,6 +5,7 @@ use server_rs::features::broadcast::data::ffmpeg::{
 use server_rs::features::broadcast::data::pipeline::{PipelineSession, start_stt_pipelines};
 use server_rs::features::broadcast::domain::{
     Lang, LiveSession, LiveSessionHandle, LiveSessions, PipelineConfig, VideoEncoderKind,
+    output_health::{OutputHealthSnapshot, OutputId},
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -65,6 +66,24 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     log_smoke_args(&args);
 
     let mut manager = RtmpManager::new();
+    let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel::<OutputHealthSnapshot>();
+    manager.set_output_health_tx(health_tx);
+    let health_logger = tokio::spawn(async move {
+        while let Some(snapshot) = health_rx.recv().await {
+            tracing::info!(
+                event = snapshot.event_name(),
+                output_id = %snapshot.output_id,
+                stream_id = %snapshot.stream_id,
+                lang = %snapshot.lang,
+                destination_platform = %snapshot.destination_platform,
+                state = ?snapshot.state,
+                restart_count = snapshot.restart_count,
+                degradation = ?snapshot.degradation,
+                message = ?snapshot.message,
+                "mp4 smoke output health event"
+            );
+        }
+    });
     manager.set_video_encoder(args.encoder);
     manager.set_video_profile_caps(VideoProfileCaps::new(
         args.max_width,
@@ -92,7 +111,10 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
             delay_ms,
             is_source: is_passthrough,
             host_gain: if is_passthrough { 1.0 } else { 0.2 },
-            output_id: None,
+            output_id: Some(
+                OutputId::new("mp4-fanout-smoke", &output_lang, &output.label, 0)
+                    .map_err(|error| format!("invalid smoke output id: {error:?}"))?,
+            ),
             destination_platform: &output.label,
             output_controls_enabled: true,
             render_graph_node: None,
@@ -146,6 +168,7 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     }
     manager.lock().await.stop_all().await;
     let _ = monitor.await;
+    health_logger.abort();
     tracing::info!("mp4 fanout smoke finished");
     Ok(())
 }
