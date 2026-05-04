@@ -1,8 +1,13 @@
 use crate::features::broadcast::domain::{
-    Lang, LiveSessionHandle, ProviderHealthEvent, ServerMsg, TtsRequest,
+    AvailableWindowMethod, Lang, LiveSessionHandle, ProviderHealthEvent, ServerMsg,
+    SourceTimingMethod, SourceUtteranceTiming, TtsRequest,
 };
 use futures_util::StreamExt;
-use tokio::sync::mpsc::error::TrySendError;
+use std::{sync::Arc, time::Instant};
+use tokio::{
+    sync::{Mutex, mpsc::error::TrySendError},
+    time::{Duration, sleep},
+};
 use tokio_tungstenite::tungstenite;
 
 use super::soniox::{SONIOX_END_TOKEN, SonioxMode, SonioxResponse};
@@ -29,6 +34,9 @@ pub(super) fn spawn_response_processor(
     } = args;
     tokio::spawn(async move {
         let mut final_text = String::new();
+        let mut timing = UtteranceTimingAccumulator::default();
+        let pending_tts = Arc::new(Mutex::new(None));
+        let lookahead_tts = tts_lookahead_budget_enabled();
         let mut utterance_counter = utterance_counter;
 
         while let Some(message) = read_soniox_message(&tag, &mut stt_stream).await {
@@ -67,7 +75,8 @@ pub(super) fn spawn_response_processor(
                 return (utterance_counter, false);
             }
 
-            let (interim_tail, endpoint_hit) = accumulate_tokens(&mode, &response, &mut final_text);
+            let (interim_tail, endpoint_hit) =
+                accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
             emit_interim_if_needed(InterimArgs {
                 mode: &mode,
                 handle: &handle,
@@ -92,13 +101,24 @@ pub(super) fn spawn_response_processor(
                     utterance_counter,
                     handle: &handle,
                     final_text: &mut final_text,
+                    source_start_ms: timing.source_start_ms,
+                    source_timing: timing.finish(),
+                    pending_tts: pending_tts.clone(),
+                    lookahead_tts,
                 })
                 .await;
             }
         }
 
+        flush_pending_tts(pending_tts, AvailableWindowMethod::HoldTimeoutFallback).await;
         (utterance_counter, true)
     })
+}
+
+fn tts_lookahead_budget_enabled() -> bool {
+    std::env::var("BRIVVA_TTS_LOOKAHEAD_BUDGET")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 async fn read_soniox_message(tag: &str, stt_stream: &mut SonioxStream) -> Option<String> {
@@ -206,18 +226,73 @@ fn flush_reason(endpoint_hit: bool, final_text: &str) -> Option<&'static str> {
     None
 }
 
+#[derive(Default)]
+struct UtteranceTimingAccumulator {
+    source_start_ms: Option<u64>,
+    source_end_ms: Option<u64>,
+    response_started_at: Option<Instant>,
+}
+
+impl UtteranceTimingAccumulator {
+    fn observe_useful_token(&mut self) {
+        self.response_started_at.get_or_insert_with(Instant::now);
+    }
+
+    fn observe_source_timing(&mut self, start_ms: u64, end_ms: u64) {
+        self.source_start_ms = Some(
+            self.source_start_ms
+                .map_or(start_ms, |current| current.min(start_ms)),
+        );
+        self.source_end_ms = Some(
+            self.source_end_ms
+                .map_or(end_ms, |current| current.max(end_ms)),
+        );
+    }
+
+    fn finish(&mut self) -> Option<SourceUtteranceTiming> {
+        let timing = if let (Some(start), Some(end)) = (self.source_start_ms, self.source_end_ms) {
+            Some(SourceUtteranceTiming::same_as_speech(
+                end.saturating_sub(start).clamp(500, 15_000),
+                SourceTimingMethod::SonioxTokenTimestamps,
+            ))
+        } else {
+            self.response_started_at.map(|started| {
+                SourceUtteranceTiming::same_as_speech(
+                    (started.elapsed().as_millis() as u64).clamp(500, 15_000),
+                    SourceTimingMethod::ResponseWallClock,
+                )
+            })
+        };
+        *self = Self::default();
+        timing
+    }
+}
+
 fn accumulate_tokens(
     mode: &SonioxMode,
     response: &SonioxResponse,
     final_text: &mut String,
+    timing: &mut UtteranceTimingAccumulator,
 ) -> (String, bool) {
     let mut interim_tail = String::new();
     let mut endpoint_hit = false;
 
     for token in &response.tokens {
+        let accepted = mode.accepts(token);
+        if accepted || token.timing_ms().is_some() {
+            timing.observe_useful_token();
+        }
+        if matches!(
+            token.translation_status.as_deref(),
+            Some("none" | "original") | None
+        ) && token.is_final
+            && let Some((start_ms, end_ms)) = token.timing_ms()
+        {
+            timing.observe_source_timing(start_ms, end_ms);
+        }
         // AUDIT: normal-flow filter — mode selects source vs translation
         // tokens per the SonioxMode. Not a silent-bug branch.
-        if !mode.accepts(token) {
+        if !accepted {
             continue;
         }
         // AUDIT: end-of-utterance sentinel — marks boundary, not a drop.
@@ -257,11 +332,29 @@ fn emit_interim_if_needed(args: InterimArgs<'_>) {
     }
 }
 
+type PendingTtsSlot = Arc<Mutex<Option<PendingTtsDispatch>>>;
+
+struct PendingTtsDispatch {
+    committed: String,
+    utterance_id: u64,
+    target_lang: Lang,
+    handle: LiveSessionHandle,
+    selected_voice_id: Option<String>,
+    selected_voice_enrollment_lang: Option<Lang>,
+    voice_preset: crate::features::broadcast::domain::VoicePreset,
+    source_timing: Option<SourceUtteranceTiming>,
+    source_start_ms: Option<u64>,
+}
+
 struct FinalizeArgs<'a> {
     mode: &'a SonioxMode,
     utterance_counter: u64,
     handle: &'a LiveSessionHandle,
     final_text: &'a mut String,
+    source_start_ms: Option<u64>,
+    source_timing: Option<SourceUtteranceTiming>,
+    pending_tts: PendingTtsSlot,
+    lookahead_tts: bool,
 }
 
 async fn finalize_utterance_if_needed(args: FinalizeArgs<'_>) -> u64 {
@@ -270,6 +363,10 @@ async fn finalize_utterance_if_needed(args: FinalizeArgs<'_>) -> u64 {
         utterance_counter,
         handle,
         final_text,
+        source_start_ms,
+        source_timing,
+        pending_tts,
+        lookahead_tts,
     } = args;
     if final_text.trim().is_empty() {
         final_text.clear();
@@ -286,6 +383,10 @@ async fn finalize_utterance_if_needed(args: FinalizeArgs<'_>) -> u64 {
                 utterance_id: next_utterance_id,
                 target_lang,
                 handle,
+                source_start_ms,
+                source_timing,
+                pending_tts,
+                lookahead_tts,
             })
             .await;
         }
@@ -308,6 +409,10 @@ struct EmitTranslationArgs<'a> {
     utterance_id: u64,
     target_lang: &'a Lang,
     handle: &'a LiveSessionHandle,
+    source_start_ms: Option<u64>,
+    source_timing: Option<SourceUtteranceTiming>,
+    pending_tts: PendingTtsSlot,
+    lookahead_tts: bool,
 }
 
 async fn emit_translation(args: EmitTranslationArgs<'_>) {
@@ -316,6 +421,10 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         utterance_id,
         target_lang,
         handle,
+        source_start_ms,
+        source_timing,
+        pending_tts,
+        lookahead_tts,
     } = args;
     let (selected_voice_id, selected_voice_enrollment_lang, voice_preset) = handle
         .sessions
@@ -348,15 +457,22 @@ async fn emit_translation(args: EmitTranslationArgs<'_>) {
         }
     }
 
-    dispatch_tts_to_worker(DispatchTtsArgs {
-        committed,
+    let dispatch = PendingTtsDispatch {
+        committed: committed.to_string(),
         utterance_id,
-        target_lang,
-        handle,
+        target_lang: target_lang.clone(),
+        handle: handle.clone(),
         selected_voice_id,
         selected_voice_enrollment_lang,
         voice_preset,
-    });
+        source_timing,
+        source_start_ms,
+    };
+    if lookahead_tts {
+        schedule_tts_with_lookahead(pending_tts, dispatch).await;
+    } else {
+        dispatch_pending_tts(dispatch);
+    }
 }
 
 struct DispatchTtsArgs<'a> {
@@ -367,6 +483,74 @@ struct DispatchTtsArgs<'a> {
     selected_voice_id: Option<String>,
     selected_voice_enrollment_lang: Option<Lang>,
     voice_preset: crate::features::broadcast::domain::VoicePreset,
+    source_timing: Option<SourceUtteranceTiming>,
+}
+
+fn dispatch_pending_tts(dispatch: PendingTtsDispatch) {
+    dispatch_tts_to_worker(DispatchTtsArgs {
+        committed: &dispatch.committed,
+        utterance_id: dispatch.utterance_id,
+        target_lang: &dispatch.target_lang,
+        handle: &dispatch.handle,
+        selected_voice_id: dispatch.selected_voice_id,
+        selected_voice_enrollment_lang: dispatch.selected_voice_enrollment_lang,
+        voice_preset: dispatch.voice_preset,
+        source_timing: dispatch.source_timing,
+    });
+}
+
+async fn flush_pending_tts(pending_tts: PendingTtsSlot, method: AvailableWindowMethod) {
+    let pending = pending_tts.lock().await.take();
+    if let Some(mut dispatch) = pending {
+        if matches!(method, AvailableWindowMethod::HoldTimeoutFallback) {
+            dispatch.source_timing = dispatch
+                .source_timing
+                .map(SourceUtteranceTiming::hold_timeout_fallback);
+        }
+        dispatch_pending_tts(dispatch);
+    }
+}
+
+async fn schedule_tts_with_lookahead(pending_tts: PendingTtsSlot, current: PendingTtsDispatch) {
+    let previous = {
+        let mut guard = pending_tts.lock().await;
+        guard.take()
+    };
+    if let Some(mut previous) = previous {
+        if let (Some(prev_start), Some(current_start)) =
+            (previous.source_start_ms, current.source_start_ms)
+            && current_start > prev_start
+        {
+            previous.source_timing = previous
+                .source_timing
+                .map(|timing| timing.with_available_window(current_start - prev_start));
+        }
+        dispatch_pending_tts(previous);
+    }
+
+    let utterance_id = current.utterance_id;
+    {
+        let mut guard = pending_tts.lock().await;
+        *guard = Some(current);
+    }
+
+    let pending_for_timeout = pending_tts.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(500)).await;
+        let should_flush = pending_for_timeout
+            .lock()
+            .await
+            .as_ref()
+            .map(|pending| pending.utterance_id == utterance_id)
+            .unwrap_or(false);
+        if should_flush {
+            flush_pending_tts(
+                pending_for_timeout,
+                AvailableWindowMethod::HoldTimeoutFallback,
+            )
+            .await;
+        }
+    });
 }
 
 /// Non-blocking hand-off to the per-lang TTS worker. Before April 2026 this
@@ -396,6 +580,7 @@ fn dispatch_tts_to_worker(args: DispatchTtsArgs<'_>) {
         text: args.committed.to_string(),
         utterance_id: args.utterance_id,
         target_lang: args.target_lang.clone(),
+        source_timing: args.source_timing,
         handle: args.handle.clone(),
         selected_voice_id: args.selected_voice_id,
         selected_voice_enrollment_lang: args.selected_voice_enrollment_lang,
@@ -435,6 +620,24 @@ mod tests {
     fn token(text: &str, is_final: bool, translation_status: Option<&str>) -> SonioxToken {
         SonioxToken {
             text: text.to_string(),
+            start_ms: None,
+            end_ms: None,
+            is_final,
+            translation_status: translation_status.map(str::to_string),
+        }
+    }
+
+    fn timed_token(
+        text: &str,
+        is_final: bool,
+        translation_status: Option<&str>,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> SonioxToken {
+        SonioxToken {
+            text: text.to_string(),
+            start_ms: Some(start_ms),
+            end_ms: Some(end_ms),
             is_final,
             translation_status: translation_status.map(str::to_string),
         }
@@ -478,7 +681,8 @@ mod tests {
             error_message: None,
         };
         let mut final_text = String::new();
-        let (interim, endpoint) = accumulate_tokens(&mode, &response, &mut final_text);
+        let mut timing = UtteranceTimingAccumulator::default();
+        let (interim, endpoint) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
 
         assert_eq!(final_text, "hello world");
         assert_eq!(interim, " so");
@@ -497,7 +701,8 @@ mod tests {
             error_message: None,
         };
         let mut final_text = String::new();
-        let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text);
+        let mut timing = UtteranceTimingAccumulator::default();
+        let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
 
         assert_eq!(final_text, "done ");
         assert!(endpoint);
@@ -519,10 +724,75 @@ mod tests {
             error_message: None,
         };
         let mut final_text = String::new();
-        let (interim, _) = accumulate_tokens(&mode, &response, &mut final_text);
+        let mut timing = UtteranceTimingAccumulator::default();
+        let (interim, _) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
 
         assert_eq!(final_text, "konnichiwa");
         assert_eq!(interim, " yo");
+    }
+
+    #[test]
+    fn accumulate_translate_mode_captures_source_token_timing() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::En,
+            target_lang: Lang::Ja,
+        };
+        let response = SonioxResponse {
+            tokens: vec![
+                timed_token("hello ", true, Some("original"), 1_000, 1_400),
+                timed_token("world", true, Some("original"), 1_450, 2_200),
+                token("こんにちは", true, Some("translation")),
+            ],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let mut timing = UtteranceTimingAccumulator::default();
+
+        accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
+        let source_timing = timing.finish().expect("source timing");
+
+        assert_eq!(final_text, "こんにちは");
+        assert_eq!(source_timing.source_speech_duration_ms, 1_200);
+        assert_eq!(source_timing.tts_budget_ms(), 1_200);
+        assert_eq!(
+            source_timing.timing_method,
+            SourceTimingMethod::SonioxTokenTimestamps
+        );
+    }
+
+    #[test]
+    fn accumulate_translate_mode_falls_back_to_response_wall_clock_without_timestamps() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::En,
+            target_lang: Lang::Ja,
+        };
+        let response = SonioxResponse {
+            tokens: vec![token("こんにちは", true, Some("translation"))],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let mut timing = UtteranceTimingAccumulator::default();
+
+        accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
+        let source_timing = timing.finish().expect("fallback timing");
+
+        assert_eq!(final_text, "こんにちは");
+        assert_eq!(source_timing.source_speech_duration_ms, 500);
+        assert_eq!(source_timing.tts_budget_ms(), 500);
+        assert_eq!(
+            source_timing.timing_method,
+            SourceTimingMethod::ResponseWallClock
+        );
+    }
+
+    #[test]
+    fn timing_accumulator_resets_after_finish() {
+        let mut timing = UtteranceTimingAccumulator::default();
+        timing.observe_source_timing(1_000, 2_000);
+        assert!(timing.finish().is_some());
+        assert!(timing.finish().is_none());
     }
 
     #[test]
@@ -534,7 +804,8 @@ mod tests {
             error_code: None,
             error_message: None,
         };
-        accumulate_tokens(&mode, &response, &mut final_text);
+        let mut timing = UtteranceTimingAccumulator::default();
+        accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
 
         assert_eq!(final_text, "prefix added");
     }
@@ -640,6 +911,10 @@ mod tests {
             utterance_counter: 5,
             handle: &handle,
             final_text: &mut text,
+            source_start_ms: None,
+            source_timing: None,
+            pending_tts: Arc::new(Mutex::new(None)),
+            lookahead_tts: false,
         })
         .await;
         assert_eq!(new_counter, 5);
@@ -656,6 +931,10 @@ mod tests {
             utterance_counter: 3,
             handle: &handle,
             final_text: &mut text,
+            source_start_ms: None,
+            source_timing: None,
+            pending_tts: Arc::new(Mutex::new(None)),
+            lookahead_tts: false,
         })
         .await;
         assert_eq!(new_counter, 4);
@@ -754,6 +1033,10 @@ mod tests {
             utterance_id: 2,
             target_lang: &Lang::Ja,
             handle: &handle,
+            source_start_ms: None,
+            source_timing: None,
+            pending_tts: Arc::new(Mutex::new(None)),
+            lookahead_tts: false,
         })
         .await;
 
@@ -885,12 +1168,125 @@ mod tests {
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
             voice_preset: VoicePreset::Female,
+            source_timing: None,
         });
 
         let req = tts_rx.recv().await.expect("worker should receive");
         assert_eq!(req.utterance_id, 42);
         assert_eq!(req.text, "konnichiwa");
         assert_eq!(req.target_lang, Lang::Ja);
+    }
+
+    fn pending_dispatch(
+        utterance_id: u64,
+        source_start_ms: Option<u64>,
+        source_timing: Option<SourceUtteranceTiming>,
+        handle: LiveSessionHandle,
+    ) -> PendingTtsDispatch {
+        use crate::features::broadcast::domain::VoicePreset;
+        PendingTtsDispatch {
+            committed: format!("utt-{utterance_id}"),
+            utterance_id,
+            target_lang: Lang::Ja,
+            handle,
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+            source_timing,
+            source_start_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn lookahead_scheduler_uses_next_utterance_start_as_available_window() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(None));
+
+        schedule_tts_with_lookahead(
+            pending.clone(),
+            pending_dispatch(
+                1,
+                Some(1_000),
+                Some(SourceUtteranceTiming::same_as_speech(
+                    500,
+                    SourceTimingMethod::SonioxTokenTimestamps,
+                )),
+                handle.clone(),
+            ),
+        )
+        .await;
+        assert!(tts_rx.try_recv().is_err(), "first utterance should be held");
+
+        schedule_tts_with_lookahead(
+            pending,
+            pending_dispatch(
+                2,
+                Some(3_000),
+                Some(SourceUtteranceTiming::same_as_speech(
+                    500,
+                    SourceTimingMethod::SonioxTokenTimestamps,
+                )),
+                handle,
+            ),
+        )
+        .await;
+
+        let req = tts_rx.recv().await.expect("previous utterance dispatched");
+        let timing = req.source_timing.expect("timing");
+        assert_eq!(req.utterance_id, 1);
+        assert_eq!(timing.source_speech_duration_ms, 500);
+        assert_eq!(timing.available_window_ms, Some(2_000));
+        assert_eq!(
+            timing.available_window_method,
+            AvailableWindowMethod::NextUtteranceStart
+        );
+        assert_eq!(timing.tts_budget_ms(), 2_000);
+    }
+
+    #[tokio::test]
+    async fn lookahead_timeout_dispatches_pending_once() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(None));
+
+        schedule_tts_with_lookahead(
+            pending,
+            pending_dispatch(
+                1,
+                Some(1_000),
+                Some(SourceUtteranceTiming::same_as_speech(
+                    500,
+                    SourceTimingMethod::SonioxTokenTimestamps,
+                )),
+                handle,
+            ),
+        )
+        .await;
+
+        let req = tokio::time::timeout(Duration::from_secs(1), tts_rx.recv())
+            .await
+            .expect("timeout task should dispatch")
+            .expect("request");
+        let timing = req.source_timing.expect("timing");
+        assert_eq!(req.utterance_id, 1);
+        assert_eq!(timing.available_window_ms, Some(1_000));
+        assert_eq!(
+            timing.available_window_method,
+            AvailableWindowMethod::HoldTimeoutFallback
+        );
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        assert!(tts_rx.try_recv().is_err(), "pending should dispatch once");
     }
 
     #[tokio::test]
@@ -911,6 +1307,7 @@ mod tests {
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
             voice_preset: VoicePreset::Female,
+            source_timing: None,
         });
         // Nothing observable beyond no-panic; the §0.5.4 warn is fired by
         // `tracing` into a test-mode sink.
@@ -938,6 +1335,7 @@ mod tests {
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
             voice_preset: VoicePreset::Female,
+            source_timing: None,
         };
         dispatch_tts_to_worker(args_template()); // fills the single slot
         // Second call must not block, panic, or loop.
@@ -966,6 +1364,7 @@ mod tests {
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
             voice_preset: VoicePreset::Female,
+            source_timing: None,
         });
     }
 }

@@ -106,6 +106,7 @@ async fn cross_lang_cloned_tts_request_body_carries_flash_v2_5_and_language_code
         text: "こんにちは".into(),
         utterance_id: 7,
         target_lang: Lang::Ja,
+        source_timing: None,
         handle,
         selected_voice_id: Some("EL-clone-xyz".into()),
         selected_voice_enrollment_lang: Some(Lang::En),
@@ -262,6 +263,7 @@ async fn re_record_mid_session_routes_next_tts_dispatch_to_the_new_voice() {
         text: "こんにちは".into(),
         utterance_id: 42,
         target_lang: Lang::Ja,
+        source_timing: None,
         handle: LiveSessionHandle::new("LIVE-RR".into(), sessions.clone()),
         selected_voice_id: voice_id,
         selected_voice_enrollment_lang: enrollment,
@@ -301,6 +303,7 @@ async fn default_voice_path_omits_language_code_even_when_caller_passes_enrollme
         text: "hello".into(),
         utterance_id: 1,
         target_lang: Lang::Ja,
+        source_timing: None,
         handle,
         selected_voice_id: None,
         // Enrollment supplied but irrelevant on default path.

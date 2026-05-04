@@ -1,7 +1,8 @@
 use crate::features::broadcast::data::ffmpeg::TtsSegment;
 pub use crate::features::broadcast::domain::TtsRequest;
 use crate::features::broadcast::domain::{
-    Lang, LiveSessionHandle, ProviderHealthEvent, ServerMsg, VoicePreset,
+    AvailableWindowMethod, Lang, LiveSessionHandle, ProviderHealthEvent, ServerMsg,
+    SourceTimingMethod, SourceUtteranceTiming, VoicePreset,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -146,6 +147,15 @@ pub(crate) fn estimate_source_duration_ms(text: &str, lang: &Lang) -> u64 {
         .saturating_mul(1_000)
         .saturating_div(chars_per_second)
         .clamp(1_000, 15_000)
+}
+
+pub(crate) fn source_timing_for_request(req: &TtsRequest) -> SourceUtteranceTiming {
+    req.source_timing.unwrap_or_else(|| SourceUtteranceTiming {
+        source_speech_duration_ms: estimate_source_duration_ms(&req.text, &req.target_lang),
+        available_window_ms: None,
+        timing_method: SourceTimingMethod::TextEstimateFallback,
+        available_window_method: AvailableWindowMethod::Unavailable,
+    })
 }
 
 pub(crate) fn estimate_tts_duration_ms(text: &str, lang: &Lang) -> u64 {
@@ -514,7 +524,9 @@ async fn current_tts_backlog_ms(req: &TtsRequest) -> u64 {
 pub async fn broadcast_translated_tts(req: TtsRequest) {
     let tts_start = Instant::now();
     let initial_backlog_ms = current_tts_backlog_ms(&req).await;
-    let estimated_source_duration_ms = estimate_source_duration_ms(&req.text, &req.target_lang);
+    let source_timing = source_timing_for_request(&req);
+    let source_speech_duration_ms = source_timing.source_speech_duration_ms;
+    let estimated_source_duration_ms = source_timing.tts_budget_ms();
     let (initial_policy, predicted_expansion_ratio_milli, predicted_tts_duration_ms) =
         predict_tts_policy(
             &req.text,
@@ -541,6 +553,11 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
                 target_lang = %req.target_lang,
                 backlog_ms = initial_backlog_ms,
                 estimated_source_duration_ms,
+                source_timing_method = ?source_timing.timing_method,
+                available_window_method = ?source_timing.available_window_method,
+                source_speech_duration_ms,
+                available_window_ms = ?source_timing.available_window_ms,
+                tts_budget_ms = estimated_source_duration_ms,
                 predicted_tts_duration_ms,
                 predicted_expansion_ratio_milli,
                 original_chars = req.text.chars().count(),
@@ -564,6 +581,11 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         target_lang = %req.target_lang,
         char_count = tts_text.chars().count(),
         estimated_source_duration_ms,
+        source_timing_method = ?source_timing.timing_method,
+        available_window_method = ?source_timing.available_window_method,
+        source_speech_duration_ms,
+        available_window_ms = ?source_timing.available_window_ms,
+        tts_budget_ms = estimated_source_duration_ms,
         initial_backlog_ms,
         initial_policy = initial_policy.as_str(),
         predicted_tts_duration_ms,
@@ -745,6 +767,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         tts_text: &tts_text,
         audio_buffer: &audio_buffer,
         estimated_source_duration_ms,
+        source_timing_method: source_timing.timing_method,
         initial_backlog_ms,
         initial_policy,
     })
@@ -996,6 +1019,7 @@ struct PushTtsArgs<'a> {
     tts_text: &'a str,
     audio_buffer: &'a [u8],
     estimated_source_duration_ms: u64,
+    source_timing_method: SourceTimingMethod,
     initial_backlog_ms: u64,
     initial_policy: TtsExpansionPolicy,
 }
@@ -1035,6 +1059,7 @@ async fn push_tts_into_rtmp(args: PushTtsArgs<'_>) {
                 utterance_id = req.utterance_id,
                 target_lang = %req.target_lang,
                 estimated_source_duration_ms = args.estimated_source_duration_ms,
+                source_timing_method = ?args.source_timing_method,
                 tts_duration_ms,
                 expansion_ratio_milli = ratio,
                 backlog_ms = args.initial_backlog_ms,
@@ -1163,6 +1188,74 @@ mod tests {
         session.host_tx = Some(tx);
         sessions.insert(id.into(), session);
         (sessions, rx)
+    }
+
+    fn test_tts_request(text: &str, source_timing: Option<SourceUtteranceTiming>) -> TtsRequest {
+        let sessions: LiveSessions = Arc::new(DashMap::new());
+        TtsRequest {
+            text: text.into(),
+            utterance_id: 1,
+            target_lang: Lang::Ja,
+            source_timing,
+            handle: LiveSessionHandle::new("test".into(), sessions),
+            selected_voice_id: None,
+            selected_voice_enrollment_lang: None,
+            voice_preset: VoicePreset::Female,
+        }
+    }
+
+    #[test]
+    fn source_timing_for_request_prefers_measured_timing() {
+        let req = test_tts_request(
+            "これは長い翻訳テキストです",
+            Some(SourceUtteranceTiming::same_as_speech(
+                2_500,
+                SourceTimingMethod::SonioxTokenTimestamps,
+            )),
+        );
+
+        assert_eq!(
+            source_timing_for_request(&req),
+            SourceUtteranceTiming::same_as_speech(2_500, SourceTimingMethod::SonioxTokenTimestamps,)
+        );
+    }
+
+    #[test]
+    fn source_timing_for_request_falls_back_to_text_estimate() {
+        let req = test_tts_request("こんにちは", None);
+
+        assert_eq!(
+            source_timing_for_request(&req).timing_method,
+            SourceTimingMethod::TextEstimateFallback
+        );
+    }
+
+    #[test]
+    fn source_timing_budget_uses_available_window_and_caps_huge_silence() {
+        let timing =
+            SourceUtteranceTiming::same_as_speech(500, SourceTimingMethod::SonioxTokenTimestamps)
+                .with_available_window(2_000);
+        assert_eq!(timing.tts_budget_ms(), 2_000);
+
+        let huge =
+            SourceUtteranceTiming::same_as_speech(500, SourceTimingMethod::SonioxTokenTimestamps)
+                .with_available_window(10_000);
+        assert_eq!(huge.tts_budget_ms(), 3_000);
+    }
+
+    #[test]
+    fn available_window_makes_tts_policy_less_aggressive_for_fast_speech() {
+        let text = "これは今すぐ買える限定セットです";
+        let speech_only =
+            SourceUtteranceTiming::same_as_speech(500, SourceTimingMethod::SonioxTokenTimestamps);
+        let with_silence = speech_only.with_available_window(2_000);
+
+        let (speech_policy, _, _) =
+            predict_tts_policy(text, &Lang::Ja, speech_only.tts_budget_ms(), 0);
+        let (silence_policy, _, _) =
+            predict_tts_policy(text, &Lang::Ja, with_silence.tts_budget_ms(), 0);
+
+        assert!(tts_policy_rank(silence_policy) < tts_policy_rank(speech_policy));
     }
 
     #[test]
@@ -1481,6 +1574,7 @@ mod tests {
             text: "hello".into(),
             utterance_id: 1,
             target_lang: Lang::Ja,
+            source_timing: None,
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
@@ -1505,6 +1599,7 @@ mod tests {
             text: "hello".into(),
             utterance_id: 1,
             target_lang: Lang::Ja,
+            source_timing: None,
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
@@ -1550,6 +1645,7 @@ mod tests {
             text: "hello".into(),
             utterance_id: 1,
             target_lang: Lang::Ja,
+            source_timing: None,
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
@@ -1599,6 +1695,7 @@ mod tests {
             text: "hello".into(),
             utterance_id: 42,
             target_lang: Lang::Ja,
+            source_timing: None,
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
@@ -1657,6 +1754,7 @@ mod tests {
             text: "hello".into(),
             utterance_id: 1,
             target_lang: Lang::Ja,
+            source_timing: None,
             handle,
             selected_voice_id: None,
             selected_voice_enrollment_lang: None,
@@ -1664,8 +1762,13 @@ mod tests {
         })
         .await;
 
-        // Non-2xx triggers the "no audio" early-return; no host notifications.
-        assert!(rx.try_recv().is_err());
+        // Non-2xx triggers provider_health but no successful TTS/video-end notifications.
+        while let Ok(message) = rx.try_recv() {
+            if let axum::extract::ws::Message::Text(text) = message {
+                assert!(!text.as_str().contains("\"type\":\"tts_end\""));
+                assert!(!text.as_str().contains("\"type\":\"video_end\""));
+            }
+        }
         server.abort();
     }
 

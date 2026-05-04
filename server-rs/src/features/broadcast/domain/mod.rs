@@ -239,6 +239,64 @@ impl LiveSessionHandle {
 
 // ── TTS dispatch request ──────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTimingMethod {
+    SonioxTokenTimestamps,
+    ResponseWallClock,
+    TextEstimateFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvailableWindowMethod {
+    NextUtteranceStart,
+    HoldTimeoutFallback,
+    SameAsSpeech,
+    Unavailable,
+}
+
+pub const MAX_TTS_BUDGET_MS: u64 = 3_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceUtteranceTiming {
+    pub source_speech_duration_ms: u64,
+    pub available_window_ms: Option<u64>,
+    pub timing_method: SourceTimingMethod,
+    pub available_window_method: AvailableWindowMethod,
+}
+
+impl SourceUtteranceTiming {
+    pub fn same_as_speech(duration_ms: u64, timing_method: SourceTimingMethod) -> Self {
+        Self {
+            source_speech_duration_ms: duration_ms,
+            available_window_ms: None,
+            timing_method,
+            available_window_method: AvailableWindowMethod::SameAsSpeech,
+        }
+    }
+
+    pub fn with_available_window(self, available_window_ms: u64) -> Self {
+        Self {
+            available_window_ms: Some(available_window_ms),
+            available_window_method: AvailableWindowMethod::NextUtteranceStart,
+            ..self
+        }
+    }
+
+    pub fn hold_timeout_fallback(self) -> Self {
+        Self {
+            available_window_ms: Some(self.source_speech_duration_ms.max(1_000)),
+            available_window_method: AvailableWindowMethod::HoldTimeoutFallback,
+            ..self
+        }
+    }
+
+    pub fn tts_budget_ms(self) -> u64 {
+        self.available_window_ms
+            .unwrap_or(self.source_speech_duration_ms)
+            .clamp(500, MAX_TTS_BUDGET_MS)
+    }
+}
+
 /// All inputs the per-lang TTS worker needs to render + broadcast a single
 /// utterance. Lives in the domain layer (rather than next to the ElevenLabs
 /// client) because `LiveSession.tts_workers` stores `mpsc::Sender<TtsRequest>`
@@ -248,6 +306,7 @@ pub struct TtsRequest {
     pub text: String,
     pub utterance_id: u64,
     pub target_lang: Lang,
+    pub source_timing: Option<SourceUtteranceTiming>,
     pub handle: LiveSessionHandle,
     pub selected_voice_id: Option<String>,
     pub selected_voice_enrollment_lang: Option<Lang>,

@@ -90,6 +90,14 @@ Important limitation:
 - Translated tokens do not include timestamps. Spoken/original tokens do. So
   source-duration measurement must come from original token timing or local
   audio chunk timing, not translated tokens.
+- Patched: server-rs parses Soniox `start_ms`/`end_ms`, carries
+  `SourceUtteranceTiming` into `TtsRequest`, and uses translated-text duration
+  estimate only as explicit `TextEstimateFallback`.
+- Patched: source speech duration and available live window are separate.
+  With `BRIVVA_TTS_LOOKAHEAD_BUDGET=1`, TTS dispatch is held briefly so the
+  next utterance start can provide an available-window budget for fast speech
+  followed by silence; timeout fallback dispatches once if no next utterance
+  arrives.
 
 ## Recommended Architecture
 

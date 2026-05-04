@@ -114,9 +114,22 @@ pub struct SonioxToken {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
+    pub start_ms: Option<u64>,
+    #[serde(default)]
+    pub end_ms: Option<u64>,
+    #[serde(default)]
     pub is_final: bool,
     #[serde(default)]
     pub translation_status: Option<String>,
+}
+
+impl SonioxToken {
+    pub fn timing_ms(&self) -> Option<(u64, u64)> {
+        match (self.start_ms, self.end_ms) {
+            (Some(start), Some(end)) if end >= start => Some((start, end)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -233,6 +246,8 @@ mod tests {
     fn token(text: &str, translation_status: Option<&str>) -> SonioxToken {
         SonioxToken {
             text: text.to_string(),
+            start_ms: None,
+            end_ms: None,
             is_final: false,
             translation_status: translation_status.map(str::to_string),
         }
