@@ -47,7 +47,7 @@ Status values:
 
 | ID | Status | Risk | Current Signal | Next Patch | Deep Link |
 | --- | --- | --- | --- | --- | --- |
-| RS-030 | patched | Bad network/backpressure behavior needs deterministic repeatable stress inputs. | MP4 smoke now supports audio delay, video/audio chunk drops, fake bad RTMP, TTS delay, and STT disable chaos flags. | Run short chaos scenarios and tune assertions; add JSON summaries later. | [Future Automation](future_automation.md) |
+| RS-030 | patched | Bad network/backpressure behavior needs deterministic repeatable stress inputs. | MP4 smoke now supports audio delay, video/audio chunk drops, fake bad RTMP, TTS delay, and STT disable chaos flags; short Infisical e2e passed for all six scenarios on 2026-05-04. | Add JSON summaries later. | [Future Automation](future_automation.md) |
 | RS-031 | patched | Full stress suite may not assert pass/fail on every bad signal yet. | Runner now fails on media drops, sustained below-realtime encode, TTS overflows, and hard recovery above configured thresholds. | Add JSON summary output for dashboards/CI. | [Signals: Useful Greps](signals.md#useful-greps) |
 | RS-032 | watch | MP4 fixtures can be invalid or unsupported codec, causing misleading zero-chunk runs. | Browser path is H.264-only; fixtures should be H.264 to simulate browser ingest. | Keep fixture validation/preflight explicit before starting RTMP outputs. | [Scenarios: High-Resolution Input](scenarios.md#high-resolution-input) |
 | RS-033 | watch | 4K is not proven end-to-end. | Runner now preflights H.264 fixtures and requires 4K input to be at least `3840x2160`; bad codec/dimension fixtures fail before misleading zero-chunk runs. | Run `single_4k30`, `many_outputs_4k30`, and `high_res_capped` with a valid H.264 4K fixture on the launch machine/GPU. | [Scenarios: High-Resolution Input](scenarios.md#high-resolution-input) |
@@ -60,6 +60,7 @@ Status values:
 | `9a28d54` | patched | Added TTS concision strategy docs and Soniox exploration notes. | Use tracker item RS-001 before adding Soniox context code. |
 | `fb24df9` | patched | Split TTS source speech timing from available-window budget; added Soniox timestamp parsing and env-gated lookahead TTS scheduler. | Rerun e2e with `BRIVVA_TTS_LOOKAHEAD_BUDGET=1` and verify by ear/logs. |
 | `18e2fa7` | patched | Added lookahead scheduler race/edge tests, atomic timeout flush, and ElevenLabs speed control. | Live-listen JA/ZH/KO; tune speed values if artifacts appear. |
+| `d470382` | patched | Added deterministic MP4 chaos scenarios and 4K fixture preflight; validated six short chaos e2e runs. | Run true 4K scenarios with a valid H.264 4K fixture on launch hardware. |
 
 ## Standard Triage Flow
 
