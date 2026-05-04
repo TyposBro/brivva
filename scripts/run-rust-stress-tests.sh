@@ -48,7 +48,9 @@ Expected to be run inside Infisical:
 Scenario names:
   single_720p15 single_1080p30 cpu_720p30 many_outputs_1080p30
   single_4k30 many_outputs_4k30 high_res_capped low_quality
-  backlog_catchup backlog_catchup_many_outputs grip_smoke bad_destination tts_failure stt_failure long_run difficult_audio network
+  backlog_catchup backlog_catchup_many_outputs grip_smoke bad_destination
+  audio_delay video_drop audio_drop fake_bad_rtmp tts_delay stt_disabled
+  tts_failure stt_failure long_run difficult_audio network
 EOF
 }
 
@@ -181,8 +183,60 @@ have_any_output() {
 	have_youtube_output || have_grip_output || [[ -n "${MP4_FANOUT_SMOKE_RTMP_URLS:-}" ]]
 }
 
+probe_video_csv() {
+	local mp4="$1"
+	ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,avg_frame_rate -of csv=p=0 "$mp4" 2>/dev/null | head -n1
+}
+
+validate_h264_mp4() {
+	local label="$1"
+	local mp4="$2"
+	local min_width="${3:-0}"
+	local min_height="${4:-0}"
+	local probed codec width height fps
+	if ! command -v ffprobe >/dev/null 2>&1; then
+		echo "ffprobe not found; cannot preflight $label fixture" >&2
+		return 1
+	fi
+	probed="$(probe_video_csv "$mp4")"
+	IFS=, read -r codec width height fps <<<"$probed"
+	if [[ "$codec" != "h264" ]]; then
+		echo "$label fixture must be H.264, got '${codec:-unknown}': $mp4" >&2
+		return 1
+	fi
+	if (( min_width > 0 )) && (( width < min_width || height < min_height )); then
+		echo "$label fixture must be at least ${min_width}x${min_height}, got ${width}x${height}: $mp4" >&2
+		return 1
+	fi
+	return 0
+}
+
+convert_to_h264_hint() {
+	local input="$1"
+	local output="$2"
+	cat <<EOF
+Convert fixture once with:
+  ffmpeg -y -i "$input" -map 0:v:0 -an -c:v libx264 -preset veryfast -pix_fmt yuv420p -profile:v high -level 5.1 -movflags +faststart "$output"
+EOF
+}
+
+if ! validate_h264_mp4 "main" "$MP4"; then
+	convert_to_h264_hint "$MP4" "${MP4%.*}.h264.mp4" >&2
+	exit 2
+fi
+
 first_available_output() {
 	for output in grip pass "$SOURCE_LANG" en ko ja zh legacy; do
+		if have_output_key "$output"; then
+			echo "$output"
+			return 0
+		fi
+	done
+	return 1
+}
+
+first_non_grip_output() {
+	for output in pass "$SOURCE_LANG" en ko ja zh legacy; do
 		if have_output_key "$output"; then
 			echo "$output"
 			return 0
@@ -319,8 +373,12 @@ analyze_log() {
 		"host_audio_stale_chunks_dropped" 0 || failed=1
 	assert_counter_at_most "$name" "$logfile" "ready host audio drops" \
 		"ready_host_bytes_dropped" 0 || failed=1
+	local max_ffmpeg_restarts=0
+	case "$name" in
+		fake_bad_rtmp | bad_destination) max_ffmpeg_restarts=2 ;;
+	esac
 	assert_count_at_most "$name" "$logfile" "FFmpeg process crash/restart" \
-		"ffmpeg rtmp process crashed" 0 || failed=1
+		"ffmpeg rtmp process crashed" "$max_ffmpeg_restarts" || failed=1
 	assert_counter_at_most "$name" "$logfile" "sustained below-realtime encode ticks" \
 		"consecutive_ticks" "$MAX_SLOW_ENCODE_TICKS" || failed=1
 	assert_count_at_most "$name" "$logfile" "whole TTS segment overflow" \
@@ -374,6 +432,7 @@ common_env=(
 )
 
 SINGLE_OUTPUT="$(first_available_output || true)"
+CHAOS_OUTPUT="$(first_non_grip_output || true)"
 TRANSLATED_OUTPUT="$(first_translated_output || true)"
 MULTI_OUTPUTS="$(all_available_outputs)"
 
@@ -389,6 +448,9 @@ if [[ -n "$SINGLE_OUTPUT" ]]; then
 fi
 if [[ -n "$TRANSLATED_OUTPUT" ]]; then
 	echo "  first_translated_output=$TRANSLATED_OUTPUT -> $(output_secret_name "$TRANSLATED_OUTPUT")"
+fi
+if [[ -n "$CHAOS_OUTPUT" ]]; then
+	echo "  chaos_output=$CHAOS_OUTPUT -> $(output_secret_name "$CHAOS_OUTPUT")"
 fi
 
 if [[ -z "$SINGLE_OUTPUT" ]]; then
@@ -514,6 +576,11 @@ if should_run single_4k30 || should_run many_outputs_4k30 || should_run high_res
 		record_skip single_4k30 "provide --4k-mp4 /path/to/h264-4k.mp4"
 		record_skip many_outputs_4k30 "provide --4k-mp4 /path/to/h264-4k.mp4"
 		record_skip high_res_capped "provide --4k-mp4 /path/to/4k.mp4"
+	elif ! validate_h264_mp4 "4K" "$FOUR_K_MP4" 3840 2160; then
+		convert_to_h264_hint "$FOUR_K_MP4" "${FOUR_K_MP4%.*}.h264-4k.mp4" >&2
+		record_skip single_4k30 "4K fixture preflight failed"
+		record_skip many_outputs_4k30 "4K fixture preflight failed"
+		record_skip high_res_capped "4K fixture preflight failed"
 	else
 		run_case single_4k30 \
 			"${common_env[@]}" \
@@ -564,6 +631,30 @@ if [[ -z "$MULTI_OUTPUTS" || "$MULTI_OUTPUTS" != *,* ]]; then
 	should_run tts_failure && record_skip tts_failure "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
 	should_run stt_failure && record_skip stt_failure "need at least two STREAM_KEY_YOUTUBE_{PASS,KO,EN,JA,ZH}"
 else
+	run_case tts_delay \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_TRANSLATED_DELAY_MS=1000" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"MP4_FANOUT_SMOKE_TTS_DELAY_MS=1500"
+
+	run_case stt_disabled \
+		"${common_env[@]}" \
+		"MP4_FANOUT_SMOKE_MP4=$MP4" \
+		"MP4_FANOUT_SMOKE_OUTPUTS=$MULTI_OUTPUTS" \
+		"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+		"MP4_FANOUT_SMOKE_TRANSLATED_DELAY_MS=1000" \
+		"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+		"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+		"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+		"BRIVVA_VIDEO_MAX_FPS=30" \
+		"MP4_FANOUT_SMOKE_STT_DISABLE=1"
+
 	run_case tts_failure \
 		"${common_env[@]}" \
 		"MP4_FANOUT_SMOKE_MP4=$MP4" \
@@ -586,6 +677,50 @@ else
 		"BRIVVA_VIDEO_MAX_FPS=30" \
 		"SONIOX_API_KEY=bad"
 fi
+
+run_case audio_delay \
+	"${common_env[@]}" \
+	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$CHAOS_OUTPUT" \
+	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+	"BRIVVA_VIDEO_MAX_FPS=30" \
+	"MP4_FANOUT_SMOKE_AUDIO_DELAY_MS=40"
+
+run_case video_drop \
+	"${common_env[@]}" \
+	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$CHAOS_OUTPUT" \
+	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+	"BRIVVA_VIDEO_MAX_FPS=30" \
+	"MP4_FANOUT_SMOKE_DROP_VIDEO_EVERY_N=30"
+
+run_case audio_drop \
+	"${common_env[@]}" \
+	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$CHAOS_OUTPUT" \
+	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+	"BRIVVA_VIDEO_MAX_FPS=30" \
+	"MP4_FANOUT_SMOKE_DROP_AUDIO_EVERY_N=50"
+
+run_case fake_bad_rtmp \
+	"${common_env[@]}" \
+	"MP4_FANOUT_SMOKE_MP4=$MP4" \
+	"MP4_FANOUT_SMOKE_OUTPUTS=$CHAOS_OUTPUT" \
+	"MP4_FANOUT_SMOKE_DURATION=$DURATION" \
+	"MP4_FANOUT_SMOKE_ENCODER=nvenc" \
+	"BRIVVA_VIDEO_MAX_WIDTH=1920" \
+	"BRIVVA_VIDEO_MAX_HEIGHT=1080" \
+	"BRIVVA_VIDEO_MAX_FPS=30" \
+	"MP4_FANOUT_SMOKE_FAKE_BAD_RTMP=1"
 
 run_case long_run \
 	"${common_env[@]}" \

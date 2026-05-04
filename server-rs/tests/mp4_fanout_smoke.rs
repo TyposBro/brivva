@@ -31,6 +31,10 @@ struct Args {
     soniox_ws_url: String,
     elevenlabs_api_key: String,
     elevenlabs_base_url: String,
+    audio_delay_ms: u64,
+    drop_video_every_n: u64,
+    drop_audio_every_n: u64,
+    stt_disabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,14 +107,11 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
 
     let manager: SharedRtmpManager = Arc::new(tokio::sync::Mutex::new(manager));
     let target_langs = target_langs_for_translation(&args.outputs, &args.source_lang);
-    let stt_tx = if target_langs.is_empty() {
-        None
+    let (stt_tx, stt_task, stt_sessions) = if target_langs.is_empty() {
+        (None, None, None)
     } else {
-        Some(spawn_translation_pipeline(
-            &args,
-            manager.clone(),
-            target_langs,
-        ))
+        let (tx, task, sessions) = spawn_translation_pipeline(&args, manager.clone(), target_langs);
+        (Some(tx), Some(task), Some(sessions))
     };
     let stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_health_monitor(manager.clone(), stop.clone());
@@ -118,8 +119,18 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let mut audio = spawn_audio_ffmpeg(&args.mp4)?;
     let video_stdout = video.stdout.take().ok_or("video ffmpeg stdout missing")?;
     let audio_stdout = audio.stdout.take().ok_or("audio ffmpeg stdout missing")?;
-    let video_task = tokio::spawn(feed_h264(manager.clone(), video_stdout));
-    let audio_task = tokio::spawn(feed_pcm(manager.clone(), stt_tx, audio_stdout));
+    let video_task = tokio::spawn(feed_h264(
+        manager.clone(),
+        video_stdout,
+        args.drop_video_every_n,
+    ));
+    let audio_task = tokio::spawn(feed_pcm(
+        manager.clone(),
+        if args.stt_disabled { None } else { stt_tx },
+        audio_stdout,
+        args.audio_delay_ms,
+        args.drop_audio_every_n,
+    ));
 
     tokio::time::sleep(Duration::from_secs(args.duration_secs)).await;
     stop.store(true, std::sync::atomic::Ordering::Release);
@@ -127,6 +138,12 @@ async fn mp4_fanout_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let _ = audio.kill().await;
     video_task.abort();
     audio_task.abort();
+    if let Some(sessions) = stt_sessions {
+        sessions.remove("mp4-fanout-smoke");
+    }
+    if let Some(task) = stt_task {
+        task.abort();
+    }
     manager.lock().await.stop_all().await;
     let _ = monitor.await;
     tracing::info!("mp4 fanout smoke finished");
@@ -168,6 +185,10 @@ fn log_smoke_args(args: &Args) {
         soniox_ws_url = %args.soniox_ws_url,
         elevenlabs_api_key_present = !args.elevenlabs_api_key.trim().is_empty(),
         elevenlabs_base_url = %args.elevenlabs_base_url,
+        audio_delay_ms = args.audio_delay_ms,
+        drop_video_every_n = args.drop_video_every_n,
+        drop_audio_every_n = args.drop_audio_every_n,
+        stt_disabled = args.stt_disabled,
         "mp4 fanout smoke starting"
     );
 }
@@ -213,6 +234,10 @@ fn parse_args() -> Result<Args, String> {
     let elevenlabs_api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
     let elevenlabs_base_url = std::env::var("ELEVENLABS_BASE_URL")
         .unwrap_or_else(|_| "https://api.elevenlabs.io".to_string());
+    let audio_delay_ms = env_u32("MP4_FANOUT_SMOKE_AUDIO_DELAY_MS", 0) as u64;
+    let drop_video_every_n = env_u32("MP4_FANOUT_SMOKE_DROP_VIDEO_EVERY_N", 0) as u64;
+    let drop_audio_every_n = env_u32("MP4_FANOUT_SMOKE_DROP_AUDIO_EVERY_N", 0) as u64;
+    let stt_disabled = env_flag("MP4_FANOUT_SMOKE_STT_DISABLE");
     let youtube_url = std::env::var("YOUTUBE_RTMP_URL")
         .unwrap_or_else(|_| "rtmp://a.rtmp.youtube.com/live2".to_string());
     let output_filter = parse_output_filter_env("MP4_FANOUT_SMOKE_OUTPUTS")?;
@@ -228,6 +253,12 @@ fn parse_args() -> Result<Args, String> {
         outputs.push(grip_output);
     }
     let mut legacy_rtmp = Vec::new();
+    if env_flag("MP4_FANOUT_SMOKE_FAKE_BAD_RTMP") {
+        legacy_rtmp.push(RtmpDestination::new(
+            "fake-bad-rtmp".to_string(),
+            "rtmp://127.0.0.1:1/live/bad".to_string(),
+        ));
+    }
     if output_allowed(output_filter.as_deref(), "legacy") {
         if let Ok(key) = std::env::var("STREAM_KEY_YOUTUBE") {
             if !key.trim().is_empty() {
@@ -279,6 +310,10 @@ fn parse_args() -> Result<Args, String> {
         soniox_ws_url,
         elevenlabs_api_key,
         elevenlabs_base_url,
+        audio_delay_ms,
+        drop_video_every_n,
+        drop_audio_every_n,
+        stt_disabled,
     })
 }
 
@@ -462,7 +497,11 @@ fn spawn_translation_pipeline(
     args: &Args,
     manager: SharedRtmpManager,
     target_langs: Vec<Lang>,
-) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+) -> (
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::task::JoinHandle<()>,
+    LiveSessions,
+) {
     let sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
     let mut live = LiveSession::new(
         "mp4-fanout-smoke".to_string(),
@@ -481,7 +520,7 @@ fn spawn_translation_pipeline(
     sessions.insert("mp4-fanout-smoke".to_string(), live);
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let session = PipelineSession {
-        handle: LiveSessionHandle::new("mp4-fanout-smoke".to_string(), sessions),
+        handle: LiveSessionHandle::new("mp4-fanout-smoke".to_string(), sessions.clone()),
         source_lang: args.source_lang.clone(),
         target_langs,
         config: Arc::new(PipelineConfig {
@@ -493,8 +532,8 @@ fn spawn_translation_pipeline(
             ..Default::default()
         }),
     };
-    tokio::spawn(start_stt_pipelines(session, rx));
-    tx
+    let task = tokio::spawn(start_stt_pipelines(session, rx));
+    (tx, task, sessions)
 }
 
 fn parse_lang_env(key: &str, default: Lang) -> Result<Lang, String> {
@@ -542,6 +581,12 @@ fn env_u32(key: &str, default: u32) -> u32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_flag(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn spawn_video_ffmpeg(mp4: &str) -> std::io::Result<tokio::process::Child> {
@@ -596,15 +641,26 @@ fn spawn_audio_ffmpeg(mp4: &str) -> std::io::Result<tokio::process::Child> {
 async fn feed_h264(
     manager: Arc<tokio::sync::Mutex<RtmpManager>>,
     stdout: tokio::process::ChildStdout,
+    drop_every_n: u64,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut buf = vec![0u8; 64 * 1024];
+    let mut chunk_idx = 0u64;
     loop {
         let Ok(n) = reader.read(&mut buf).await else {
             break;
         };
         if n == 0 {
             break;
+        }
+        chunk_idx = chunk_idx.saturating_add(1);
+        if drop_every_n > 0 && chunk_idx % drop_every_n == 0 {
+            tracing::warn!(
+                chunk_idx,
+                drop_every_n,
+                "mp4 smoke dropping video chunk by chaos flag"
+            );
+            continue;
         }
         manager.lock().await.push_video_h264(&buf[..n]);
     }
@@ -614,12 +670,27 @@ async fn feed_pcm(
     manager: Arc<tokio::sync::Mutex<RtmpManager>>,
     stt_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     stdout: tokio::process::ChildStdout,
+    audio_delay_ms: u64,
+    drop_every_n: u64,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut buf = vec![0u8; 1764];
+    let mut chunk_idx = 0u64;
     loop {
         if reader.read_exact(&mut buf).await.is_err() {
             break;
+        }
+        chunk_idx = chunk_idx.saturating_add(1);
+        if audio_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(audio_delay_ms)).await;
+        }
+        if drop_every_n > 0 && chunk_idx % drop_every_n == 0 {
+            tracing::warn!(
+                chunk_idx,
+                drop_every_n,
+                "mp4 smoke dropping audio chunk by chaos flag"
+            );
+            continue;
         }
         let chunk = buf.clone();
         manager.lock().await.push_host_audio(&chunk);

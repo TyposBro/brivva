@@ -53,6 +53,12 @@ latency.
 - `many_outputs_4k30`: all available outputs at 4K30, requires `--4k-mp4`.
 - `high_res_capped`: 4K input capped to 1080p30.
 - `bad_destination`: one good output plus one dead RTMP destination.
+- `audio_delay`: feeder delays PCM chunks with `MP4_FANOUT_SMOKE_AUDIO_DELAY_MS`.
+- `video_drop`: feeder drops every Nth H.264 chunk with `MP4_FANOUT_SMOKE_DROP_VIDEO_EVERY_N`.
+- `audio_drop`: feeder drops every Nth PCM chunk with `MP4_FANOUT_SMOKE_DROP_AUDIO_EVERY_N`.
+- `fake_bad_rtmp`: injects `MP4_FANOUT_SMOKE_FAKE_BAD_RTMP=1` without manual URL setup.
+- `tts_delay`: delays ElevenLabs requests with `MP4_FANOUT_SMOKE_TTS_DELAY_MS`.
+- `stt_disabled`: disables STT fanout with `MP4_FANOUT_SMOKE_STT_DISABLE=1`.
 - `tts_failure`: bad ElevenLabs key, original stream should continue.
 - `stt_failure`: bad Soniox key, original stream should continue.
 - `grip_smoke`: fresh Grip RTMP/RTMPS URL + key, verify Grip Studio receives
@@ -100,6 +106,16 @@ STREAM_KEY_YOUTUBE_ZH
 translated TTS and burned subtitles.
 
 The smoke feeder requires H.264 MP4 fixtures and copies H.264 into the Rust
-server path. For AV1/HEVC/other source files, convert the fixture once before
-running the smoke test; the live browser ingest path is H.264-only because RTMP
-outputs require H.264.
+server path. The runner now preflights fixtures with `ffprobe`; 4K scenarios
+require H.264 video at least `3840x2160`. For AV1/HEVC/other source files,
+convert the fixture once before running the smoke test; the live browser ingest
+path is H.264-only because RTMP outputs require H.264.
+
+Typical conversion:
+
+```bash
+ffmpeg -y -i input.mp4 -map 0:v:0 -an \
+  -c:v libx264 -preset veryfast -pix_fmt yuv420p \
+  -profile:v high -level 5.1 -movflags +faststart \
+  input.h264.mp4
+```

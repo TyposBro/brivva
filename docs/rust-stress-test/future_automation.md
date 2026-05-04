@@ -1,6 +1,6 @@
 # Future Stress Automation
 
-Useful smoke-test flags to add later:
+Implemented smoke-test chaos flags:
 
 - `MP4_FANOUT_SMOKE_AUDIO_DELAY_MS`
 - `MP4_FANOUT_SMOKE_DROP_VIDEO_EVERY_N`
@@ -11,3 +11,9 @@ Useful smoke-test flags to add later:
 
 These avoid relying on OS-level `tc` or manual bad credentials for repeatable
 chaos tests.
+
+Still useful later:
+
+- JSON `summary.json` per stress run.
+- Local RTMP sink process for deterministic one-bad-destination validation.
+- CI wrapper that runs short chaos scenarios against local-only destinations.

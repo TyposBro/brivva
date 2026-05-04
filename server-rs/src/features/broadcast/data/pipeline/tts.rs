@@ -927,6 +927,19 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
         speed,
         deadline,
     } = args;
+    let chaos_delay_ms = std::env::var("MP4_FANOUT_SMOKE_TTS_DELAY_MS")
+        .ok()
+        .and_then(|delay_ms| delay_ms.parse::<u64>().ok())
+        .filter(|delay_ms| *delay_ms > 0);
+    if let Some(delay_ms) = chaos_delay_ms {
+        tracing::warn!(delay_ms, "mp4 smoke delaying TTS request by chaos flag");
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        return TtsFetchResult::Failure(TtsFailure {
+            reason: "chaos_tts_delay",
+            recoverable: true,
+            status_code: None,
+        });
+    }
     let client = reqwest::Client::new();
     // Voice-settings tuning biases TTS toward the original enrollment accent.
     // Higher stability + non-zero similarity_boost + style=0 keeps the voice
