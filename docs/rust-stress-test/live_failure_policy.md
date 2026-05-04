@@ -165,8 +165,9 @@ Recommended patch path:
 1. Add per-segment timing metadata:
    `source_duration_ms`, `tts_duration_ms`, `expansion_ratio`, `text_chars`.
 2. Add concise translation mode when expansion/backlog is high.
-3. Add provider-level TTS speed controls if ElevenLabs supports stable
-   per-request speaking-rate control for the selected model/voice.
+3. Provider-level TTS speed controls are available through ElevenLabs
+   per-request `voice_settings.speed`; use conservative speed only when
+   catch-up/concision/hard-recovery policy is active.
 4. Keep playback catch-up and whole-segment dropping as safety nets.
 
 Implemented patch path:
@@ -181,6 +182,9 @@ Implemented patch path:
    - remove common filler/polite phrases by target language;
    - prefer clauses containing prices, numbers, discounts, stock, dates, or CTA;
    - apply tighter caps during hard recovery than normal concise mode.
+5. ElevenLabs request bodies now include conservative `voice_settings.speed`
+   only when policy is beyond normal (`1.08` catch-up, `1.12` concise,
+   `1.20` hard recovery).
 
 Remaining recommended improvement:
 

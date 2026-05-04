@@ -210,6 +210,15 @@ fn stricter_tts_policy(a: TtsExpansionPolicy, b: TtsExpansionPolicy) -> TtsExpan
     }
 }
 
+pub(crate) fn tts_speed_for_policy(policy: TtsExpansionPolicy) -> Option<f64> {
+    match policy {
+        TtsExpansionPolicy::Normal => None,
+        TtsExpansionPolicy::CatchUp => Some(1.08),
+        TtsExpansionPolicy::Concise => Some(1.12),
+        TtsExpansionPolicy::HardRecovery => Some(1.20),
+    }
+}
+
 pub(crate) fn predict_tts_policy(
     text: &str,
     lang: &Lang,
@@ -534,6 +543,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             estimated_source_duration_ms,
             initial_backlog_ms,
         );
+    let tts_speed = tts_speed_for_policy(initial_policy);
     let tts_text = if matches!(
         initial_policy,
         TtsExpansionPolicy::CatchUp
@@ -560,6 +570,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
                 tts_budget_ms = estimated_source_duration_ms,
                 predicted_tts_duration_ms,
                 predicted_expansion_ratio_milli,
+                tts_speed,
                 original_chars = req.text.chars().count(),
                 concise_chars = concise.chars().count(),
                 policy = initial_policy.as_str(),
@@ -590,6 +601,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         initial_policy = initial_policy.as_str(),
         predicted_tts_duration_ms,
         predicted_expansion_ratio_milli,
+        tts_speed,
         deadline_ms = tts_deadline.as_millis() as u64,
         "tts dispatch starting"
     );
@@ -668,6 +680,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         is_cloned,
         lang: &req.target_lang,
         enrollment_lang: req.selected_voice_enrollment_lang.as_ref(),
+        speed: tts_speed,
         deadline: tts_deadline,
     })
     .await
@@ -717,6 +730,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             is_cloned,
             lang: &req.target_lang,
             enrollment_lang: None,
+            speed: tts_speed,
             deadline: tts_deadline,
         })
         .await
@@ -840,6 +854,7 @@ struct FetchTtsArgs<'a> {
     /// phonology instead of defaulting to English inference (the April
     /// 2026 Indian-accent regression). Ignored for default voices.
     enrollment_lang: Option<&'a Lang>,
+    speed: Option<f64>,
     deadline: Duration,
 }
 
@@ -857,6 +872,7 @@ pub fn build_tts_request_body(
     model_id: &str,
     is_cloned: bool,
     enrollment_lang: Option<&Lang>,
+    speed: Option<f64>,
 ) -> serde_json::Value {
     if is_cloned {
         let mut body = serde_json::json!({
@@ -869,10 +885,19 @@ pub fn build_tts_request_body(
                 "use_speaker_boost": true
             }
         });
+        if let Some(speed) = speed {
+            body["voice_settings"]["speed"] = serde_json::json!(speed);
+        }
         if let Some(lang) = enrollment_lang {
             body["language_code"] = serde_json::Value::String(lang.to_elevenlabs_code().into());
         }
         body
+    } else if let Some(speed) = speed {
+        serde_json::json!({
+            "text": text,
+            "model_id": model_id,
+            "voice_settings": { "speed": speed }
+        })
     } else {
         serde_json::json!({ "text": text, "model_id": model_id })
     }
@@ -899,6 +924,7 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
         is_cloned,
         lang,
         enrollment_lang,
+        speed,
         deadline,
     } = args;
     let client = reqwest::Client::new();
@@ -909,7 +935,7 @@ async fn fetch_tts_audio(args: FetchTtsArgs<'_>) -> TtsFetchResult {
     // need aggressive boost — they are library voices engineered for 32
     // target languages — but the request shape is the same either way so we
     // send the settings unconditionally.
-    let body = build_tts_request_body(text, model_id, is_cloned, enrollment_lang);
+    let body = build_tts_request_body(text, model_id, is_cloned, enrollment_lang, speed);
     let tts_result = tokio::time::timeout(deadline, async {
         let mut audio_buffer = Vec::new();
         let response = client
@@ -1496,7 +1522,7 @@ mod tests {
 
     #[test]
     fn build_tts_request_body_includes_voice_settings_only_for_cloned_voices() {
-        let cloned = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
+        let cloned = build_tts_request_body("hi", "eleven_multilingual_v2", true, None, None);
         assert!(cloned.get("voice_settings").is_some());
         assert_eq!(cloned["voice_settings"]["stability"].as_f64().unwrap(), 0.5);
         assert!(
@@ -1505,10 +1531,38 @@ mod tests {
                 .unwrap()
         );
 
-        let default = build_tts_request_body("hi", "eleven_flash_v2_5", false, None);
+        let default = build_tts_request_body("hi", "eleven_flash_v2_5", false, None, None);
         assert!(default.get("voice_settings").is_none());
         assert_eq!(default["model_id"].as_str().unwrap(), "eleven_flash_v2_5");
         assert_eq!(default["text"].as_str().unwrap(), "hi");
+    }
+
+    #[test]
+    fn build_tts_request_body_can_emit_elevenlabs_speed_control() {
+        let cloned = build_tts_request_body("hi", "eleven_flash_v2_5", true, None, Some(1.12));
+        assert_eq!(cloned["voice_settings"]["speed"].as_f64().unwrap(), 1.12);
+        assert_eq!(cloned["voice_settings"]["stability"].as_f64().unwrap(), 0.5);
+
+        let default = build_tts_request_body("hi", "eleven_flash_v2_5", false, None, Some(1.08));
+        assert_eq!(default["voice_settings"]["speed"].as_f64().unwrap(), 1.08);
+        assert!(default["voice_settings"].get("stability").is_none());
+    }
+
+    #[test]
+    fn tts_speed_for_policy_only_speeds_up_backlog_recovery_modes() {
+        assert_eq!(tts_speed_for_policy(TtsExpansionPolicy::Normal), None);
+        assert_eq!(
+            tts_speed_for_policy(TtsExpansionPolicy::CatchUp),
+            Some(1.08)
+        );
+        assert_eq!(
+            tts_speed_for_policy(TtsExpansionPolicy::Concise),
+            Some(1.12)
+        );
+        assert_eq!(
+            tts_speed_for_policy(TtsExpansionPolicy::HardRecovery),
+            Some(1.20)
+        );
     }
 
     #[test]
@@ -1517,7 +1571,7 @@ mod tests {
         // enrollment lang so eleven_multilingual_v2 stops silently defaulting
         // to the English inference path (April 2026 Indian-accent bug).
         let cloned_with_enroll =
-            build_tts_request_body("hi", "eleven_multilingual_v2", true, Some(&Lang::Ko));
+            build_tts_request_body("hi", "eleven_multilingual_v2", true, Some(&Lang::Ko), None);
         assert_eq!(
             cloned_with_enroll["language_code"].as_str().unwrap(),
             "ko",
@@ -1527,7 +1581,8 @@ mod tests {
         // Cloned without enrollment → omit the field. Some legacy voice rows
         // have no enrollment metadata; we let ElevenLabs pick rather than
         // pretend we know.
-        let cloned_no_enroll = build_tts_request_body("hi", "eleven_multilingual_v2", true, None);
+        let cloned_no_enroll =
+            build_tts_request_body("hi", "eleven_multilingual_v2", true, None, None);
         assert!(
             cloned_no_enroll.get("language_code").is_none(),
             "cloned + no enrollment_lang → language_code must be absent"
@@ -1537,7 +1592,7 @@ mod tests {
         // different model and the target lang is already encoded by the
         // library voice id itself.
         let default_with_enroll =
-            build_tts_request_body("hi", "eleven_flash_v2_5", false, Some(&Lang::Ko));
+            build_tts_request_body("hi", "eleven_flash_v2_5", false, Some(&Lang::Ko), None);
         assert!(
             default_with_enroll.get("language_code").is_none(),
             "default voice path must not emit language_code even if enrollment_lang supplied"
@@ -1778,12 +1833,12 @@ mod tests {
         // supports Instant Voice Cloning + `language_code` steering, which
         // is what makes cross-lingual cloned synthesis work for live RTMP
         // without the eleven_multilingual_v2 latency penalty.
-        let cloned_body = build_tts_request_body("hi", "eleven_flash_v2_5", true, None);
+        let cloned_body = build_tts_request_body("hi", "eleven_flash_v2_5", true, None, None);
         assert_eq!(
             cloned_body["model_id"].as_str().unwrap(),
             "eleven_flash_v2_5"
         );
-        let default_body = build_tts_request_body("hi", "eleven_flash_v2_5", false, None);
+        let default_body = build_tts_request_body("hi", "eleven_flash_v2_5", false, None, None);
         assert_eq!(
             default_body["model_id"].as_str().unwrap(),
             "eleven_flash_v2_5"
@@ -1797,7 +1852,7 @@ mod tests {
         // `model_id="eleven_flash_v2_5"`. That combination is what delegates
         // cross-lingual synthesis to ElevenLabs instead of the old
         // fall-back-to-default-voice behavior.
-        let body = build_tts_request_body("hi", "eleven_flash_v2_5", true, Some(&Lang::Ja));
+        let body = build_tts_request_body("hi", "eleven_flash_v2_5", true, Some(&Lang::Ja), None);
         assert_eq!(body["language_code"].as_str().unwrap(), "ja");
         assert_eq!(body["model_id"].as_str().unwrap(), "eleven_flash_v2_5");
         // voice_settings still shipped on the cloned path.

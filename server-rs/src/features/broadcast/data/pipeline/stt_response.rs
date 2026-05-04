@@ -499,15 +499,44 @@ fn dispatch_pending_tts(dispatch: PendingTtsDispatch) {
     });
 }
 
+fn apply_available_window_method(
+    mut dispatch: PendingTtsDispatch,
+    method: AvailableWindowMethod,
+) -> PendingTtsDispatch {
+    if matches!(method, AvailableWindowMethod::HoldTimeoutFallback) {
+        dispatch.source_timing = dispatch
+            .source_timing
+            .map(SourceUtteranceTiming::hold_timeout_fallback);
+    }
+    dispatch
+}
+
 async fn flush_pending_tts(pending_tts: PendingTtsSlot, method: AvailableWindowMethod) {
     let pending = pending_tts.lock().await.take();
-    if let Some(mut dispatch) = pending {
-        if matches!(method, AvailableWindowMethod::HoldTimeoutFallback) {
-            dispatch.source_timing = dispatch
-                .source_timing
-                .map(SourceUtteranceTiming::hold_timeout_fallback);
+    if let Some(dispatch) = pending {
+        dispatch_pending_tts(apply_available_window_method(dispatch, method));
+    }
+}
+
+async fn flush_pending_tts_if_current(
+    pending_tts: PendingTtsSlot,
+    utterance_id: u64,
+    method: AvailableWindowMethod,
+) {
+    let pending = {
+        let mut guard = pending_tts.lock().await;
+        if guard
+            .as_ref()
+            .map(|pending| pending.utterance_id == utterance_id)
+            .unwrap_or(false)
+        {
+            guard.take()
+        } else {
+            None
         }
-        dispatch_pending_tts(dispatch);
+    };
+    if let Some(dispatch) = pending {
+        dispatch_pending_tts(apply_available_window_method(dispatch, method));
     }
 }
 
@@ -537,19 +566,12 @@ async fn schedule_tts_with_lookahead(pending_tts: PendingTtsSlot, current: Pendi
     let pending_for_timeout = pending_tts.clone();
     tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
-        let should_flush = pending_for_timeout
-            .lock()
-            .await
-            .as_ref()
-            .map(|pending| pending.utterance_id == utterance_id)
-            .unwrap_or(false);
-        if should_flush {
-            flush_pending_tts(
-                pending_for_timeout,
-                AvailableWindowMethod::HoldTimeoutFallback,
-            )
-            .await;
-        }
+        flush_pending_tts_if_current(
+            pending_for_timeout,
+            utterance_id,
+            AvailableWindowMethod::HoldTimeoutFallback,
+        )
+        .await;
     });
 }
 
@@ -1287,6 +1309,208 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(550)).await;
         assert!(tts_rx.try_recv().is_err(), "pending should dispatch once");
+    }
+
+    #[tokio::test]
+    async fn stale_timeout_does_not_flush_newer_pending_utterance() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(Some(pending_dispatch(
+            2,
+            Some(3_000),
+            Some(SourceUtteranceTiming::same_as_speech(
+                500,
+                SourceTimingMethod::SonioxTokenTimestamps,
+            )),
+            handle,
+        ))));
+
+        flush_pending_tts_if_current(
+            pending.clone(),
+            1,
+            AvailableWindowMethod::HoldTimeoutFallback,
+        )
+        .await;
+
+        assert!(
+            tts_rx.try_recv().is_err(),
+            "stale timeout for utterance 1 must not flush pending utterance 2"
+        );
+        assert_eq!(
+            pending.lock().await.as_ref().map(|p| p.utterance_id),
+            Some(2)
+        );
+
+        flush_pending_tts_if_current(pending, 2, AvailableWindowMethod::HoldTimeoutFallback).await;
+        let req = tts_rx.recv().await.expect("current pending should flush");
+        assert_eq!(req.utterance_id, 2);
+    }
+
+    #[tokio::test]
+    async fn lookahead_missing_source_start_keeps_same_as_speech_budget() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(None));
+
+        schedule_tts_with_lookahead(
+            pending.clone(),
+            pending_dispatch(
+                1,
+                None,
+                Some(SourceUtteranceTiming::same_as_speech(
+                    700,
+                    SourceTimingMethod::ResponseWallClock,
+                )),
+                handle.clone(),
+            ),
+        )
+        .await;
+        schedule_tts_with_lookahead(
+            pending,
+            pending_dispatch(
+                2,
+                Some(3_000),
+                Some(SourceUtteranceTiming::same_as_speech(
+                    500,
+                    SourceTimingMethod::SonioxTokenTimestamps,
+                )),
+                handle,
+            ),
+        )
+        .await;
+
+        let req = tts_rx.recv().await.expect("previous utterance dispatched");
+        let timing = req.source_timing.expect("timing");
+        assert_eq!(req.utterance_id, 1);
+        assert_eq!(timing.available_window_ms, None);
+        assert_eq!(
+            timing.available_window_method,
+            AvailableWindowMethod::SameAsSpeech
+        );
+        assert_eq!(timing.tts_budget_ms(), 700);
+    }
+
+    #[tokio::test]
+    async fn emit_translation_dispatches_tts_immediately_when_lookahead_disabled() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+
+        emit_translation(EmitTranslationArgs {
+            committed: "konnichiwa",
+            utterance_id: 7,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            source_start_ms: Some(1_000),
+            source_timing: Some(SourceUtteranceTiming::same_as_speech(
+                500,
+                SourceTimingMethod::SonioxTokenTimestamps,
+            )),
+            pending_tts: Arc::new(Mutex::new(None)),
+            lookahead_tts: false,
+        })
+        .await;
+
+        let req = tts_rx.try_recv().expect("TTS should dispatch immediately");
+        assert_eq!(req.utterance_id, 7);
+        assert_eq!(req.text, "konnichiwa");
+    }
+
+    #[tokio::test]
+    async fn emit_translation_keeps_frontend_immediate_when_tts_is_held() {
+        let (sessions, mut host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(None));
+
+        emit_translation(EmitTranslationArgs {
+            committed: "konnichiwa",
+            utterance_id: 8,
+            target_lang: &Lang::Ja,
+            handle: &handle,
+            source_start_ms: Some(1_000),
+            source_timing: Some(SourceUtteranceTiming::same_as_speech(
+                500,
+                SourceTimingMethod::SonioxTokenTimestamps,
+            )),
+            pending_tts: pending.clone(),
+            lookahead_tts: true,
+        })
+        .await;
+
+        let mut saw_translation = false;
+        while let Ok(Message::Text(text)) = host_rx.try_recv() {
+            if text.as_str().contains("\"type\":\"translation\"") {
+                saw_translation = true;
+            }
+        }
+        assert!(
+            saw_translation,
+            "frontend translation should not wait for TTS"
+        );
+        assert!(
+            tts_rx.try_recv().is_err(),
+            "TTS should be held for lookahead"
+        );
+        assert_eq!(
+            pending.lock().await.as_ref().map(|p| p.utterance_id),
+            Some(8)
+        );
+    }
+
+    #[tokio::test]
+    async fn lookahead_timeout_after_session_teardown_drops_without_sending() {
+        let (sessions, _host_rx) = session_with_host_tx("room");
+        let (tts_tx, mut tts_rx) = mpsc::channel::<TtsRequest>(4);
+        {
+            let mut session = sessions.get_mut("room").unwrap();
+            session.tts_workers.insert(Lang::Ja, tts_tx);
+        }
+        let handle = LiveSessionHandle::new("room".into(), sessions);
+        let pending = Arc::new(Mutex::new(None));
+
+        schedule_tts_with_lookahead(
+            pending.clone(),
+            pending_dispatch(
+                1,
+                Some(1_000),
+                Some(SourceUtteranceTiming::same_as_speech(
+                    500,
+                    SourceTimingMethod::SonioxTokenTimestamps,
+                )),
+                handle.clone(),
+            ),
+        )
+        .await;
+        handle.sessions.remove(&handle.id);
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            tts_rx.try_recv().is_err(),
+            "removed session should not receive TTS"
+        );
+        assert!(
+            pending.lock().await.is_none(),
+            "timeout should clear pending state"
+        );
     }
 
     #[tokio::test]
