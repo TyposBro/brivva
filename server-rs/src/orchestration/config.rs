@@ -85,8 +85,8 @@ impl AppConfig {
             video_encoder: crate::features::broadcast::domain::VideoEncoderKind::from_wire(
                 &env_or_default("BRIVVA_VIDEO_ENCODER", "x264"),
             ),
-            video_max_width: env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920).clamp(640, 3840),
-            video_max_height: env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080).clamp(360, 2160),
+            video_max_width: env_u32("BRIVVA_VIDEO_MAX_WIDTH", 1920).clamp(640, 1920),
+            video_max_height: env_u32("BRIVVA_VIDEO_MAX_HEIGHT", 1080).clamp(360, 1080),
             video_max_fps: env_u32("BRIVVA_VIDEO_MAX_FPS", 30).clamp(15, 120),
             translated_stream_delay_ms: env_u64_any(
                 &["BRIVVA_TRANSLATED_STREAM_DELAY_MS", "BROADCAST_DELAY_MS"],
@@ -313,8 +313,8 @@ mod tests {
             cfg.video_encoder,
             crate::features::broadcast::domain::VideoEncoderKind::Nvenc
         );
-        assert_eq!(cfg.video_max_width, 3840);
-        assert_eq!(cfg.video_max_height, 2160);
+        assert_eq!(cfg.video_max_width, 1920);
+        assert_eq!(cfg.video_max_height, 1080);
         assert_eq!(cfg.video_max_fps, 120);
         assert_eq!(cfg.translated_stream_delay_ms, 5500);
 

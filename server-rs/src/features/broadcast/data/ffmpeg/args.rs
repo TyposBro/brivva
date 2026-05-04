@@ -33,10 +33,13 @@ impl Default for VideoProfileCaps {
 }
 
 impl VideoProfileCaps {
+    const BACKEND_MAX_WIDTH: u32 = 1920;
+    const BACKEND_MAX_HEIGHT: u32 = 1080;
+
     pub fn new(max_width: u32, max_height: u32, max_fps: u32) -> Self {
         Self {
-            max_width: max_width.clamp(640, 3840),
-            max_height: max_height.clamp(360, 2160),
+            max_width: max_width.clamp(640, Self::BACKEND_MAX_WIDTH),
+            max_height: max_height.clamp(360, Self::BACKEND_MAX_HEIGHT),
             max_fps: max_fps.clamp(15, 120),
         }
     }
@@ -678,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn video_profile_can_preserve_4k120_when_runtime_caps_allow_it() {
+    fn video_profile_caps_4k_capture_to_1080p_backend_ceiling() {
         let profile = VideoProfile::from_capture_with_caps(
             3840,
             2160,
@@ -687,13 +690,13 @@ mod tests {
         );
         assert_eq!(profile.input_fps, 120);
         assert_eq!(profile.output_fps, 120);
-        assert_eq!(profile.max_width, 3840);
-        assert_eq!(profile.max_height, 2160);
-        assert_eq!(profile.bitrate_kbps, 35_000);
+        assert_eq!(profile.max_width, 1920);
+        assert_eq!(profile.max_height, 1080);
+        assert_eq!(profile.bitrate_kbps, 12_000);
     }
 
     #[test]
-    fn video_profile_treats_wide_4k_as_4k_class() {
+    fn video_profile_caps_wide_4k_capture_to_1080p_backend_ceiling() {
         let profile = VideoProfile::from_capture_with_caps(
             3840,
             1920,
@@ -702,9 +705,9 @@ mod tests {
         );
         assert_eq!(profile.input_fps, 30);
         assert_eq!(profile.output_fps, 30);
-        assert_eq!(profile.max_width, 3840);
-        assert_eq!(profile.max_height, 2160);
-        assert_eq!(profile.bitrate_kbps, 24_000);
+        assert_eq!(profile.max_width, 1920);
+        assert_eq!(profile.max_height, 1080);
+        assert_eq!(profile.bitrate_kbps, 6_000);
     }
 
     #[test]
