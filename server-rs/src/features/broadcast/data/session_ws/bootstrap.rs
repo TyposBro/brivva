@@ -92,6 +92,8 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
     }
     live_session.voice_preset =
         crate::features::broadcast::domain::VoicePreset::from_wire(&bundle.session.voice_preset);
+    live_session.translation_terms =
+        parse_translation_terms(bundle.session.translation_terms.as_deref());
 
     let metrics = SessionMetrics::new();
     live_session.metrics = Some(metrics.clone());
@@ -226,6 +228,7 @@ mod tests {
             live_session_id: None,
             voice_preset: "female".into(),
             created_at: 0,
+            translation_terms: None,
         }
     }
 
@@ -316,4 +319,15 @@ mod tests {
         };
         assert!(matches!(preflight_streams(&bundle), StreamPreflight::Ok));
     }
+}
+
+fn parse_translation_terms(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .take(50)
+        .map(|term| term.chars().take(80).collect::<String>())
+        .collect()
 }

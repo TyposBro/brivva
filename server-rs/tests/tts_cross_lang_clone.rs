@@ -196,6 +196,7 @@ async fn re_record_mid_session_routes_next_tts_dispatch_to_the_new_voice() {
         live_session_id: Some("LIVE-RR".into()),
         voice_preset: "cloned".into(),
         created_at: 0,
+        translation_terms: None,
     };
     let voice_b = Voice {
         id: "v-B".into(),

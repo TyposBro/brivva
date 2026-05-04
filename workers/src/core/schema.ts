@@ -72,6 +72,7 @@ export const sessions = sqliteTable(
     live_session_id: text("live_session_id"),
     /** 'cloned' | 'female' | 'male'. Selects which voice TTS should use. */
     voice_preset: text("voice_preset").notNull().default("female"),
+    translation_terms: text("translation_terms"),
     created_at: integer("created_at").notNull(),
   },
   (t) => [index("sessions_user_id_idx").on(t.user_id)],

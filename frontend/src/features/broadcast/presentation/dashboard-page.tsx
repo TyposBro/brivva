@@ -107,6 +107,7 @@ function DashboardInner() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [privacyStatus, setPrivacyStatus] = useState("unlisted");
+  const [translationTerms, setTranslationTerms] = useState("");
   const [magicPaste, setMagicPaste] = useState("");
   const [quoteSessionId, setQuoteSessionId] = useState<string | null>(null);
   // Surfaced when POST /api/sessions returns 400 voice_language_mismatch
@@ -350,6 +351,7 @@ function DashboardInner() {
         voice_id: selectedVoice || undefined,
         platforms,
         privacy_status: hasYoutube ? privacyStatus : undefined,
+        translation_terms: translationTerms.trim() || undefined,
       });
 
       if (result.errors?.length) setError(result.errors.join("; "));
@@ -669,6 +671,26 @@ function DashboardInner() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* Translation hints */}
+        <div className="bg-surface-container-low rounded-xl px-4 py-3 space-y-2">
+          <label className="text-on-surface text-sm font-label font-bold block">
+            Product terms for translation <span className="text-on-surface-variant font-normal">optional</span>
+          </label>
+          <p className="text-on-surface-variant text-xs font-label leading-relaxed">
+            Add brand names, product names, promo codes, prices, sizing words, or phrases the host will say. This helps the live translator keep important commerce terms accurate instead of guessing.
+          </p>
+          <textarea
+            className="w-full min-h-24 bg-surface-container-highest border-none rounded-lg px-3 py-2 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary/50 transition-all font-label text-sm outline-none resize-y"
+            placeholder="Example: Brivva Pro serum, 1+1 bundle, SUMMER20, ₩29,900, collagen ampoule"
+            value={translationTerms}
+            maxLength={2000}
+            onChange={(e) => setTranslationTerms(e.target.value)}
+          />
+          <div className="text-right text-[10px] font-label text-on-surface-variant">
+            {translationTerms.length}/2000
           </div>
         </div>
 

@@ -136,6 +136,7 @@ export function createSession(body: {
   voice_id?: string;
   platforms?: PlatformConfig[];
   privacy_status?: string;
+  translation_terms?: string;
 }): Promise<CreateSessionResponse> {
   return parseResult(
     client().POST("/api/sessions", { body }),

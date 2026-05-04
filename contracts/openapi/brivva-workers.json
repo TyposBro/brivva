@@ -317,7 +317,8 @@
           "status",
           "live_session_id",
           "voice_preset",
-          "created_at"
+          "created_at",
+          "translation_terms"
         ],
         "properties": {
           "id": {
@@ -356,6 +357,10 @@
           },
           "created_at": {
             "type": "integer"
+          },
+          "translation_terms": {
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -482,6 +487,10 @@
           },
           "privacy_status": {
             "type": "string"
+          },
+          "translation_terms": {
+            "type": "string",
+            "maxLength": 2000
           },
           "platforms": {
             "type": "array",

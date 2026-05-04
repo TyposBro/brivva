@@ -29,8 +29,8 @@ pub struct SonioxContext {
 
 #[derive(Debug, Serialize)]
 pub struct SonioxContextItem {
-    pub key: &'static str,
-    pub value: &'static str,
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +140,7 @@ pub enum SonioxMode {
     Translate {
         source_lang: Lang,
         target_lang: Lang,
+        terms: Vec<String>,
     },
 }
 
@@ -150,6 +151,7 @@ impl SonioxMode {
             SonioxMode::Translate {
                 source_lang,
                 target_lang,
+                ..
             } => format!("{}→{}", source_lang, target_lang),
         }
     }
@@ -167,13 +169,14 @@ impl SonioxMode {
             SonioxMode::Translate {
                 source_lang,
                 target_lang,
+                terms,
             } => (
                 source_lang.to_string(),
                 Some(SonioxTranslation {
                     kind: "one_way",
                     target_language: target_lang.to_string(),
                 }),
-                Some(live_commerce_translation_context()),
+                Some(live_commerce_translation_context(terms)),
             ),
         };
 
@@ -205,23 +208,28 @@ impl SonioxMode {
     }
 }
 
-fn live_commerce_translation_context() -> SonioxContext {
-    SonioxContext {
-        general: vec![
-            SonioxContextItem {
-                key: "domain",
-                value: "live commerce",
-            },
-            SonioxContextItem {
-                key: "setting",
-                value: "real-time sales livestream",
-            },
-            SonioxContextItem {
-                key: "instructions",
-                value: "Translate in concise spoken live-commerce style. Preserve prices, product names, stock counts, discounts, dates, and calls to action exactly. Avoid filler, repeated greetings, and excessive politeness.",
-            },
-        ],
+fn live_commerce_translation_context(terms: &[String]) -> SonioxContext {
+    let mut general = vec![
+        SonioxContextItem {
+            key: "domain".into(),
+            value: "live commerce".into(),
+        },
+        SonioxContextItem {
+            key: "setting".into(),
+            value: "real-time sales livestream".into(),
+        },
+        SonioxContextItem {
+            key: "instructions".into(),
+            value: "Translate in concise spoken live-commerce style. Preserve prices, product names, stock counts, discounts, dates, and calls to action exactly. Avoid filler, repeated greetings, and excessive politeness.".into(),
+        },
+    ];
+    if !terms.is_empty() {
+        general.push(SonioxContextItem {
+            key: "translation_terms".into(),
+            value: terms.join(", "),
+        });
     }
+    SonioxContext { general }
 }
 
 #[cfg(test)]
@@ -266,6 +274,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         assert!(mode.accepts(&token("konnichiwa", Some("translation"))));
         assert!(!mode.accepts(&token("hello", Some("original"))));
@@ -277,6 +286,7 @@ mod tests {
         let translate = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ko,
+            terms: Vec::new(),
         };
         let source = SonioxMode::Source { lang: Lang::En };
 
@@ -306,6 +316,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Zh,
+            terms: Vec::new(),
         };
         let config = mode.build_config("k");
 
@@ -324,6 +335,23 @@ mod tests {
     }
 
     #[test]
+    fn translate_config_includes_host_translation_terms_when_present() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::Ko,
+            target_lang: Lang::Ja,
+            terms: vec!["Brivva Pro serum".into(), "SUMMER20".into()],
+        };
+        let config = mode.build_config("k");
+        let context = config.context.expect("translate mode has context");
+        let terms = context
+            .general
+            .iter()
+            .find(|item| item.key == "translation_terms")
+            .expect("has host terms");
+        assert_eq!(terms.value, "Brivva Pro serum, SUMMER20");
+    }
+
+    #[test]
     fn config_serializes_skips_translation_when_none() {
         let mode = SonioxMode::Source { lang: Lang::En };
         let json = serde_json::to_string(&mode.build_config("k")).unwrap();
@@ -336,6 +364,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::Ko,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         let json = serde_json::to_string(&mode.build_config("k")).unwrap();
         assert!(json.contains("\"context\""), "serialized: {json}");
@@ -352,6 +381,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         assert_eq!(mode.tag(), "en→ja");
     }

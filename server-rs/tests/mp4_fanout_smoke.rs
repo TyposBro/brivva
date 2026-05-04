@@ -523,6 +523,7 @@ fn spawn_translation_pipeline(
         handle: LiveSessionHandle::new("mp4-fanout-smoke".to_string(), sessions.clone()),
         source_lang: args.source_lang.clone(),
         target_langs,
+        translation_terms: Vec::new(),
         config: Arc::new(PipelineConfig {
             soniox_api_key: args.soniox_api_key.clone(),
             soniox_ws_url: args.soniox_ws_url.clone(),

@@ -735,6 +735,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         let response = SonioxResponse {
             tokens: vec![
@@ -758,6 +759,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         let response = SonioxResponse {
             tokens: vec![
@@ -788,6 +790,7 @@ mod tests {
         let mode = SonioxMode::Translate {
             source_lang: Lang::En,
             target_lang: Lang::Ja,
+            terms: Vec::new(),
         };
         let response = SonioxResponse {
             tokens: vec![token("こんにちは", true, Some("translation"))],
@@ -880,6 +883,7 @@ mod tests {
             mode: &SonioxMode::Translate {
                 source_lang: Lang::En,
                 target_lang: Lang::Ja,
+                terms: Vec::new(),
             },
             handle: &handle,
             final_text: "x",

@@ -122,10 +122,16 @@ fn spawn_stt_pipeline(
     source_lang: &Lang,
 ) -> mpsc::Sender<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
-    let (target_langs, pipeline_cfg) = live_sessions
+    let (target_langs, pipeline_cfg, translation_terms) = live_sessions
         .get(live_session_id)
-        .map(|r| (r.rtmp_langs.clone(), r.pipeline_config.clone()))
-        .unwrap_or_else(|| (Vec::new(), Arc::new(PipelineConfig::default())));
+        .map(|r| {
+            (
+                r.rtmp_langs.clone(),
+                r.pipeline_config.clone(),
+                r.translation_terms.clone(),
+            )
+        })
+        .unwrap_or_else(|| (Vec::new(), Arc::new(PipelineConfig::default()), Vec::new()));
     let session = pipeline::PipelineSession {
         handle: crate::features::broadcast::domain::LiveSessionHandle::new(
             live_session_id.to_string(),
@@ -133,6 +139,7 @@ fn spawn_stt_pipeline(
         ),
         source_lang: source_lang.clone(),
         target_langs,
+        translation_terms,
         config: pipeline_cfg,
     };
     tokio::spawn(async move {

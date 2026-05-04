@@ -320,6 +320,7 @@ export type CreateSession = {
   title: string;
   sourceLang: string;
   targetLangs: string;
+  translationTerms?: string | null;
 };
 
 export async function createSession(
@@ -340,6 +341,7 @@ export async function createSession(
     status: "setup",
     live_session_id: null,
     voice_preset: args.voiceId ? "cloned" : "female",
+    translation_terms: args.translationTerms ?? null,
     created_at: now(),
   };
   await wrap(db).insert(schema.sessions).values(row).run();

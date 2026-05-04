@@ -186,6 +186,7 @@ mod tests {
             live_session_id: Some("LIVE-1".into()),
             voice_preset: "cloned".into(),
             created_at: 0,
+            translation_terms: None,
         }
     }
 

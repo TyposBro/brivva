@@ -28,6 +28,7 @@ pub struct PipelineSession {
     pub handle: LiveSessionHandle,
     pub source_lang: Lang,
     pub target_langs: Vec<Lang>,
+    pub translation_terms: Vec<String>,
     pub config: Arc<PipelineConfig>,
 }
 
@@ -209,6 +210,7 @@ fn spawn_translate_sessions(
         let mode = SonioxMode::Translate {
             source_lang: session.source_lang.clone(),
             target_lang,
+            terms: session.translation_terms.clone(),
         };
         tokio::spawn(async move {
             run_soniox_session(session, mode, target_rx).await;
@@ -388,6 +390,7 @@ mod tests {
             handle,
             source_lang: Lang::En,
             target_langs: vec![Lang::Ja, Lang::Ko, Lang::Zh],
+            translation_terms: Vec::new(),
             config: Arc::new(PipelineConfig {
                 elevenlabs_api_key: "k".into(),
                 ..Default::default()
@@ -425,6 +428,7 @@ mod tests {
             handle,
             source_lang: Lang::En,
             target_langs: vec![Lang::Ja],
+            translation_terms: Vec::new(),
             // Default config → empty elevenlabs_api_key → setup should skip.
             config: Arc::new(PipelineConfig::default()),
         };
@@ -463,6 +467,7 @@ mod tests {
             handle,
             source_lang: Lang::En,
             target_langs: vec![Lang::Ja],
+            translation_terms: Vec::new(),
             config: Arc::new(PipelineConfig {
                 elevenlabs_api_key: "k".into(),
                 ..Default::default()
@@ -498,6 +503,7 @@ mod tests {
             handle,
             source_lang: Lang::En,
             target_langs: vec![Lang::Ja],
+            translation_terms: Vec::new(),
             config: Arc::new(PipelineConfig::default()), // empty soniox_api_key
         };
         // Should just log and return — no panic or spawn storm.
@@ -532,6 +538,7 @@ mod tests {
             source_lang: Lang::En,
             // Duplicates + source repeat exercise dedupe + fan-out wiring.
             target_langs: vec![Lang::Ja, Lang::En, Lang::Ja, Lang::Ko],
+            translation_terms: Vec::new(),
             config: Arc::new(PipelineConfig {
                 soniox_api_key: "sk".into(),
                 // ws://127.0.0.1:1 is connection-refused → each tokio task

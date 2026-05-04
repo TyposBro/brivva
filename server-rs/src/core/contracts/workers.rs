@@ -22,6 +22,7 @@ pub struct Session {
     pub live_session_id: Option<String>,
     pub voice_preset: String,
     pub created_at: i64,
+    pub translation_terms: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

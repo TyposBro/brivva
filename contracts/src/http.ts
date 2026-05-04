@@ -60,6 +60,7 @@ export const SessionSchema = z.object({
   live_session_id: z.string().nullable(),
   voice_preset: VoicePresetSchema.default("female"),
   created_at: z.number().int(),
+  translation_terms: z.string().nullable().default(null),
 });
 
 export const UpdateSessionVoicePresetSchema = z.object({
@@ -163,6 +164,7 @@ export const CreateSessionRequestSchema = z.object({
   voice_id: z.string().min(1).optional(),
   platforms: z.array(PlatformConfigSchema).optional(),
   privacy_status: z.string().min(1).optional(),
+  translation_terms: z.string().max(2000).optional(),
 });
 
 export const CreateSessionResponseSchema = z.object({

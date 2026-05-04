@@ -521,6 +521,7 @@ app.post("/api/sessions", async (c) => {
 		title: body.title,
 		sourceLang: body.source_lang,
 		targetLangs: JSON.stringify(body.target_langs),
+		translationTerms: body.translation_terms?.trim() || null,
 	});
 
 	const privacyStatus = body.privacy_status ?? "unlisted";

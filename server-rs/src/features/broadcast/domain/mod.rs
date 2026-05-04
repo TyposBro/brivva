@@ -413,6 +413,8 @@ pub struct LiveSession {
     pub webrtc_peer: Option<Arc<RTCPeerConnection>>,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
+    /// Optional host-provided product/brand/offer terms for STT/translation context.
+    pub translation_terms: Vec<String>,
     /// Upstream-service config injected from orchestration at session start.
     pub pipeline_config: Arc<PipelineConfig>,
     /// Billing counters shared with the RTMP drains and the metrics reporter
@@ -448,6 +450,7 @@ impl LiveSession {
             rtmp_manager: None,
             webrtc_peer: None,
             rtmp_langs: Vec::new(),
+            translation_terms: Vec::new(),
             pipeline_config,
             metrics: None,
             tts_workers: HashMap::new(),

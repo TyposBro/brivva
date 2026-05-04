@@ -1805,6 +1805,7 @@ export interface components {
             /** @enum {string} */
             voice_preset: "cloned" | "female" | "male";
             created_at: number;
+            translation_terms: string | null;
         };
         PlatformCredential: {
             id: string;
@@ -1838,6 +1839,7 @@ export interface components {
             target_langs: string[];
             voice_id?: string;
             privacy_status?: string;
+            translation_terms?: string;
             platforms?: components["schemas"]["PlatformConfig"][];
         };
         CreateSessionResponse: {

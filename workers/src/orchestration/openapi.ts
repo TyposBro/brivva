@@ -225,6 +225,7 @@ const schemas = {
       "live_session_id",
       "voice_preset",
       "created_at",
+      "translation_terms",
     ],
     properties: {
       id: { type: "string" },
@@ -237,6 +238,7 @@ const schemas = {
       live_session_id: { type: "string", nullable: true },
       voice_preset: { type: "string", enum: ["cloned", "female", "male"] },
       created_at: { type: "integer" },
+      translation_terms: { type: "string", nullable: true },
     },
   },
   PlatformCredential: {
@@ -299,6 +301,7 @@ const schemas = {
       target_langs: { type: "array", items: { type: "string" }, minItems: 1 },
       voice_id: { type: "string" },
       privacy_status: { type: "string" },
+      translation_terms: { type: "string", maxLength: 2000 },
       platforms: { type: "array", items: ref("PlatformConfig") },
     },
   },
