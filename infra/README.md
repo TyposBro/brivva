@@ -10,9 +10,9 @@ Reproducible AWS infra for Brivva backend. Region fixed to `us-east-1` for proxi
 | Secrets Manager secret | `brivva/env`           | Runtime secret payload, populated from Infisical during `tofu apply`                    |
 | IAM role               | `brivva-ecs-execution` | ECS task exec + `secretsmanager:GetSecretValue` on `brivva/env`                         |
 | CloudWatch log group   | `/ecs/brivva`          | 7d retention                                                                            |
-| ECS cluster            | `brivva`               | Fargate CPU fallback or ECS-on-EC2 GPU primary                                          |
-| ECS task def           | `brivva`               | 16 vCPU / 32 GB fallback; GPU mode requests 1 GPU and sets `BRIVVA_VIDEO_ENCODER=nvenc` |
-| ECS service            | `brivva`               | 1 task; Fargate launch type or GPU capacity provider                                    |
+| ECS cluster            | `brivva`               | ECS-on-EC2 GPU primary                                                                  |
+| ECS task def           | `brivva`               | g4dn-sized EC2 task, requests 1 GPU and sets `BRIVVA_VIDEO_ENCODER=nvenc`               |
+| ECS service            | `brivva`               | 1 task via GPU capacity provider                                                        |
 | Security group         | `brivva-task`          | Egress + WebRTC UDP 40000-40100                                                         |
 
 Sensitive values live in Infisical. Terraform receives them only as
@@ -39,9 +39,9 @@ Outputs include `ecr_server_url`, `account_id`, etc.
 
 ## ECS GPU mode (May 10 primary)
 
-Default Terraform remains `ecs_launch_type=FARGATE` and `gpu_desired_capacity=0`, so no GPU instance bill appears until explicitly enabled.
+Terraform is GPU-only. The primary `brivva` service runs on ECS-on-EC2 with a GPU capacity provider, requests `GPU:1`, and defaults to one `g4dn.xlarge` via `gpu_desired_capacity=1`.
 
-Safer blue/green rehearsal: create a parallel `brivva-gpu` service first. This does **not** replace the primary Fargate `brivva` service.
+Safer blue/green rehearsal: create a parallel `brivva-gpu` service first. This does **not** replace the primary `brivva` service.
 
 Phase 6C GPU rehearsal is private/internal-only: no public IP assignment, no TCP 3000 from `0.0.0.0/0`, `BRIVVA_V2_GPU_WORKERS=0`, and fake-sink/shadow mode only. The endpoint helper refuses to print public HTTP/WS endpoints.
 
@@ -109,7 +109,7 @@ AWS_REGION=us-east-1 ./scripts/check-gpu-zero-spend.sh
 
 Current rehearsal network path is private/no-public-IP and fake-sink/shadow by default:
 
-- Launch template sets `associate_public_ip_address = false`.
+- Primary GPU launch template sets `associate_public_ip_address = true` for outbound internet without a NAT gateway bill.
 - VPC endpoints cover AWS control-plane traffic only: ECS, ECS agent/telemetry, ECR API/DKR, CloudWatch Logs, Secrets Manager, and S3 image layers.
 - VPC endpoints do **not** provide external internet egress to Soniox, ElevenLabs, YouTube, Grip, TikTok, or generic RTMP destinations.
 - Operator/browser access to private `http://<gpu-private-ip>:3000` requires VPN, bastion, SSM port-forward, or another private route. SSM debugging also needs `gpu_private_endpoint_debug_services_enabled=true` plus IAM/session-manager permissions; ECS Exec is not enabled by this Terraform.
@@ -121,20 +121,18 @@ Real-platform smoke requires one of these explicit choices before scaling paid G
 2. controlled primary `brivva` EC2_GPU cutover using the existing public route/tunnel, with rollback ready;
 3. future bastion/VPN/SSM-tunnel design plus external egress.
 
-Direct primary switch path (riskier): changes the existing `brivva` service from Fargate to EC2 GPU and may replace the service.
+Primary GPU deploy:
 
 ```fish
 infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
-  -var='ecs_launch_type=EC2_GPU' \
   -var='gpu_desired_capacity=1' \
   -var='gpu_instance_type=g4dn.xlarge'
 ```
 
-Turn GPU spend back off:
+Turn GPU spend back off intentionally:
 
 ```fish
 infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
-  -var='ecs_launch_type=EC2_GPU' \
   -var='gpu_desired_capacity=0'
 ```
 
@@ -154,14 +152,7 @@ The GPU path uses:
 
 ## Redeploy (after code change)
 
-Terraform does NOT rebuild images. CPU/Fargate fallback flow:
-
-```fish
-cd ..
-./deploy.sh   # build → push :latest → force new ECS deployment
-```
-
-GPU/ECS-on-EC2 image flow:
+Terraform does NOT rebuild images. GPU/ECS-on-EC2 image flow:
 
 ```fish
 # first GPU image bootstrap / after GPU Dockerfile changes
@@ -170,11 +161,11 @@ GPU/ECS-on-EC2 image flow:
 # build/push GPU server image without touching ECS services
 ./deploy.sh --gpu --build-only
 
-# direct primary deploy only after cutover is intended
+# primary deploy
 ./deploy.sh --gpu
 ```
 
-`--gpu` selects the NVENC runtime base and writes `BRIVVA_VIDEO_ENCODER=nvenc` into the task definition. The server build base is shared with CPU deploys; the runtime base tag defaults to `bookworm-ffmpeg-7.1.1-nvenc-v1`.
+GPU deploy is the default. `--gpu` is kept for compatibility and writes `BRIVVA_VIDEO_ENCODER=nvenc` into the task definition. The runtime base tag defaults to `bookworm-ffmpeg-7.1.1-nvenc-v1`.
 
 ### Session Naming Migration
 
@@ -243,7 +234,7 @@ Tasks fetch secrets at container start — they don't hot-reload.
 
 ## Sizing
 
-**Current default: 16 vCPU / 32 GB.** (bumped from 8/16 on 2026-04-30 after
+**Current default: 1× g4dn.xlarge GPU host, 4096 CPU units / 14 GB task.** CPU fallback is removed. Previous 16 vCPU / 32 GB Fargate sizing was retired after GPU became cheaper and more reliable for NVENC video encode. This was originally bumped from 8/16 on 2026-04-30 after
 YouTube RTMP fell below realtime on 720p30, and from 2/4 on 2026-04-20 to carry
 the May 10 "ultimate test" shape: En source → Ko+Zh+Ja translations +
 passthrough on Grip+TikTok+YouTube simultaneously.)
@@ -271,16 +262,14 @@ Rough budget per running stream:
 
 ### Tune via Terraform config
 
-If you need to override the new default:
+If you need to override the GPU task size:
 
 ```hcl
-task_cpu    = "16384"  # 16 vCPU (current default)
-task_memory = "32768"  # 32 GB
+gpu_task_cpu    = "4096"   # g4dn.xlarge has 4 vCPU
+gpu_task_memory = "14336"  # leave room for ECS/NVIDIA/system overhead
 ```
 
-Valid Fargate combos: see [AWS docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html). Common pairs: 1024/2048, 2048/4096, 4096/8192, 8192/16384, 16384/32768.
-
-Apply changes: `tofu apply`, then `./deploy.sh --skip-build` to roll tasks.
+Apply changes: `tofu apply`, then `./deploy.sh --gpu --skip-build` to roll tasks.
 
 ## Session log capture
 
@@ -301,7 +290,7 @@ Toggle layers independently:
 | server-rs high-volume debug events | `session_logs_verbose` Terraform variable                                    | off     |
 
 Keep verbose off for normal production. Frontend media stats are enough for
-session-quality estimates; server verbose is only for debugging Fargate-side
+session-quality estimates; server verbose is only for debugging server-side
 event ordering.
 
 ## Horizontal scale (many concurrent rooms)
@@ -382,8 +371,8 @@ the `dashboard_url` output.
 | Name                           | Trigger                            | What it means                                                |
 | ------------------------------ | ---------------------------------- | ------------------------------------------------------------ |
 | `brivva-ecs-running-tasks-low` | `RunningTaskCount < 1` for 2m      | Task crashed or deploy rolling. Tunnel users see 530/1033.   |
-| `brivva-ecs-cpu-high`          | CPU avg > 80% for 15m              | Saturated — bump `task_cpu` or scale out.                    |
-| `brivva-ecs-memory-high`       | Mem avg > 85% for 15m              | OOM-kill imminent — bump `task_memory`.                      |
+| `brivva-ecs-cpu-high`          | CPU avg > 80% for 15m              | Saturated — bump `gpu_task_cpu`/instance or scale out.       |
+| `brivva-ecs-memory-high`       | Mem avg > 85% for 15m              | OOM-kill imminent — bump `gpu_task_memory`/instance.         |
 | `brivva-ffmpeg-crash-rate`     | > 3 ffmpeg crashes in 5m           | Destination RTMP unhealthy or CPU throttling.                |
 | `brivva-ffmpeg-gave-up`        | Any "restart limit exceeded" in 1m | A stream is fully DOWN until the session restarts. **Page.** |
 
@@ -435,7 +424,7 @@ Sidecar auto-enabled iff both `tunnel_creds` AND `tunnel_id` are non-empty. With
 
 **Named tunnels are persistent.** Same `TUNNEL_CREDS` + `TUNNEL_ID` rejoin the same tunnel after every task restart. Hostname→tunnel route lives in Cloudflare DNS, not regenerated.
 
-**Scale-to-zero limitation:** Cloudflare can't wake Fargate. If `desired_count=0` and a request lands, visitor gets `530/1033`. Livestream is stateful (long-lived WS, ffmpeg processes, SQLite), so stay at `desired_count=1`.
+**Scale-to-zero limitation:** Cloudflare can't wake a stopped ECS GPU service. If `desired_count=0` / `gpu_desired_capacity=0` and a request lands, visitor gets `530/1033`. Livestream is stateful (long-lived WS, ffmpeg processes, SQLite), so stay at `desired_count=1` and one GPU host for production.
 
 ## Destroy
 

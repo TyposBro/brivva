@@ -28,43 +28,8 @@ variable "broadcast_delay_ms" {
   default     = 5000
 }
 
-variable "task_cpu" {
-  description = <<-EOT
-    Fargate CPU units (1024 = 1 vCPU). Default 16384 = 16 vCPU.
-    Sized for 1 concurrent stream with 720p/1080p transcode + up to 3 translations
-    + passthrough + burn-in subtitles (May 10 "ultimate test" shape:
-    En -> Ko+Zh+Ja + passthrough = ~3.45 cores under load, comfortable
-    headroom for STT/translate/TTS orchestration).
-    See infra/README.md "Sizing" for the math and scale-out guidance.
-  EOT
-  type        = string
-  default     = "16384"
-}
-
-variable "task_memory" {
-  description = "Fargate memory MB. Default 32768 = 32 GB (paired with 16 vCPU)."
-  type        = string
-  default     = "32768"
-}
-
-variable "ecs_launch_type" {
-  description = "Media engine launch path: FARGATE for CPU fallback, EC2_GPU for May 10 GPU primary."
-  type        = string
-  default     = "FARGATE"
-  validation {
-    condition     = contains(["FARGATE", "EC2_GPU"], var.ecs_launch_type)
-    error_message = "ecs_launch_type must be FARGATE or EC2_GPU."
-  }
-}
-
-variable "gpu_capacity_enabled" {
-  description = "Create zero-capacity ECS GPU ASG/capacity provider without switching the service off Fargate. No GPU bill while gpu_desired_capacity=0."
-  type        = bool
-  default     = true
-}
-
 variable "gpu_instance_type" {
-  description = "EC2 GPU instance type for ecs_launch_type=EC2_GPU. g4dn.xlarge = cheapest NVIDIA T4 launch target."
+  description = "EC2 GPU instance type for the primary media service. g4dn.xlarge = cheapest NVIDIA T4 launch target."
   type        = string
   default     = "g4dn.xlarge"
 }
@@ -76,15 +41,15 @@ variable "gpu_availability_zones" {
 }
 
 variable "gpu_desired_capacity" {
-  description = "Number of ECS GPU EC2 instances. Keep 0 until ready to pay; set 1 for rehearsal/launch."
+  description = "Number of ECS GPU EC2 instances for the primary media service. Set 1 for production, 0 only to intentionally stop media."
   type        = number
-  default     = 0
+  default     = 1
 }
 
 variable "gpu_rehearsal_service_enabled" {
-  description = "Create a parallel brivva-gpu ECS service for blue/green rehearsal without replacing the primary Fargate service."
+  description = "Create a parallel brivva-gpu ECS service for isolated blue/green rehearsal beside the primary GPU service."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "gpu_rehearsal_desired_count" {
@@ -204,7 +169,7 @@ variable "jwt_secret" {
 }
 
 variable "internal_secret" {
-  description = "Shared secret for Fargate→Workers /internal/* HTTP calls."
+  description = "Shared secret for server-rs→Workers /internal/* HTTP calls."
   type        = string
   sensitive   = true
 }

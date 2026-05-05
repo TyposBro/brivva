@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build server-rs image → push to ECR → register task def → deploy ECS.
+# Build GPU server-rs image → push to ECR → register task def → deploy ECS.
 # Infra (cluster, service, task def, secrets) is owned by terraform — see infra/.
 # Run `terraform -chdir=infra apply` first.
 
@@ -46,12 +46,12 @@ BUILD_FFMPEG_GPU_BASE=false
 BUILD_SERVER_BASES=false
 BASES_ONLY=false
 BUILD_ONLY=false
-GPU_MODE=false
+GPU_MODE=true
 
 usage() {
 	echo "Usage: $0 [--gpu] [--bases-only] [--build-only] [--skip-build] [--build-ffmpeg-base] [--build-ffmpeg-gpu-base] [--build-server-bases]"
 	echo ""
-	echo "  --gpu                 Build/deploy using NVENC GPU runtime base"
+	echo "  --gpu                 Build/deploy using NVENC GPU runtime base (default; kept for compatibility)"
 	echo "  --bases-only          Build/verify requested base images, then exit before server deploy"
 	echo "  --build-only          Build/push server-rs image, then exit before ECS deploy"
 	echo "  --skip-build          Skip Docker build, deploy server-rs:latest"
@@ -102,11 +102,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [[ "$GPU_MODE" == true ]]; then
-	BRIVVA_VIDEO_ENCODER="${BRIVVA_VIDEO_ENCODER:-nvenc}"
-else
-	BRIVVA_VIDEO_ENCODER="${BRIVVA_VIDEO_ENCODER:-x264}"
-fi
+BRIVVA_VIDEO_ENCODER="${BRIVVA_VIDEO_ENCODER:-nvenc}"
 
 if [[ "$SKIP_BUILD" == true && ("$BUILD_FFMPEG_BASE" == true || "$BUILD_FFMPEG_GPU_BASE" == true || "$BUILD_SERVER_BASES" == true || "$BASES_ONLY" == true || "$BUILD_ONLY" == true) ]]; then
 	echo "--skip-build cannot be combined with build/base image flags" >&2
@@ -129,35 +125,18 @@ if [[ "$SKIP_BUILD" == false ]]; then
 	aws ecr get-login-password --region "$AWS_REGION" |
 		docker login --username AWS --password-stdin "$ECR_BASE"
 
-	# Keep Fargate on x86_64 so production ffmpeg behavior matches Ubuntu dev.
+	# Keep ECS GPU on x86_64 so production ffmpeg behavior matches Ubuntu dev.
 	PLATFORM="linux/amd64"
 	SHA="$(git rev-parse HEAD)"
 	IMAGE="$ECR_BASE/$PROJECT/server-rs:$SHA"
 	LATEST_IMAGE="$ECR_BASE/$PROJECT/server-rs:latest"
-	FFMPEG_BASE_IMAGE="${FFMPEG_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-base:${FFMPEG_VERSION}-native-rtmp}"
 	FFMPEG_GPU_BASE_IMAGE="${FFMPEG_GPU_BASE_IMAGE:-$ECR_BASE/$PROJECT/ffmpeg-gpu-base:${FFMPEG_VERSION}-nvenc}"
 	SERVER_BUILD_BASE_IMAGE="${SERVER_BUILD_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-build-base:${SERVER_BUILD_BASE_TAG}}"
-	if [[ "$GPU_MODE" == true ]]; then
-		SERVER_RUNTIME_BASE_IMAGE="${SERVER_RUNTIME_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-runtime-base:${SERVER_RUNTIME_GPU_BASE_TAG}}"
-	else
-		SERVER_RUNTIME_BASE_IMAGE="${SERVER_RUNTIME_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-runtime-base:${SERVER_RUNTIME_BASE_TAG}}"
-	fi
+	SERVER_RUNTIME_BASE_IMAGE="${SERVER_RUNTIME_BASE_IMAGE:-$ECR_BASE/$PROJECT/server-runtime-base:${SERVER_RUNTIME_GPU_BASE_TAG}}"
 
 	if [[ "$BUILD_FFMPEG_BASE" == true ]]; then
-		echo "==> Building ffmpeg-base ($PLATFORM) → $FFMPEG_BASE_IMAGE"
-		docker buildx build --platform "$PLATFORM" \
-			-t "$FFMPEG_BASE_IMAGE" \
-			-t "$ECR_BASE/$PROJECT/ffmpeg-base:latest" \
-			--build-arg "FFMPEG_VERSION=$FFMPEG_VERSION" \
-			-f infra/ffmpeg-base/Dockerfile --push infra/ffmpeg-base
-	else
-		echo "==> Verifying ffmpeg-base exists → $FFMPEG_BASE_IMAGE"
-		aws ecr describe-images \
-			--region "$AWS_REGION" \
-			--repository-name "$PROJECT/ffmpeg-base" \
-			--image-ids "imageTag=${FFMPEG_VERSION}-native-rtmp" \
-			--query 'imageDetails[0].{digest:imageDigest,pushed:imagePushedAt}' \
-			--output table
+		echo "--build-ffmpeg-base is obsolete: production deploy is GPU-only. Use --build-ffmpeg-gpu-base." >&2
+		exit 1
 	fi
 
 	if [[ "$GPU_MODE" == true ]]; then
