@@ -205,12 +205,12 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         "1024".into(),
         "-f".into(),
         "h264".into(),
-        // Raw H.264 is timestampless, so FFmpeg needs the expected input rate.
-        // The browser sends its actual capture profile before WebRTC starts;
-        // output layout is selected later per destination. Launch defaults are
-        // mobile portrait because live-commerce viewers are phone-first.
-        "-r".into(),
-        profile.input_fps.to_string(),
+        // Raw H.264 is timestampless. Use wall-clock input timestamps instead
+        // of a declared input -r: browser H.264 encoders often deliver 15fps
+        // even when getSettings() reports 30fps, and -r 30 makes FFmpeg run at
+        // ~0.5x realtime. The output fps filter/r below owns RTMP cadence.
+        "-use_wallclock_as_timestamps".into(),
+        "1".into(),
         "-i".into(),
         "pipe:0".into(),
         "-thread_queue_size".into(),
@@ -596,7 +596,7 @@ mod tests {
         assert!(joined.ends_with("rtmp://x/y"));
         assert!(joined.contains("-progress pipe:2 -stats_period 1"));
         assert!(joined.contains("-f h264"));
-        assert!(joined.contains("-r 30 -i pipe:0"));
+        assert!(joined.contains("-use_wallclock_as_timestamps 1 -i pipe:0"));
         assert!(joined.contains(
             "-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
         ));
@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn build_ffmpeg_args_uses_capture_clock_for_reencode_profile() {
+    fn build_ffmpeg_args_uses_wallclock_input_for_reencode_profile() {
         let args = build_ffmpeg_args_with_profile(
             "/tmp/fifo",
             None,
@@ -772,7 +772,7 @@ mod tests {
             VideoEncoderKind::X264,
         );
         let joined = args.join(" ");
-        assert!(joined.contains("-r 60 -i pipe:0"));
+        assert!(joined.contains("-use_wallclock_as_timestamps 1 -i pipe:0"));
         assert!(joined.contains(
             "-vf fps=30,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
         ));
