@@ -2606,6 +2606,105 @@ describe("GET /api/sessions/:id/usage + PATCH /internal/sessions/:id/metrics", (
     expect(usageBody.unbillable_windows.by_lang_minutes.ja).toBe(0.5);
   });
 
+  it("billing drill keeps healthy siblings billable across provider/platform failures", async () => {
+    await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
+      .bind("u-billing-drill", Math.floor(Date.now() / 1000))
+      .run();
+    const create = await call("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "u-billing-drill",
+        title: "Billing drill",
+        source_lang: "en",
+        target_langs: ["ja", "ko", "zh"],
+      }),
+    });
+    const { session } = (await create.json()) as { session: { id: string } };
+
+    await call(`/internal/sessions/${session.id}/metrics`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": env.INTERNAL_SECRET,
+      },
+      body: JSON.stringify({
+        source_seconds: 180,
+        output_seconds_by_lang: { ja: 180, ko: 180, zh: 180 },
+      }),
+    });
+
+    const postFailure = (body: Record<string, unknown>) =>
+      call(`/internal/sessions/${session.id}/provider-failures`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Secret": env.INTERNAL_SECRET,
+        },
+        body: JSON.stringify({
+          live_session_id: "live-billing-drill",
+          state: "failed",
+          recoverable: true,
+          billable: false,
+          started_at_ms: 1000,
+          recovered_at_ms: 61000,
+          ...body,
+        }),
+      });
+
+    expect(
+      (await postFailure({
+        provider: "soniox",
+        scope: "lang",
+        reason: "bad_source_lang_or_key",
+        lang: "ja",
+        message: "bad Soniox window: JA translation unbillable",
+      })).status,
+    ).toBe(200);
+    expect(
+      (await postFailure({
+        provider: "elevenlabs",
+        scope: "lang",
+        reason: "bad_tts_lang_or_key",
+        lang: "ko",
+        status_code: 401,
+        message: "bad ElevenLabs window: KO TTS unbillable",
+      })).status,
+    ).toBe(200);
+    expect(
+      (await postFailure({
+        output_id: "rtmp-zh-youtube",
+        provider: "rtmp",
+        scope: "output",
+        reason: "bad_platform_key",
+        lang: "zh",
+        platform: "youtube",
+        message: "bad RTMP/platform window: ZH output unbillable",
+      })).status,
+    ).toBe(200);
+
+    const usage = await call(`/api/sessions/${session.id}/usage`);
+    const usageBody = (await usage.json()) as {
+      output_minutes_by_lang: Record<string, number>;
+      estimated_cost_usd: number;
+      unbillable_windows: {
+        by_provider_minutes: Record<string, number>;
+        by_lang_minutes: Record<string, number>;
+      };
+    };
+
+    expect(usageBody.output_minutes_by_lang.ja).toBe(2);
+    expect(usageBody.output_minutes_by_lang.ko).toBe(2);
+    expect(usageBody.output_minutes_by_lang.zh).toBe(2);
+    expect(usageBody.unbillable_windows.by_provider_minutes.soniox).toBe(1);
+    expect(usageBody.unbillable_windows.by_provider_minutes.elevenlabs).toBe(1);
+    expect(usageBody.unbillable_windows.by_provider_minutes.rtmp).toBe(1);
+    expect(usageBody.unbillable_windows.by_lang_minutes.ja).toBe(1);
+    expect(usageBody.unbillable_windows.by_lang_minutes.ko).toBe(1);
+    expect(usageBody.unbillable_windows.by_lang_minutes.zh).toBe(1);
+    expect(usageBody.estimated_cost_usd).toBe(9);
+  });
+
   it("PATCH merges per-lang outputs without clobbering prior langs (edge)", async () => {
     await env.DB.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)")
       .bind("u-merge", Math.floor(Date.now() / 1000))

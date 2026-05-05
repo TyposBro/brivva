@@ -123,6 +123,26 @@ variable "gpu_task_memory" {
   default     = "14336"
 }
 
+variable "gpu_bad_provider_drill" {
+  description = "Optional isolated brivva-gpu provider drill. Creates/uses a separate Secrets Manager secret; never mutates shared brivva/env. Allowed: none, soniox, elevenlabs."
+  type        = string
+  default     = "none"
+  validation {
+    condition     = contains(["none", "soniox", "elevenlabs"], var.gpu_bad_provider_drill)
+    error_message = "gpu_bad_provider_drill must be one of: none, soniox, elevenlabs."
+  }
+}
+
+variable "gpu_bad_provider_sentinel" {
+  description = "Operator acknowledgement required for bad-provider drills. Must be exactly ISOLATED_GPU_DRILL_ONLY when gpu_bad_provider_drill != none."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.gpu_bad_provider_drill == "none" || var.gpu_bad_provider_sentinel == "ISOLATED_GPU_DRILL_ONLY"
+    error_message = "Set gpu_bad_provider_sentinel=ISOLATED_GPU_DRILL_ONLY to prove this is an isolated brivva-gpu drill, not a prod brivva/env mutation."
+  }
+}
+
 variable "session_logs_enabled" {
   description = "Set BRIVVA_SESSION_LOGS=1 on server-rs to upload per-session NDJSON logs to Workers/D1."
   type        = bool

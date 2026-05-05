@@ -8,7 +8,10 @@ async fn main() {
     // Kill any orphan FFmpeg processes from a previous crash.
     ffmpeg::kill_orphan_ffmpeg();
 
-    let app = build_app(app_state());
+    let state = app_state();
+    ffmpeg::log_startup_runtime_self_check(state.video_encoder);
+
+    let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 

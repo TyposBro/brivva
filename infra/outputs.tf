@@ -31,7 +31,13 @@ output "ecr_server_runtime_base_url" {
 }
 
 output "secret_arn" {
-  value = aws_secretsmanager_secret.env.arn
+  description = "Primary production secret used by brivva service. Bad-provider drills must never mutate this."
+  value       = aws_secretsmanager_secret.env.arn
+}
+
+output "gpu_drill_secret_arn" {
+  description = "Isolated secret used only by brivva-gpu when gpu_bad_provider_drill != none. Null otherwise."
+  value       = local.gpu_bad_provider_enabled ? aws_secretsmanager_secret.gpu_drill[0].arn : null
 }
 
 output "log_group" {

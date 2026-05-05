@@ -29,13 +29,15 @@ data "aws_ssm_parameter" "ecs_gpu_ami" {
 }
 
 locals {
-  account_id          = data.aws_caller_identity.current.account_id
-  enable_cloudflared  = nonsensitive(length(var.tunnel_creds) > 0) && length(var.tunnel_id) > 0
-  ecr_server          = aws_ecr_repository.server.repository_url
-  secret_arn          = aws_secretsmanager_secret.env.arn
-  use_ec2_gpu         = var.ecs_launch_type == "EC2_GPU"
-  enable_gpu_capacity = var.gpu_capacity_enabled || local.use_ec2_gpu || var.gpu_rehearsal_service_enabled
-  ecs_gpu_ami_id      = local.enable_gpu_capacity ? jsondecode(data.aws_ssm_parameter.ecs_gpu_ami[0].value).image_id : null
+  account_id               = data.aws_caller_identity.current.account_id
+  enable_cloudflared       = nonsensitive(length(var.tunnel_creds) > 0) && length(var.tunnel_id) > 0
+  ecr_server               = aws_ecr_repository.server.repository_url
+  secret_arn               = aws_secretsmanager_secret.env.arn
+  gpu_bad_provider_enabled = var.gpu_bad_provider_drill != "none"
+  gpu_secret_arn           = local.gpu_bad_provider_enabled ? aws_secretsmanager_secret.gpu_drill[0].arn : aws_secretsmanager_secret.env.arn
+  use_ec2_gpu              = var.ecs_launch_type == "EC2_GPU"
+  enable_gpu_capacity      = var.gpu_capacity_enabled || local.use_ec2_gpu || var.gpu_rehearsal_service_enabled
+  ecs_gpu_ami_id           = local.enable_gpu_capacity ? jsondecode(data.aws_ssm_parameter.ecs_gpu_ami[0].value).image_id : null
 
   # Phase 6C private GPU rehearsal keeps endpoint blast radius/cost bounded to
   # one selected GPU subnet/AZ. The S3 gateway endpoint route table IDs are
@@ -212,6 +214,27 @@ resource "aws_secretsmanager_secret_version" "env" {
   })
 }
 
+resource "aws_secretsmanager_secret" "gpu_drill" {
+  count                   = local.gpu_bad_provider_enabled ? 1 : 0
+  name                    = "${var.project}/env-gpu-drill"
+  description             = "Isolated brivva-gpu bad-provider drill secret. Primary brivva never references this secret."
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "gpu_drill" {
+  count     = local.gpu_bad_provider_enabled ? 1 : 0
+  secret_id = aws_secretsmanager_secret.gpu_drill[0].id
+  secret_string = jsonencode({
+    SONIOX_API_KEY       = var.gpu_bad_provider_drill == "soniox" ? "brivva-gpu-drill-bad-soniox" : var.soniox_api_key
+    ELEVENLABS_API_KEY   = var.gpu_bad_provider_drill == "elevenlabs" ? "brivva-gpu-drill-bad-elevenlabs" : var.elevenlabs_api_key
+    GOOGLE_CLIENT_ID     = var.google_client_id
+    GOOGLE_CLIENT_SECRET = var.google_client_secret
+    TUNNEL_CREDS         = ""
+    JWT_SECRET           = var.jwt_secret
+    INTERNAL_SECRET      = var.internal_secret
+  })
+}
+
 # ── IAM ────────────────────────────────────────────────────
 
 resource "aws_iam_role" "exec" {
@@ -237,9 +260,12 @@ resource "aws_iam_role_policy" "secrets_read" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = aws_secretsmanager_secret.env.arn
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      Resource = concat(
+        [aws_secretsmanager_secret.env.arn],
+        local.gpu_bad_provider_enabled ? [aws_secretsmanager_secret.gpu_drill[0].arn] : []
+      )
     }]
   })
 }
@@ -571,6 +597,13 @@ locals {
       { name = "BRIVVA_V2_GPU_WORKERS", value = "0" },
       { name = "BRIVVA_V2_GPU_REHEARSAL_MODE", value = "shadow" },
       { name = "BRIVVA_V2_GPU_REHEARSAL_SINK", value = "fake" },
+      { name = "BRIVVA_GPU_BAD_PROVIDER_DRILL", value = var.gpu_bad_provider_drill },
+    ]
+    secrets = [
+      { name = "SONIOX_API_KEY", valueFrom = "${local.gpu_secret_arn}:SONIOX_API_KEY::" },
+      { name = "ELEVENLABS_API_KEY", valueFrom = "${local.gpu_secret_arn}:ELEVENLABS_API_KEY::" },
+      { name = "JWT_SECRET", valueFrom = "${local.gpu_secret_arn}:JWT_SECRET::" },
+      { name = "INTERNAL_SECRET", valueFrom = "${local.gpu_secret_arn}:INTERNAL_SECRET::" },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -617,7 +650,7 @@ resource "aws_ecs_task_definition" "app" {
 }
 
 resource "aws_ecs_task_definition" "gpu_rehearsal" {
-  count                    = var.gpu_rehearsal_service_enabled ? 1 : 0
+  count                    = (var.gpu_rehearsal_service_enabled || local.gpu_bad_provider_enabled) ? 1 : 0
   family                   = "${var.project}-gpu"
   requires_compatibilities = ["EC2"]
   network_mode             = "host"
@@ -633,7 +666,20 @@ resource "aws_ecs_task_definition" "gpu_rehearsal" {
   container_definitions = jsonencode(local.gpu_rehearsal_containers)
 
   lifecycle {
-    ignore_changes = [container_definitions, tags]
+    precondition {
+      condition     = !local.gpu_bad_provider_enabled || var.gpu_rehearsal_service_enabled
+      error_message = "Bad-provider drills are only allowed through the isolated brivva-gpu rehearsal task definition."
+    }
+
+    precondition {
+      condition     = !local.gpu_bad_provider_enabled || local.gpu_secret_arn != local.secret_arn
+      error_message = "Bad-provider drill must use separate brivva/env-gpu-drill secret, never shared brivva/env."
+    }
+
+    # Terraform owns rehearsal container definitions so bad-provider drill env/secrets
+    # create a new isolated task revision. Primary app task defs are still handled
+    # separately above with container_definitions ignored for deploy.sh.
+    ignore_changes = [tags]
   }
 }
 

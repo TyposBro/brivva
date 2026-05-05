@@ -92,6 +92,29 @@ infisical run --env=dev --path=/ -- \
   cargo test -p server-rs --test mp4_fanout_smoke -- --ignored --nocapture
 ```
 
+## AWS Fake/Local-Sink Entrypoint
+
+Use this only after an AWS rehearsal task/container is already running. It does
+not scale AWS, deploy, mutate secrets, or use real RTMP platform keys. It
+creates `tmp/aws-soak-runs/<run>/manifest.md`, an env file, and pass/fail grep
+patterns, then prints the exact fake/local-sink smoke commands for the AWS task
+path.
+
+```bash
+AWS_REGION=us-east-1 \
+MP4_FANOUT_SMOKE_MP4=/mnt/fixtures/text.h264.mp4 \
+MP4_FANOUT_SMOKE_SOURCE_LANG=ko \
+MP4_FANOUT_SMOKE_DURATION=600 \
+  ./scripts/aws-smoke-entrypoint.sh
+```
+
+Healthy-run fail greps should be zero unless the scenario explicitly allows the
+fault: FFmpeg restart/crash, sustained below-realtime encode, media stale/drop
+counters, `tts segment queue overflow`, and `final_policy="hard_recovery"`.
+Fake/local sink is AWS image/GPU/media proof only; real-platform RS-007 proof
+still requires NAT/egress/operator access plus visible YouTube/Grip/TikTok live
+checks.
+
 ## Expected YouTube Secrets
 
 ```text

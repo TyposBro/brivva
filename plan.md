@@ -1,491 +1,638 @@
-# Plan: Source Speech Timing vs Available Live Window
+# RS-007 AWS Launch-Profile Soak Plan
 
-Goal: use silence after fast host utterances without lying about source speech duration.
+Status: draft
+Owner: Aziz / Brivva engineering
+Tracker item: `docs/rust-stress-test/tracker.md` → RS-007
+Goal: prove the exact AWS production path before any paid live-commerce show.
 
-Current RS-023 patch fixed the obvious bug: TTS no longer estimates host source duration from translated text length. It now carries source timing from Soniox timestamps when available.
+## 1. Why This Exists
 
-This next plan is **not** a quick accumulator hack. It introduces a clean distinction:
+Local Rust stress tests proved important media behavior, but RS-007 remains open because AWS can fail in ways local runs cannot expose:
 
-```rust
-pub source_speech_duration_ms: u64,
-pub available_window_ms: Option<u64>,
-pub timing_method: SourceTimingMethod,
-```
+- ECS task placement / service rollout problems.
+- EC2 GPU host capacity or quota failure.
+- NVIDIA driver / NVENC missing or unusable inside the task.
+- FFmpeg build drift: missing native RTMP/RTMPS, OpenSSL, `libharfbuzz`, `drawtext`, `h264_nvenc`.
+- CJK font/subtitle rendering failure.
+- Secrets Manager / IAM / Infisical secret mismatch.
+- CloudWatch log shipping gaps.
+- Workers internal metrics/session-log failures.
+- AWS egress too weak for real RTMP fanout.
+- Platform acceptance mismatch: AWS pushes bytes, but YouTube/Grip/TikTok does not show a visible healthy live.
 
-TTS policy can use `available_window_ms` for concision decisions, while logs/diagnostics still use `source_speech_duration_ms` for true expansion ratio.
+This plan treats AWS as unproven until the exact launch task/image/secrets/profile completes dry-run, soak, and failure drills.
 
-## Problem This Solves
+## 2. Launch Profile To Prove
 
-Example:
+Default launch profile unless product explicitly changes it:
 
-```text
-Host says quickly: "Hi, how are you doing?"
-Actual spoken duration: 200ms
-Then host is silent: 2s
-```
+| Area | Launch value |
+| --- | --- |
+| AWS region | `us-east-1` |
+| Compute path | ECS on EC2 GPU. Private `brivva-gpu` rehearsal may prove image/GPU/fake-sink only until egress + operator access are explicit; real-platform proof uses either primary `brivva` EC2_GPU cutover or a rehearsal service with NAT/public egress + private operator access. |
+| Instance target | `g4dn.xlarge` first capability target; upgrade to larger NVIDIA host if exact launch fanout/CPU/STT/TTS load falls below realtime. |
+| Encoder | `nvenc` |
+| Output profile | mobile-first RTMP: H.264, `720x1280` portrait, 1s keyframes, ~2.5Mbps video |
+| Input cap | accept host up to 1080p30 launch tier; 4K host must downsample to 1080p/portrait output |
+| 4K output | disabled unless separately sold and separately passed on exact AWS hardware |
+| Source language | launch rehearsal language, normally `ko` or `en` based on show host |
+| Target languages | all launch languages, e.g. `ko`, `ja`, `zh`, plus pass/source output |
+| Platforms | all launch platforms with real one-shot/current keys: YouTube + Grip + TikTok/generic RTMP if used |
+| Network path | no-public-IP GPU needs VPC endpoints for AWS control plane and NAT/egress for Soniox, ElevenLabs, YouTube/Grip/TikTok; browser/operator access needs VPN/bastion/SSM tunnel or primary public route. |
+| Duration | 30-60 min exact-profile soak after shorter capability checks |
+| Billing | provider failure windows persisted and excluded from billable usage |
 
-If TTS budget only uses spoken duration, JA/ZH/KO translation gets forced into ~500ms after clamp. That causes unnecessary concision/speedup and worse quality.
+Hard rule: do not mark RS-007 closed from fake sink only. Fake sink is useful for GPU/image capability, but production proof requires at least one real platform and the launch platform mix if available. Current `brivva-gpu` Terraform is private/shadow/fake-sink by default, so it is not a full paid-live proof until network/egress/access mode is changed intentionally.
 
-But translated audio can safely use some of the silence before the next host utterance.
+## 3. Required Artifacts
 
-Correct model:
-
-```text
-source_speech_duration_ms = current_source_end_ms - current_source_start_ms
-available_window_ms = next_source_start_ms - current_source_start_ms
-```
-
-Use:
-
-- `source_speech_duration_ms` for actual expansion diagnostics;
-- `available_window_ms` for pre-synthesis TTS budget/concision, when known.
-
-## Non-Negotiable Design Rule
-
-Do **not** pretend:
-
-```text
-source duration = next utterance start - current utterance start
-```
-
-That would corrupt metrics.
-
-Instead, keep two separate fields:
-
-```rust
-source_speech_duration_ms // truth: how long host actually spoke
-available_window_ms       // budget: how much live time TTS can occupy
-```
-
-## Proposed Domain Types
-
-File: `server-rs/src/features/broadcast/domain/mod.rs`
-
-Current:
-
-```rust
-pub struct SourceUtteranceTiming {
-    pub duration_ms: u64,
-    pub method: SourceTimingMethod,
-}
-```
-
-Replace with:
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceTimingMethod {
-    SonioxTokenTimestamps,
-    ResponseWallClock,
-    TextEstimateFallback,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AvailableWindowMethod {
-    NextUtteranceStart,
-    HoldTimeoutFallback,
-    SameAsSpeech,
-    Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceUtteranceTiming {
-    pub source_speech_duration_ms: u64,
-    pub available_window_ms: Option<u64>,
-    pub timing_method: SourceTimingMethod,
-    pub available_window_method: AvailableWindowMethod,
-}
-```
-
-Helper:
-
-```rust
-impl SourceUtteranceTiming {
-    pub fn tts_budget_ms(self) -> u64 {
-        self.available_window_ms
-            .unwrap_or(self.source_speech_duration_ms)
-            .clamp(500, MAX_TTS_BUDGET_MS)
-    }
-}
-```
-
-Initial cap:
-
-```rust
-const MAX_TTS_BUDGET_MS: u64 = 3_000;
-```
-
-Rationale: use silence, but do not let 10s silence make translation bloated.
-
-## Architecture: Hold Buffer / Scheduler
-
-Current flow:
+Create one run folder per AWS rehearsal:
 
 ```text
-Soniox flushes utterance N
--> emit Translation
--> dispatch TTS immediately
+tmp/aws-soak-runs/YYYYMMDD-HHMM-<profile>/
+  manifest.md
+  terraform-plan.txt
+  ecs-describe-services.json
+  ecs-describe-tasks.json
+  ecs-container-instance.json
+  cloudwatch-server-rs.log
+  cloudwatch-gpu-server-rs.log
+  smoke.log
+  soak.log
+  provider-drills.log
+  platform-visible-live.md
+  billing-check.md
+  verdict.md
 ```
 
-New flow:
+`manifest.md` must record:
+
+- git commit SHA;
+- Docker image digest actually used by the task, not only mutable `latest`;
+- Terraform/OpenTofu var set;
+- ECS task definition ARN;
+- ECS service name (`brivva-gpu` rehearsal or primary `brivva`);
+- network mode used for the run: fake-sink private rehearsal, private rehearsal with NAT/operator access, or primary EC2_GPU cutover;
+- EC2 instance ID/type/AZ;
+- FFmpeg version/config output;
+- `ffmpeg -protocols` proof for `rtmp`/`rtmps` and `ffmpeg -version` proof for OpenSSL;
+- `ffmpeg -encoders | rg h264_nvenc` result;
+- font list / CJK font proof;
+- exact source MP4 fixture path/checksum;
+- exact output platforms/languages;
+- stream keys age/freshness note, especially Grip one-shot key;
+- start/end timestamps in UTC and KST.
+
+## 4. Pass / Fail Gates
+
+### 4.1 Dry-Run Capability Gate
+
+Pass only if AWS task proves:
+
+- ECS GPU host registered in cluster.
+- Task is `RUNNING` and stable for at least 5 minutes before media starts.
+- Network path matches test goal:
+  - fake-sink/private rehearsal: VPC endpoints or NAT are enough for ECS/ECR/Secrets/CloudWatch;
+  - real platform: NAT/public egress reaches Soniox, ElevenLabs, YouTube/Grip/TikTok, and operator/browser can reach the task through VPN/bastion/SSM tunnel or primary route.
+- Container logs reach CloudWatch.
+- Secrets are present without printing values.
+- Workers internal metrics endpoint accepts session metrics.
+- FFmpeg supports required launch features:
+  - `rtmp` and `rtmps` protocols;
+  - OpenSSL/native RTMPS path;
+  - `drawtext` filter;
+  - `libharfbuzz`/font shaping path;
+  - `h264_nvenc` encoder;
+  - AAC audio encoder.
+- Runtime fonts include CJK fonts and subtitle render does not produce tofu boxes.
+- NVENC encode can start from inside ECS task, not just on host.
+
+Fail fast if any of these are missing. Do not continue to real platform soak.
+
+### 4.2 Exact-Profile Soak Gate
+
+Pass only if 30-60 min AWS launch-profile run has:
+
+- no FFmpeg publisher crash/restart;
+- no sustained below-realtime encode after warmup;
+- no `video_stale_chunks_dropped` in normal healthy run;
+- no `host_audio_stale_chunks_dropped` in normal healthy run;
+- no `ready_host_bytes_dropped` in normal healthy run;
+- `tts segment queue overflow=0` for normal healthy run;
+- `final_policy="hard_recovery"=0` unless the scenario explicitly allows it;
+- `tts_buffered_bytes` drains and does not grow forever;
+- `tts_playback_speed` returns to `1.00` after catch-up;
+- source/pass output stays live;
+- translated audio is human-intelligible for JA/ZH/KO or launch languages;
+- every intended platform dashboard shows visible healthy live, not only RTMP bytes sent;
+- CloudWatch logs contain enough per-output/platform/lang IDs to debug failures;
+- Workers receives health/metrics/session logs;
+- billing summary excludes any intentionally injected unbillable failure windows.
+
+### 4.3 Failure Drill Gate
+
+Before paid production, AWS path must pass:
+
+- bad Soniox key injected only into an isolated rehearsal task/override/secret, never the shared production `brivva/env` secret: source/pass continues; translation lanes fail visibly; translated billing pauses;
+- bad ElevenLabs key or forced TTS failure injected only into an isolated rehearsal task/override/secret: source/pass and captions continue where applicable; TTS billing pauses;
+- one bad RTMP destination mixed with good destinations: bad output fails, siblings stay live;
+- platform key rejection/bad stream key: affected output fails and is non-billable, siblings stay live;
+- operator stop/restart one output if the control exists; otherwise document manual ECS/operator workaround.
+
+## 5. Phase Plan
+
+## Phase A — Repo / Config Preflight
+
+1. Confirm tracker and docs are current:
+   - `docs/rust-stress-test/tracker.md`
+   - `docs/rust-stress-test/production_readiness.md`
+   - `docs/rust-stress-test/provider_failure_billing.md`
+   - `docs/rust-stress-test/scenarios.md`
+   - `docs/rust-stress-test/signals.md`
+2. Confirm working tree state and commit SHA.
+3. Confirm `deploy.sh --gpu` path still builds GPU runtime image.
+4. Confirm helper scripts referenced by `infra/README.md` actually exist. Current repo lacks most GPU helper scripts (`run-ecs-gpu-rehearsal.sh`, `ecs-gpu-endpoint.sh`, `check-aws-gpu-quota.sh`, etc.). If missing, either:
+   - restore/add helper scripts, or
+   - use AWS CLI equivalents and capture commands in `manifest.md`.
+5. Confirm launch caps:
+   - `BRIVVA_VIDEO_ENCODER=nvenc` on GPU task;
+   - `BRIVVA_VIDEO_MAX_WIDTH=1920`;
+   - `BRIVVA_VIDEO_MAX_HEIGHT=1080`;
+   - `BRIVVA_VIDEO_MAX_FPS=30`;
+   - RTMP output remains mobile-first portrait unless show explicitly requires source layout.
+6. Confirm 4K is product-disabled unless exact AWS 4K run is added.
+7. Decide network mode before touching AWS capacity:
+   - private fake-sink only: allowed for GPU/image capability;
+   - private real-platform: requires NAT/egress plus VPN/bastion/SSM/operator route;
+   - primary EC2_GPU cutover: higher blast radius, but proves real public path.
+8. Set `AWS_REGION=us-east-1`; every AWS CLI command in artifacts must show region explicitly or inherit this exported env.
 
-```text
-Soniox flushes utterance N
--> emit Translation immediately
--> hold TTS dispatch briefly
--> if utterance N+1 starts soon, compute N.available_window_ms
--> dispatch N TTS with better budget
--> if no N+1 arrives before timeout, dispatch N with fallback budget
-```
+Output: `manifest.md` started.
 
-Only TTS dispatch is delayed. UI translation/subtitle should stay immediate.
+## Phase B — AWS Account / Quota / Terraform Preflight
 
-## Why Scheduler Instead Of Accumulator Hack
-
-Accumulator knows current utterance timing only. It does not know the next utterance start yet.
-
-If we mutate current duration later inside accumulator, bugs appear:
-
-- duplicate dispatch;
-- final utterance never dispatches;
-- long silence creates huge budget;
-- per-language streams diverge silently;
-- logs confuse speech duration and usable budget.
-
-Scheduler/hold-buffer makes state explicit:
-
-```text
-pending utterance waiting for either:
-1. next utterance start, or
-2. timeout
-```
-
-## Actionable Implementation Steps
-
-### Step 1 — Refactor `SourceUtteranceTiming` fields
-
-File: `server-rs/src/features/broadcast/domain/mod.rs`
-
-Change from:
-
-```rust
-pub duration_ms: u64,
-pub method: SourceTimingMethod,
-```
-
-to:
-
-```rust
-pub source_speech_duration_ms: u64,
-pub available_window_ms: Option<u64>,
-pub timing_method: SourceTimingMethod,
-pub available_window_method: AvailableWindowMethod,
-```
-
-Update all callsites/tests.
-
-For first compile-safe migration:
-
-```rust
-available_window_ms: None,
-available_window_method: AvailableWindowMethod::Unavailable,
-```
-
-### Step 2 — Update TTS policy to use budget helper
-
-File: `server-rs/src/features/broadcast/data/pipeline/tts.rs`
-
-Current logic uses:
-
-```rust
-let estimated_source_duration_ms = source_timing.duration_ms;
-```
-
-Change to:
-
-```rust
-let source_speech_duration_ms = source_timing.source_speech_duration_ms;
-let tts_budget_ms = source_timing.tts_budget_ms();
-```
-
-Use `tts_budget_ms` for:
-
-- `predict_tts_policy()` denominator;
-- `live_commerce_text_for_policy_with_budget()`;
-- pre-synthesis concision decisions.
-
-Use `source_speech_duration_ms` for:
-
-- actual expansion logs;
-- diagnostics.
-
-Log both:
-
-```rust
-source_speech_duration_ms,
-available_window_ms = ?source_timing.available_window_ms,
-tts_budget_ms,
-timing_method = ?source_timing.timing_method,
-available_window_method = ?source_timing.available_window_method,
-```
-
-### Step 3 — Preserve source start/end in STT accumulator
-
-File: `server-rs/src/features/broadcast/data/pipeline/stt_response.rs`
-
-Current accumulator computes duration from min start/max end. Keep raw boundaries too:
-
-```rust
-source_start_ms: Option<u64>,
-source_end_ms: Option<u64>,
-```
-
-Create completed utterance object:
-
-```rust
-struct CompletedTranslationUtterance {
-    committed: String,
-    utterance_id: u64,
-    target_lang: Lang,
-    source_start_ms: Option<u64>,
-    source_end_ms: Option<u64>,
-    fallback_speech_duration_ms: u64,
-    timing_method: SourceTimingMethod,
-    selected_voice_id: Option<String>,
-    selected_voice_enrollment_lang: Option<Lang>,
-    voice_preset: VoicePreset,
-}
-```
-
-Speech duration builder:
-
-```rust
-source_speech_duration_ms = match (source_start_ms, source_end_ms) {
-    (Some(start), Some(end)) => end.saturating_sub(start).clamp(500, 15_000),
-    _ => fallback_wall_clock_or_text_estimate,
-}
-```
-
-### Step 4 — Split translation emit from TTS dispatch
-
-Currently `emit_translation()` both:
-
-- sends frontend translation/subtitle;
-- dispatches TTS.
-
-Split into:
-
-```rust
-emit_translation_to_frontend(...)
-schedule_translation_tts(...)
-```
-
-Frontend/subtitle stays immediate.
-
-TTS goes through scheduler.
-
-### Step 5 — Add pending TTS hold buffer
-
-Inside each translation response processor, keep:
-
-```rust
-let pending_tts: Arc<Mutex<Option<CompletedTranslationUtterance>>> = ...;
-```
-
-When utterance N completes:
-
-1. If pending N-1 exists and N has `source_start_ms`, dispatch N-1 with:
-
-```rust
-available_window_ms = N.source_start_ms - N_minus_1.source_start_ms
-available_window_method = AvailableWindowMethod::NextUtteranceStart
-```
-
-2. Store N as pending.
-3. Arm timeout for N.
-
-### Step 6 — Add hold timeout
-
-Constant:
-
-```rust
-const TTS_LOOKAHEAD_HOLD_TIMEOUT_MS: u64 = 500;
-```
-
-If no next utterance arrives within 500ms, dispatch pending N with:
-
-```rust
-available_window_ms = None
-available_window_method = AvailableWindowMethod::HoldTimeoutFallback
-```
-
-TTS budget helper then falls back to `source_speech_duration_ms`, maybe with a quality floor:
-
-```rust
-source_speech_duration_ms.max(1_000).min(3_000)
-```
-
-Need decision:
-
-- strict fallback: use speech only;
-- quality fallback: allow minimum 1s budget after timeout.
-
-Recommended first version: quality fallback, because timeout itself means host silence existed for 500ms.
-
-### Step 7 — Prevent duplicate dispatch
-
-Timeout and next-utterance path can race.
-
-Required implementation pattern:
-
-```rust
-let pending = pending_tts.lock().await.take();
-if let Some(pending) = pending {
-    dispatch(pending);
-}
-```
-
-Only `take()` owner dispatches.
-
-If timeout already dispatched, next utterance sees `None` and does not dispatch old utterance again.
-
-### Step 8 — Env flag rollout
-
-Do not make scheduler default immediately.
-
-Add:
+1. Confirm AWS identity and region (`AWS_REGION=us-east-1`).
+2. Confirm EC2 GPU quota supports at least one `g4dn.xlarge`:
+   - service quota for running on-demand G/VT instances must cover 4 vCPU.
+3. Confirm target AZ has `g4dn.xlarge` capacity. Keep `us-east-1e` excluded per `infra/variables.tf`.
+4. Run OpenTofu plan for rehearsal mode first:
 
 ```bash
-BRIVVA_TTS_LOOKAHEAD_BUDGET=1
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0'
 ```
 
-When off:
-
-- immediate dispatch;
-- `available_window_ms = None`;
-- behavior equivalent to current RS-023 patch, except new explicit fields/logs.
-
-When on:
-
-- hold buffer active;
-- next-start budget active.
-
-### Step 9 — Tests
-
-Add tests for these exact cases.
-
-#### Domain/TTS tests
-
-1. `tts_budget_ms()` uses `available_window_ms` when present.
-2. `tts_budget_ms()` falls back to `source_speech_duration_ms` when absent.
-3. huge available window is capped at `MAX_TTS_BUDGET_MS`.
-4. TTS policy is less aggressive with:
-
-```rust
-source_speech_duration_ms = 500
-available_window_ms = Some(2_000)
-```
-
-than with only 500ms speech.
-
-#### STT scheduler tests
-
-5. Fast utterance followed by silence/next utterance:
-   - N speech = 500ms clamp;
-   - N+1 starts 2,000ms after N start;
-   - N dispatched with `available_window_ms=Some(2_000)`.
-
-6. Huge silence:
-   - N+1 starts 10,000ms later;
-   - budget helper caps to 3,000ms.
-
-7. No next utterance:
-   - timeout dispatches N.
-
-8. No duplicate dispatch:
-   - timeout dispatches N;
-   - later N+1 arrives;
-   - N was sent exactly once.
-
-9. Missing Soniox timestamps:
-   - scheduler falls back cleanly;
-   - logs/timing method show fallback.
-
-10. Frontend translation is immediate:
-   - `ServerMsg::Translation` sent before TTS hold timeout.
-
-### Step 10 — Validation
-
-Run:
+5. Current GPU launch template uses no public IP. For private/no-public-IP GPU rehearsal, verify VPC endpoints and route table IDs intentionally:
 
 ```bash
-cargo test -p server-rs stt_response
-cargo test -p server-rs tts
-cargo test -p server-rs ffmpeg
-cargo check -p server-rs
-git diff --check
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0' \
+  -var='gpu_private_endpoints_enabled=true' \
+  -var='gpu_private_endpoint_route_table_ids=["rtb-..."]'
 ```
 
-Then live/stress with flag on:
+6. For any real-platform run from private GPU, confirm NAT/egress path exists for Soniox, ElevenLabs, YouTube/Grip/TikTok. VPC endpoints alone cover AWS control-plane pulls/logs/secrets, not external provider/platform traffic.
+7. Save plan output to run folder.
+
+Pass: plan only touches expected ECS/GPU/rehearsal resources and network changes match chosen mode.
+Fail: unexpected primary service replacement, route-table blast radius, accidental public endpoint exposure, missing external egress for real-platform runs, or secret drift.
+
+## Phase C — Build And Push Exact GPU Image
+
+1. Build/push GPU bases if Dockerfile or FFmpeg version changed:
 
 ```bash
-BRIVVA_TTS_LOOKAHEAD_BUDGET=1
+./deploy.sh --gpu --build-ffmpeg-gpu-base --build-server-bases --bases-only
 ```
 
-Inspect logs for:
+2. Build/push server GPU image without switching primary service:
+
+```bash
+./deploy.sh --gpu --build-only
+```
+
+3. Resolve and record immutable image digest. Prefer the SHA tag from `deploy.sh`; do not rely on mutable `latest` as proof:
+
+```bash
+aws ecr describe-images \
+  --region "$AWS_REGION" \
+  --repository-name brivva/server-rs \
+  --image-ids imageTag="$(git rev-parse HEAD)" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text
+```
+
+4. Pin the rehearsal/soak task definition to the SHA tag or image digest, or record ECS/container metadata proving the pulled digest exactly matches the manifest.
+
+Pass: image exists in ECR, digest is recorded, and task image proof is immutable.
+
+## Phase D — Create Rehearsal Capacity At Zero Blast Radius
+
+Prefer parallel `brivva-gpu` rehearsal service over primary cutover for GPU/image/fake-sink proof. Do not treat it as real-platform proof unless NAT/external egress and operator/browser access are intentionally added. Otherwise use a controlled primary `brivva` EC2_GPU cutover for real-platform smoke/soak.
+
+1. Apply rehearsal service with zero desired count:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0'
+```
+
+2. Scale one GPU host + one rehearsal task only when ready to burn AWS cost and after private endpoint/NAT/access mode is decided:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=1' \
+  -var='gpu_desired_capacity=1' \
+  -var='gpu_instance_type=g4dn.xlarge'
+```
+
+3. Watch ECS service events until stable.
+4. Save region-explicit outputs:
+   - `aws ecs describe-services --region "$AWS_REGION" --cluster brivva --services brivva-gpu`
+   - `aws ecs list-tasks --region "$AWS_REGION" --cluster brivva --service-name brivva-gpu`
+   - `aws ecs describe-tasks --region "$AWS_REGION" --cluster brivva --tasks ...`
+   - `aws ecs describe-container-instances --region "$AWS_REGION" ...`
+   - CloudWatch startup logs.
+
+Pass: one ECS GPU container instance registered, task running, logs flowing, and chosen network mode is proven.
+Fail: task placement error, capacity unavailable, host cannot pull image, secrets unavailable, no CloudWatch logs, or private task cannot reach required external providers/platforms for a real-platform run.
+
+## Phase E — Runtime Capability Probe Inside AWS Task
+
+Need a way to execute or embed these probes. Options:
+
+- startup self-check logs emitted by `server-rs` (preferred, works without shell access);
+- one-shot diagnostic container/task using the same runtime image;
+- temporary diagnostic endpoint/route guarded by internal auth;
+- ECS Exec only after Terraform explicitly enables it and IAM/task-role/session-manager permissions are verified. Current infra should not assume ECS Exec works.
+
+Required probe commands or equivalent startup logs:
+
+```bash
+ffmpeg -version
+ffmpeg -hide_banner -protocols
+ffmpeg -hide_banner -filters
+ffmpeg -hide_banner -encoders
+ffprobe -version
+fc-match "Noto Sans CJK KR"
+```
+
+Required assertions:
 
 ```text
-source_speech_duration_ms=500
-available_window_ms=Some(2000)
-tts_budget_ms=2000
-available_window_method=NextUtteranceStart
+ffmpeg config includes openssl/native-rtmps path
+protocols include rtmp and rtmps
+filters include drawtext
+encoders include h264_nvenc
+gpu runtime can load NVIDIA encode libs
+CJK font resolves to Noto/DejaVu fallback, not missing
 ```
 
-## Risk Assessment
+NVENC smoke command if shell access exists:
 
-Feasible, but more dangerous than RS-023 because it introduces delayed dispatch and race potential.
+```bash
+ffmpeg -hide_banner -f lavfi -i testsrc2=size=1280x720:rate=30 \
+  -t 10 -c:v h264_nvenc -f null -
+```
 
-Primary risk areas:
+Subtitle/font smoke:
 
-- duplicate TTS dispatch;
-- final utterance stuck pending;
-- latency increase;
-- per-language divergence;
-- scheduler state surviving session teardown;
-- timeout too short/long.
+```bash
+ffmpeg -hide_banner -f lavfi -i color=black:s=720x1280:r=30 \
+  -t 5 -vf "drawtext=font='Noto Sans CJK KR':text='한국어 日本語 中文':x=40:y=80:fontsize=48:fontcolor=white" \
+  -c:v h264_nvenc -f null -
+```
 
-Mitigation:
+Pass: both commands run near realtime and return 0.
+Fail: stop; fix image/host/driver/fonts before any platform run.
 
-- env flag;
-- `take()`-based single-dispatch ownership;
-- keep frontend translation immediate;
-- cap available window;
-- tests for timeout and duplicate dispatch.
+## Phase F — AWS Fake-Sink / Local-Sink Media Smoke
 
-## Recommended Patch Order
+Purpose: separate AWS encode/media bugs from platform keys/network dashboards.
 
-### Patch A — Safe field split
+Run one short server-rs media smoke against fake/local RTMP sink if supported. This can use private `brivva-gpu` without external platform egress. If no AWS-side stress entrypoint exists yet, patch one before continuing.
 
-- introduce `source_speech_duration_ms` and `available_window_ms` fields;
-- TTS uses helper budget;
-- no scheduler yet;
-- behavior equivalent to current.
+Target smoke:
 
-### Patch B — Scheduler behind env flag
+- duration: 5-10 min;
+- encoder: `nvenc`;
+- input: known H.264 1080p30 fixture;
+- outputs: pass/source + one translated language;
+- no real customer platform yet.
 
-- hold buffer;
-- next-start budget;
-- timeout;
-- no duplicate dispatch tests.
+Pass signals:
 
-### Patch C — Live validation and default-on decision
+- speed near `1.0x` after warmup;
+- no media stale drops;
+- no FFmpeg restart;
+- TTS drains;
+- CloudWatch logs enough metrics.
 
-- run stress/live logs;
-- listen to JA/ZH/KO quality;
-- if good, make default.
+Fail: fix Rust/FFmpeg/AWS before consuming real platform keys.
 
-## Go / No-Go
+## Phase G — Single Real Platform Smoke
 
-Go only if scheduler can be implemented with small, testable local state.
+Purpose: prove AWS egress + real RTMP + visible live.
 
-No-go if it requires broad STT pipeline architecture changes. In that case keep RS-023 patch, collect live timing logs, then revisit with a dedicated scheduler refactor.
+Precondition: the task must have external egress to providers/platforms and operator/browser access to start/watch the run. Private `brivva-gpu` fake-sink mode does not satisfy this by itself; add NAT/access or use controlled primary `brivva` EC2_GPU cutover.
+
+1. Use one YouTube test event first.
+2. Then use Grip smoke with a fresh one-shot Grip key if Grip is part of launch.
+3. Duration: 10-15 min each.
+4. Use launch output profile: portrait `720x1280`, H.264, 1s keyframes, <3Mbps for Grip.
+
+Platform proof checklist:
+
+- Rust logs show output started.
+- FFmpeg logs show increasing bytes/chunks and speed near realtime.
+- Platform dashboard shows video and audio healthy.
+- Human watches output for subtitles/audio sync.
+- No crash/restart.
+- Workers metrics/session logs arrive.
+
+Grip-specific:
+
+- fresh one-shot `STREAM_URL_GRIP` + `STREAM_KEY_GRIP` only;
+- verify Grip Studio receives `720x1280`, H.264, audio, increasing chunks;
+- do not reuse key for second run.
+
+Pass: AWS is real-platform capable for one platform.
+Fail: classify as AWS egress, FFmpeg/RTMP, platform key, or platform visible-live issue.
+
+## Phase H — Exact Launch-Profile Soak
+
+Run the real launch shape:
+
+- AWS ECS GPU task;
+- `nvenc`;
+- real launch source fixture or host feed equivalent;
+- all launch languages;
+- all launch platform outputs possible with fresh keys;
+- 30-60 min duration;
+- no manual restarts during run unless testing operator recovery.
+
+Suggested run name:
+
+```text
+aws_launch_profile_1080p30_all_outputs_YYYYMMDD_HHMM
+```
+
+During soak, watch:
+
+```bash
+# logs/signals copied locally after or streamed during run
+rg "test result|mp4 fanout smoke finished|session" tmp/aws-soak-runs/**/soak.log
+rg "tts segment queue overflow|tts_playback_speed|tts_catchup_active" tmp/aws-soak-runs/**/soak.log
+rg "drop_frames=|speed=|encode below realtime" tmp/aws-soak-runs/**/soak.log
+rg "video_stale_chunks_dropped|host_audio_stale_chunks_dropped|ready_host_bytes_dropped" tmp/aws-soak-runs/**/soak.log
+rg "ffmpeg rtmp process crashed|publisher restart|provider_health|billable=false" tmp/aws-soak-runs/**/soak.log
+```
+
+Human checks every platform:
+
+- original audio/video live;
+- translated audio intelligible;
+- subtitles readable, no CJK tofu boxes;
+- platform dashboard health green/stable;
+- no growing latency that makes commerce interaction unusable.
+
+Pass: all pass/fail gates in section 4.2.
+Fail: record exact first-bad timestamp and classify.
+
+## Phase I — AWS Provider/Platform Failure Drills
+
+Run after one clean exact-profile soak, not before.
+
+### I.1 Bad Soniox Key
+
+- Deploy/override task with intentionally bad `SONIOX_API_KEY` in an isolated rehearsal task/secret only.
+- Do **not** mutate shared production `brivva/env` or Infisical prod secret values; primary `brivva` reads the same secret at task start.
+- Run 5-10 min single platform.
+- Expected:
+  - source/pass stays live;
+  - translation lanes fail visibly;
+  - provider health event has `provider=soniox`, `billable=false`;
+  - Workers failure window persisted;
+  - billing excludes affected translated minutes.
+
+### I.2 Bad ElevenLabs Key / TTS Failure
+
+- Use intentionally bad `ELEVENLABS_API_KEY` via isolated rehearsal task/secret, or existing test scenario if available.
+- Do **not** mutate shared production `brivva/env` or Infisical prod secret values.
+- Expected:
+  - source/pass stays live;
+  - captions/translation continue if Soniox is healthy;
+  - TTS lane fails visibly;
+  - provider health event has `provider=elevenlabs`, `billable=false`;
+  - billing excludes affected TTS/audio minutes.
+
+### I.3 One Bad Destination
+
+- Configure all good launch outputs plus one dead RTMP URL.
+- Expected:
+  - bad destination emits failed health;
+  - at least one sibling output reaches visible live;
+  - no global stream crash;
+  - only bad platform/output is non-billable.
+
+### I.4 Bad Platform Key
+
+- Use bad YouTube/RTMP key in one output only.
+- Expected:
+  - that output fails/restarts then marks failed;
+  - siblings remain live;
+  - billing excludes failed output window.
+
+Pass: failure windows visible in logs/frontend/Workers/billing.
+Fail: production remains operator-supervised and RS-007 stays open.
+
+## Phase J — Billing Verification
+
+For every clean soak and every failure drill, record:
+
+- session ID;
+- output IDs;
+- provider health windows;
+- Workers `/internal/sessions/:id/metrics` acceptance;
+- usage/summary output;
+- unbillable audit buckets.
+
+Minimum billing assertions:
+
+- clean soak billable minutes roughly match delivered healthy windows;
+- bad Soniox creates unbillable source/lang translation window;
+- bad ElevenLabs creates unbillable TTS/lang window;
+- bad RTMP/platform creates unbillable output/platform window;
+- sibling healthy outputs remain billable.
+
+If platform SKU mapping is not final, write product caveat in `billing-check.md` and keep RS-006/RS-007 watch/open as appropriate.
+
+## Phase K — Rollback / Cost Kill Switch
+
+Before scaling GPU up, prepare exact rollback commands.
+
+Rehearsal scale-down:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0'
+```
+
+Primary fallback if direct cutover was attempted:
+
+```bash
+infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
+  -var='ecs_launch_type=FARGATE' \
+  -var='gpu_desired_capacity=0'
+```
+
+Post-run cost check:
+
+```bash
+aws autoscaling describe-auto-scaling-groups \
+  --region "$AWS_REGION" \
+  --auto-scaling-group-names brivva-ecs-gpu
+
+aws ecs describe-services \
+  --region "$AWS_REGION" \
+  --cluster brivva \
+  --services brivva-gpu brivva
+```
+
+Pass: GPU ASG desired/running capacity returns to 0 after rehearsal unless intentionally left for launch. If primary EC2_GPU cutover was used, verify service is back on Fargate or intentionally left on GPU with operator approval.
+
+## 6. Known Gaps To Patch If Missing
+
+These are blockers if the repo cannot currently perform the AWS soak directly:
+
+0. **Network/egress/access mode**
+   - Current GPU launch template has no public IP and `brivva-gpu` is documented private/shadow/fake-sink.
+   - For real-platform smoke, add NAT/external egress plus operator/browser access, or use controlled primary EC2_GPU cutover.
+   - Do not start YouTube/Grip/TikTok proof from private fake-sink mode and call it production-equivalent.
+
+1. **AWS-side stress entrypoint**
+   - Current `scripts/run-rust-stress-tests.sh` is local-oriented.
+   - Need a way to run equivalent MP4 smoke against ECS task or start a rehearsal session through the real API/frontend.
+
+2. **Runtime self-check endpoint/log**
+   - Add startup self-check logs for FFmpeg protocols/filters/encoders/fonts/NVENC.
+   - Better than depending on ECS Exec; current Terraform does not enable ECS Exec by default.
+
+3. **CloudWatch log export helper**
+   - Script should pull server logs for a time range into run folder.
+
+4. **Image digest pinning**
+   - Soak must prove immutable digest/SHA tag, not mutable `latest`.
+
+5. **Isolated rehearsal secrets/overrides**
+   - Bad Soniox/ElevenLabs drills must not mutate shared production `brivva/env`.
+   - Add separate rehearsal secret, ECS task override path, or provider-failure test flag.
+
+6. **Platform visible-live checks**
+   - At minimum manual dashboard checklist.
+   - Later automate YouTube Live API / Grip API if available.
+
+7. **JSON summary**
+   - Existing tracker says JSON summaries are future work.
+   - For RS-007, manual `verdict.md` is acceptable, but JSON is better for repeatability.
+
+## 7. Verdict Template
+
+Write `verdict.md` after every run:
+
+```markdown
+# AWS Soak Verdict
+
+Run: YYYYMMDD-HHMM-profile
+Commit: <sha>
+Image digest: <digest>
+Task definition: <arn>
+Instance: <id> / <type> / <az>
+Duration: <minutes>
+Platforms: <list>
+Languages: <list>
+
+## Result
+
+PASS / FAIL
+
+## Hard Signals
+
+- FFmpeg restarts: 0 / N
+- Sustained below realtime: 0 / N
+- video_stale_chunks_dropped: 0 / N
+- host_audio_stale_chunks_dropped: 0 / N
+- ready_host_bytes_dropped: 0 / N
+- TTS overflows by lang: {...}
+- hard recovery by lang: {...}
+- Workers metrics/session logs: yes/no
+- Billing failure windows: yes/no/not-applicable
+
+## Platform Visible Live
+
+- YouTube pass/source: yes/no
+- YouTube JA/ZH/etc: yes/no
+- Grip: yes/no
+- TikTok/generic RTMP: yes/no
+
+## Human Listening
+
+- Source: ok/bad
+- JA: ok/bad
+- ZH: ok/bad
+- KO/source-lang: ok/bad
+- Notes: ...
+
+## First Bad Timestamp If Failed
+
+UTC timestamp:
+Log line:
+Likely class: AWS / FFmpeg / platform / Soniox / ElevenLabs / billing / operator
+
+## Decision
+
+- RS-007 status: open/watch/patched
+- Next patch:
+```
+
+## 8. RS-007 Closure Criteria
+
+Move RS-007 from `open` to `patched` only after:
+
+1. dry-run capability gate passes on AWS;
+2. single real platform smoke passes on AWS;
+3. exact 30-60 min launch-profile soak passes on AWS;
+4. provider/platform failure drills pass or have documented launch-safe manual fallback;
+5. billing verification shows unbillable windows excluded;
+6. run artifacts are saved under `tmp/aws-soak-runs/...` or durable docs/log storage;
+7. `docs/rust-stress-test/tracker.md` is updated with commit/run ID and remaining watch items.
+
+If exact-profile soak passes but failure drills are incomplete, set RS-007 to `watch`, not `patched`.
+
+## 9. Immediate Next Actions
+
+1. Decide proof mode:
+   - private `brivva-gpu` fake-sink: lowest blast radius, GPU/image only;
+   - private `brivva-gpu` real-platform: first add NAT/external egress + operator/browser access;
+   - primary `brivva` EC2_GPU cutover: real path, higher blast radius, rollback ready.
+2. Verify helper scripts from `infra/README.md`; restore or replace missing ones with region-explicit AWS CLI commands.
+3. Add/confirm AWS runtime self-check logs for FFmpeg/NVENC/fonts; do not depend on ECS Exec unless infra enables it.
+4. Add isolated rehearsal secret/task-override path for bad provider drills.
+5. Build/push GPU image and record immutable digest/SHA tag.
+6. Scale `brivva-gpu` to one host/task only after network mode is ready.
+7. Run dry-run capability probe.
+8. Run fake/local sink smoke.
+9. Run 10-15 min YouTube smoke only from real-platform-capable network mode.
+10. Run Grip smoke with fresh one-shot key if Grip is in launch.
+11. Run 30-60 min exact launch-profile soak.
+12. Run failure drills.
+13. Update tracker.

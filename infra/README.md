@@ -47,17 +47,15 @@ Phase 6C GPU rehearsal is private/internal-only: no public IP assignment, no TCP
 
 No-public-IP GPU ECS capacity needs private AWS control-plane access. The low-blast-radius rehearsal path is VPC endpoints, gated by `gpu_private_endpoints_enabled=false` by default. When enabled, Terraform creates one-AZ interface endpoints for `ecs`, `ecs-agent`, `ecs-telemetry`, `ecr.api`, `ecr.dkr`, `logs`, and `secretsmanager`, plus an S3 gateway endpoint for ECR image layers. Optional SSM debug endpoints are behind `gpu_private_endpoint_debug_services_enabled`. You must explicitly pass `gpu_private_endpoint_route_table_ids=[...]` for the GPU subnet route table(s); Terraform intentionally refuses to infer or mutate all default VPC route tables.
 
-One-command smoke/rehearsal runner:
+Read-only AWS preflight:
 
 ```fish
-# no spend; checks quota/Terraform/scripts/private-only 6C guards
-./scripts/run-ecs-gpu-rehearsal.sh --preflight-only
-./scripts/prove-v2-gpu-worker-cloud-private-static.sh
-
-# scale to 1 only from an operator network that can reach the VPC-private endpoint;
-# smoke endpoint, start local frontend pointed at ECS GPU, scale down on Ctrl-C
-./scripts/run-ecs-gpu-rehearsal.sh
+set -x AWS_REGION us-east-1
+./scripts/aws-gpu-preflight.sh
+./scripts/check-aws-gpu-quota.sh
 ```
+
+This does not apply Terraform, scale EC2, deploy, or mutate secrets. It only describes identity, quota, default VPC/subnets/route tables, rehearsal VPC endpoints, ECS services, GPU ASG, and CloudWatch log group.
 
 Lower-level Terraform commands:
 
@@ -91,8 +89,11 @@ infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
 
 # after task is RUNNING, print private/internal HTTP/WS endpoint for VITE_MEDIA_URL testing
 # from a network that can reach the VPC. Refuses public IP endpoints.
-./scripts/ecs-gpu-endpoint.sh
-./scripts/smoke-media-engine.sh http://<gpu-private-ip>:3000
+AWS_REGION=us-east-1 ./scripts/ecs-gpu-endpoint.sh
+
+# no dedicated AWS media-smoke helper exists yet; use the real API/frontend from
+# the operator private network or add a narrow ECS-side fake-sink smoke entrypoint.
+# Do not call private fake-sink proof production-equivalent.
 
 # if quota/capacity blocks launch or smoke is done, return to zero spend/retry loop
 infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
@@ -101,8 +102,24 @@ infisical run --env=prod -- ./infra/tofu-infisical.sh apply \
   -var='gpu_desired_capacity=0'
 
 # verify no GPU EC2 spend remains
-./scripts/check-gpu-zero-spend.sh
+AWS_REGION=us-east-1 ./scripts/check-gpu-zero-spend.sh
 ```
+
+### Real-platform blocker matrix
+
+Current rehearsal network path is private/no-public-IP and fake-sink/shadow by default:
+
+- Launch template sets `associate_public_ip_address = false`.
+- VPC endpoints cover AWS control-plane traffic only: ECS, ECS agent/telemetry, ECR API/DKR, CloudWatch Logs, Secrets Manager, and S3 image layers.
+- VPC endpoints do **not** provide external internet egress to Soniox, ElevenLabs, YouTube, Grip, TikTok, or generic RTMP destinations.
+- Operator/browser access to private `http://<gpu-private-ip>:3000` requires VPN, bastion, SSM port-forward, or another private route. SSM debugging also needs `gpu_private_endpoint_debug_services_enabled=true` plus IAM/session-manager permissions; ECS Exec is not enabled by this Terraform.
+- Therefore private `brivva-gpu` without NAT/operator route can prove only GPU/image/CloudWatch/secrets/fake-sink capability. It cannot close RS-007 or prove paid production.
+
+Real-platform smoke requires one of these explicit choices before scaling paid GPU capacity:
+
+1. private `brivva-gpu` + NAT/external egress + private operator/browser access;
+2. controlled primary `brivva` EC2_GPU cutover using the existing public route/tunnel, with rollback ready;
+3. future bastion/VPN/SSM-tunnel design plus external egress.
 
 Direct primary switch path (riskier): changes the existing `brivva` service from Fargate to EC2 GPU and may replace the service.
 
@@ -173,6 +190,44 @@ bun run ops:migrate-session-rename:prod
 The SQL lives in [workers/ops/live-session-id-migration.sql](../workers/ops/live-session-id-migration.sql).
 
 `deploy.sh` auto-resolves account from terraform state. Override with `AWS_ACCOUNT=...` if running standalone.
+
+## Isolated bad-provider drills
+
+Bad Soniox/ElevenLabs drills must never edit Infisical prod values or the shared
+Secrets Manager secret `brivva/env`. The primary ECS service `brivva` always
+references `brivva/env`; drill poisoning is isolated to the parallel `brivva-gpu`
+task definition by creating `brivva/env-gpu-drill` and pointing only the
+rehearsal container at that secret.
+
+Plan-only guardrail commands (no scale-up, no deploy, desired counts forced to
+0):
+
+```fish
+./scripts/plan-ecs-gpu-bad-provider-drill.sh soniox
+./scripts/plan-ecs-gpu-bad-provider-drill.sh elevenlabs
+```
+
+Manual equivalent:
+
+```fish
+infisical run --env=prod -- ./infra/tofu-infisical.sh plan \
+  -var='gpu_rehearsal_service_enabled=true' \
+  -var='gpu_rehearsal_desired_count=0' \
+  -var='gpu_desired_capacity=0' \
+  -var='gpu_bad_provider_drill=soniox' \
+  -var='gpu_bad_provider_sentinel=ISOLATED_GPU_DRILL_ONLY'
+```
+
+Proof of isolation to check in the Terraform plan/task definitions:
+
+- `aws_ecs_task_definition.app` / service `brivva` secret ARNs stay on
+  `brivva/env`.
+- `aws_ecs_task_definition.gpu_rehearsal` / service `brivva-gpu` uses
+  `brivva/env-gpu-drill` only when `gpu_bad_provider_drill != none`.
+- `brivva/env` secret value is not changed to a bad provider key; only
+  `brivva/env-gpu-drill` contains the sentinel bad key.
+- `gpu_bad_provider_sentinel=ISOLATED_GPU_DRILL_ONLY` is required or Terraform
+  validation fails.
 
 ## Rotate secrets
 
