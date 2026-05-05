@@ -357,6 +357,37 @@ describe("useHostSession", () => {
     });
   });
 
+  it("startRecording without H.264 → stays ready and shows supported-device guidance", async () => {
+    Object.defineProperty(globalThis, "RTCRtpSender", {
+      configurable: true,
+      value: {
+        getCapabilities: vi.fn(() => ({
+          codecs: [{ mimeType: "video/VP8", sdpFmtpLine: "" }],
+        })),
+      },
+    });
+    mockedEnsureFreshToken.mockResolvedValueOnce("t");
+    const { result } = renderHook(() => useHostSession());
+    await act(async () => {
+      await result.current.connectSession({ userId: "u1" });
+    });
+    act(() => socketInstances[0].fireOpen());
+    act(() => result.current.skipVoiceSetup());
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    expect(result.current.status).toBe("ready");
+    expect(result.current.connectionIssue).toBe(
+      "Your browser/device can’t provide H.264 video for live streaming. Please use Chrome desktop or another supported device.",
+    );
+    expect(pipelineInstances[0].stopped).toBe(true);
+    expect(socketInstances[0].sent).not.toContainEqual(
+      expect.objectContaining({ type: "webrtc:offer" }),
+    );
+  });
+
   it("stopRecording → pipeline stop + status=ready", async () => {
     mockedEnsureFreshToken.mockResolvedValueOnce("t");
     const { result } = renderHook(() => useHostSession());

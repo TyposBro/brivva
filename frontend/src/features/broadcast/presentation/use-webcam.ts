@@ -109,7 +109,7 @@ export function useWebcam(
       await preferHighQuality(sender);
       if (!requireH264(peer)) {
         const message =
-          "Your browser/device cannot start H.264 live stream.";
+          "Your browser/device can’t provide H.264 video for live streaming. Please use Chrome desktop or another supported device.";
         onConnectionIssue?.({ layer: "webrtc", state: "failed", message });
         stopPeer(peerRef);
         throw new Error(message);

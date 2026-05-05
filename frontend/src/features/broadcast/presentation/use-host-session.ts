@@ -173,13 +173,28 @@ export function useHostSession() {
 
   const startRecording = async () => {
     if (!socket.current.isOpen) return;
-    const analyser = await audio.current.start(
-      (buf) => socket.current.sendAudio(buf),
-      { timestampedAudio: appConfig().timestampedAudioEnabled },
-    );
+    let analyser: AnalyserNode;
+    try {
+      analyser = await audio.current.start(
+        (buf) => socket.current.sendAudio(buf),
+        { timestampedAudio: appConfig().timestampedAudioEnabled },
+      );
+      await startFrameStreaming();
+    } catch (e) {
+      audio.current.stop();
+      stopFrameStreaming();
+      const message = e instanceof Error ? e.message : "Media start failed";
+      dispatch({ type: "connection_issue", message });
+      sessionLog(
+        "warn",
+        "frontend.recording_start_failed",
+        { error: message },
+        message,
+      );
+      return;
+    }
     dispatch({ type: "recording_started", analyser });
     sessionLog("info", "frontend.recording_started");
-    await startFrameStreaming();
     sessionLog("info", "frontend.video_uplink_started");
   };
 

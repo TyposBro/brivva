@@ -109,6 +109,7 @@ function DashboardInner() {
   const [privacyStatus, setPrivacyStatus] = useState("unlisted");
   const [translationTerms, setTranslationTerms] = useState("");
   const [magicPaste, setMagicPaste] = useState("");
+  const [gripFreshConfirmed, setGripFreshConfirmed] = useState(false);
   const [quoteSessionId, setQuoteSessionId] = useState<string | null>(null);
   // Surfaced when POST /api/sessions returns 400 voice_language_mismatch
   // even though the FE's reactive state didn't catch it (stale voice cache
@@ -210,6 +211,7 @@ function DashboardInner() {
     const cred = savedCreds[platformId];
     const tuned = streamDefault(sourceLang, lang);
 
+    if (platformId === "grip") setGripFreshConfirmed(false);
     setDestinations((prev) => [
       ...prev,
       {
@@ -233,6 +235,9 @@ function DashboardInner() {
     setDestinations((prev) =>
       prev.map((d) => {
         if (d.uid !== uid) return d;
+        if (d.platform === "grip" && patch.stream_key !== undefined) {
+          setGripFreshConfirmed(false);
+        }
         // When the target language flips and the user hadn't hand-tuned
         // timing, re-apply the curated defaults. Otherwise switching to
         // Passthrough would leave a 2500ms delay + 0.2 gain on what is now
@@ -259,6 +264,7 @@ function DashboardInner() {
     if (detected) {
       const destLang = pickDestinationLang(sourceLang);
       const tuned = streamDefault(sourceLang, destLang);
+      if (detected.platform === "grip") setGripFreshConfirmed(false);
       setDestinations((prev) => [
         ...prev,
         {
@@ -385,6 +391,8 @@ function DashboardInner() {
   }
 
   const hasYoutubeDest = destinations.some((d) => d.platform === "youtube");
+  const hasGripDest = destinations.some((d) => d.platform === "grip");
+  const missingFreshGripConfirmation = hasGripDest && !gripFreshConfirmed;
   // Disable Go Live when any destination has a client-side validation error.
   // Prevents the "stream row created with NULL rtmp_url → session hangs"
   // production bug from reaching the backend a second time (Apr 19, 2026).
@@ -674,6 +682,24 @@ function DashboardInner() {
           </div>
         </div>
 
+        {hasGripDest && (
+          <label className="flex gap-3 rounded-xl bg-warning/10 px-4 py-3 text-xs font-label text-on-surface-variant">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-primary"
+              checked={gripFreshConfirmed}
+              onChange={(e) => setGripFreshConfirmed(e.target.checked)}
+            />
+            <span>
+              <span className="block font-bold text-on-surface">
+                Grip key check
+              </span>
+              I pasted a fresh, current-session Grip stream key from Grip admin.
+              Reused keys can silently fail after a few seconds.
+            </span>
+          </label>
+        )}
+
         {/* Translation hints */}
         <div className="bg-surface-container-low rounded-xl px-4 py-3 space-y-2">
           <label className="text-on-surface text-sm font-label font-bold block">
@@ -734,7 +760,10 @@ function DashboardInner() {
         <button
           className={cn(
             "w-full py-4 rounded-xl font-headline font-extrabold text-lg uppercase tracking-tight transition-all",
-            destinations.length > 0 && !hasInvalidDestination && !voiceLangMismatch
+            destinations.length > 0 &&
+              !hasInvalidDestination &&
+              !voiceLangMismatch &&
+              !missingFreshGripConfirmation
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
           )}
@@ -743,7 +772,8 @@ function DashboardInner() {
             creating ||
             destinations.length === 0 ||
             hasInvalidDestination ||
-            voiceLangMismatch
+            voiceLangMismatch ||
+            missingFreshGripConfirmation
           }
         >
           <span className="flex items-center justify-center gap-2">
@@ -756,7 +786,9 @@ function DashboardInner() {
                   ? "Fix destination errors to go live"
                   : voiceLangMismatch
                     ? "Fix voice language to go live"
-                    : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+                    : missingFreshGripConfirmation
+                      ? "Confirm fresh Grip key to go live"
+                      : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
           </span>
         </button>
 

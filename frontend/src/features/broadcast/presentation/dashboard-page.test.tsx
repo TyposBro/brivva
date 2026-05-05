@@ -325,6 +325,33 @@ describe("DashboardPage", () => {
     expect(ttStreamKey.value).toBe("tiktok-reusable");
   });
 
+  it("Grip destination requires fresh-key confirmation before Go Live", async () => {
+    getUser.mockResolvedValue(fullUser());
+    listVoices.mockResolvedValue({ voices: [] });
+    listSessions.mockResolvedValue({ sessions: [] });
+    listCredentials.mockResolvedValue({ credentials: [] });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: 1 });
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <DashboardPage />
+      </MemoryRouter>,
+    );
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const u = userEvent.setup();
+
+    await u.click(await screen.findByRole("button", { name: /Add destination/i }));
+    await u.click(screen.getByRole("button", { name: /^Grip$/i }));
+    await u.type(screen.getByPlaceholderText(/Server URL/i), "rtmps://grip.example/app");
+    await u.type(screen.getByPlaceholderText(/Stream Key/i), "fresh-grip-key");
+
+    expect(
+      screen.getByRole("button", { name: /Confirm fresh Grip key to go live/i }),
+    ).toBeDisabled();
+    await u.click(screen.getByLabelText(/fresh, current-session Grip stream key/i));
+    expect(screen.getByRole("button", { name: /^Go Live$/i })).toBeEnabled();
+  });
+
   it("recent sessions render in the list (happy)", async () => {
     getUser.mockResolvedValue(fullUser());
     listVoices.mockResolvedValue({ voices: [] });
