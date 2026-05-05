@@ -381,9 +381,10 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
         ]),
         VideoEncoderKind::Nvenc => args.extend_from_slice(&[
             "h264_nvenc".into(),
-            // Live streaming: p1 (fastest) keeps 4+ simultaneous 720p encodes
-            // above realtime on a single T4 NVENC chip. p5 (medium quality)
-            // produced 0.5x encode speed in production (May 2026).
+            // Live streaming: p1 (fastest) with no spatial AQ — the T4 NVENC
+            // chip can handle 4 simultaneous 720p encodes at realtime only
+            // when all quality features are off. May 2026: p1 alone = 0.94x;
+            // dropping spatial-aq should recover the last ~6%.
             "-preset".into(),
             "p1".into(),
             "-tune".into(),
@@ -394,10 +395,6 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
             "high".into(),
             "-bf".into(),
             "0".into(),
-            "-spatial-aq".into(),
-            "1".into(),
-            "-aq-strength".into(),
-            "6".into(),
         ]),
     }
     args.extend_from_slice(&[
@@ -798,8 +795,6 @@ mod tests {
         assert!(joined.contains("-tune hq"));
         assert!(joined.contains("-rc cbr"));
         assert!(joined.contains("-profile:v high"));
-        assert!(joined.contains("-spatial-aq 1"));
-        assert!(joined.contains("-aq-strength 6"));
         assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
         assert!(!joined.contains("-c:v libx264"));
     }
