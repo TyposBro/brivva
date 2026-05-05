@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
+import type { ProviderHealthNotice } from "./reducer";
 
 const navigate = vi.fn();
 vi.mock("react-router-dom", async (orig) => {
@@ -20,6 +21,9 @@ const session = {
   } as unknown as AnalyserNode,
   error: null,
   voiceReady: true,
+  mediaDiagnostics: null,
+  connectionIssue: null,
+  providerHealth: [] as ProviderHealthNotice[],
   timings: [],
   videoRef: { current: null },
   connectSession: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +69,9 @@ describe("BroadcastView", () => {
     session.connectSession.mockClear();
     session.skipVoiceSetup.mockClear();
     session.closeSession.mockClear();
+    session.status = "ready";
+    session.providerHealth = [];
+    session.connectionIssue = null;
     HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
       fillStyle: "",
       fillRect: vi.fn(),
@@ -129,6 +136,35 @@ describe("BroadcastView", () => {
     );
     await waitFor(() => expect(session.skipVoiceSetup).toHaveBeenCalled());
     session.status = "ready" as const;
+  });
+
+  it("renders provider-health notices with billable status", async () => {
+    getSession.mockResolvedValue({ session: null, streams: [] });
+    session.providerHealth = [
+      {
+        provider: "elevenlabs",
+        state: "degraded",
+        recoverable: true,
+        billable: false,
+        reason: "rate_limited",
+        targetLang: "ja",
+        statusCode: 429,
+        message: "Japanese TTS not billable while rate limited.",
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <BroadcastView sessionId="s1" sourceLang="en" userId="u1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Provider health/i)).toBeInTheDocument();
+    expect(screen.getByText(/elevenlabs/i)).toBeInTheDocument();
+    expect(screen.getByText(/unbillable/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Japanese TTS not billable while rate limited/i),
+    ).toBeInTheDocument();
   });
 
   it("Back button closes the session and navigates (sad)", async () => {

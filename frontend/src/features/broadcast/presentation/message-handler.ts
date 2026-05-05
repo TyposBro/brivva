@@ -22,6 +22,11 @@ export function createMessageHandler(
   return (msg: unknown) => {
     const parsed = HostServerMessageSchema.safeParse(msg);
     if (!parsed.success) {
+      dispatch({
+        type: "connection_issue",
+        message:
+          "Server sent an unsupported live message. End this run and create a fresh session if it repeats.",
+      });
       return;
     }
 

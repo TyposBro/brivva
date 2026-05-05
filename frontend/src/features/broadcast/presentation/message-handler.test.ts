@@ -26,9 +26,13 @@ describe("createMessageHandler", () => {
     expect(h.stopwatch.markInterim).toHaveBeenCalledOnce();
   });
 
-  it("interim missing transcript → ignored as invalid", () => {
+  it("interim missing transcript → surfaces protocol warning", () => {
     h.handler({ type: "interim" });
-    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.dispatch).toHaveBeenCalledWith({
+      type: "connection_issue",
+      message:
+        "Server sent an unsupported live message. End this run and create a fresh session if it repeats.",
+    });
   });
 
   it("final → dispatch + startTimer w/ active langs", () => {
@@ -87,9 +91,13 @@ describe("createMessageHandler", () => {
     expect(h.dispatch).toHaveBeenCalledWith({ type: "error", message: "boom" });
   });
 
-  it("error w/o message → ignored as invalid", () => {
+  it("error w/o message → surfaces protocol warning", () => {
     h.handler({ type: "error" });
-    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.dispatch).toHaveBeenCalledWith({
+      type: "connection_issue",
+      message:
+        "Server sent an unsupported live message. End this run and create a fresh session if it repeats.",
+    });
   });
 
   it("provider_health → stores notice and surfaces unbillable issue", () => {
@@ -124,9 +132,13 @@ describe("createMessageHandler", () => {
     });
   });
 
-  it("unknown msg.type → no dispatch, no stopwatch calls (sad)", () => {
+  it("unknown msg.type → protocol warning, no stopwatch calls (sad)", () => {
     h.handler({ type: "mystery" });
-    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.dispatch).toHaveBeenCalledWith({
+      type: "connection_issue",
+      message:
+        "Server sent an unsupported live message. End this run and create a fresh session if it repeats.",
+    });
     expect(h.stopwatch.markInterim).not.toHaveBeenCalled();
     expect(h.stopwatch.startTimer).not.toHaveBeenCalled();
   });

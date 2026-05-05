@@ -50,8 +50,17 @@ export class SessionSocket {
     onMessage: SessionSocketCallbacks["onMessage"],
     onBinary?: SessionSocketCallbacks["onBinary"]
   ): void {
-    if (typeof e.data === "string") onMessage(JSON.parse(e.data));
-    else if (e.data instanceof ArrayBuffer && onBinary) onBinary(e.data);
+    if (typeof e.data === "string") {
+      try {
+        onMessage(JSON.parse(e.data));
+      } catch {
+        onMessage({
+          type: "error",
+          message:
+            "Server sent a malformed live message. End this run and create a fresh session if it repeats.",
+        });
+      }
+    } else if (e.data instanceof ArrayBuffer && onBinary) onBinary(e.data);
   }
 
   sendAudio(buffer: ArrayBuffer): void {

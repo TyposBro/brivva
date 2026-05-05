@@ -115,6 +115,32 @@ describe("api-client HTTP wrappers", () => {
     await expect(getUser("u1")).rejects.toThrow(/API 500: request failed/);
   });
 
+  it("known backend error codes get operator remediation", async () => {
+    stubFail("POST", "/api/sessions", 400, { error: "voice_language_mismatch" });
+    await expect(
+      createSession({
+        user_id: "u1",
+        title: "t",
+        source_lang: "ko",
+        target_langs: ["ja"],
+      }),
+    ).rejects.toThrow(/Re-record the voice or change the source language/);
+  });
+
+  it("Grip provision failures get manual-paste remediation", async () => {
+    stubFail("POST", "/api/sessions", 502, {
+      error: "Grip Seller API provision failed: Grip Seller API /broadcasts failed: 404",
+    });
+    await expect(
+      createSession({
+        user_id: "u1",
+        title: "t",
+        source_lang: "ko",
+        target_langs: ["zh"],
+      }),
+    ).rejects.toThrow(/manual paste with a fresh Grip stream key/);
+  });
+
   it("listSessions returns the sessions array", async () => {
     stubOk("GET", "/api/sessions", {
       sessions: [

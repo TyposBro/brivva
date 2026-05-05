@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useHostSession } from "./use-host-session";
-import type { MediaDiagnostics } from "./reducer";
+import type { MediaDiagnostics, ProviderHealthNotice } from "./reducer";
 import { AudioRecorder } from "./audio-recorder";
 import { LatencyDashboard } from "./latency-dashboard";
 import { VoiceSetupCard } from "./voice-setup-card";
@@ -39,6 +39,7 @@ export function BroadcastView({
     timings,
     mediaDiagnostics,
     connectionIssue,
+    providerHealth,
     videoRef,
     connectSession,
     startRecording,
@@ -150,6 +151,10 @@ export function BroadcastView({
           </div>
         )}
 
+        {providerHealth.length > 0 && (
+          <ProviderHealthPanel notices={providerHealth} />
+        )}
+
         {status === "disconnected" && (
           <div className="bg-surface-container-low text-on-surface-variant font-label rounded-lg px-4 py-3">
             Disconnected. End this run and create a fresh session before going live again.
@@ -243,6 +248,46 @@ export function BroadcastView({
   );
 }
 
+
+function ProviderHealthPanel({
+  notices,
+}: {
+  notices: ProviderHealthNotice[];
+}) {
+  return (
+    <div className="bg-surface-container-low rounded-xl px-4 py-3 font-label text-xs space-y-2">
+      <p className="text-on-surface font-bold">Provider health</p>
+      <div className="space-y-1.5">
+        {notices.map((notice) => (
+          <div
+            key={`${notice.provider}:${notice.targetLang ?? ""}:${notice.reason}`}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 text-on-surface-variant"
+          >
+            <span className="font-bold text-on-surface uppercase">
+              {notice.provider}
+            </span>
+            {notice.targetLang && (
+              <span className="rounded bg-surface-container-highest px-1.5 py-0.5 uppercase">
+                {notice.targetLang}
+              </span>
+            )}
+            <span
+              className={cn(
+                "rounded px-1.5 py-0.5 font-bold uppercase",
+                notice.billable
+                  ? "bg-warning/10 text-warning"
+                  : "bg-error-container/30 text-error",
+              )}
+            >
+              {notice.billable ? "billable" : "unbillable"}
+            </span>
+            <span>{notice.message}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function MediaDiagnosticsPanel({
   diagnostics,

@@ -88,11 +88,36 @@ async function parseResult<T>(
     const parsed = ErrorResponseSchema.safeParse(error);
     const code = parsed.success ? parsed.data.error : null;
     const message = code
-      ? `API ${response.status}: ${code}`
+      ? friendlyApiMessage(response.status, code)
       : `API ${response.status}: request failed`;
     throw new ApiError(response.status, code, message);
   }
   return schema.parse(data);
+}
+
+function friendlyApiMessage(status: number, code: string): string {
+  if (code === "voice_language_mismatch") {
+    return "Voice clone language does not match this session source. Re-record the voice or change the source language.";
+  }
+  if (code === "grip_creds_not_savable") {
+    return "Grip stream keys are one-shot and cannot be saved. Paste a fresh Grip key for each session.";
+  }
+  if (code === "account_in_use") {
+    return "This account is already connected to another Brivva user. Use that account or disconnect it first.";
+  }
+  if (code === "voice_in_use") {
+    return "This voice is attached to an existing session and cannot be deleted yet.";
+  }
+  if (code === "no cloned voice attached to session") {
+    return "No cloned voice is attached to this session. Finish voice setup or choose a preset voice.";
+  }
+  if (code.startsWith("Grip Seller API provision failed")) {
+    return "Grip broadcast creation failed. Use manual paste with a fresh Grip stream key, or retry after checking Grip Seller API access.";
+  }
+  if (code.startsWith("YouTube broadcast create failed")) {
+    return "YouTube broadcast creation failed. Reconnect YouTube, verify Live access, then try again.";
+  }
+  return `API ${status}: ${code}`;
 }
 
 export function getUser(userId: string): Promise<UserInfo> {

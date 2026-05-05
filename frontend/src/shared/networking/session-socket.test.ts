@@ -83,6 +83,18 @@ describe("SessionSocket", () => {
     expect(onMessage).toHaveBeenCalledWith({ type: "final", utteranceId: 1 });
   });
 
+  it("malformed JSON routes a user-visible protocol error", () => {
+    const s = new SessionSocket();
+    const onMessage = vi.fn();
+    s.connect({}, { onMessage, onClose: () => {} });
+    FakeWebSocket.instances[0].fireMessage("{not-json");
+    expect(onMessage).toHaveBeenCalledWith({
+      type: "error",
+      message:
+        "Server sent a malformed live message. End this run and create a fresh session if it repeats.",
+    });
+  });
+
   it("routes ArrayBuffer to onBinary", () => {
     const s = new SessionSocket();
     const onBinary = vi.fn();
