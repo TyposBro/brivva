@@ -21,5 +21,5 @@ aws service-quotas get-service-quota \
   --region "$AWS_REGION" \
   --service-code ec2 \
   --quota-code "$QUOTA_CODE" \
-  --query '{QuotaName:QuotaName,Value:Value,Unit:Unit,NeededVcpu:`'"$MIN_VCPU"'`}' \
+  --query '{QuotaName:Quota.QuotaName,Value:Quota.Value,Unit:Quota.Unit,NeededVcpu:`'"$MIN_VCPU"'`}' \
   --output table

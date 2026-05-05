@@ -23,7 +23,7 @@ aws service-quotas get-service-quota \
   --region "$AWS_REGION" \
   --service-code ec2 \
   --quota-code "$GPU_VCPU_QUOTA_CODE" \
-  --query '{QuotaName:QuotaName,Value:Value,Unit:Unit,Adjustable:Adjustable}' \
+  --query '{QuotaName:Quota.QuotaName,Value:Quota.Value,Unit:Quota.Unit,Adjustable:Quota.Adjustable}' \
   --output table || true
 
 echo "\n== Default VPC/subnets/AZs =="
