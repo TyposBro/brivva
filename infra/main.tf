@@ -502,6 +502,9 @@ locals {
       { name = "BRIVVA_WEBRTC_STUN_URLS", value = "stun:stun.l.google.com:19302" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = "40000" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = "40100" },
+      # ECS GPU task assignment exposes /dev/nvidia*, but NVENC libraries are
+      # mounted only when the NVIDIA runtime includes the video capability.
+      { name = "NVIDIA_DRIVER_CAPABILITIES", value = "video,compute,utility" },
       { name = "BRIVVA_VIDEO_ENCODER", value = "nvenc" },
     ]
     secrets = [
@@ -589,6 +592,7 @@ locals {
       { name = "BRIVVA_WEBRTC_STUN_URLS", value = "stun:stun.l.google.com:19302" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = "40000" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = "40100" },
+      { name = "NVIDIA_DRIVER_CAPABILITIES", value = "video,compute,utility" },
       { name = "BRIVVA_VIDEO_ENCODER", value = "nvenc" },
       # Phase 6C cloud validation is shadow/fake-sink only. Production route
       # selection remains disabled until a later explicit live-route gate.

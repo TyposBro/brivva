@@ -103,6 +103,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 BRIVVA_VIDEO_ENCODER="${BRIVVA_VIDEO_ENCODER:-nvenc}"
+NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-video,compute,utility}"
 
 if [[ "$SKIP_BUILD" == true && ("$BUILD_FFMPEG_BASE" == true || "$BUILD_FFMPEG_GPU_BASE" == true || "$BUILD_SERVER_BASES" == true || "$BASES_ONLY" == true || "$BUILD_ONLY" == true) ]]; then
 	echo "--skip-build cannot be combined with build/base image flags" >&2
@@ -237,6 +238,7 @@ aws ecs describe-task-definition \
 		--arg WEBRTC_STUN_URLS "$BRIVVA_WEBRTC_STUN_URLS" \
 		--arg WEBRTC_UDP_PORT_MIN "$BRIVVA_WEBRTC_UDP_PORT_MIN" \
 		--arg WEBRTC_UDP_PORT_MAX "$BRIVVA_WEBRTC_UDP_PORT_MAX" \
+		--arg NVIDIA_DRIVER_CAPABILITIES "$NVIDIA_DRIVER_CAPABILITIES" \
 		--arg VIDEO_ENCODER "$BRIVVA_VIDEO_ENCODER" '
       .containerDefinitions |= map(
         if .name == $C then
@@ -249,6 +251,7 @@ aws ecs describe-task-definition \
                     and .name != "BRIVVA_WEBRTC_STUN_URLS"
                     and .name != "BRIVVA_WEBRTC_UDP_PORT_MIN"
                     and .name != "BRIVVA_WEBRTC_UDP_PORT_MAX"
+                    and .name != "NVIDIA_DRIVER_CAPABILITIES"
                     and .name != "BRIVVA_VIDEO_ENCODER"
                   )))
               + [
@@ -257,6 +260,7 @@ aws ecs describe-task-definition \
                 {name: "BRIVVA_WEBRTC_STUN_URLS", value: $WEBRTC_STUN_URLS},
                 {name: "BRIVVA_WEBRTC_UDP_PORT_MIN", value: $WEBRTC_UDP_PORT_MIN},
                 {name: "BRIVVA_WEBRTC_UDP_PORT_MAX", value: $WEBRTC_UDP_PORT_MAX},
+                {name: "NVIDIA_DRIVER_CAPABILITIES", value: $NVIDIA_DRIVER_CAPABILITIES},
                 {name: "BRIVVA_VIDEO_ENCODER", value: $VIDEO_ENCODER}
               ]
             )

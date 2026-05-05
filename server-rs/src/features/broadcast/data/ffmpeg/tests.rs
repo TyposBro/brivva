@@ -160,6 +160,56 @@ fn fake_exited_stream_full(id: &str, lang: &str, is_source: bool, passthrough: b
     }
 }
 
+fn fake_running_stream(id: &str, lang: &str) -> RtmpStream {
+    let child = std::process::Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn shell child");
+    RtmpStream {
+        child,
+        video_handle: Some(thread::spawn(|| {})),
+        audio_handle: Some(thread::spawn(|| {})),
+        audio_fifo: format!("/tmp/brivva_audio_fake_{id}"),
+        subtitle_textfile: format!("/tmp/brivva_subtitle_fake_{id}.txt"),
+        lang: lang.to_string(),
+        rtmp_urls: vec!["rtmp://fake".into()],
+        destinations: vec![RtmpDestination::new("fake", "rtmp://fake")],
+        delay: Duration::from_millis(1000),
+        is_source: false,
+        host_gain: 1.0,
+        passthrough: false,
+        output_id: None,
+        destination_platform: "fake".into(),
+        output_controls_enabled: false,
+        render_graph_node: None,
+        buffers: StreamBuffers::new(),
+        stop_flag: Arc::new(AtomicBool::new(false)),
+        restart_count: 0,
+        last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
+    }
+}
+
+#[test]
+fn live_video_profile_update_does_not_kill_active_ffmpeg() {
+    let mut m = RtmpManager::new();
+    m.streams
+        .insert("fake".into(), fake_running_stream("fake", "ja"));
+
+    m.set_capture_video_profile(720, 720, 24);
+
+    let stream = m.streams.get_mut("fake").expect("stream still present");
+    assert!(
+        stream.child.try_wait().expect("child status readable").is_none(),
+        "profile correction must not burn restart budget by killing live ffmpeg"
+    );
+    stream.stop_flag.store(true, Ordering::Release);
+    let _ = stream.child.kill();
+    let _ = stream.child.wait();
+}
+
 #[test]
 fn detect_crashed_picks_up_exited_child_and_emits_restart_snapshot() {
     let mut m = RtmpManager::new();

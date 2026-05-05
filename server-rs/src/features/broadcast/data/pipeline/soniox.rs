@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 pub const SONIOX_MODEL: &str = "stt-rt-preview";
 pub const HOST_SAMPLE_RATE: u32 = 44_100;
 pub const SONIOX_END_TOKEN: &str = "<end>";
+pub const SONIOX_FIN_TOKEN: &str = "<fin>";
+
+pub fn is_soniox_endpoint_token(text: &str) -> bool {
+    matches!(text, SONIOX_END_TOKEN | SONIOX_FIN_TOKEN)
+}
 
 #[derive(Debug, Serialize)]
 pub struct SonioxConfig<'a> {
@@ -195,7 +200,7 @@ impl SonioxMode {
     }
 
     pub fn accepts(&self, token: &SonioxToken) -> bool {
-        if token.text == SONIOX_END_TOKEN {
+        if is_soniox_endpoint_token(&token.text) {
             return true;
         }
 

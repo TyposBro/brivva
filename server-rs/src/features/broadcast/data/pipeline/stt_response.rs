@@ -10,7 +10,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite;
 
-use super::soniox::{SONIOX_END_TOKEN, SonioxMode, SonioxResponse};
+use super::soniox::{SonioxMode, SonioxResponse, is_soniox_endpoint_token};
 use super::stt_transport::SonioxStream;
 use super::to_ws;
 
@@ -296,7 +296,7 @@ fn accumulate_tokens(
             continue;
         }
         // AUDIT: end-of-utterance sentinel — marks boundary, not a drop.
-        if token.text == SONIOX_END_TOKEN {
+        if is_soniox_endpoint_token(&token.text) {
             endpoint_hit = true;
             continue;
         }
@@ -717,7 +717,7 @@ mod tests {
         let response = SonioxResponse {
             tokens: vec![
                 token("done ", true, None),
-                token(SONIOX_END_TOKEN, true, None),
+                token(super::super::soniox::SONIOX_END_TOKEN, true, None),
             ],
             error_code: None,
             error_message: None,
@@ -727,6 +727,46 @@ mod tests {
         let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
 
         assert_eq!(final_text, "done ");
+        assert!(endpoint);
+    }
+
+    #[test]
+    fn accumulate_flags_endpoint_on_fin_token_and_skips_its_text() {
+        let mode = SonioxMode::Source { lang: Lang::En };
+        let response = SonioxResponse {
+            tokens: vec![
+                token("done ", true, None),
+                token(super::super::soniox::SONIOX_FIN_TOKEN, true, None),
+                token(super::super::soniox::SONIOX_FIN_TOKEN, true, None),
+            ],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let mut timing = UtteranceTimingAccumulator::default();
+        let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
+
+        assert_eq!(final_text, "done ");
+        assert!(endpoint);
+    }
+
+    #[test]
+    fn accumulate_translate_accepts_fin_endpoint_without_leaking_text() {
+        let mode = SonioxMode::Translate {
+            source_lang: Lang::En,
+            target_lang: Lang::Ko,
+            terms: Vec::new(),
+        };
+        let response = SonioxResponse {
+            tokens: vec![token(super::super::soniox::SONIOX_FIN_TOKEN, true, None)],
+            error_code: None,
+            error_message: None,
+        };
+        let mut final_text = String::new();
+        let mut timing = UtteranceTimingAccumulator::default();
+        let (_, endpoint) = accumulate_tokens(&mode, &response, &mut final_text, &mut timing);
+
+        assert_eq!(final_text, "");
         assert!(endpoint);
     }
 

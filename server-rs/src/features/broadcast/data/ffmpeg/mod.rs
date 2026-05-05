@@ -493,18 +493,22 @@ impl RtmpManager {
             "ffmpeg video profile updated for host camera"
         );
         self.video_profile = profile;
-        for (id, stream) in &mut self.streams {
-            if stream.stop_flag.load(Ordering::Acquire) {
-                continue;
-            }
+        let active_stream_count = self
+            .streams
+            .values()
+            .filter(|stream| !stream.stop_flag.load(Ordering::Acquire))
+            .count();
+        if active_stream_count > 0 {
+            // Do not kill live FFmpeg children for observed WebRTC profile
+            // corrections. The browser can report/estimate FPS after streams
+            // have already started; killing here looks like an FFmpeg crash,
+            // burns restart budget, and restarts mid-GOP without SPS/PPS.
+            // Existing children keep their launch profile; future restarts use
+            // the corrected profile.
             tracing::info!(
-                stream_id = %id,
-                lang = %stream.lang,
-                "ffmpeg restarting to apply host video profile"
+                active_stream_count,
+                "ffmpeg video profile update deferred for active streams"
             );
-            if let Err(e) = stream.child.kill() {
-                tracing::warn!(stream_id = %id, error = %e, "ffmpeg profile-restart kill failed");
-            }
         }
     }
 
