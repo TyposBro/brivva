@@ -13,6 +13,7 @@ target/
 # Dev loop script output
 .test-logs/
 .dev-logs/
+tmp/
 
 # Playwright artifacts (logs, traces, videos, screenshots, reports)
 frontend/test-results/
