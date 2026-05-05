@@ -254,7 +254,20 @@ pub enum AvailableWindowMethod {
     Unavailable,
 }
 
-pub const MAX_TTS_BUDGET_MS: u64 = 3_000;
+pub const MAX_TTS_BUDGET_MS: u64 = 6_000;
+
+/// Per-language cap on `tts_budget_ms`. Slow-TTS languages (JA, ZH) get
+/// more time to synthesize; fast languages (EN) get a tight cap.
+/// Empirically calibrated from ElevenLabs Flash v2.5 audio duration
+/// measurements (May 2026): JA ~4.5 chars/s, ZH ~5.5, KO ~6.3, EN ~18.
+pub fn tts_budget_cap_ms(lang: &Lang) -> u64 {
+    match lang {
+        Lang::Ja => 6_000,
+        Lang::Zh => 5_000,
+        Lang::Ko => 4_000,
+        Lang::En => 2_000,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceUtteranceTiming {
@@ -290,10 +303,11 @@ impl SourceUtteranceTiming {
         }
     }
 
-    pub fn tts_budget_ms(self) -> u64 {
+    pub fn tts_budget_ms(self, lang: &Lang) -> u64 {
+        let cap = tts_budget_cap_ms(lang);
         self.available_window_ms
             .unwrap_or(self.source_speech_duration_ms)
-            .clamp(500, MAX_TTS_BUDGET_MS)
+            .clamp(500, cap)
     }
 }
 

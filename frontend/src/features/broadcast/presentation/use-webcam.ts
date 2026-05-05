@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 const HOST_VIDEO_MIN_WIDTH = 720;
 const HOST_VIDEO_MIN_HEIGHT = 1280;
@@ -47,33 +47,12 @@ export function useWebcam(
   const cfrUplinkRef = useRef<CfrUplink | null>(null);
   const statsIntervalRef = useRef<number | null>(null);
   const pendingLocalOfferRef = useRef(false);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
 
   const videoRef = useCallback((el: HTMLVideoElement | null) => {
     videoElRef.current = el;
     if (el && streamRef.current) {
       el.srcObject = streamRef.current;
-    }
-  }, []);
-
-  const startWebcam = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          // Phone-first live commerce output is a 720x1280 portrait canvas.
-          // This is an ideal, not exact: laptops usually capture landscape,
-          // and the server pads that source into the same portrait canvas.
-          width: { ideal: HOST_VIDEO_IDEAL_WIDTH },
-          height: { ideal: HOST_VIDEO_IDEAL_HEIGHT },
-          frameRate: { ideal: HOST_VIDEO_IDEAL_FPS },
-          facingMode: "user",
-        },
-      });
-      streamRef.current = stream;
-      if (videoElRef.current) {
-        videoElRef.current.srcObject = stream;
-      }
-    } catch (err) {
-      console.error("Webcam access failed:", err);
     }
   }, []);
 
@@ -84,6 +63,31 @@ export function useWebcam(
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   }, []);
+
+  const startWebcam = useCallback(async (mode?: "user" | "environment") => {
+    stopWebcam();
+    const targetMode = mode ?? facingMode;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          // Phone-first live commerce output is a 720x1280 portrait canvas.
+          // This is an ideal, not exact: laptops usually capture landscape,
+          // and the server pads that source into the same portrait canvas.
+          width: { ideal: HOST_VIDEO_IDEAL_WIDTH },
+          height: { ideal: HOST_VIDEO_IDEAL_HEIGHT },
+          frameRate: { ideal: HOST_VIDEO_IDEAL_FPS },
+          facingMode: targetMode,
+        },
+      });
+      streamRef.current = stream;
+      setFacingMode(targetMode);
+      if (videoElRef.current) {
+        videoElRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Webcam access failed:", err);
+    }
+  }, [facingMode, stopWebcam]);
 
   const startFrameStreaming = useCallback(async () => {
     if (!isSocketOpen() || !streamRef.current || peerRef.current) return;
@@ -144,6 +148,15 @@ export function useWebcam(
     stopCfrUplink(cfrUplinkRef);
   }, []);
 
+  const flipCamera = useCallback(() => {
+    // Only relevant on mobile — desktop browsers typically ignore facingMode.
+    // Stop the active WebRTC uplink, release the old camera, and restart with
+    // the opposite sensor (selfie ↔ main).
+    stopFrameStreaming();
+    const next = facingMode === "user" ? "environment" : "user";
+    void startWebcam(next);
+  }, [facingMode, stopFrameStreaming, startWebcam]);
+
   const handleWebRtcMessage = useCallback((msg: unknown): boolean => {
     if (!isWebRtcAnswer(msg)) return false;
     const peer = peerRef.current;
@@ -157,8 +170,10 @@ export function useWebcam(
 
   return {
     videoRef,
+    facingMode,
     startWebcam,
     stopWebcam,
+    flipCamera,
     startFrameStreaming,
     stopFrameStreaming,
     handleWebRtcMessage,

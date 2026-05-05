@@ -741,11 +741,21 @@ fn resample_pcm_s16le_mono_nearest(input: &[u8], output_bytes: usize) -> Vec<u8>
     if in_samples == out_samples {
         return input[..output_bytes.min(input.len())].to_vec();
     }
+    // Linear interpolation between neighbouring samples. Nearest-neighbour
+    // dropping caused audible aliasing when TTS catchup speed > 1.0
+    // (the "low fps sound" artifact reported May 2026).
     let mut out = Vec::with_capacity(output_bytes);
     for i in 0..out_samples {
-        let src_sample = i.saturating_mul(in_samples) / out_samples;
-        let src = (src_sample * 2).min(input.len().saturating_sub(2));
-        out.extend_from_slice(&input[src..src + 2]);
+        let pos = i as f64 * (in_samples - 1) as f64 / (out_samples - 1).max(1) as f64;
+        let idx0 = pos.floor() as usize;
+        let idx1 = (idx0 + 1).min(in_samples - 1);
+        let frac = pos - idx0 as f64;
+        let byte0 = idx0 * 2;
+        let byte1 = idx1 * 2;
+        let s0 = i16::from_le_bytes([input[byte0], input[byte0 + 1]]) as f64;
+        let s1 = i16::from_le_bytes([input[byte1], input[byte1 + 1]]) as f64;
+        let interpolated = (s0 + (s1 - s0) * frac) as i16;
+        out.extend_from_slice(&interpolated.to_le_bytes());
     }
     out
 }

@@ -164,9 +164,10 @@ pub(crate) fn estimate_tts_duration_ms(text: &str, lang: &Lang) -> u64 {
         return 1_000;
     }
     let chars_per_second = match lang {
-        // ElevenLabs Japanese output in live runs was materially slower than
-        // text density suggested; predict conservatively so we shorten before
-        // synthesis instead of overflowing the live translated-audio queue.
+        // ElevenLabs Flash v2.5 audio duration calibration (May 2026):
+        // EN ~18, JA ~4.5, ZH ~5.5, KO ~6.3 chars/sec of spoken audio.
+        // Values are slightly conservative (under-predict duration) so we
+        // err on the side of shortening text rather than overflowing queue.
         Lang::Ja => 5,
         Lang::Zh => 7,
         Lang::Ko => 6,
@@ -535,7 +536,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     let initial_backlog_ms = current_tts_backlog_ms(&req).await;
     let source_timing = source_timing_for_request(&req);
     let source_speech_duration_ms = source_timing.source_speech_duration_ms;
-    let estimated_source_duration_ms = source_timing.tts_budget_ms();
+    let estimated_source_duration_ms = source_timing.tts_budget_ms(&req.target_lang);
     let (initial_policy, predicted_expansion_ratio_milli, predicted_tts_duration_ms) =
         predict_tts_policy(
             &req.text,
@@ -1274,12 +1275,12 @@ mod tests {
         let timing =
             SourceUtteranceTiming::same_as_speech(500, SourceTimingMethod::SonioxTokenTimestamps)
                 .with_available_window(2_000);
-        assert_eq!(timing.tts_budget_ms(), 2_000);
+        assert_eq!(timing.tts_budget_ms(&Lang::Ja), 2_000);
 
         let huge =
             SourceUtteranceTiming::same_as_speech(500, SourceTimingMethod::SonioxTokenTimestamps)
                 .with_available_window(10_000);
-        assert_eq!(huge.tts_budget_ms(), 3_000);
+        assert_eq!(huge.tts_budget_ms(&Lang::Ja), 6_000);
     }
 
     #[test]
@@ -1290,9 +1291,9 @@ mod tests {
         let with_silence = speech_only.with_available_window(2_000);
 
         let (speech_policy, _, _) =
-            predict_tts_policy(text, &Lang::Ja, speech_only.tts_budget_ms(), 0);
+            predict_tts_policy(text, &Lang::Ja, speech_only.tts_budget_ms(&Lang::Ja), 0);
         let (silence_policy, _, _) =
-            predict_tts_policy(text, &Lang::Ja, with_silence.tts_budget_ms(), 0);
+            predict_tts_policy(text, &Lang::Ja, with_silence.tts_budget_ms(&Lang::Ja), 0);
 
         assert!(tts_policy_rank(silence_policy) < tts_policy_rank(speech_policy));
     }

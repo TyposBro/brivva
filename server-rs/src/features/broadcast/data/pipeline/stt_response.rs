@@ -116,9 +116,12 @@ pub(super) fn spawn_response_processor(
 }
 
 fn tts_lookahead_budget_enabled() -> bool {
+    // Default ON (May 2026). Lookahead lets each utterance borrow silence
+    // before the next utterance starts, increasing the TTS budget for
+    // slow-TTS languages (JA, ZH). Set to "0" only if it causes regressions.
     std::env::var("BRIVVA_TTS_LOOKAHEAD_BUDGET")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(true)
 }
 
 async fn read_soniox_message(tag: &str, stt_stream: &mut SonioxStream) -> Option<String> {
@@ -565,7 +568,10 @@ async fn schedule_tts_with_lookahead(pending_tts: PendingTtsSlot, current: Pendi
 
     let pending_for_timeout = pending_tts.clone();
     tokio::spawn(async move {
-        sleep(Duration::from_millis(500)).await;
+        // Hold pending TTS for 2s to capture silence between utterances.
+        // Live-commerce hosts frequently pause for product displays / chat —
+        // 500ms was too short and wasted usable silence budget.
+        sleep(Duration::from_millis(2_000)).await;
         flush_pending_tts_if_current(
             pending_for_timeout,
             utterance_id,
@@ -818,7 +824,7 @@ mod tests {
 
         assert_eq!(final_text, "こんにちは");
         assert_eq!(source_timing.source_speech_duration_ms, 1_200);
-        assert_eq!(source_timing.tts_budget_ms(), 1_200);
+        assert_eq!(source_timing.tts_budget_ms(&Lang::Ja), 1_200);
         assert_eq!(
             source_timing.timing_method,
             SourceTimingMethod::SonioxTokenTimestamps
@@ -845,7 +851,7 @@ mod tests {
 
         assert_eq!(final_text, "こんにちは");
         assert_eq!(source_timing.source_speech_duration_ms, 500);
-        assert_eq!(source_timing.tts_budget_ms(), 500);
+        assert_eq!(source_timing.tts_budget_ms(&Lang::Ja), 500);
         assert_eq!(
             source_timing.timing_method,
             SourceTimingMethod::ResponseWallClock
@@ -1312,7 +1318,7 @@ mod tests {
             timing.available_window_method,
             AvailableWindowMethod::NextUtteranceStart
         );
-        assert_eq!(timing.tts_budget_ms(), 2_000);
+        assert_eq!(timing.tts_budget_ms(&Lang::Ja), 2_000);
     }
 
     #[tokio::test]
@@ -1340,7 +1346,7 @@ mod tests {
         )
         .await;
 
-        let req = tokio::time::timeout(Duration::from_secs(1), tts_rx.recv())
+        let req = tokio::time::timeout(Duration::from_secs(3), tts_rx.recv())
             .await
             .expect("timeout task should dispatch")
             .expect("request");
@@ -1351,7 +1357,7 @@ mod tests {
             timing.available_window_method,
             AvailableWindowMethod::HoldTimeoutFallback
         );
-        tokio::time::sleep(Duration::from_millis(550)).await;
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
         assert!(tts_rx.try_recv().is_err(), "pending should dispatch once");
     }
 
@@ -1441,7 +1447,7 @@ mod tests {
             timing.available_window_method,
             AvailableWindowMethod::SameAsSpeech
         );
-        assert_eq!(timing.tts_budget_ms(), 700);
+        assert_eq!(timing.tts_budget_ms(&Lang::Ja), 700);
     }
 
     #[tokio::test]
@@ -1546,7 +1552,7 @@ mod tests {
         .await;
         handle.sessions.remove(&handle.id);
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
         assert!(
             tts_rx.try_recv().is_err(),
             "removed session should not receive TTS"

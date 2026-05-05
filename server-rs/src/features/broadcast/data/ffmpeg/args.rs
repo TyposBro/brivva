@@ -109,6 +109,9 @@ impl VideoProfile {
 
     fn as_mobile_portrait_output(self) -> Self {
         let output_fps = self.output_fps.min(30);
+        // bufsize ≥ 2× bitrate avoids NVENC "limited by bandwidth" warnings.
+        // 5000k gives the VBV buffer enough headroom for CBR at 2500k while
+        // keeping RTMP latency bounded for live commerce.
         Self {
             input_fps: self.input_fps,
             output_fps,
@@ -116,7 +119,7 @@ impl VideoProfile {
             max_height: 1280,
             bitrate_kbps: 2_500,
             maxrate_kbps: 2_800,
-            bufsize_kbps: 3_000,
+            bufsize_kbps: 5_000,
             keyframe_interval_frames: output_fps,
             pad_to_canvas: true,
         }
@@ -373,13 +376,16 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
             "main".into(),
             "-bf".into(),
             "0".into(),
+            "-sc_threshold".into(),
+            "0".into(),
         ]),
         VideoEncoderKind::Nvenc => args.extend_from_slice(&[
             "h264_nvenc".into(),
-            // Premium live path: keep latency bounded, but spend RTX GPU
-            // budget on quality via HQ tuning + adaptive quantization.
+            // Live streaming: p1 (fastest) keeps 4+ simultaneous 720p encodes
+            // above realtime on a single T4 NVENC chip. p5 (medium quality)
+            // produced 0.5x encode speed in production (May 2026).
             "-preset".into(),
-            "p5".into(),
+            "p1".into(),
             "-tune".into(),
             "hq".into(),
             "-rc".into(),
@@ -390,10 +396,8 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
             "0".into(),
             "-spatial-aq".into(),
             "1".into(),
-            "-temporal-aq".into(),
-            "1".into(),
             "-aq-strength".into(),
-            "8".into(),
+            "6".into(),
         ]),
     }
     args.extend_from_slice(&[
@@ -403,8 +407,6 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
         profile.keyframe_interval_frames.to_string(),
         "-keyint_min".into(),
         profile.keyframe_interval_frames.to_string(),
-        "-sc_threshold".into(),
-        "0".into(),
         "-b:v".into(),
         format!("{}k", profile.bitrate_kbps),
         "-maxrate".into(),
@@ -759,7 +761,7 @@ mod tests {
 
         assert!(joined.contains("-vf fps=30,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"));
         assert!(joined.contains("-g 30 -keyint_min 30"));
-        assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 3000k"));
+        assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 5000k"));
     }
 
     #[test]
@@ -792,12 +794,12 @@ mod tests {
         );
         let joined = args.join(" ");
         assert!(joined.contains("-c:v h264_nvenc"));
-        assert!(joined.contains("-preset p5"));
+        assert!(joined.contains("-preset p1"));
         assert!(joined.contains("-tune hq"));
         assert!(joined.contains("-rc cbr"));
         assert!(joined.contains("-profile:v high"));
         assert!(joined.contains("-spatial-aq 1"));
-        assert!(joined.contains("-temporal-aq 1"));
+        assert!(joined.contains("-aq-strength 6"));
         assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
         assert!(!joined.contains("-c:v libx264"));
     }

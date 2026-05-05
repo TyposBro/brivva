@@ -42,8 +42,10 @@ export function useHostSession() {
 
   const {
     videoRef,
+    facingMode,
     startWebcam,
     stopWebcam,
+    flipCamera,
     startFrameStreaming,
     stopFrameStreaming,
     handleWebRtcMessage,
@@ -213,10 +215,12 @@ export function useHostSession() {
     ...state,
     timings,
     videoRef,
+    facingMode,
     connectSession,
     startRecording,
     stopRecording,
     closeSession,
+    flipCamera,
     startVoiceRecording,
     stopVoiceRecording,
     skipVoiceSetup,

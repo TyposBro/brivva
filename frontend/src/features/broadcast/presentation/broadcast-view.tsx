@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { useHostSession } from "./use-host-session";
 import type { MediaDiagnostics, ProviderHealthNotice } from "./reducer";
 import { AudioRecorder } from "./audio-recorder";
@@ -41,10 +41,12 @@ export function BroadcastView({
     connectionIssue,
     providerHealth,
     videoRef,
+    facingMode,
     connectSession,
     startRecording,
     stopRecording,
     closeSession,
+    flipCamera,
     startVoiceRecording,
     stopVoiceRecording,
     skipVoiceSetup,
@@ -194,7 +196,7 @@ export function BroadcastView({
         )}
 
         <div className={cn("flex flex-col items-center gap-2", isReady ? "block" : "hidden")}>
-          <div className="h-80 aspect-[9/16] overflow-hidden rounded-xl border-2 border-surface-container-highest bg-black">
+          <div className="relative h-80 aspect-[9/16] overflow-hidden rounded-xl border-2 border-surface-container-highest bg-black group">
             <video
               ref={videoRef}
               autoPlay
@@ -202,6 +204,14 @@ export function BroadcastView({
               playsInline
               className="h-full w-full object-contain -scale-x-100"
             />
+            <button
+              type="button"
+              onClick={flipCamera}
+              className="absolute bottom-3 right-3 bg-black/50 hover:bg-black/70 text-white rounded-full p-2 opacity-0 group-hover:opacity-100 transition-opacity"
+              title={facingMode === "user" ? "Switch to main camera" : "Switch to selfie camera"}
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
           </div>
           <span className="text-on-surface-variant text-xs font-label">
             Your camera (mirrored)
