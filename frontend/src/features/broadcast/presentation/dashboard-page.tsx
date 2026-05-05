@@ -85,6 +85,19 @@ function isLikelyMobileHost(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
+function chromiumBrowserRequirementError(): string | null {
+  if (typeof navigator === "undefined") return null;
+  const ua = navigator.userAgent;
+  const isChromium = /Chrome|Chromium|CriOS|Edg|OPR|Brave/i.test(ua);
+  const isFirefox = /Firefox|FxiOS/i.test(ua);
+  const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR/i.test(ua);
+  if (isChromium && !isFirefox) return null;
+  if (isFirefox || isSafari) {
+    return "Live hosting requires desktop Chrome, Brave, or another Chromium-based browser. Firefox/Safari can connect but may send H.264 that YouTube cannot play reliably.";
+  }
+  return "Live hosting requires desktop Chrome, Brave, or another Chromium-based browser.";
+}
+
 function DashboardInner() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -116,6 +129,7 @@ function DashboardInner() {
   // after a race). Forces the banner on so the host has a path forward.
   const [postMismatch, setPostMismatch] = useState(false);
   const mobileHostWarning = isLikelyMobileHost();
+  const browserRequirementError = chromiumBrowserRequirementError();
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -284,6 +298,11 @@ function DashboardInner() {
   // ── Create session ─────────────────────────────────
 
   const handleCreateSession = async () => {
+    const browserError = chromiumBrowserRequirementError();
+    if (browserError) {
+      setError(browserError);
+      return;
+    }
     if (!title.trim()) {
       setError("Enter a session title");
       return;
@@ -749,6 +768,13 @@ function DashboardInner() {
           </div>
         )}
 
+        {browserRequirementError && (
+          <div className="rounded-xl bg-error-container/20 px-4 py-3 text-xs font-label text-error">
+            <span className="font-bold">Use Chrome or Brave to host live.</span>{" "}
+            Firefox/Safari are blocked for launch tests because their WebRTC H.264 stream can make YouTube fail to show video.
+          </div>
+        )}
+
         {mobileHostWarning && (
           <div className="rounded-xl bg-warning-container/20 px-4 py-3 text-xs font-label text-on-surface-variant">
             <span className="font-bold text-on-surface">Desktop recommended for hosting.</span>{" "}
@@ -763,7 +789,8 @@ function DashboardInner() {
             destinations.length > 0 &&
               !hasInvalidDestination &&
               !voiceLangMismatch &&
-              !missingFreshGripConfirmation
+              !missingFreshGripConfirmation &&
+              !browserRequirementError
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
           )}
@@ -773,7 +800,8 @@ function DashboardInner() {
             destinations.length === 0 ||
             hasInvalidDestination ||
             voiceLangMismatch ||
-            missingFreshGripConfirmation
+            missingFreshGripConfirmation ||
+            Boolean(browserRequirementError)
           }
         >
           <span className="flex items-center justify-center gap-2">
@@ -788,7 +816,9 @@ function DashboardInner() {
                     ? "Fix voice language to go live"
                     : missingFreshGripConfirmation
                       ? "Confirm fresh Grip key to go live"
-                      : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+                      : browserRequirementError
+                        ? "Use Chrome or Brave to go live"
+                        : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
           </span>
         </button>
 

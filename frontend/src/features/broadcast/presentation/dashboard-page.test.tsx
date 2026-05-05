@@ -75,6 +75,10 @@ describe("DashboardPage", () => {
   beforeEach(() => {
     _resetForTesting();
     vi.stubGlobal("localStorage", new FakeStorage());
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 Chrome/124.0.0.0 Safari/537.36",
+    });
     signIn("u1");
     navigate.mockReset();
     getUser.mockReset();
@@ -350,6 +354,34 @@ describe("DashboardPage", () => {
     ).toBeDisabled();
     await u.click(screen.getByLabelText(/fresh, current-session Grip stream key/i));
     expect(screen.getByRole("button", { name: /^Go Live$/i })).toBeEnabled();
+  });
+
+  it("blocks Firefox host browser before Go Live", async () => {
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0",
+    });
+    getUser.mockResolvedValue(fullUser({ youtube_connected: true }));
+    listVoices.mockResolvedValue({ voices: [] });
+    listSessions.mockResolvedValue({ sessions: [] });
+    listCredentials.mockResolvedValue({ credentials: [] });
+    fetchOnboardingState.mockResolvedValue({ onboardingCompletedAt: 1 });
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <DashboardPage />
+      </MemoryRouter>,
+    );
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const u = userEvent.setup();
+
+    await u.click(await screen.findByRole("button", { name: /Add destination/i }));
+    await u.click(screen.getByRole("button", { name: /^YouTube$/i }));
+
+    expect(screen.getByText(/Use Chrome or Brave to host live/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Use Chrome or Brave to go live/i }),
+    ).toBeDisabled();
   });
 
   it("recent sessions render in the list (happy)", async () => {

@@ -146,7 +146,7 @@ export function BroadcastView({
             <p className="font-bold">Media connection problem</p>
             <p>{connectionIssue}</p>
             <p className="text-xs text-on-surface-variant">
-              For launch tests, use desktop Chrome/Brave, keep the tab visible, and avoid Wi‑Fi/LTE handoffs.
+              For launch tests, use desktop Chrome or Brave only. Keep the tab visible and avoid Wi‑Fi/LTE handoffs.
             </p>
           </div>
         )}

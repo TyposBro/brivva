@@ -380,7 +380,7 @@ describe("useHostSession", () => {
 
     expect(result.current.status).toBe("ready");
     expect(result.current.connectionIssue).toBe(
-      "Your browser/device can’t provide H.264 video for live streaming. Please use Chrome desktop or another supported device.",
+      "Your browser/device can’t provide launch-safe H.264 video for live streaming. Please use desktop Chrome or Brave.",
     );
     expect(pipelineInstances[0].stopped).toBe(true);
     expect(socketInstances[0].sent).not.toContainEqual(
