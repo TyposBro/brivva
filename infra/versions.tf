@@ -8,7 +8,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "brivva-tf-state"
+    bucket         = "brivva-tf-state-983601045027"
     key            = "brivva/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true

@@ -57,8 +57,8 @@ output "cloudflared_enabled" {
 }
 
 output "dashboard_url" {
-  description = "Deep link to the CloudWatch ops dashboard."
-  value       = "https://${var.region}.console.aws.amazon.com/cloudwatch/home?region=${var.region}#dashboards:name=${aws_cloudwatch_dashboard.app.dashboard_name}"
+  description = "Deep link to the CloudWatch ops dashboard. Null when alarm_enabled=false."
+  value       = var.alarm_enabled ? "https://${var.region}.console.aws.amazon.com/cloudwatch/home?region=${var.region}#dashboards:name=${aws_cloudwatch_dashboard.app[0].dashboard_name}" : null
 }
 
 output "alarm_topic_arn" {

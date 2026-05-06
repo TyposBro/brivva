@@ -41,9 +41,15 @@ variable "gpu_availability_zones" {
 }
 
 variable "gpu_desired_capacity" {
-  description = "Number of ECS GPU EC2 instances for the primary media service. Set 1 for production, 0 only to intentionally stop media."
+  description = "Number of ECS GPU EC2 instances for the primary media service. Keep 0 by default to avoid idle GPU spend; set 1 immediately before a live demo/run."
   type        = number
-  default     = 1
+  default     = 0
+}
+
+variable "gpu_service_desired_count" {
+  description = "Desired ECS tasks for the primary media service. Keep 0 with gpu_desired_capacity=0 to avoid pending work/idle spend; set 1 for a live demo/run."
+  type        = number
+  default     = 0
 }
 
 variable "gpu_rehearsal_service_enabled" {

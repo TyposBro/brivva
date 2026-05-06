@@ -210,6 +210,7 @@ resource "aws_cloudwatch_metric_alarm" "ffmpeg_gave_up" {
 # ── Dashboard ──────────────────────────────────────────────
 
 resource "aws_cloudwatch_dashboard" "app" {
+  count          = local.alarm_enabled ? 1 : 0
   dashboard_name = "${var.project}-ops"
 
   dashboard_body = jsonencode({

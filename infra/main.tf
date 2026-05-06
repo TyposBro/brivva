@@ -711,7 +711,7 @@ resource "aws_ecs_service" "app" {
   name            = var.project
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = 1
+  desired_count   = var.gpu_service_desired_count
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.gpu[0].name
     weight            = 1
