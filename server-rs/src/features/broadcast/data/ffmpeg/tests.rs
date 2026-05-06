@@ -8,9 +8,9 @@ fn timing_constants_match_documented_values() {
     assert_eq!(IDLE_RESTART_THRESHOLD, Duration::from_secs(25));
     assert_eq!(HOST_AUDIO_CAP_BYTES, 20 * 88_200);
     assert_eq!(HOST_VIDEO_H264_CAP_CHUNKS, 120_000);
-    assert_eq!(DEFAULT_TTS_QUEUE_CAP_MS, 15_000);
-    assert_eq!(MAX_TTS_QUEUE_CAP_MS, 30_000);
-    assert_eq!(tts_queue_cap_bytes_from_env(), 15 * 88_200);
+    assert_eq!(DEFAULT_TTS_QUEUE_CAP_MS, 60_000);
+    assert_eq!(MAX_TTS_QUEUE_CAP_MS, 120_000);
+    assert_eq!(tts_queue_cap_bytes_from_env(), 60 * 88_200);
 }
 
 #[test]
@@ -202,7 +202,11 @@ fn live_video_profile_update_does_not_kill_active_ffmpeg() {
 
     let stream = m.streams.get_mut("fake").expect("stream still present");
     assert!(
-        stream.child.try_wait().expect("child status readable").is_none(),
+        stream
+            .child
+            .try_wait()
+            .expect("child status readable")
+            .is_none(),
         "profile correction must not burn restart budget by killing live ffmpeg"
     );
     stream.stop_flag.store(true, Ordering::Release);
@@ -336,14 +340,14 @@ fn push_tts_caps_queue_by_dropping_whole_oldest_segments() {
         1,
         "ja".into(),
         "old".into(),
-        vec![1u8; 10 * 88_200],
+        vec![1u8; 40 * 88_200],
     ));
     m.push_tts_segment(TtsSegment::new(
         2,
         1,
         "ja".into(),
         "new".into(),
-        vec![2u8; 10 * 88_200],
+        vec![2u8; 40 * 88_200],
     ));
     let q = m.streams["t"].buffers.tts.lock().unwrap();
     assert!(tts_queue_bytes(&q) <= tts_queue_cap_bytes_from_env());
@@ -357,13 +361,13 @@ fn push_tts_does_not_drop_when_payload_fits_within_cap() {
     m.streams
         .insert("t".into(), fake_exited_stream("t", "ja", false));
 
-    let fifteen_seconds = 15 * 88_200;
-    m.push_tts("ja", vec![1u8; fifteen_seconds]);
+    let sixty_seconds = 60 * 88_200;
+    m.push_tts("ja", vec![1u8; sixty_seconds]);
     let q = m.streams["t"].buffers.tts.lock().unwrap();
     assert_eq!(
         tts_queue_bytes(&q),
-        fifteen_seconds,
-        "15s of PCM must fit under live cap"
+        sixty_seconds,
+        "60s of PCM must fit under live cap"
     );
 }
 

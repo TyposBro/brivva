@@ -186,7 +186,7 @@ describe("§0.5.1 fixture roundtrip — YouTube Live Streaming API", () => {
     expect(result.broadcastId).toMatch(/^[A-Za-z0-9_-]{11}$/);
     expect(result.streamId).toBe(streamInsertHappy.id);
     expect(result.rtmpUrl).toBe(
-      streamInsertHappy.cdn.ingestionInfo.ingestionAddress,
+      streamInsertHappy.cdn.ingestionInfo.rtmpsIngestionAddress,
     );
     expect(result.streamKey).toBe(
       streamInsertHappy.cdn.ingestionInfo.streamName,

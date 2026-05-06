@@ -44,7 +44,6 @@ export function BroadcastView({
     facingMode,
     connectSession,
     startRecording,
-    stopRecording,
     closeSession,
     flipCamera,
     startVoiceRecording,
@@ -104,6 +103,10 @@ export function BroadcastView({
   const handleBack = () => {
     closeSession();
     navigate(`/session/${sessionId}`);
+  };
+
+  const handleStopBroadcast = () => {
+    closeSession();
   };
 
   const isReady = status === "ready" || status === "recording";
@@ -227,7 +230,7 @@ export function BroadcastView({
             isRecording={isRecording}
             analyser={analyser}
             onStart={startRecording}
-            onStop={stopRecording}
+            onStop={handleStopBroadcast}
           />
         )}
 

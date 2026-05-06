@@ -53,8 +53,10 @@ type InsertStreamResponse = {
   cdn?: {
     ingestionInfo?: {
       ingestionAddress?: string;
+      rtmpsIngestionAddress?: string;
       streamName?: string;
       backupIngestionAddress?: string;
+      rtmpsBackupIngestionAddress?: string;
     };
   };
 };
@@ -77,36 +79,9 @@ export async function createYouTubeBroadcast(
 ): Promise<YouTubeBroadcastResult> {
   let accessToken = args.accessToken;
 
-  const call = async <T>(path: string, body: unknown): Promise<T> => {
-    const run = async (token: string): Promise<Response> =>
-      await fetch(`${YT_BASE}${path}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-
-    let resp = await run(accessToken);
-    // One-shot refresh on 401. A 403 (quota, permission) is NOT transient —
-    // we surface it as a YouTubeBroadcastError so the caller can clean up.
-    if (resp.status === 401 && opts.refreshToken && opts.onTokenRefresh) {
-      const refreshed = await refreshAccessToken(env, opts.refreshToken);
-      accessToken = refreshed.access_token;
-      const expiresAt = Math.floor(Date.now() / 1000) + refreshed.expires_in;
-      await opts.onTokenRefresh(refreshed.access_token, expiresAt);
-      resp = await run(accessToken);
-    }
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new YouTubeBroadcastError(
-        `YouTube ${path} failed: ${resp.status} ${text}`,
-        resp.status,
-      );
-    }
-    return (await resp.json()) as T;
-  };
+  const call = makeYouTubePostCaller(env, accessToken, opts, (token) => {
+    accessToken = token;
+  });
 
   // 1) liveBroadcasts.insert — the viewer-facing container.
   const broadcast = await call<InsertBroadcastResponse>(
@@ -124,7 +99,10 @@ export async function createYouTubeBroadcast(
         // Enable monitor stream so the creator can preview before going live.
         // broadcastStreamDelayMs=0 since we already apply delay in Fargate.
         enableAutoStart: true,
-        enableAutoStop: true,
+        // Keep YouTube from finalizing the VOD on a transient RTMP disconnect.
+        // Fargate has its own restart loop; Workers explicitly completes the
+        // broadcast when the host ends the Brivva session.
+        enableAutoStop: false,
       },
     },
   );
@@ -144,7 +122,9 @@ export async function createYouTubeBroadcast(
     },
   );
 
-  const rtmpUrl = stream.cdn?.ingestionInfo?.ingestionAddress;
+  const rtmpUrl =
+    stream.cdn?.ingestionInfo?.rtmpsIngestionAddress ??
+    stream.cdn?.ingestionInfo?.ingestionAddress;
   const streamKey = stream.cdn?.ingestionInfo?.streamName;
   if (!rtmpUrl || !streamKey) {
     throw new YouTubeBroadcastError(
@@ -165,6 +145,67 @@ export async function createYouTubeBroadcast(
     rtmpUrl,
     streamKey,
     watchUrl: `https://www.youtube.com/watch?v=${broadcast.id}`,
+  };
+}
+
+export async function completeYouTubeBroadcast(
+  env: Env,
+  args: { accessToken: string; broadcastId: string },
+  opts: {
+    refreshToken?: string | null;
+    onTokenRefresh?: (newAccessToken: string, expiresAt: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  let accessToken = args.accessToken;
+  const call = makeYouTubePostCaller(env, accessToken, opts, (token) => {
+    accessToken = token;
+  });
+  await call<InsertBroadcastResponse>(
+    `/liveBroadcasts/transition?broadcastStatus=complete&id=${encodeURIComponent(args.broadcastId)}&part=status`,
+    {},
+  );
+}
+
+function makeYouTubePostCaller(
+  env: Env,
+  initialAccessToken: string,
+  opts: {
+    refreshToken?: string | null;
+    onTokenRefresh?: (newAccessToken: string, expiresAt: number) => Promise<void>;
+  },
+  onAccessToken: (token: string) => void,
+) {
+  let accessToken = initialAccessToken;
+  return async <T>(path: string, body: unknown): Promise<T> => {
+    const run = async (token: string): Promise<Response> =>
+      await fetch(`${YT_BASE}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+    let resp = await run(accessToken);
+    // One-shot refresh on 401. A 403 (quota, permission, invalid transition)
+    // is NOT transient — surface it as a YouTubeBroadcastError.
+    if (resp.status === 401 && opts.refreshToken && opts.onTokenRefresh) {
+      const refreshed = await refreshAccessToken(env, opts.refreshToken);
+      accessToken = refreshed.access_token;
+      onAccessToken(accessToken);
+      const expiresAt = Math.floor(Date.now() / 1000) + refreshed.expires_in;
+      await opts.onTokenRefresh(refreshed.access_token, expiresAt);
+      resp = await run(accessToken);
+    }
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new YouTubeBroadcastError(
+        `YouTube ${path} failed: ${resp.status} ${text}`,
+        resp.status,
+      );
+    }
+    return (await resp.json()) as T;
   };
 }
 

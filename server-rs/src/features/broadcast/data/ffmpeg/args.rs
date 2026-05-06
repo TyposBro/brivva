@@ -1,4 +1,5 @@
 use std::io::BufRead;
+use std::time::Instant;
 
 use crate::features::broadcast::domain::VideoEncoderKind;
 
@@ -120,7 +121,7 @@ impl VideoProfile {
             bitrate_kbps: 2_500,
             maxrate_kbps: 2_800,
             bufsize_kbps: 5_000,
-            keyframe_interval_frames: output_fps,
+            keyframe_interval_frames: output_fps * 2,
             pad_to_canvas: true,
         }
     }
@@ -264,7 +265,15 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
 
 fn append_publish_target(ffmpeg_args: &mut Vec<String>, rtmp_urls: &[String]) {
     if rtmp_urls.len() <= 1 {
+        if rtmp_urls
+            .first()
+            .is_some_and(|url| url.starts_with("rtmp://") || url.starts_with("rtmps://"))
+        {
+            ffmpeg_args.extend_from_slice(&["-rtmp_live".into(), "live".into()]);
+        }
         ffmpeg_args.extend_from_slice(&[
+            "-flvflags".into(),
+            "no_duration_filesize".into(),
             "-f".into(),
             "flv".into(),
             rtmp_urls.first().cloned().unwrap_or_default(),
@@ -276,7 +285,12 @@ fn append_publish_target(ffmpeg_args: &mut Vec<String>, rtmp_urls: &[String]) {
         "tee".into(),
         rtmp_urls
             .iter()
-            .map(|url| format!("[f=flv:onfail=ignore]{}", escape_tee_url(url)))
+            .map(|url| {
+                format!(
+                    "[f=flv:flvflags=no_duration_filesize:onfail=ignore]{}",
+                    escape_tee_url(url)
+                )
+            })
             .collect::<Vec<_>>()
             .join("|"),
     ]);
@@ -381,14 +395,13 @@ fn video_encoder_args(encoder: VideoEncoderKind, profile: VideoProfile) -> Vec<S
         ]),
         VideoEncoderKind::Nvenc => args.extend_from_slice(&[
             "h264_nvenc".into(),
-            // Live streaming: p1 (fastest) with no spatial AQ — the T4 NVENC
-            // chip can handle 4 simultaneous 720p encodes at realtime only
-            // when all quality features are off. May 2026: p1 alone = 0.94x;
-            // dropping spatial-aq should recover the last ~6%.
+            // Live streaming: p1 (fastest) + low-latency tune keeps the T4
+            // encoder from buffering behind RTMP backpressure during long
+            // YouTube pushes.
             "-preset".into(),
             "p1".into(),
             "-tune".into(),
-            "hq".into(),
+            "ll".into(),
             "-rc".into(),
             "cbr".into(),
             "-profile:v".into(),
@@ -473,6 +486,10 @@ pub(super) enum FfmpegProgressAlert {
 pub(super) struct FfmpegProgressMonitor {
     fps: Option<f64>,
     speed: Option<f64>,
+    out_time_us: Option<u64>,
+    last_out_time_us: Option<u64>,
+    last_progress_at: Option<Instant>,
+    output_started: bool,
     dup_frames: Option<u64>,
     drop_frames: Option<u64>,
     last_drop_frames: u64,
@@ -490,6 +507,7 @@ impl FfmpegProgressMonitor {
         match key {
             "fps" => self.fps = parse_progress_f64(value),
             "speed" => self.speed = parse_speed(value),
+            "out_time_us" | "out_time_ms" => self.out_time_us = value.parse::<u64>().ok(),
             "dup_frames" => self.dup_frames = value.parse::<u64>().ok(),
             "drop_frames" => self.drop_frames = value.parse::<u64>().ok(),
             "progress" => return self.finish_tick(),
@@ -509,7 +527,8 @@ impl FfmpegProgressMonitor {
 
     fn finish_tick(&mut self) -> Vec<FfmpegProgressAlert> {
         let mut alerts = Vec::new();
-        if let Some(speed) = self.speed {
+        let effective_speed = self.interval_speed().or(self.speed);
+        if let Some(speed) = effective_speed {
             if speed < Self::SLOW_SPEED_THRESHOLD {
                 self.consecutive_slow_ticks += 1;
                 if self.consecutive_slow_ticks >= Self::SLOW_SPEED_ALERT_TICKS {
@@ -532,6 +551,28 @@ impl FfmpegProgressMonitor {
             self.last_drop_frames = drop_frames;
         }
         alerts
+    }
+
+    fn interval_speed(&mut self) -> Option<f64> {
+        let now = Instant::now();
+        let out_time_us = self.out_time_us?;
+        let last_out_time_us = self.last_out_time_us.replace(out_time_us);
+        let last_progress_at = self.last_progress_at.replace(now);
+        if out_time_us > 0 {
+            self.output_started = true;
+        }
+        if !self.output_started {
+            return None;
+        }
+        let (Some(last_out_time_us), Some(last_progress_at)) = (last_out_time_us, last_progress_at)
+        else {
+            return None;
+        };
+        let elapsed_us = now.duration_since(last_progress_at).as_micros() as f64;
+        if elapsed_us <= 0.0 || out_time_us < last_out_time_us {
+            return None;
+        }
+        Some((out_time_us - last_out_time_us) as f64 / elapsed_us)
     }
 }
 
@@ -657,6 +698,8 @@ mod tests {
         assert!(joined.contains("-muxdelay 0"));
         assert!(joined.contains("-muxpreload 0"));
         assert!(joined.contains("-flush_packets 1"));
+        assert!(joined.contains("-rtmp_live live"));
+        assert!(joined.contains("-flvflags no_duration_filesize"));
     }
 
     #[test]
@@ -740,7 +783,7 @@ mod tests {
         assert_eq!(profile.max_height, 1280);
         assert_eq!(profile.bitrate_kbps, 2_500);
         assert_eq!(profile.maxrate_kbps, 2_800);
-        assert_eq!(profile.keyframe_interval_frames, 30);
+        assert_eq!(profile.keyframe_interval_frames, 60);
         assert!(profile.pad_to_canvas);
     }
 
@@ -757,7 +800,7 @@ mod tests {
         let joined = args.join(" ");
 
         assert!(joined.contains("-vf fps=30,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"));
-        assert!(joined.contains("-g 30 -keyint_min 30"));
+        assert!(joined.contains("-g 60 -keyint_min 60"));
         assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 5000k"));
     }
 
@@ -792,7 +835,7 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("-c:v h264_nvenc"));
         assert!(joined.contains("-preset p1"));
-        assert!(joined.contains("-tune hq"));
+        assert!(joined.contains("-tune ll"));
         assert!(joined.contains("-rc cbr"));
         assert!(joined.contains("-profile:v high"));
         assert!(joined.contains("-b:v 6000k -maxrate 9000k -bufsize 18000k"));
@@ -829,8 +872,15 @@ mod tests {
         );
         let joined = args.join(" ");
         assert!(joined.contains("-f tee"));
-        assert!(joined.contains("[f=flv:onfail=ignore]rtmp://a/live/key-a"));
-        assert!(joined.contains("|[f=flv:onfail=ignore]rtmp://b/live/key-b"));
+        assert!(
+            joined
+                .contains("[f=flv:flvflags=no_duration_filesize:onfail=ignore]rtmp://a/live/key-a")
+        );
+        assert!(
+            joined.contains(
+                "|[f=flv:flvflags=no_duration_filesize:onfail=ignore]rtmp://b/live/key-b"
+            )
+        );
         assert!(!joined.contains("-f flv rtmp://a/live/key-a"));
     }
 
@@ -862,6 +912,26 @@ mod tests {
                 speed: 0.84,
                 consecutive_ticks: 5,
             }]
+        );
+    }
+
+    #[test]
+    fn ffmpeg_progress_monitor_uses_interval_speed_over_cumulative_startup_speed() {
+        let mut monitor = FfmpegProgressMonitor::default();
+        let mut alerts = Vec::new();
+        monitor.ingest_line("speed=0.10x");
+        monitor.ingest_line("out_time_us=1000000");
+        alerts.extend(monitor.ingest_line("progress=continue"));
+        for i in 2..10 {
+            monitor.last_progress_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+            monitor.ingest_line("speed=0.20x");
+            monitor.ingest_line(&format!("out_time_us={}", i * 1_000_000));
+            alerts.extend(monitor.ingest_line("progress=continue"));
+        }
+
+        assert!(
+            alerts.is_empty(),
+            "cumulative ffmpeg speed includes no-input warmup; interval speed should stay healthy"
         );
     }
 

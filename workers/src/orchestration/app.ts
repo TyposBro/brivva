@@ -34,6 +34,7 @@ import {
 } from "../features/grip/seller-api";
 import * as el from "../features/voices/elevenlabs-client";
 import {
+	completeYouTubeBroadcast,
 	createYouTubeBroadcast,
 	YouTubeBroadcastError,
 	type YouTubeBroadcastResult,
@@ -1586,8 +1587,65 @@ app.patch("/internal/sessions/:id", async (c) => {
 		event: "workers.session_status_updated",
 		fields: { status: body.status },
 	});
+	if (body.status === "ended") {
+		c.executionCtx.waitUntil(completeYouTubeBroadcastsForSession(c.env, params.id));
+	}
 	return c.json({ status: "ok" });
 });
+
+async function completeYouTubeBroadcastsForSession(env: Env, sessionId: string) {
+	const session = await db.getSession(env.DB, sessionId);
+	if (!session) return;
+	const user = await db.getUserById(env.DB, session.user_id);
+	if (!user?.youtube_access_token) return;
+	const streams = await db.listStreams(env.DB, sessionId);
+	let accessToken = user.youtube_access_token;
+	for (const stream of streams) {
+		if (stream.platform !== "youtube" || !stream.platform_broadcast_id) {
+			continue;
+		}
+		try {
+			await completeYouTubeBroadcast(
+				env,
+				{
+					accessToken,
+					broadcastId: stream.platform_broadcast_id,
+				},
+				{
+					refreshToken: user.youtube_refresh_token,
+					onTokenRefresh: async (newToken, expiresAt) => {
+						accessToken = newToken;
+						await db.updateAccessToken(env.DB, {
+							userId: user.id,
+							accessToken: newToken,
+							expiresAt,
+						});
+					},
+				},
+			);
+			await emitWorkerSessionLog(env, {
+				sessionId,
+				liveSessionId: null,
+				event: "workers.youtube_broadcast_completed",
+				fields: { broadcast_id: stream.platform_broadcast_id },
+			});
+		} catch (error) {
+			console.warn("[sessions] youtube broadcast complete failed", {
+				sessionId,
+				broadcastId: stream.platform_broadcast_id,
+				error: String(error),
+			});
+			await emitWorkerSessionLog(env, {
+				sessionId,
+				liveSessionId: null,
+				event: "workers.youtube_broadcast_complete_failed",
+				level: "warn",
+				message: String(error),
+				fields: { broadcast_id: stream.platform_broadcast_id },
+			});
+		}
+	}
+}
 
 // Metrics update (Fargate → Workers as STT/TTS minutes accumulate).
 // Merge-semantics: omitted fields leave prior values alone; per-lang output

@@ -262,9 +262,11 @@ fn push_track_quality_alerts(
 }
 
 fn push_resolution_alert(alerts: &mut Vec<String>, label: &str, width: f64, height: f64) {
-    if width < 1920.0 || height < 1080.0 {
+    let short_side = width.min(height);
+    let long_side = width.max(height);
+    if short_side < 720.0 || long_side < 1080.0 {
         alerts.push(format!(
-            "{label} below 1080p floor: {}x{}",
+            "{label} below HD portrait floor (short>=720 long>=1080): {}x{}",
             width.round() as u32,
             height.round() as u32
         ));
@@ -307,14 +309,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn media_quality_alerts_warns_when_below_1080p30_floor() {
+    fn media_quality_alerts_warns_when_below_hd_portrait_or_fps_floor() {
         let stats = json!({
-            "sourceTrack": { "width": 1280, "height": 720, "frameRate": 24 },
+            "sourceTrack": { "width": 640, "height": 360, "frameRate": 24 },
             "uplinkTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
             "cfr": { "framesPerSecond": 28.4 },
             "outboundVideo": {
-                "frameWidth": 1280,
-                "frameHeight": 720,
+                "frameWidth": 640,
+                "frameHeight": 360,
                 "framesPerSecond": 17,
                 "qualityLimitationReason": "cpu"
             }
@@ -322,22 +324,26 @@ mod tests {
 
         let alerts = media_quality_alerts(&stats);
 
-        assert!(alerts.contains(&"capture below 1080p floor: 1280x720".to_string()));
+        assert!(alerts.contains(
+            &"capture below HD portrait floor (short>=720 long>=1080): 640x360".to_string()
+        ));
         assert!(alerts.contains(&"capture below 30fps floor: 24.0fps".to_string()));
         assert!(alerts.contains(&"cfr below 30fps floor: 28.4fps".to_string()));
-        assert!(alerts.contains(&"outbound below 1080p floor: 1280x720".to_string()));
+        assert!(alerts.contains(
+            &"outbound below HD portrait floor (short>=720 long>=1080): 640x360".to_string()
+        ));
         assert!(alerts.contains(&"outbound below 30fps floor: 17.0fps".to_string()));
         assert!(alerts.contains(&"outbound quality limited: cpu".to_string()));
     }
 
     #[test]
-    fn media_quality_alerts_accepts_1080p30_and_quality_none() {
+    fn media_quality_alerts_accepts_hd_portrait_and_landscape_quality_none() {
         let stats = json!({
-            "sourceTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
+            "sourceTrack": { "width": 720, "height": 1080, "frameRate": 30 },
             "uplinkTrack": { "width": 1920, "height": 1080, "frameRate": 30 },
             "cfr": { "framesPerSecond": 30 },
             "outboundVideo": {
-                "frameWidth": 1920,
+                "frameWidth": 720,
                 "frameHeight": 1080,
                 "framesPerSecond": 29.8,
                 "qualityLimitationReason": "none"

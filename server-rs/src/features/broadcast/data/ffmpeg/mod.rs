@@ -40,6 +40,7 @@ use crate::features::broadcast::domain::render_graph::{
 
 use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -60,8 +61,8 @@ const PCM_BYTES_PER_SECOND: usize = 88_200;
 /// Live-commerce translated audio should not silently drift by tens of
 /// seconds. Keep a firm default cap and shed whole TTS segments if forced;
 /// never chop raw PCM from the middle of a sentence.
-const DEFAULT_TTS_QUEUE_CAP_MS: u64 = 15_000;
-const MAX_TTS_QUEUE_CAP_MS: u64 = 30_000;
+const DEFAULT_TTS_QUEUE_CAP_MS: u64 = 60_000;
+const MAX_TTS_QUEUE_CAP_MS: u64 = 120_000;
 /// Max FFmpeg restart attempts per stream.
 const MAX_FFMPEG_RESTARTS: u32 = 3;
 /// Delay between FFmpeg restart attempts.
@@ -846,6 +847,8 @@ impl RtmpManager {
             match stream.child.try_wait() {
                 Ok(Some(status)) => {
                     let code = status.code().unwrap_or(-1);
+                    let signal = status.signal();
+                    let core_dumped = status.core_dumped();
                     if stream.stop_flag.load(Ordering::Acquire) {
                         continue;
                     }
@@ -853,6 +856,8 @@ impl RtmpManager {
                         stream_id = %id,
                         lang = %stream.lang,
                         exit_code = code,
+                        exit_signal = signal,
+                        core_dumped,
                         restart_count = stream.restart_count,
                         "ffmpeg rtmp process crashed, scheduling restart"
                     );
@@ -866,7 +871,10 @@ impl RtmpManager {
                         OutputHealthState::Degraded,
                         stream.restart_count,
                         Some(OutputDegradationLabel::FfmpegCrash),
-                        Some(format!("ffmpeg exit_code={code}")),
+                        Some(match signal {
+                            Some(signal) => format!("ffmpeg signal={signal} exit_code={code}"),
+                            None => format!("ffmpeg exit_code={code}"),
+                        }),
                     );
                     if stream.restart_count >= MAX_FFMPEG_RESTARTS {
                         tracing::error!(

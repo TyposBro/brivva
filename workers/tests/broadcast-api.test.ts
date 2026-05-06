@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
 import {
+  completeYouTubeBroadcast,
   createYouTubeBroadcast,
   YouTubeBroadcastError,
 } from "../src/features/youtube/broadcast-api";
@@ -27,12 +28,21 @@ type FetchFn = (
 function stubYouTubeCalls(
   queue: Array<{ match: RegExp; method: string; reply: Response }>,
 ): ReturnType<typeof vi.fn> {
-  const calls: Array<{ url: string; method: string }> = [];
+  const calls: Array<{ url: string; method: string; body?: unknown }> = [];
   let idx = 0;
   const fn = vi.fn<FetchFn>(async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     const method = (init?.method ?? "GET").toUpperCase();
-    calls.push({ url, method });
+    const rawBody = init?.body;
+    let body: unknown = undefined;
+    if (typeof rawBody === "string") {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        body = rawBody;
+      }
+    }
+    calls.push({ url, method, body });
     const next = queue[idx++];
     if (!next) throw new Error(`unexpected extra fetch: ${method} ${url}`);
     if (!next.match.test(url)) {
@@ -79,6 +89,7 @@ describe("createYouTubeBroadcast — happy path", () => {
           cdn: {
             ingestionInfo: {
               ingestionAddress: "rtmp://a.rtmp.youtube.com/live2",
+              rtmpsIngestionAddress: "rtmps://a.rtmps.youtube.com/live2",
               streamName: "secret-key-abc",
             },
           },
@@ -100,9 +111,13 @@ describe("createYouTubeBroadcast — happy path", () => {
 
     expect(result.broadcastId).toBe("bcast-123");
     expect(result.streamId).toBe("stream-456");
-    expect(result.rtmpUrl).toBe("rtmp://a.rtmp.youtube.com/live2");
+    expect(result.rtmpUrl).toBe("rtmps://a.rtmps.youtube.com/live2");
     expect(result.streamKey).toBe("secret-key-abc");
     expect(result.watchUrl).toBe("https://www.youtube.com/watch?v=bcast-123");
+    const calls = (fetch as unknown as { calls: Array<{ body?: unknown }> }).calls;
+    expect(calls[0].body).toMatchObject({
+      contentDetails: { enableAutoStart: true, enableAutoStop: false },
+    });
   });
 });
 
@@ -136,6 +151,7 @@ describe("createYouTubeBroadcast — token refresh", () => {
           cdn: {
             ingestionInfo: {
               ingestionAddress: "rtmp://a.rtmp.youtube.com/live2",
+              rtmpsIngestionAddress: "rtmps://a.rtmps.youtube.com/live2",
               streamName: "k",
             },
           },
@@ -186,6 +202,25 @@ describe("createYouTubeBroadcast — token refresh", () => {
         privacyStatus: "unlisted",
       }),
     ).rejects.toBeInstanceOf(YouTubeBroadcastError);
+  });
+});
+
+describe("completeYouTubeBroadcast", () => {
+  it("transitions a live broadcast to complete", async () => {
+    const fetchStub = stubYouTubeCalls([
+      {
+        match: /liveBroadcasts\/transition\?broadcastStatus=complete&id=bcast-123&part=status/,
+        method: "POST",
+        reply: jsonResponse({ id: "bcast-123", status: { lifeCycleStatus: "complete" } }),
+      },
+    ]);
+
+    await completeYouTubeBroadcast(ENV, {
+      accessToken: "tok",
+      broadcastId: "bcast-123",
+    });
+
+    expect(fetchStub).toHaveBeenCalledTimes(1);
   });
 });
 
