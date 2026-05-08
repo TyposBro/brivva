@@ -33,8 +33,8 @@ Browser WebRTC (H.264 / VP8 / future codecs)
 ### Phase 1 — Reliability without architecture rewrite
 
 - Bound ICE gathering before sending offer. Done.
-- Add configurable ICE servers so production can use TURN, not STUN-only.
-- Remove hard Chrome/Brave dashboard gate; warn instead and rely on runtime diagnostics.
+- Add configurable ICE servers so production can use TURN, not STUN-only. Done for frontend (`VITE_WEBRTC_ICE_SERVERS`) and server (`BRIVVA_WEBRTC_ICE_SERVERS`).
+- Remove hard Chrome/Brave dashboard gate; warn instead and rely on runtime diagnostics. Done.
 - Keep detailed media diagnostics:
   - outbound codec/encoder/fps/resolution
   - first H.264 write to FFmpeg
@@ -47,7 +47,7 @@ UI states should mean:
 
 - `Ready`: stream row exists.
 - `Connecting`: WebRTC/socket negotiation active.
-- `Publishing`: FFmpeg is writing bytes to RTMP.
+- `Publishing`: FFmpeg is writing bytes to RTMP. Internal FFmpeg success now emits `output.publishing`, not `output.live`.
 - `Live`: platform confirms ingest / live stream health.
 - `Degraded`: output running but below realtime / backpressured / missing video.
 - `Failed`: provider rejects or FFmpeg cannot recover.

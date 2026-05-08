@@ -114,13 +114,6 @@ export function useWebcam(
       track.contentHint = "motion";
       const sender = peer.addTrack(track, uplinkStream);
       await preferHighQuality(sender);
-      if (!requireH264(peer)) {
-        const message =
-          "Your browser/device can’t provide launch-safe H.264 video for live streaming. Please use desktop Chrome or Brave.";
-        onConnectionIssue?.({ layer: "webrtc", state: "failed", message });
-        stopPeer(peerRef);
-        throw new Error(message);
-      }
     }
 
     const offer = await peer.createOffer();
@@ -345,20 +338,3 @@ async function preferHighQuality(sender: RTCRtpSender) {
     .catch((err) => console.warn("WebRTC video quality params failed:", err));
 }
 
-function requireH264(peer: RTCPeerConnection | null) {
-  if (!peer) return false;
-  const transceiver = peer
-    .getTransceivers()
-    .find((t) => t.sender.track?.kind === "video");
-  const capabilities = RTCRtpSender.getCapabilities?.("video");
-  if (!transceiver || !capabilities?.codecs || !transceiver.setCodecPreferences)
-    return false;
-  const h264 = capabilities.codecs.filter(
-    (c) =>
-      c.mimeType.toLowerCase() === "video/h264" &&
-      !/packetization-mode=0/i.test(c.sdpFmtpLine ?? ""),
-  );
-  if (h264.length === 0) return false;
-  transceiver.setCodecPreferences(h264);
-  return true;
-}

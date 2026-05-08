@@ -206,12 +206,69 @@ async fn apply_video_profile(
 
 fn webrtc_config() -> RTCConfiguration {
     RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            ..Default::default()
-        }],
+        ice_servers: read_ice_servers_env().unwrap_or_else(default_ice_servers),
         ..Default::default()
     }
+}
+
+fn default_ice_servers() -> Vec<RTCIceServer> {
+    vec![RTCIceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        ..Default::default()
+    }]
+}
+
+fn read_ice_servers_env() -> Option<Vec<RTCIceServer>> {
+    let raw = std::env::var("BRIVVA_WEBRTC_ICE_SERVERS").ok()?;
+    parse_ice_servers_json(&raw).or_else(|| parse_ice_server_urls(&raw))
+}
+
+fn parse_ice_server_urls(raw: &str) -> Option<Vec<RTCIceServer>> {
+    let urls: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    (!urls.is_empty()).then_some(vec![RTCIceServer {
+        urls,
+        ..Default::default()
+    }])
+}
+
+fn parse_ice_servers_json(raw: &str) -> Option<Vec<RTCIceServer>> {
+    #[derive(Deserialize)]
+    struct IceServerJson {
+        urls: IceUrlsJson,
+        username: Option<String>,
+        credential: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IceUrlsJson {
+        One(String),
+        Many(Vec<String>),
+    }
+    let parsed: Vec<IceServerJson> = serde_json::from_str(raw).ok()?;
+    let servers: Vec<RTCIceServer> = parsed
+        .into_iter()
+        .filter_map(|server| {
+            let urls = match server.urls {
+                IceUrlsJson::One(url) => vec![url],
+                IceUrlsJson::Many(urls) => urls,
+            }
+            .into_iter()
+            .filter(|url| !url.trim().is_empty())
+            .collect::<Vec<_>>();
+            (!urls.is_empty()).then_some(RTCIceServer {
+                urls,
+                username: server.username.unwrap_or_default(),
+                credential: server.credential.unwrap_or_default(),
+                ..Default::default()
+            })
+        })
+        .collect();
+    (!servers.is_empty()).then_some(servers)
 }
 
 fn webrtc_udp_port_min() -> u16 {

@@ -47,6 +47,9 @@ fn clean_part(label: &'static str, value: &str) -> Result<String, OutputHealthEr
 #[serde(rename_all = "snake_case")]
 pub enum OutputHealthState {
     Starting,
+    /// FFmpeg is successfully publishing bytes to the RTMP endpoint. This is
+    /// internal output health, not provider-confirmed public live status.
+    Publishing,
     Live,
     Degraded,
     Restarting,
@@ -58,6 +61,7 @@ impl OutputHealthState {
     pub fn event_name(self) -> &'static str {
         match self {
             Self::Starting => "output.starting",
+            Self::Publishing => "output.publishing",
             Self::Live => "output.live",
             Self::Degraded => "output.degraded",
             Self::Restarting => "output.restarting",
@@ -207,6 +211,10 @@ mod tests {
     #[test]
     fn health_states_map_to_logs_first_event_names() {
         assert_eq!(OutputHealthState::Starting.event_name(), "output.starting");
+        assert_eq!(
+            OutputHealthState::Publishing.event_name(),
+            "output.publishing"
+        );
         assert_eq!(OutputHealthState::Live.event_name(), "output.live");
         assert_eq!(OutputHealthState::Degraded.event_name(), "output.degraded");
         assert_eq!(

@@ -547,7 +547,7 @@ fn spawn_rtmp_health_bridge(
 
 fn rtmp_snapshot_to_provider_health(snapshot: OutputHealthSnapshot) -> Option<ProviderHealthEvent> {
     let (state, recoverable, billable, reason) = match snapshot.state {
-        OutputHealthState::Starting | OutputHealthState::Live => return None,
+        OutputHealthState::Starting | OutputHealthState::Publishing | OutputHealthState::Live => return None,
         OutputHealthState::Degraded => (
             "degraded",
             true,
