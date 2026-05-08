@@ -63,6 +63,9 @@ export function bootstrap(): void {
 			import.meta.env.VITE_BRIVVA_V2_TIMESTAMPED_AUDIO,
 		),
 		webRtcIceServers: parseIceServers(import.meta.env.VITE_WEBRTC_ICE_SERVERS),
+		webRtcTurnCredentialsEnabled: envEnabledByDefault(
+			import.meta.env.VITE_WEBRTC_TURN_CREDENTIALS,
+		),
 	});
 
 	configureAuth({

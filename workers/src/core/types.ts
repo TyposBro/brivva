@@ -71,6 +71,9 @@ export type Env = {
   // set as a Worker secret/var during launch tests.
   SESSION_LOGS_ENABLED?: string;
   SESSION_LOG_CONSOLE?: string;
+  TURN_HOST?: string;
+  TURN_STATIC_AUTH_SECRET?: string;
+  TURN_TTL_SECONDS?: string;
   // Dev-only sign-in bypass. When the string "true", `/auth/google` mints a
   // JWT for a fixed local user and redirects back without ever contacting
   // accounts.google.com. Guarded by strict string comparison so a stray

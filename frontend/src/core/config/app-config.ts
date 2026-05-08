@@ -21,6 +21,8 @@ export interface AppConfig {
   timestampedAudioEnabled: boolean;
   /** Optional JSON-encoded RTCIceServer[] for TURN/STUN overrides. */
   webRtcIceServers: RTCIceServer[] | null;
+  /** Fetch short-lived TURN credentials from Workers at WebRTC start. */
+  webRtcTurnCredentialsEnabled: boolean;
 }
 
 let current: AppConfig | null = null;

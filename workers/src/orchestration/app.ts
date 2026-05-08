@@ -101,6 +101,47 @@ app.use(
 
 app.get("/", (c) => c.text("Brivva API (Workers + D1)"));
 app.get("/health", (c) => c.json({ ok: true }));
+
+app.get("/api/turn-credentials", async (c) => {
+	const host = c.env.TURN_HOST?.trim();
+	const secret = c.env.TURN_STATIC_AUTH_SECRET?.trim();
+	if (!host || !secret) {
+		return c.json({ error: "TURN is not configured" }, 503);
+	}
+	const ttl = Math.max(
+		60,
+		Math.min(3600, Number.parseInt(c.env.TURN_TTL_SECONDS ?? "600", 10) || 600),
+	);
+	const expiresAt = Math.floor(Date.now() / 1000) + ttl;
+	const userId = c.req.query("user_id")?.replace(/[^a-zA-Z0-9_-]/g, "") || "anon";
+	const username = `${expiresAt}:${userId}`;
+	const key = await crypto.subtle.importKey(
+		"raw",
+		new TextEncoder().encode(secret),
+		{ name: "HMAC", hash: "SHA-1" },
+		false,
+		["sign"],
+	);
+	const sig = await crypto.subtle.sign(
+		"HMAC",
+		key,
+		new TextEncoder().encode(username),
+	);
+	const credential = btoa(String.fromCharCode(...new Uint8Array(sig)));
+	return c.json({
+		iceServers: [
+			{
+				urls: [
+					`turn:${host}:3478?transport=udp`,
+					`turn:${host}:3478?transport=tcp`,
+				],
+				username,
+				credential,
+			},
+		],
+		expiresAt,
+	});
+});
 app.get("/openapi.json", (c) => c.json(buildOpenApiDocument()));
 app.get("/docs", swaggerUI({ url: "/openapi.json" }));
 

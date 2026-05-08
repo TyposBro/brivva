@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { appConfig } from "../../../core/config/app-config";
+import { getUserId } from "../../../shared/auth/auth-store";
 
 const HOST_VIDEO_MIN_WIDTH = 720;
 const HOST_VIDEO_MIN_HEIGHT = 1280;
@@ -94,9 +95,7 @@ export function useWebcam(
     if (!isSocketOpen() || !streamRef.current || peerRef.current) return;
 
     const peer = new RTCPeerConnection({
-      iceServers: appConfig().webRtcIceServers ?? [
-        { urls: "stun:stun.l.google.com:19302" },
-      ],
+      iceServers: await resolveIceServers(),
     });
     peerRef.current = peer;
     attachConnectionDiagnostics(peer, onConnectionIssue);
@@ -339,6 +338,27 @@ function preferWebRtcVideoCodecs(peer: RTCPeerConnection) {
   const rtx = codecs.filter((c) => c.mimeType.toLowerCase() === "video/rtx");
   const preferred = [...h264, ...vp8, ...rtx];
   if (preferred.length > 0) transceiver.setCodecPreferences(preferred);
+}
+
+async function resolveIceServers(): Promise<RTCIceServer[]> {
+  const config = appConfig();
+  if (config.webRtcTurnCredentialsEnabled) {
+    try {
+      const url = new URL(`${config.workersApiBase}/api/turn-credentials`);
+      const userId = getUserId();
+      if (userId) url.searchParams.set("user_id", userId);
+      const response = await fetch(url.toString());
+      if (response.ok) {
+        const data = (await response.json()) as { iceServers?: RTCIceServer[] };
+        if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+          return data.iceServers;
+        }
+      }
+    } catch (err) {
+      console.warn("TURN credential fetch failed, falling back to static ICE:", err);
+    }
+  }
+  return config.webRtcIceServers ?? [{ urls: "stun:stun.l.google.com:19302" }];
 }
 
 async function preferHighQuality(sender: RTCRtpSender) {
