@@ -1,46 +1,46 @@
-# Agent Progress — VP8/WebRTC Media Normalization
+# Agent Progress — Prod E2E Browser Ingest Verification
 
 ## Goal
-Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate VP8 can feed Brivva RTMP outputs instead of blackholing video.
+Find what remains after VP8/WebRTC normalization and run production E2E test against `https://brivva.pages.dev` with fake media.
 
 ## Checklist
-- [x] Inspect current WebRTC → FFmpeg video path.
-- [x] Design minimal safe codec normalization path.
-- [x] Implement VP8 RTP depacketization/frame packaging.
-- [x] Make FFmpeg input codec/container selectable per live session/output.
-- [x] Wire WebRTC VP8 tracks into RTMP manager.
-- [x] Add tests for VP8 IVF framing and FFmpeg args.
-- [x] Run full frontend/backend/worker checks.
-- [x] Commit stable chunks.
-- [x] Deploy backend.
-- [x] Verify production health / logs.
+- [x] Inspect existing E2E/runbook/CDP tooling.
+- [x] Ensure fake media artifacts are available.
+- [x] Run prod browser E2E on `brivva.pages.dev`.
+- [x] Verify frontend, backend logs, FFmpeg input codec path, and provider health where possible.
+- [x] Identify and fix VP8 keyframe-gating issue found by E2E logs.
+- [ ] Commit VP8 keyframe fix.
+- [ ] Deploy keyframe fix.
+- [ ] Re-run prod VP8 E2E after keyframe fix.
+- [ ] Document remaining work/risks.
 
 ## Completed
-- Added `VideoInputCodec` (`H264AnnexB`, `Vp8Ivf`) to FFmpeg arg builder.
-- FFmpeg input can now be `-f h264` or `-f ivf` while always outputting RTMP-safe H.264/AAC.
-- RtmpManager can switch input codec and restart existing outputs with preserved buffers.
-- WebRTC VP8 tracks now depacketize RTP payloads, wrap frames in IVF stream/frame headers, and push them to FFmpeg.
-- Video drain is codec-aware for keyframe gating (H.264 IDR vs VP8 keyframe).
-- Added tests for VP8 IVF headers and FFmpeg IVF input args.
-- Deployed backend image `d070d8a39de45548e2d6b4cfb6a64d369ad80b66` to ECS task definition `brivva:65`.
-- Production health endpoint returned `ok`; startup logs show runtime FFmpeg/NVENC self-check OK and tunnel reconnected.
+- Reused headless Brave CDP session with fake media:
+  - `/tmp/brivva-fake-video.y4m`
+  - `/tmp/brivva-fake-audio.wav`
+- Created prod session `056fd55a-bf24-4542-89a0-c67f14b829fc` on `https://brivva.pages.dev`.
+- Forced browser video capabilities to remove H.264 so WebRTC negotiated VP8.
+- Started Korean source + YouTube passthrough stream.
+- UI confirmed YouTube provider health `stream=active health=good`, app stream `LIVE`, WebRTC outbound `720×1080 @ 30fps`.
+- Backend logs confirmed VP8 path:
+  - `webrtc VP8 video track started`
+  - `switching ffmpeg video input codec video_input_codec=vp8_ivf`
+  - FFmpeg args include `-f ivf`
+  - first VP8 IVF chunk written to stdin.
+- Stopped stream after test to limit cost.
+- E2E logs exposed a real remaining issue: FFmpeg saw VP8 interframes before a prior keyframe after codec-switch restart.
+- Implemented stricter VP8 keyframe detection: requires VP8 keyframe bit plus `0x9d012a` sync code.
 
 ## Tests run
-- `cargo check -p server-rs` — pass
-- `cargo test -p server-rs webrtc --quiet` — pass
-- `cargo test -p server-rs ffmpeg --quiet` — pass
-- `bun run --cwd frontend typecheck` — pass
-- `bun run --cwd workers typecheck` — pass
-- `cargo test -p server-rs --quiet` — pass (382 unit tests; ignored manual smoke tests unchanged)
-- `curl -fsS https://brivva.spiko.uz/health` — pass (`ok`)
-- `AWS_PROFILE=personal aws logs tail /ecs/brivva --since 5m --region us-east-1 --format short` — startup self-check OK
+- `cargo test -p server-rs ffmpeg --quiet` — pass after keyframe fix.
+- Prod E2E via CDP/headless Brave — pass at provider level, but exposed VP8 keyframe warning to fix/retest.
+- CloudWatch query for session `056fd55a-bf24-4542-89a0-c67f14b829fc`.
 
 ## Commits
-- `2642aa8 feat: normalize VP8 WebRTC ingest`
-- `d070d8a docs: track VP8 ingest progress`
+- Pending for keyframe fix.
 
 ## Blockers
 - None.
 
 ## Exact next action
-None for this requested implementation; monitor next Firefox/VP8 real live session for provider health.
+Commit VP8 keyframe fix, deploy backend, re-run prod forced-VP8 E2E and verify no VP8 decoder warnings.
