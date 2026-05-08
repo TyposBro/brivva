@@ -10,8 +10,9 @@ Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate V
 - [x] Make FFmpeg input codec/container selectable per live session/output.
 - [x] Wire WebRTC VP8 tracks into RTMP manager.
 - [x] Add tests for VP8 IVF framing and FFmpeg args.
-- [ ] Run full frontend/backend/worker checks.
-- [ ] Commit stable chunks and deploy.
+- [x] Run full frontend/backend/worker checks.
+- [x] Commit stable chunk.
+- [ ] Deploy backend.
 - [ ] Verify production health / logs.
 
 ## Completed
@@ -26,12 +27,15 @@ Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate V
 - `cargo check -p server-rs` — pass
 - `cargo test -p server-rs webrtc --quiet` — pass
 - `cargo test -p server-rs ffmpeg --quiet` — pass
+- `bun run --cwd frontend typecheck` — pass
+- `bun run --cwd workers typecheck` — pass
+- `cargo test -p server-rs --quiet` — pass (382 unit tests; ignored manual smoke tests unchanged)
 
 ## Commits
-- None in this chunk yet.
+- `2642aa8 feat: normalize VP8 WebRTC ingest`
 
 ## Blockers
 - None.
 
 ## Exact next action
-Run broader checks, commit VP8 media normalization chunk, then deploy backend/frontend if needed and run smoke verification.
+Deploy ECS backend with VP8 normalization and verify health/logs.
