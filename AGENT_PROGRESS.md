@@ -11,9 +11,9 @@ Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate V
 - [x] Wire WebRTC VP8 tracks into RTMP manager.
 - [x] Add tests for VP8 IVF framing and FFmpeg args.
 - [x] Run full frontend/backend/worker checks.
-- [x] Commit stable chunk.
-- [ ] Deploy backend.
-- [ ] Verify production health / logs.
+- [x] Commit stable chunks.
+- [x] Deploy backend.
+- [x] Verify production health / logs.
 
 ## Completed
 - Added `VideoInputCodec` (`H264AnnexB`, `Vp8Ivf`) to FFmpeg arg builder.
@@ -22,6 +22,8 @@ Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate V
 - WebRTC VP8 tracks now depacketize RTP payloads, wrap frames in IVF stream/frame headers, and push them to FFmpeg.
 - Video drain is codec-aware for keyframe gating (H.264 IDR vs VP8 keyframe).
 - Added tests for VP8 IVF headers and FFmpeg IVF input args.
+- Deployed backend image `d070d8a39de45548e2d6b4cfb6a64d369ad80b66` to ECS task definition `brivva:65`.
+- Production health endpoint returned `ok`; startup logs show runtime FFmpeg/NVENC self-check OK and tunnel reconnected.
 
 ## Tests run
 - `cargo check -p server-rs` — pass
@@ -30,12 +32,15 @@ Implement end-to-end VP8/WebRTC media normalization so browsers that negotiate V
 - `bun run --cwd frontend typecheck` — pass
 - `bun run --cwd workers typecheck` — pass
 - `cargo test -p server-rs --quiet` — pass (382 unit tests; ignored manual smoke tests unchanged)
+- `curl -fsS https://brivva.spiko.uz/health` — pass (`ok`)
+- `AWS_PROFILE=personal aws logs tail /ecs/brivva --since 5m --region us-east-1 --format short` — startup self-check OK
 
 ## Commits
 - `2642aa8 feat: normalize VP8 WebRTC ingest`
+- `d070d8a docs: track VP8 ingest progress`
 
 ## Blockers
 - None.
 
 ## Exact next action
-Deploy ECS backend with VP8 normalization and verify health/logs.
+None for this requested implementation; monitor next Firefox/VP8 real live session for provider health.
