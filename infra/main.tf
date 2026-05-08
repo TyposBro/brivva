@@ -209,6 +209,8 @@ resource "aws_secretsmanager_secret_version" "env" {
     TUNNEL_CREDS         = var.tunnel_creds
     JWT_SECRET           = var.jwt_secret
     INTERNAL_SECRET      = var.internal_secret
+    TURN_USER            = var.turn_user
+    TURN_PASSWORD        = var.turn_password
   })
 }
 
@@ -324,6 +326,30 @@ resource "aws_security_group" "task" {
     to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  ingress {
+    description = "TURN/STUN UDP for restrictive NAT WebRTC clients"
+    from_port   = 3478
+    to_port     = 3478
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "TURN TCP fallback for restrictive NAT WebRTC clients"
+    from_port   = 3478
+    to_port     = 3478
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "TURN UDP relay ports"
+    from_port   = var.turn_relay_port_min
+    to_port     = var.turn_relay_port_max
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -500,6 +526,7 @@ locals {
       { name = "BRIVVA_SESSION_LOGS", value = var.session_logs_enabled ? "1" : "0" },
       { name = "BRIVVA_SESSION_LOG_VERBOSE", value = var.session_logs_verbose ? "1" : "0" },
       { name = "BRIVVA_WEBRTC_STUN_URLS", value = "stun:stun.l.google.com:19302" },
+      { name = "BRIVVA_WEBRTC_ICE_SERVERS", value = var.webrtc_ice_servers },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = "40000" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = "40100" },
       # ECS GPU task assignment exposes /dev/nvidia*, but NVENC libraries are
@@ -549,6 +576,32 @@ locals {
     }
   }
 
+  turn_container = {
+    name       = "coturn"
+    image      = "coturn/coturn:4.6"
+    essential  = false
+    entryPoint = ["sh", "-c"]
+    command = [
+      "turnserver -n --log-file=stdout --listening-port=3478 --min-port=${var.turn_relay_port_min} --max-port=${var.turn_relay_port_max} --realm=${var.turn_realm} --user=$${TURN_USER}:$${TURN_PASSWORD} --lt-cred-mech --fingerprint --no-multicast-peers --no-cli"
+    ]
+    portMappings = [
+      { containerPort = 3478, hostPort = 3478, protocol = "udp" },
+      { containerPort = 3478, hostPort = 3478, protocol = "tcp" },
+    ]
+    secrets = [
+      { name = "TURN_USER", valueFrom = "${local.secret_arn}:TURN_USER::" },
+      { name = "TURN_PASSWORD", valueFrom = "${local.secret_arn}:TURN_PASSWORD::" },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.app.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "coturn"
+      }
+    }
+  }
+
   cloudflared_container = {
     name      = "cloudflared"
     image     = "cloudflare/cloudflared:latest"
@@ -577,6 +630,7 @@ locals {
 
   containers = concat(
     [local.server_container],
+    var.turn_enabled ? [local.turn_container] : [],
     local.enable_cloudflared ? [local.cloudflared_init_container] : [],
     local.enable_cloudflared ? [local.cloudflared_container] : [],
   )
@@ -590,6 +644,7 @@ locals {
       { name = "BRIVVA_SESSION_LOGS", value = var.session_logs_enabled ? "1" : "0" },
       { name = "BRIVVA_SESSION_LOG_VERBOSE", value = var.session_logs_verbose ? "1" : "0" },
       { name = "BRIVVA_WEBRTC_STUN_URLS", value = "stun:stun.l.google.com:19302" },
+      { name = "BRIVVA_WEBRTC_ICE_SERVERS", value = var.webrtc_ice_servers },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MIN", value = "40000" },
       { name = "BRIVVA_WEBRTC_UDP_PORT_MAX", value = "40100" },
       { name = "NVIDIA_DRIVER_CAPABILITIES", value = "video,compute,utility" },

@@ -126,6 +126,49 @@ variable "session_logs_verbose" {
   default     = false
 }
 
+variable "webrtc_ice_servers" {
+  description = "Optional JSON RTCIceServer[] passed to server-rs as BRIVVA_WEBRTC_ICE_SERVERS for TURN/STUN. Empty keeps default Google STUN."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "turn_enabled" {
+  description = "Run a coturn sidecar on the GPU host for restrictive NAT browser WebRTC clients."
+  type        = bool
+  default     = false
+}
+
+variable "turn_realm" {
+  description = "TURN realm/host advertised by coturn. Usually turn.brivva... or brivva.spiko.uz if DNS points at the GPU host."
+  type        = string
+  default     = "brivva.spiko.uz"
+}
+
+variable "turn_user" {
+  description = "Static TURN username for the first launch path. Rotate once ephemeral TURN credentials are wired."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "turn_password" {
+  description = "Static TURN password for the first launch path. Rotate once ephemeral TURN credentials are wired."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "turn_relay_port_min" {
+  type    = number
+  default = 49152
+}
+
+variable "turn_relay_port_max" {
+  type    = number
+  default = 49200
+}
+
 variable "log_retention_days" {
   type    = number
   default = 7
