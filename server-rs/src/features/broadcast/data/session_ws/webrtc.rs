@@ -582,34 +582,69 @@ impl VideoRtpClock {
     }
 }
 
-#[derive(Default)]
 struct Vp8IvfDepacketizer {
     frame: Vec<u8>,
     frame_index: u64,
     wrote_header: bool,
+    expected_seq: Option<u16>,
+    waiting_keyframe: bool,
+}
+
+impl Default for Vp8IvfDepacketizer {
+    fn default() -> Self {
+        Self {
+            frame: Vec::new(),
+            frame_index: 0,
+            wrote_header: false,
+            expected_seq: None,
+            waiting_keyframe: true,
+        }
+    }
 }
 
 impl Vp8IvfDepacketizer {
     fn depacketize(&mut self, packet: &Packet) -> Option<Vec<u8>> {
+        if self
+            .expected_seq
+            .is_some_and(|expected| expected != packet.header.sequence_number)
+        {
+            self.frame.clear();
+            self.waiting_keyframe = true;
+        }
+        self.expected_seq = Some(packet.header.sequence_number.wrapping_add(1));
+
         // `Vp8Packet` stores parsed descriptor flags on `self`; create a fresh
         // parser per RTP packet so optional fields from a previous packet do
         // not leak into the next packet's payload offset calculation.
         let mut parser = Vp8Packet::default();
         match parser.depacketize(&packet.payload) {
             Ok(bytes) if !bytes.is_empty() => {
+                if parser.s == 1 {
+                    self.frame.clear();
+                } else if self.frame.is_empty() {
+                    self.waiting_keyframe = true;
+                    return None;
+                }
                 self.frame.extend_from_slice(&bytes);
                 if packet.header.marker {
+                    let raw_frame = std::mem::take(&mut self.frame);
+                    let keyframe = vp8_raw_frame_is_keyframe(&raw_frame);
+                    if self.waiting_keyframe && !keyframe {
+                        return None;
+                    }
+                    if keyframe {
+                        self.waiting_keyframe = false;
+                    }
                     let mut out = Vec::new();
                     if !self.wrote_header {
                         out.extend_from_slice(&ivf_stream_header());
                         self.wrote_header = true;
                     }
                     out.extend_from_slice(&ivf_frame_header(
-                        self.frame.len() as u32,
+                        raw_frame.len() as u32,
                         self.frame_index,
                     ));
-                    out.extend_from_slice(&self.frame);
-                    self.frame.clear();
+                    out.extend_from_slice(&raw_frame);
                     self.frame_index = self.frame_index.saturating_add(1);
                     Some(out)
                 } else {
@@ -620,10 +655,18 @@ impl Vp8IvfDepacketizer {
             Err(error) => {
                 tracing::debug!(error = %error, "webrtc VP8 depacketize failed");
                 self.frame.clear();
+                self.waiting_keyframe = true;
                 None
             }
         }
     }
+}
+
+fn vp8_raw_frame_is_keyframe(frame: &[u8]) -> bool {
+    frame.first().is_some_and(|b| b & 0x01 == 0)
+        && frame
+            .get(3..6)
+            .is_some_and(|sync| sync == [0x9d, 0x01, 0x2a])
 }
 
 fn ivf_stream_header() -> [u8; 32] {
@@ -1046,18 +1089,18 @@ mod tests {
         let mut depacketizer = Vp8IvfDepacketizer::default();
         let first = Packet {
             header: Header { marker: true, ..Default::default() },
-            payload: vec![0x90, 0x80, 0x01, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
+            payload: vec![0x90, 0x80, 0x01, 0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
         };
         assert!(depacketizer.depacketize(&first).is_some());
 
         let second = Packet {
-            header: Header { marker: true, ..Default::default() },
-            payload: vec![0x10, 0x01, 0xaa, 0xbb, 0xcc].into(),
+            header: Header { marker: true, sequence_number: 1, ..Default::default() },
+            payload: vec![0x10, 0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
         };
         let out = depacketizer
             .depacketize(&second)
             .expect("second VP8 packet should parse with a fresh descriptor parser");
-        assert_eq!(&out[12..], &[0x01, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(&out[12..], &[0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a]);
     }
 
     #[test]
