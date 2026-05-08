@@ -485,10 +485,17 @@ app.post("/api/sessions", async (c) => {
 	);
 	if (body instanceof Response) return body;
 	const user = await db.getOrCreateUser(c.env.DB, body.user_id);
+	const hasTranslatedTargets = body.target_langs.some(
+		(lang) => lang !== "pass" && lang !== body.source_lang,
+	);
 	// Fall back to the user's active voice clone when the caller doesn't pin one
 	// explicitly — avoids ghost "Voice Setup" screens on /session/:id/setup when
-	// onboarding already enrolled a clone.
-	const voiceId = body.voice_id ?? user.active_voice_id ?? null;
+	// onboarding already enrolled a clone. Passthrough/source-only sessions do
+	// not synthesize TTS, so keep them voice-agnostic and do not apply the cloned
+	// voice enrollment-language guard below.
+	const voiceId = hasTranslatedTargets
+		? (body.voice_id ?? user.active_voice_id ?? null)
+		: null;
 
 	// Strict enrollment-vs-session source_lang guard. The cloned voice can only
 	// be cross-lingually steered by ElevenLabs' `language_code` on the TARGET

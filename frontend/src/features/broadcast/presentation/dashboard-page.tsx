@@ -411,6 +411,9 @@ function DashboardInner() {
 
   const hasYoutubeDest = destinations.some((d) => d.platform === "youtube");
   const hasGripDest = destinations.some((d) => d.platform === "grip");
+  const hasTranslatedDestination = destinations.some(
+    (d) => d.lang !== "pass" && d.lang !== sourceLang,
+  );
   const missingFreshGripConfirmation = hasGripDest && !gripFreshConfirmed;
   // Disable Go Live when any destination has a client-side validation error.
   // Prevents the "stream row created with NULL rtmp_url → session hangs"
@@ -430,7 +433,7 @@ function DashboardInner() {
   const voice = voices[0] ?? null;
   const voiceLang = voice?.source_lang ?? null;
   const reactiveVoiceLangMismatch = voice !== null && voiceLang !== sourceLang;
-  const voiceLangMismatch = reactiveVoiceLangMismatch || postMismatch;
+  const voiceLangMismatch = hasTranslatedDestination && (reactiveVoiceLangMismatch || postMismatch);
   const voiceLangKnown =
     voiceLang !== null && (SOURCE_LANGS as readonly string[]).includes(voiceLang);
   const voiceLangLabel = voiceLangKnown ? api.langLabel(voiceLang!) : "an unknown language";
