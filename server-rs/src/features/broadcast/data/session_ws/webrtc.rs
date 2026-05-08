@@ -7,7 +7,7 @@ use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use serde::Deserialize;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MIME_TYPE_H264, MediaEngine};
+use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_VP8, MediaEngine};
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::error::Result as WebRtcResult;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -85,7 +85,7 @@ async fn accept_webrtc_video(
 ) -> WebRtcResult<Arc<RTCPeerConnection>> {
     apply_video_profile(&offer, live_sessions, live_session_id).await;
     let mut media = MediaEngine::default();
-    register_h264_only_video_codecs(&mut media)?;
+    register_browser_video_codecs(&mut media)?;
     let registry = register_default_interceptors(Registry::new(), &mut media)?;
     let mut settings = SettingEngine::default();
     settings.set_udp_network(UDPNetwork::Ephemeral(EphemeralUDP::new(
@@ -129,7 +129,7 @@ async fn accept_webrtc_video(
     Ok(peer)
 }
 
-fn register_h264_only_video_codecs(media: &mut MediaEngine) -> WebRtcResult<()> {
+fn register_browser_video_codecs(media: &mut MediaEngine) -> WebRtcResult<()> {
     let video_rtcp_feedback = vec![
         RTCPFeedback {
             typ: "goog-remb".to_owned(),
@@ -148,6 +148,20 @@ fn register_h264_only_video_codecs(media: &mut MediaEngine) -> WebRtcResult<()> 
             parameter: "pli".to_owned(),
         },
     ];
+    media.register_codec(
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_VP8.to_owned(),
+                clock_rate: 90_000,
+                channels: 0,
+                sdp_fmtp_line: "".to_owned(),
+                rtcp_feedback: video_rtcp_feedback.clone(),
+            },
+            payload_type: 96,
+            ..Default::default()
+        },
+        RTPCodecType::Video,
+    )?;
     for (payload_type, profile_level_id) in [(102, "42001f"), (125, "42e01f"), (123, "640032")] {
         media.register_codec(
             RTCRtpCodecParameters {
@@ -303,11 +317,29 @@ fn wire_video_track(
                 return;
             }
             let codec = track.codec();
+            if codec.capability.mime_type == MIME_TYPE_VP8 {
+                tracing::warn!(
+                    live_session_id = %live_session_id,
+                    mime_type = %codec.capability.mime_type,
+                    "webrtc VP8 video negotiated; VP8 transcode path not enabled on this server build"
+                );
+                if let Some(session) = live_sessions.get(&live_session_id) {
+                    session.send_to_host(Message::Text(
+                        serde_json::json!({
+                            "type": "webrtc:error",
+                            "message": "Browser negotiated VP8 video, but this Brivva media server build still requires H.264 for RTMP ingest. Use a browser/device with H.264 until VP8 transcoding is deployed.",
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                }
+                return;
+            }
             if codec.capability.mime_type != MIME_TYPE_H264 {
                 tracing::warn!(
                     live_session_id = %live_session_id,
                     mime_type = %codec.capability.mime_type,
-                    "webrtc video track ignored: RTMP copy path requires H.264"
+                    "webrtc video track ignored: unsupported video codec"
                 );
                 return;
             }

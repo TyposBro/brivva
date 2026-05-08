@@ -113,6 +113,7 @@ export function useWebcam(
     for (const track of uplinkStream.getVideoTracks()) {
       track.contentHint = "motion";
       const sender = peer.addTrack(track, uplinkStream);
+      preferWebRtcVideoCodecs(peer);
       await preferHighQuality(sender);
     }
 
@@ -320,6 +321,24 @@ function isWebRtcAnswer(msg: unknown): msg is WebRtcAnswer {
     (msg as { type?: unknown }).type === "webrtc:answer" &&
     typeof (msg as { sdp?: unknown }).sdp === "string"
   );
+}
+
+function preferWebRtcVideoCodecs(peer: RTCPeerConnection) {
+  const transceiver = peer
+    .getTransceivers()
+    .find((t) => t.sender.track?.kind === "video");
+  const capabilities = RTCRtpSender.getCapabilities?.("video");
+  if (!transceiver?.setCodecPreferences || !capabilities?.codecs) return;
+  const codecs = capabilities.codecs;
+  const h264 = codecs.filter(
+    (c) =>
+      c.mimeType.toLowerCase() === "video/h264" &&
+      !/packetization-mode=0/i.test(c.sdpFmtpLine ?? ""),
+  );
+  const vp8 = codecs.filter((c) => c.mimeType.toLowerCase() === "video/vp8");
+  const rtx = codecs.filter((c) => c.mimeType.toLowerCase() === "video/rtx");
+  const preferred = [...h264, ...vp8, ...rtx];
+  if (preferred.length > 0) transceiver.setCodecPreferences(preferred);
 }
 
 async function preferHighQuality(sender: RTCRtpSender) {
