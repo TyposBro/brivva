@@ -584,7 +584,6 @@ impl VideoRtpClock {
 
 #[derive(Default)]
 struct Vp8IvfDepacketizer {
-    inner: Vp8Packet,
     frame: Vec<u8>,
     frame_index: u64,
     wrote_header: bool,
@@ -592,7 +591,11 @@ struct Vp8IvfDepacketizer {
 
 impl Vp8IvfDepacketizer {
     fn depacketize(&mut self, packet: &Packet) -> Option<Vec<u8>> {
-        match self.inner.depacketize(&packet.payload) {
+        // `Vp8Packet` stores parsed descriptor flags on `self`; create a fresh
+        // parser per RTP packet so optional fields from a previous packet do
+        // not leak into the next packet's payload offset calculation.
+        let mut parser = Vp8Packet::default();
+        match parser.depacketize(&packet.payload) {
             Ok(bytes) if !bytes.is_empty() => {
                 self.frame.extend_from_slice(&bytes);
                 if packet.header.marker {
@@ -1036,6 +1039,25 @@ mod tests {
         let first = clock.instant_for(10_000);
         let second = clock.instant_for(13_000);
         assert_eq!(second.duration_since(first), Duration::from_micros(33_333));
+    }
+
+    #[test]
+    fn vp8_depacketizer_does_not_leak_descriptor_flags_between_packets() {
+        let mut depacketizer = Vp8IvfDepacketizer::default();
+        let first = Packet {
+            header: Header { marker: true, ..Default::default() },
+            payload: vec![0x90, 0x80, 0x01, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
+        };
+        assert!(depacketizer.depacketize(&first).is_some());
+
+        let second = Packet {
+            header: Header { marker: true, ..Default::default() },
+            payload: vec![0x10, 0x01, 0xaa, 0xbb, 0xcc].into(),
+        };
+        let out = depacketizer
+            .depacketize(&second)
+            .expect("second VP8 packet should parse with a fresh descriptor parser");
+        assert_eq!(&out[12..], &[0x01, 0xaa, 0xbb, 0xcc]);
     }
 
     #[test]
