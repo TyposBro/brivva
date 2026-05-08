@@ -59,6 +59,25 @@ type StreamInfo = StreamRecord & {
 
 export type { StreamInfo };
 
+export type ProviderHealthStream = {
+  streamId: string;
+  platform: string;
+  provider: string;
+  platformBroadcastId?: string | null;
+  platformStreamId?: string | null;
+  youtubeStreamId?: string;
+  streamStatus?: string | null;
+  healthStatus?: string | null;
+  providerConfirmedLive?: boolean;
+  configurationIssues?: Array<{
+    type?: string;
+    severity?: string;
+    reason?: string;
+    description?: string;
+  }>;
+  error?: string;
+};
+
 export type Platform = PlatformCatalogEntry;
 
 const StreamInfoSchema = StreamSchema.transform((stream): StreamInfo => ({
@@ -177,6 +196,18 @@ export function listSessions(userId: string): Promise<{ sessions: Session[] }> {
     client().GET("/api/sessions", { params: { query: { user_id: userId } } }),
     ListSessionsResponseSchema,
   );
+}
+
+export async function getProviderHealth(
+  sessionId: string,
+): Promise<{ sessionId: string; streams: ProviderHealthStream[] }> {
+  const response = await fetch(
+    `${appConfig().workersApiBase}/api/sessions/${encodeURIComponent(sessionId)}/provider-health`,
+  );
+  if (!response.ok) {
+    throw new ApiError(response.status, null, `API ${response.status}: provider health failed`);
+  }
+  return (await response.json()) as { sessionId: string; streams: ProviderHealthStream[] };
 }
 
 export function getSession(id: string): Promise<{ session: Session | null; streams: StreamInfo[] }> {

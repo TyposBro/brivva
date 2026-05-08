@@ -62,6 +62,9 @@ export function BroadcastView({
 
   const [session, setSession] = useState<api.Session | null>(null);
   const [streams, setStreams] = useState<api.StreamInfo[]>([]);
+  const [providerStreams, setProviderStreams] = useState<api.ProviderHealthStream[]>([]);
+  const isReady = status === "ready" || status === "recording";
+  const isRecording = status === "recording";
 
   const loadSession = useCallback(async () => {
     try {
@@ -97,6 +100,25 @@ export function BroadcastView({
   }, [streams, sourceLang, setActiveTargetLangs]);
 
   useEffect(() => {
+    if (!isRecording) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const data = await api.getProviderHealth(sessionId);
+        if (!stopped) setProviderStreams(data.streams);
+      } catch (e) {
+        console.warn("Provider health poll failed:", e);
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 10_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [isRecording, sessionId]);
+
+  useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [utterances, liveTranscript]);
 
@@ -108,9 +130,6 @@ export function BroadcastView({
   const handleStopBroadcast = () => {
     closeSession();
   };
-
-  const isReady = status === "ready" || status === "recording";
-  const isRecording = status === "recording";
 
   return (
     <div className="min-h-screen bg-background">
@@ -156,8 +175,8 @@ export function BroadcastView({
           </div>
         )}
 
-        {providerHealth.length > 0 && (
-          <ProviderHealthPanel notices={providerHealth} />
+        {(providerHealth.length > 0 || providerStreams.length > 0) && (
+          <ProviderHealthPanel notices={providerHealth} streams={providerStreams} />
         )}
 
         {status === "disconnected" && (
@@ -264,13 +283,41 @@ export function BroadcastView({
 
 function ProviderHealthPanel({
   notices,
+  streams,
 }: {
   notices: ProviderHealthNotice[];
+  streams: api.ProviderHealthStream[];
 }) {
   return (
     <div className="bg-surface-container-low rounded-xl px-4 py-3 font-label text-xs space-y-2">
       <p className="text-on-surface font-bold">Provider health</p>
       <div className="space-y-1.5">
+        {streams.map((stream) => (
+          <div
+            key={`${stream.provider}:${stream.streamId}`}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 text-on-surface-variant"
+          >
+            <span className="font-bold text-on-surface uppercase">
+              {stream.provider}
+            </span>
+            <span
+              className={cn(
+                "rounded px-1.5 py-0.5 font-bold uppercase",
+                stream.providerConfirmedLive
+                  ? "bg-primary/10 text-primary"
+                  : stream.error
+                    ? "bg-error-container/30 text-error"
+                    : "bg-warning/10 text-warning",
+              )}
+            >
+              {stream.providerConfirmedLive ? "live" : stream.error ? "error" : "checking"}
+            </span>
+            <span>
+              {stream.error ??
+                `stream=${stream.streamStatus ?? "?"} health=${stream.healthStatus ?? "?"}`}
+            </span>
+          </div>
+        ))}
         {notices.map((notice) => (
           <div
             key={`${notice.provider}:${notice.targetLang ?? ""}:${notice.reason}`}
