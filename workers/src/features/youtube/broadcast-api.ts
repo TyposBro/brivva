@@ -50,6 +50,19 @@ type InsertBroadcastResponse = {
 
 type InsertStreamResponse = {
   id: string;
+  status?: {
+    streamStatus?: string;
+    healthStatus?: {
+      status?: string;
+      lastUpdateTimeSeconds?: string;
+      configurationIssues?: Array<{
+        type?: string;
+        severity?: string;
+        reason?: string;
+        description?: string;
+      }>;
+    };
+  };
   cdn?: {
     ingestionInfo?: {
       ingestionAddress?: string;
@@ -148,6 +161,46 @@ export async function createYouTubeBroadcast(
   };
 }
 
+export type YouTubeStreamHealth = {
+  streamId: string;
+  streamStatus: string | null;
+  healthStatus: string | null;
+  configurationIssues: Array<{
+    type?: string;
+    severity?: string;
+    reason?: string;
+    description?: string;
+  }>;
+  providerConfirmedLive: boolean;
+};
+
+export async function getYouTubeStreamHealth(
+  env: Env,
+  args: { accessToken: string; streamId: string },
+  opts: {
+    refreshToken?: string | null;
+    onTokenRefresh?: (newAccessToken: string, expiresAt: number) => Promise<void>;
+  } = {},
+): Promise<YouTubeStreamHealth> {
+  let accessToken = args.accessToken;
+  const call = makeYouTubeGetCaller(env, accessToken, opts, (token) => {
+    accessToken = token;
+  });
+  const response = await call<{ items?: InsertStreamResponse[] }>(
+    `/liveStreams?part=id,status&id=${encodeURIComponent(args.streamId)}`,
+  );
+  const item = response.items?.[0];
+  const streamStatus = item?.status?.streamStatus ?? null;
+  const healthStatus = item?.status?.healthStatus?.status ?? null;
+  return {
+    streamId: args.streamId,
+    streamStatus,
+    healthStatus,
+    configurationIssues: item?.status?.healthStatus?.configurationIssues ?? [],
+    providerConfirmedLive: streamStatus === "active",
+  };
+}
+
 export async function completeYouTubeBroadcast(
   env: Env,
   args: { accessToken: string; broadcastId: string },
@@ -175,16 +228,41 @@ function makeYouTubePostCaller(
   },
   onAccessToken: (token: string) => void,
 ) {
+  return makeYouTubeCaller(env, initialAccessToken, opts, onAccessToken, "POST");
+}
+
+function makeYouTubeGetCaller(
+  env: Env,
+  initialAccessToken: string,
+  opts: {
+    refreshToken?: string | null;
+    onTokenRefresh?: (newAccessToken: string, expiresAt: number) => Promise<void>;
+  },
+  onAccessToken: (token: string) => void,
+) {
+  return makeYouTubeCaller(env, initialAccessToken, opts, onAccessToken, "GET");
+}
+
+function makeYouTubeCaller(
+  env: Env,
+  initialAccessToken: string,
+  opts: {
+    refreshToken?: string | null;
+    onTokenRefresh?: (newAccessToken: string, expiresAt: number) => Promise<void>;
+  },
+  onAccessToken: (token: string) => void,
+  method: "GET" | "POST",
+) {
   let accessToken = initialAccessToken;
-  return async <T>(path: string, body: unknown): Promise<T> => {
+  return async <T>(path: string, body?: unknown): Promise<T> => {
     const run = async (token: string): Promise<Response> =>
       await fetch(`${YT_BASE}${path}`, {
-        method: "POST",
+        method,
         headers: {
           Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
+          ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
         },
-        body: JSON.stringify(body),
+        ...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
       });
 
     let resp = await run(accessToken);

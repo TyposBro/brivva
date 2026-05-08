@@ -36,6 +36,7 @@ import * as el from "../features/voices/elevenlabs-client";
 import {
 	completeYouTubeBroadcast,
 	createYouTubeBroadcast,
+	getYouTubeStreamHealth,
 	YouTubeBroadcastError,
 	type YouTubeBroadcastResult,
 } from "../features/youtube/broadcast-api";
@@ -812,6 +813,71 @@ app.get("/api/sessions/:id", async (c) => {
 	const session = await db.getSession(c.env.DB, params.id);
 	const streams = await db.listStreams(c.env.DB, params.id);
 	return c.json({ session, streams });
+});
+
+app.get("/api/sessions/:id/provider-health", async (c) => {
+	const params = parseWithSchema(c, SessionIdParamsSchema, {
+		id: c.req.param("id"),
+	});
+	if (params instanceof Response) return params;
+	const session = await db.getSession(c.env.DB, params.id);
+	if (!session) return c.json({ error: "Session not found" }, 404);
+	const user = await db.getUserById(c.env.DB, session.user_id);
+	if (!user) return c.json({ error: "User not found" }, 404);
+	const streams = await db.listStreams(c.env.DB, params.id);
+	const results = [];
+	let accessToken = user.youtube_access_token;
+	for (const stream of streams) {
+		if (stream.platform !== "youtube" || !stream.platform_stream_id) continue;
+		if (!accessToken) {
+			results.push({
+				streamId: stream.id,
+				platform: stream.platform,
+				provider: "youtube",
+				error: "YouTube account not connected",
+			});
+			continue;
+		}
+		try {
+			const health = await getYouTubeStreamHealth(
+				c.env,
+				{ accessToken, streamId: stream.platform_stream_id },
+				{
+					refreshToken: user.youtube_refresh_token,
+					onTokenRefresh: async (newAccessToken, expiresAt) => {
+						accessToken = newAccessToken;
+						await db.updateAccessToken(c.env.DB, {
+							userId: user.id,
+							accessToken: newAccessToken,
+							expiresAt,
+						});
+					},
+				},
+			);
+			results.push({
+				streamId: stream.id,
+				platform: stream.platform,
+				provider: "youtube",
+				platformBroadcastId: stream.platform_broadcast_id,
+				platformStreamId: stream.platform_stream_id,
+				youtubeStreamId: health.streamId,
+				streamStatus: health.streamStatus,
+				healthStatus: health.healthStatus,
+				configurationIssues: health.configurationIssues,
+				providerConfirmedLive: health.providerConfirmedLive,
+			});
+		} catch (error) {
+			results.push({
+				streamId: stream.id,
+				platform: stream.platform,
+				provider: "youtube",
+				platformBroadcastId: stream.platform_broadcast_id,
+				platformStreamId: stream.platform_stream_id,
+				error: String(error),
+			});
+		}
+	}
+	return c.json({ sessionId: params.id, streams: results });
 });
 
 app.post("/api/sessions/:id/voice", async (c) => {
