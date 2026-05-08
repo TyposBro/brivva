@@ -23,7 +23,7 @@ fn now_unix_ms_returns_positive_millis_since_epoch() {
 fn stream_buffers_new_starts_empty() {
     let b = StreamBuffers::new();
     assert_eq!(b.audio.lock().unwrap().len(), 0);
-    assert_eq!(b.video_h264.lock().unwrap().len(), 0);
+    assert_eq!(b.video.lock().unwrap().len(), 0);
     assert_eq!(b.tts.lock().unwrap().len(), 0);
 }
 
@@ -157,6 +157,7 @@ fn fake_exited_stream_full(id: &str, lang: &str, is_source: bool, passthrough: b
         stop_flag: Arc::new(AtomicBool::new(false)),
         restart_count: 0,
         last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
+        video_input_codec: VideoInputCodec::H264AnnexB,
     }
 }
 
@@ -189,6 +190,7 @@ fn fake_running_stream(id: &str, lang: &str) -> RtmpStream {
         stop_flag: Arc::new(AtomicBool::new(false)),
         restart_count: 0,
         last_write_ms: Arc::new(AtomicI64::new(now_unix_ms())),
+        video_input_codec: VideoInputCodec::H264AnnexB,
     }
 }
 
@@ -399,7 +401,7 @@ fn push_video_h264_caps_per_stream_buffer() {
     for _ in 0..(HOST_VIDEO_H264_CAP_CHUNKS + 50) {
         m.push_video_h264(&[0u8; 8]);
     }
-    let buf_len = m.streams["a"].buffers.video_h264.lock().unwrap().len();
+    let buf_len = m.streams["a"].buffers.video.lock().unwrap().len();
     assert_eq!(buf_len, HOST_VIDEO_H264_CAP_CHUNKS);
 }
 

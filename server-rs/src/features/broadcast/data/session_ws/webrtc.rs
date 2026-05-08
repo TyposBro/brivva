@@ -19,6 +19,7 @@ use webrtc::rtp::codecs::h264::{
     FU_END_BITMASK, FU_START_BITMASK, FUA_NALU_TYPE, H264Packet, NALU_TYPE_BITMASK, PPS_NALU_TYPE,
     SPS_NALU_TYPE, STAPA_NALU_TYPE,
 };
+use webrtc::rtp::codecs::vp8::Vp8Packet;
 use webrtc::rtp::packet::Packet;
 use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::rtp_transceiver::RTCPFeedback;
@@ -318,21 +319,14 @@ fn wire_video_track(
             }
             let codec = track.codec();
             if codec.capability.mime_type == MIME_TYPE_VP8 {
-                tracing::warn!(
-                    live_session_id = %live_session_id,
-                    mime_type = %codec.capability.mime_type,
-                    "webrtc VP8 video negotiated; VP8 transcode path not enabled on this server build"
-                );
-                if let Some(session) = live_sessions.get(&live_session_id) {
-                    session.send_to_host(Message::Text(
-                        serde_json::json!({
-                            "type": "webrtc:error",
-                            "message": "Browser negotiated VP8 video, but this Brivva media server build still requires H.264 for RTMP ingest. Use a browser/device with H.264 until VP8 transcoding is deployed.",
-                        })
-                        .to_string()
-                        .into(),
-                    ));
-                }
+                forward_track_vp8_rtp(
+                    track,
+                    peer.clone(),
+                    live_sessions,
+                    live_session_id,
+                    timeline_shadow,
+                )
+                .await;
                 return;
             }
             if codec.capability.mime_type != MIME_TYPE_H264 {
@@ -353,6 +347,73 @@ fn wire_video_track(
             .await;
         })
     }));
+}
+
+async fn forward_track_vp8_rtp(
+    track: Arc<TrackRemote>,
+    peer: Arc<RTCPeerConnection>,
+    live_sessions: LiveSessions,
+    live_session_id: String,
+    timeline_shadow: bool,
+) {
+    tracing::info!(live_session_id = %live_session_id, "webrtc VP8 video track started");
+    if let Some(manager) = live_sessions
+        .get(&live_session_id)
+        .and_then(|session| session.rtmp_manager.clone())
+    {
+        manager
+            .lock()
+            .await
+            .switch_video_input_codec(crate::features::broadcast::data::ffmpeg::VideoInputCodec::Vp8Ivf);
+    }
+    let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
+    let mut depacketizer = Vp8IvfDepacketizer::default();
+    let mut clock = VideoRtpClock::default();
+    let mut fps_estimator = VideoFpsEstimator::default();
+    let mut timeline_shadow = timeline_shadow.then(VideoTimelineShadow::default);
+    while let Ok((packet, _)) = track.read_rtp().await {
+        let Some(ivf_frame) = depacketizer.depacketize(&packet) else {
+            continue;
+        };
+        let captured_at = clock.instant_for(packet.header.timestamp);
+        if let Some(shadow) = timeline_shadow.as_mut() {
+            let sample = shadow.observe_access_unit(
+                packet.header.timestamp,
+                packet.header.sequence_number,
+                Instant::now(),
+            );
+            if sample.should_log {
+                let payload = sample.to_log_payload();
+                tracing::info!(
+                    live_session_id = %live_session_id,
+                    payload = %payload,
+                    "v2 timeline shadow video"
+                );
+            }
+        }
+        let manager = live_sessions
+            .get(&live_session_id)
+            .and_then(|session| session.rtmp_manager.clone());
+        let Some(manager) = manager else {
+            break;
+        };
+        if let Some(fps) = fps_estimator.observe(packet.header.timestamp) {
+            let profile = manager.lock().await.set_observed_video_fps(fps);
+            tracing::info!(
+                live_session_id = %live_session_id,
+                observed_fps = fps,
+                input_fps = profile.input_fps,
+                output_fps = profile.output_fps,
+                "webrtc VP8 video fps corrected from RTP timestamps"
+            );
+        }
+        manager
+            .lock()
+            .await
+            .push_video_vp8_ivf_frame_at(&ivf_frame, captured_at);
+    }
+    pli_task.abort();
+    tracing::info!(live_session_id = %live_session_id, "webrtc VP8 video track ended");
 }
 
 async fn forward_track_rtp(
@@ -519,6 +580,67 @@ impl VideoRtpClock {
         let delta_ticks = rtp_ts.wrapping_sub(base_rtp_ts) as u64;
         base_instant + Duration::from_micros(delta_ticks.saturating_mul(1_000_000) / Self::RTP_HZ)
     }
+}
+
+#[derive(Default)]
+struct Vp8IvfDepacketizer {
+    inner: Vp8Packet,
+    frame: Vec<u8>,
+    frame_index: u64,
+    wrote_header: bool,
+}
+
+impl Vp8IvfDepacketizer {
+    fn depacketize(&mut self, packet: &Packet) -> Option<Vec<u8>> {
+        match self.inner.depacketize(&packet.payload) {
+            Ok(bytes) if !bytes.is_empty() => {
+                self.frame.extend_from_slice(&bytes);
+                if packet.header.marker {
+                    let mut out = Vec::new();
+                    if !self.wrote_header {
+                        out.extend_from_slice(&ivf_stream_header());
+                        self.wrote_header = true;
+                    }
+                    out.extend_from_slice(&ivf_frame_header(
+                        self.frame.len() as u32,
+                        self.frame_index,
+                    ));
+                    out.extend_from_slice(&self.frame);
+                    self.frame.clear();
+                    self.frame_index = self.frame_index.saturating_add(1);
+                    Some(out)
+                } else {
+                    None
+                }
+            }
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(error = %error, "webrtc VP8 depacketize failed");
+                self.frame.clear();
+                None
+            }
+        }
+    }
+}
+
+fn ivf_stream_header() -> [u8; 32] {
+    let mut header = [0u8; 32];
+    header[0..4].copy_from_slice(b"DKIF");
+    header[4..6].copy_from_slice(&0u16.to_le_bytes());
+    header[6..8].copy_from_slice(&32u16.to_le_bytes());
+    header[8..12].copy_from_slice(b"VP80");
+    header[12..14].copy_from_slice(&1280u16.to_le_bytes());
+    header[14..16].copy_from_slice(&720u16.to_le_bytes());
+    header[16..20].copy_from_slice(&30u32.to_le_bytes());
+    header[20..24].copy_from_slice(&1u32.to_le_bytes());
+    header
+}
+
+fn ivf_frame_header(frame_len: u32, pts: u64) -> [u8; 12] {
+    let mut header = [0u8; 12];
+    header[0..4].copy_from_slice(&frame_len.to_le_bytes());
+    header[4..12].copy_from_slice(&pts.to_le_bytes());
+    header
 }
 
 #[derive(Default)]
@@ -914,6 +1036,16 @@ mod tests {
         let first = clock.instant_for(10_000);
         let second = clock.instant_for(13_000);
         assert_eq!(second.duration_since(first), Duration::from_micros(33_333));
+    }
+
+    #[test]
+    fn vp8_ivf_headers_wrap_depacketized_frames() {
+        let stream_header = ivf_stream_header();
+        assert_eq!(&stream_header[0..4], b"DKIF");
+        assert_eq!(&stream_header[8..12], b"VP80");
+        let frame_header = ivf_frame_header(3, 7);
+        assert_eq!(u32::from_le_bytes(frame_header[0..4].try_into().unwrap()), 3);
+        assert_eq!(u64::from_le_bytes(frame_header[4..12].try_into().unwrap()), 7);
     }
 
     #[test]

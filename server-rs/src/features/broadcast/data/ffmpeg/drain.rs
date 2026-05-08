@@ -21,7 +21,7 @@ fn now_unix_ms() -> i64 {
 }
 
 use super::mixer::{apply_gain, mix_pcm_s16le};
-use super::{TtsSegment, tts_queue_bytes};
+use super::{TtsSegment, VideoInputCodec, tts_queue_bytes};
 use crate::features::broadcast::domain::SessionMetrics;
 
 /// Audio: 20 ms per tick.
@@ -55,8 +55,9 @@ pub(super) type TimedChunk = (Instant, Arc<[u8]>);
 
 pub(super) struct VideoDrainCtx {
     pub stream_id: String,
-    pub h264_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
+    pub video_buf: Arc<StdMutex<VecDeque<TimedChunk>>>,
     pub video_stdin: std::process::ChildStdin,
+    pub input_codec: VideoInputCodec,
     pub delay: Duration,
     pub stop: Arc<AtomicBool>,
     /// Unix-ms wall clock updated after each successful write. Health monitor
@@ -68,8 +69,9 @@ pub(super) struct VideoDrainCtx {
 pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     let VideoDrainCtx {
         stream_id,
-        h264_buf,
+        video_buf,
         mut video_stdin,
+        input_codec,
         delay,
         stop,
         last_write_ms,
@@ -83,15 +85,16 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
     let mut keyframe_wait_chunks_dropped: u64 = 0;
 
     eprintln!(
-        "[VIDEO:{}] H.264 pipe drain started (delay={}ms)",
+        "[VIDEO:{}] {} pipe drain started (delay={}ms)",
         stream_id,
+        input_codec.log_label(),
         delay.as_millis()
     );
 
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
         if now.duration_since(last_stats) >= Duration::from_secs(1) {
-            let buffered_chunks = h264_buf.lock().unwrap().len();
+            let buffered_chunks = video_buf.lock().unwrap().len();
             eprintln!(
                 "[VIDEO:{}] stats chunks_written={} buffered_chunks={} video_stale_chunks_dropped={} video_keyframe_wait_chunks_dropped={}",
                 stream_id,
@@ -103,7 +106,7 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
             last_stats = now;
         }
 
-        let Some(drain) = drain_next_h264_live(&h264_buf, now, delay, max_lag, &mut need_keyframe)
+        let Some(drain) = drain_next_video_live(&video_buf, now, delay, max_lag, &mut need_keyframe, input_codec)
         else {
             thread::sleep(Duration::from_millis(2));
             continue;
@@ -124,7 +127,7 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
         let write_start = Instant::now();
         if video_stdin.write_all(&chunk).is_err() {
             if !stop.load(Ordering::Acquire) {
-                eprintln!("[VIDEO:{}] H.264 pipe write error, exiting", stream_id);
+                eprintln!("[VIDEO:{}] video pipe write error, exiting", stream_id);
             }
             return;
         }
@@ -142,7 +145,8 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
                 stream_id = %stream_id,
                 bytes = n,
                 delay_ms = delay.as_millis() as u64,
-                "ffmpeg video first h264 chunk written to stdin"
+                video_input_codec = input_codec.log_label(),
+                "ffmpeg video first chunk written to stdin"
             );
         }
         last_write_ms.store(now_unix_ms(), Ordering::Release);
@@ -153,7 +157,7 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
 
     let _ = video_stdin.flush();
     eprintln!(
-        "[VIDEO:{}] H.264 pipe drain exited after {} chunks",
+        "[VIDEO:{}] video pipe drain exited after {} chunks",
         stream_id, chunk_count
     );
 }
@@ -164,14 +168,15 @@ struct VideoDrainNext {
     dropped_for_keyframe: usize,
 }
 
-fn drain_next_h264_live(
-    h264_buf: &StdMutex<VecDeque<TimedChunk>>,
+fn drain_next_video_live(
+    video_buf: &StdMutex<VecDeque<TimedChunk>>,
     now: Instant,
     delay: Duration,
     max_lag: Duration,
     need_keyframe: &mut bool,
+    input_codec: VideoInputCodec,
 ) -> Option<VideoDrainNext> {
-    let mut buf = h264_buf.lock().unwrap();
+    let mut buf = video_buf.lock().unwrap();
     let live_cutoff = now.checked_sub(max_lag).unwrap_or(now);
 
     // If FFmpeg/RTMP stalled, the buffer may contain seconds of already-due
@@ -203,7 +208,7 @@ fn drain_next_h264_live(
             let Some((ts, packet)) = buf.front() else {
                 break;
             };
-            if *ts + delay > now || h264_annexb_contains_idr(packet) {
+            if *ts + delay > now || video_chunk_is_keyframe(packet, input_codec) {
                 break;
             }
             buf.pop_front();
@@ -215,7 +220,7 @@ fn drain_next_h264_live(
         let Some((ts, packet)) = buf.front() else {
             break;
         };
-        if *ts + delay > now || h264_annexb_contains_idr(packet) {
+        if *ts + delay > now || video_chunk_is_keyframe(packet, input_codec) {
             break;
         }
         buf.pop_front();
@@ -226,7 +231,7 @@ fn drain_next_h264_live(
     if *ts + delay <= now {
         let (_, packet) = buf.pop_front().unwrap();
         if *need_keyframe {
-            if !h264_annexb_contains_idr(&packet) {
+            if !video_chunk_is_keyframe(&packet, input_codec) {
                 return None;
             }
             *need_keyframe = false;
@@ -239,6 +244,24 @@ fn drain_next_h264_live(
     } else {
         None
     }
+}
+
+#[cfg(test)]
+fn drain_next_h264_live(
+    video_buf: &StdMutex<VecDeque<TimedChunk>>,
+    now: Instant,
+    delay: Duration,
+    max_lag: Duration,
+    need_keyframe: &mut bool,
+) -> Option<VideoDrainNext> {
+    drain_next_video_live(
+        video_buf,
+        now,
+        delay,
+        max_lag,
+        need_keyframe,
+        VideoInputCodec::H264AnnexB,
+    )
 }
 
 fn video_max_lag_from_env() -> Duration {
@@ -270,6 +293,20 @@ fn audio_fifo_write_budget_from_env() -> Duration {
         .unwrap_or(DEFAULT_AUDIO_FIFO_WRITE_BUDGET.as_millis() as u64)
         .clamp(1, MAX_AUDIO_FIFO_WRITE_BUDGET.as_millis() as u64);
     Duration::from_millis(millis)
+}
+
+fn video_chunk_is_keyframe(packet: &[u8], input_codec: VideoInputCodec) -> bool {
+    match input_codec {
+        VideoInputCodec::H264AnnexB => h264_annexb_contains_idr(packet),
+        VideoInputCodec::Vp8Ivf => vp8_ivf_frame_is_keyframe(packet),
+    }
+}
+
+fn vp8_ivf_frame_is_keyframe(packet: &[u8]) -> bool {
+    // IVF stream header is 32 bytes; per-frame header is 12 bytes. VP8
+    // keyframes have bit 0 clear in the first payload byte.
+    let offset = if packet.starts_with(b"DKIF") { 32 + 12 } else { 12 };
+    packet.get(offset).is_some_and(|b| b & 0x01 == 0)
 }
 
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
@@ -1292,8 +1329,9 @@ mod tests {
         let buf: Arc<StdMutex<VecDeque<TimedChunk>>> = Arc::new(StdMutex::new(VecDeque::new()));
         let ctx = VideoDrainCtx {
             stream_id: "sid".into(),
-            h264_buf: buf,
+            video_buf: buf,
             video_stdin: stdin,
+            input_codec: VideoInputCodec::H264AnnexB,
             delay: Duration::from_millis(0),
             stop: Arc::new(AtomicBool::new(true)),
             last_write_ms: Arc::new(AtomicI64::new(0)),
@@ -1325,8 +1363,9 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let ctx = VideoDrainCtx {
             stream_id: "sid".into(),
-            h264_buf: buf,
+            video_buf: buf,
             video_stdin: stdin,
+            input_codec: VideoInputCodec::H264AnnexB,
             delay: Duration::from_millis(0),
             stop: stop.clone(),
             last_write_ms: Arc::new(AtomicI64::new(0)),

@@ -4,6 +4,28 @@ use std::time::Instant;
 use crate::features::broadcast::domain::VideoEncoderKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoInputCodec {
+    H264AnnexB,
+    Vp8Ivf,
+}
+
+impl VideoInputCodec {
+    pub fn ffmpeg_format(self) -> &'static str {
+        match self {
+            Self::H264AnnexB => "h264",
+            Self::Vp8Ivf => "ivf",
+        }
+    }
+
+    pub fn log_label(self) -> &'static str {
+        match self {
+            Self::H264AnnexB => "h264_annexb",
+            Self::Vp8Ivf => "vp8_ivf",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoProfile {
     pub input_fps: u32,
     pub output_fps: u32,
@@ -163,6 +185,7 @@ pub(super) fn build_ffmpeg_args(audio_fifo: &str, rtmp_url: &str) -> Vec<String>
         &[rtmp_url.to_string()],
         VideoProfile::default(),
         VideoEncoderKind::X264,
+        VideoInputCodec::H264AnnexB,
     )
 }
 
@@ -172,6 +195,7 @@ pub(super) fn build_ffmpeg_args_with_profile(
     rtmp_urls: &[String],
     profile: VideoProfile,
     encoder: VideoEncoderKind,
+    input_codec: VideoInputCodec,
 ) -> Vec<String> {
     build_ffmpeg_args_with_profile_and_encoder(
         audio_fifo,
@@ -179,6 +203,7 @@ pub(super) fn build_ffmpeg_args_with_profile(
         rtmp_urls,
         profile,
         encoder,
+        input_codec,
     )
 }
 
@@ -188,6 +213,7 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
     rtmp_urls: &[String],
     profile: VideoProfile,
     encoder: VideoEncoderKind,
+    input_codec: VideoInputCodec,
 ) -> Vec<String> {
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".into(),
@@ -208,7 +234,7 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         "-thread_queue_size".into(),
         "1024".into(),
         "-f".into(),
-        "h264".into(),
+        input_codec.ffmpeg_format().into(),
         // Raw H.264 is timestampless. Use wall-clock input timestamps instead
         // of a declared input -r: browser H.264 encoders often deliver 15fps
         // even when getSettings() reports 30fps, and -r 30 makes FFmpeg run at
@@ -796,12 +822,29 @@ mod tests {
             &["rtmp://youtube/live/key".to_string()],
             profile,
             VideoEncoderKind::Nvenc,
+            VideoInputCodec::H264AnnexB,
         );
         let joined = args.join(" ");
 
         assert!(joined.contains("-vf fps=30,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"));
         assert!(joined.contains("-g 60 -keyint_min 60"));
         assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 5000k"));
+    }
+
+    #[test]
+    fn build_ffmpeg_args_can_accept_vp8_ivf_input() {
+        let args = build_ffmpeg_args_with_profile(
+            "/tmp/fifo",
+            None,
+            &["rtmp://x/y".to_string()],
+            VideoProfile::default(),
+            VideoEncoderKind::X264,
+            VideoInputCodec::Vp8Ivf,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-f ivf"));
+        assert!(joined.contains("-use_wallclock_as_timestamps 1 -i pipe:0"));
+        assert!(joined.contains("-c:v libx264"));
     }
 
     #[test]
@@ -812,6 +855,7 @@ mod tests {
             &["rtmp://x/y".to_string()],
             VideoProfile::from_capture(3840, 2160, 60),
             VideoEncoderKind::X264,
+            VideoInputCodec::H264AnnexB,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-use_wallclock_as_timestamps 1 -i pipe:0"));
@@ -831,6 +875,7 @@ mod tests {
             &["rtmp://x/y".to_string()],
             VideoProfile::default(),
             VideoEncoderKind::Nvenc,
+            VideoInputCodec::H264AnnexB,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-c:v h264_nvenc"));
@@ -850,6 +895,7 @@ mod tests {
             &["rtmp://x/y".to_string()],
             VideoProfile::default(),
             VideoEncoderKind::X264,
+            VideoInputCodec::H264AnnexB,
         );
         let joined = args.join(" ");
         assert!(joined.contains("drawtext=textfile=/tmp/brivva_subtitle_stream-1.txt"));
@@ -869,6 +915,7 @@ mod tests {
             ],
             VideoProfile::default(),
             VideoEncoderKind::X264,
+            VideoInputCodec::H264AnnexB,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-f tee"));

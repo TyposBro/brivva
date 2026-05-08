@@ -22,7 +22,9 @@ mod orphan;
 mod self_check;
 
 use args::{FfmpegProgressAlert, FfmpegProgressMonitor, parse_tee_slave_muxer_index};
-pub use args::{VideoProfile, VideoProfileCaps, drain_stderr_lines, redact_rtmp_secrets};
+pub use args::{
+    VideoInputCodec, VideoProfile, VideoProfileCaps, drain_stderr_lines, redact_rtmp_secrets,
+};
 pub use orphan::{decode_mp3_to_pcm, kill_orphan_ffmpeg};
 pub use self_check::{log_startup_runtime_self_check, run_runtime_self_check};
 
@@ -178,7 +180,7 @@ fn tts_queue_cap_bytes_from_env() -> usize {
 
 pub(crate) struct StreamBuffers {
     audio: Arc<StdMutex<VecDeque<TimedChunk>>>,
-    video_h264: Arc<StdMutex<VecDeque<TimedChunk>>>,
+    video: Arc<StdMutex<VecDeque<TimedChunk>>>,
     tts: Arc<StdMutex<VecDeque<TtsSegment>>>,
 }
 
@@ -186,7 +188,7 @@ impl StreamBuffers {
     fn new() -> Self {
         Self {
             audio: Arc::new(StdMutex::new(VecDeque::new())),
-            video_h264: Arc::new(StdMutex::new(VecDeque::new())),
+            video: Arc::new(StdMutex::new(VecDeque::new())),
             tts: Arc::new(StdMutex::new(VecDeque::new())),
         }
     }
@@ -229,6 +231,7 @@ struct RtmpStream {
     /// `0` as "not idle, skip" so a slow-starting host doesn't burn the
     /// first `MAX_FFMPEG_RESTARTS` attempt on a false-positive idle kill.
     last_write_ms: Arc<AtomicI64>,
+    video_input_codec: VideoInputCodec,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +260,7 @@ pub struct RtmpManager {
     metrics: Option<Arc<SessionMetrics>>,
     output_health_tx: Option<mpsc::UnboundedSender<OutputHealthSnapshot>>,
     video_encoder: VideoEncoderKind,
+    video_input_codec: VideoInputCodec,
 }
 
 type CrashedStreamSnapshot = (
@@ -307,6 +311,7 @@ struct StreamSpawnArgs {
     output_controls_enabled: bool,
     render_graph_node: Option<RenderGraphOutputNode>,
     existing_buffers: Option<StreamBuffers>,
+    video_input_codec: VideoInputCodec,
 }
 
 /// Public signature for `RtmpManager::start_stream`. Grouping the per-stream
@@ -430,6 +435,7 @@ impl RtmpManager {
             metrics: None,
             output_health_tx: None,
             video_encoder: VideoEncoderKind::X264,
+            video_input_codec: VideoInputCodec::H264AnnexB,
         }
     }
 
@@ -582,6 +588,7 @@ impl RtmpManager {
             output_controls_enabled: args.output_controls_enabled,
             render_graph_node: args.render_graph_node.clone(),
             existing_buffers: None,
+            video_input_codec: self.video_input_codec,
         }) {
             emit_output_health(
                 self.output_health_tx.as_ref(),
@@ -660,7 +667,10 @@ impl RtmpManager {
         }
         let shared_chunk: Arc<[u8]> = Arc::from(chunk);
         for stream in self.streams.values() {
-            let mut buf = stream.buffers.video_h264.lock().unwrap();
+            if stream.video_input_codec != VideoInputCodec::H264AnnexB {
+                continue;
+            }
+            let mut buf = stream.buffers.video.lock().unwrap();
             buf.push_back((captured_at, shared_chunk.clone()));
             let mut dropped = 0usize;
             while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
@@ -676,6 +686,78 @@ impl RtmpManager {
                     "video h264 queue cap dropped oldest chunks"
                 );
             }
+        }
+    }
+
+    pub fn push_video_vp8_ivf_frame_at(&self, frame: &[u8], captured_at: Instant) {
+        if frame.is_empty() {
+            return;
+        }
+        let shared_chunk: Arc<[u8]> = Arc::from(frame);
+        for stream in self.streams.values() {
+            if stream.video_input_codec != VideoInputCodec::Vp8Ivf {
+                continue;
+            }
+            let mut buf = stream.buffers.video.lock().unwrap();
+            buf.push_back((captured_at, shared_chunk.clone()));
+            let mut dropped = 0usize;
+            while buf.len() > HOST_VIDEO_H264_CAP_CHUNKS {
+                buf.pop_front();
+                dropped += 1;
+            }
+            if dropped > 0 {
+                tracing::warn!(
+                    destination_platform = %stream.destination_platform,
+                    lang = %stream.lang,
+                    video_buffer_cap_chunks_dropped = dropped,
+                    cap_chunks = HOST_VIDEO_H264_CAP_CHUNKS,
+                    "video vp8 ivf queue cap dropped oldest chunks"
+                );
+            }
+        }
+    }
+
+    fn stop_stream_for_restart(&mut self, id: &str) -> Option<RestartStreamArgs> {
+        let mut old = self.streams.remove(id)?;
+        old.stop_flag.store(true, Ordering::Release);
+        let _ = old.child.kill();
+        let _ = old.child.wait();
+        let _ = std::fs::remove_file(&old.audio_fifo);
+        let _ = std::fs::remove_file(&old.subtitle_textfile);
+        Some(RestartStreamArgs {
+            id: id.to_string(),
+            lang: old.lang,
+            rtmp_urls: old.rtmp_urls,
+            delay_ms: old.delay.as_millis() as u64,
+            is_source: old.is_source,
+            host_gain: old.host_gain,
+            passthrough: old.passthrough,
+            output_id: old.output_id,
+            destination_platform: old.destination_platform,
+            output_controls_enabled: old.output_controls_enabled,
+            render_graph_node: old.render_graph_node,
+            prev_count: old.restart_count,
+            destinations: old.destinations,
+            buffers: old.buffers,
+        })
+    }
+
+    pub fn switch_video_input_codec(&mut self, codec: VideoInputCodec) {
+        if self.video_input_codec == codec {
+            return;
+        }
+        self.video_input_codec = codec;
+        let to_restart: Vec<String> = self
+            .streams
+            .iter()
+            .filter_map(|(id, stream)| (stream.video_input_codec != codec).then_some(id.clone()))
+            .collect();
+        for id in to_restart {
+            let Some(old) = self.stop_stream_for_restart(&id) else {
+                continue;
+            };
+            tracing::info!(stream_id = %id, video_input_codec = codec.log_label(), "switching ffmpeg video input codec");
+            self.restart_stream_with_codec(old, codec);
         }
     }
 
@@ -942,6 +1024,10 @@ impl RtmpManager {
     /// Restart a stream after a crash, reusing its buffers so queued host
     /// media + TTS survive the FFmpeg restart.
     fn restart_stream(&mut self, args: RestartStreamArgs) {
+        self.restart_stream_with_codec(args, self.video_input_codec);
+    }
+
+    fn restart_stream_with_codec(&mut self, args: RestartStreamArgs, video_input_codec: VideoInputCodec) {
         emit_output_health(
             self.output_health_tx.as_ref(),
             args.output_controls_enabled,
@@ -974,6 +1060,7 @@ impl RtmpManager {
             output_controls_enabled: args.output_controls_enabled,
             render_graph_node: args.render_graph_node.clone(),
             existing_buffers: Some(args.buffers),
+            video_input_codec,
         }) {
             Ok(()) => {
                 if let Some(stream) = self.streams.get_mut(&args.id) {
@@ -1058,6 +1145,7 @@ impl RtmpManager {
             &args.rtmp_urls,
             video_profile,
             encoder,
+            args.video_input_codec,
         );
         tracing::info!(
             stream_id = %args.stream_id,
@@ -1073,7 +1161,8 @@ impl RtmpManager {
             maxrate_kbps = video_profile.maxrate_kbps,
             keyframe_interval_frames = video_profile.keyframe_interval_frames,
             pad_to_canvas = video_profile.pad_to_canvas,
-            "ffmpeg spawn: WebRTC H.264 pipe re-encode enabled"
+            video_input_codec = args.video_input_codec.log_label(),
+            "ffmpeg spawn: WebRTC video pipe re-encode enabled"
         );
 
         let mut child = std::process::Command::new("ffmpeg")
@@ -1209,7 +1298,7 @@ impl RtmpManager {
             .ok_or_else(|| "FFmpeg video stdin unavailable".to_string())?;
 
         // Video drain
-        let v_buf = buffers.video_h264.clone();
+        let v_buf = buffers.video.clone();
         let v_stop = stop_flag.clone();
         let v_sid = args.stream_id.clone();
         let v_last = last_write_ms.clone();
@@ -1219,8 +1308,9 @@ impl RtmpManager {
             .spawn(move || {
                 video_drain_loop(VideoDrainCtx {
                     stream_id: v_sid,
-                    h264_buf: v_buf,
+                    video_buf: v_buf,
                     video_stdin,
+                    input_codec: args.video_input_codec,
                     delay,
                     stop: v_stop,
                     last_write_ms: v_last,
@@ -1270,6 +1360,7 @@ impl RtmpManager {
                 stop_flag,
                 restart_count: 0,
                 last_write_ms,
+                video_input_codec: args.video_input_codec,
             },
         );
 
