@@ -19,6 +19,8 @@ export interface AppConfig {
   sessionLogConsole: boolean;
   /** V2 Phase 2 timestamped WS PCM bridge. Default off for deploy safety. */
   timestampedAudioEnabled: boolean;
+  /** Optional JSON-encoded RTCIceServer[] for TURN/STUN overrides. */
+  webRtcIceServers: RTCIceServer[] | null;
 }
 
 let current: AppConfig | null = null;

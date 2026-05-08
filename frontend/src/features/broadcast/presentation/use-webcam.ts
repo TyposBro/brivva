@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { appConfig } from "../../../core/config/app-config";
 
 const HOST_VIDEO_MIN_WIDTH = 720;
 const HOST_VIDEO_MIN_HEIGHT = 1280;
@@ -93,7 +94,9 @@ export function useWebcam(
     if (!isSocketOpen() || !streamRef.current || peerRef.current) return;
 
     const peer = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceServers: appConfig().webRtcIceServers ?? [
+        { urls: "stun:stun.l.google.com:19302" },
+      ],
     });
     peerRef.current = peer;
     attachConnectionDiagnostics(peer, onConnectionIssue);

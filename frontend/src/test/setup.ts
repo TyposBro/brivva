@@ -11,6 +11,7 @@ _setAppConfig({
   sessionLogsEnabled: false,
   sessionLogConsole: false,
   timestampedAudioEnabled: false,
+  webRtcIceServers: null,
 });
 
 afterEach(() => {

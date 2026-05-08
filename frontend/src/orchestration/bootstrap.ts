@@ -27,6 +27,22 @@ function envEnabledByDefault(value: unknown): boolean {
 	return true;
 }
 
+function parseIceServers(value: unknown): RTCIceServer[] | null {
+	const text = String(value ?? "").trim();
+	if (!text) return null;
+	try {
+		const parsed = JSON.parse(text) as unknown;
+		if (!Array.isArray(parsed)) return null;
+		return parsed.filter((entry): entry is RTCIceServer => {
+			if (typeof entry !== "object" || entry === null) return false;
+			const urls = (entry as { urls?: unknown }).urls;
+			return typeof urls === "string" || Array.isArray(urls);
+		});
+	} catch {
+		return null;
+	}
+}
+
 export function bootstrap(): void {
 	const workersApiBase =
 		import.meta.env.VITE_API_URL ??
@@ -46,6 +62,7 @@ export function bootstrap(): void {
 		timestampedAudioEnabled: envFlag(
 			import.meta.env.VITE_BRIVVA_V2_TIMESTAMPED_AUDIO,
 		),
+		webRtcIceServers: parseIceServers(import.meta.env.VITE_WEBRTC_ICE_SERVERS),
 	});
 
 	configureAuth({

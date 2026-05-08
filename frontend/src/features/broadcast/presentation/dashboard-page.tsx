@@ -85,17 +85,18 @@ function isLikelyMobileHost(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-function chromiumBrowserRequirementError(): string | null {
+function browserCompatibilityWarning(): string | null {
   if (typeof navigator === "undefined") return null;
   const ua = navigator.userAgent;
-  const isChromium = /Chrome|Chromium|CriOS|Edg|OPR|Brave/i.test(ua);
   const isFirefox = /Firefox|FxiOS/i.test(ua);
   const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR/i.test(ua);
-  if (isChromium && !isFirefox) return null;
-  if (isFirefox || isSafari) {
-    return "Live hosting requires desktop Chrome, Brave, or another Chromium-based browser. Firefox/Safari can connect but may send H.264 that YouTube cannot play reliably.";
+  if (isFirefox) {
+    return "Firefox may prefer VP8 for WebRTC. Brivva will try to connect, but current server ingest is strongest with H.264 until the VP8 ingest path lands.";
   }
-  return "Live hosting requires desktop Chrome, Brave, or another Chromium-based browser.";
+  if (isSafari) {
+    return "Safari supports WebRTC/H.264, but camera/network behavior differs from Chromium. Keep the tab foregrounded and watch provider health after Record.";
+  }
+  return null;
 }
 
 function DashboardInner() {
@@ -129,7 +130,7 @@ function DashboardInner() {
   // after a race). Forces the banner on so the host has a path forward.
   const [postMismatch, setPostMismatch] = useState(false);
   const mobileHostWarning = isLikelyMobileHost();
-  const browserRequirementError = chromiumBrowserRequirementError();
+  const browserCompatibilityNotice = browserCompatibilityWarning();
 
   // Progressive disclosure
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -298,11 +299,6 @@ function DashboardInner() {
   // ── Create session ─────────────────────────────────
 
   const handleCreateSession = async () => {
-    const browserError = chromiumBrowserRequirementError();
-    if (browserError) {
-      setError(browserError);
-      return;
-    }
     if (!title.trim()) {
       setError("Enter a session title");
       return;
@@ -771,10 +767,10 @@ function DashboardInner() {
           </div>
         )}
 
-        {browserRequirementError && (
-          <div className="rounded-xl bg-error-container/20 px-4 py-3 text-xs font-label text-error">
-            <span className="font-bold">Use Chrome or Brave to host live.</span>{" "}
-            Firefox/Safari are blocked for launch tests because their WebRTC H.264 stream can make YouTube fail to show video.
+        {browserCompatibilityNotice && (
+          <div className="rounded-xl bg-warning-container/20 px-4 py-3 text-xs font-label text-on-surface-variant">
+            <span className="font-bold text-on-surface">Browser compatibility notice.</span>{" "}
+            {browserCompatibilityNotice}
           </div>
         )}
 
@@ -792,8 +788,7 @@ function DashboardInner() {
             destinations.length > 0 &&
               !hasInvalidDestination &&
               !voiceLangMismatch &&
-              !missingFreshGripConfirmation &&
-              !browserRequirementError
+              !missingFreshGripConfirmation
               ? "monolith-gradient text-white hover:scale-[0.99] active:scale-[0.97] shadow-xl"
               : "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
           )}
@@ -803,8 +798,7 @@ function DashboardInner() {
             destinations.length === 0 ||
             hasInvalidDestination ||
             voiceLangMismatch ||
-            missingFreshGripConfirmation ||
-            Boolean(browserRequirementError)
+            missingFreshGripConfirmation
           }
         >
           <span className="flex items-center justify-center gap-2">
@@ -819,9 +813,7 @@ function DashboardInner() {
                     ? "Fix voice language to go live"
                     : missingFreshGripConfirmation
                       ? "Confirm fresh Grip key to go live"
-                      : browserRequirementError
-                        ? "Use Chrome or Brave to go live"
-                        : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
+                      : `Go Live${destinations.length > 1 ? ` · ${destinations.length} destinations` : ""}`}
           </span>
         </button>
 
