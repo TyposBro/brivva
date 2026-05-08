@@ -134,7 +134,7 @@ export function useHostSession() {
     }
     dispatch({ type: "reset" });
     resetTimings();
-    startWebcam();
+    await startWebcam();
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
     if (opts.sessionId) {

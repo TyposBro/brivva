@@ -134,6 +134,7 @@ export default function SessionPage() {
   })();
 
   const isLive = session.status === "live";
+  const canEnd = session.status === "setup" || session.status === "live";
 
   const observability = computeObservability({ session, streams, isLive, nowMs: now });
 
@@ -325,14 +326,14 @@ export default function SessionPage() {
             </button>
           )}
 
-          {isLive && (
+          {canEnd && (
             <button
               className="bg-error-container text-on-error-container px-6 py-3 rounded-xl font-headline font-bold hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
               onClick={handleEnd}
               disabled={ending}
             >
               <Square className="w-4 h-4" />
-              {ending ? "Ending..." : "End Session"}
+              {ending ? "Ending..." : session.status === "setup" ? "Discard Session" : "End Session"}
             </button>
           )}
 

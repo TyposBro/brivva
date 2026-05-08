@@ -21,6 +21,7 @@ BRIVVA_SESSION_LOG_VERBOSE="${BRIVVA_SESSION_LOG_VERBOSE:-0}"
 BRIVVA_WEBRTC_STUN_URLS="${BRIVVA_WEBRTC_STUN_URLS:-stun:stun.l.google.com:19302}"
 BRIVVA_WEBRTC_UDP_PORT_MIN="${BRIVVA_WEBRTC_UDP_PORT_MIN:-40000}"
 BRIVVA_WEBRTC_UDP_PORT_MAX="${BRIVVA_WEBRTC_UDP_PORT_MAX:-40100}"
+BRIVVA_FORCE_RTMP_NOT_RTMPS="${BRIVVA_FORCE_RTMP_NOT_RTMPS:-0}"
 DEPLOY_MIN_HEALTH="${DEPLOY_MIN_HEALTH:-0}"
 DEPLOY_MAX_PERCENT="${DEPLOY_MAX_PERCENT:-100}"
 
@@ -238,6 +239,7 @@ aws ecs describe-task-definition \
 		--arg WEBRTC_STUN_URLS "$BRIVVA_WEBRTC_STUN_URLS" \
 		--arg WEBRTC_UDP_PORT_MIN "$BRIVVA_WEBRTC_UDP_PORT_MIN" \
 		--arg WEBRTC_UDP_PORT_MAX "$BRIVVA_WEBRTC_UDP_PORT_MAX" \
+		--arg FORCE_RTMP_NOT_RTMPS "$BRIVVA_FORCE_RTMP_NOT_RTMPS" \
 		--arg NVIDIA_DRIVER_CAPABILITIES "$NVIDIA_DRIVER_CAPABILITIES" \
 		--arg VIDEO_ENCODER "$BRIVVA_VIDEO_ENCODER" '
       .containerDefinitions |= map(
@@ -251,6 +253,7 @@ aws ecs describe-task-definition \
                     and .name != "BRIVVA_WEBRTC_STUN_URLS"
                     and .name != "BRIVVA_WEBRTC_UDP_PORT_MIN"
                     and .name != "BRIVVA_WEBRTC_UDP_PORT_MAX"
+                    and .name != "BRIVVA_FORCE_RTMP_NOT_RTMPS"
                     and .name != "NVIDIA_DRIVER_CAPABILITIES"
                     and .name != "BRIVVA_VIDEO_ENCODER"
                   )))
@@ -260,6 +263,7 @@ aws ecs describe-task-definition \
                 {name: "BRIVVA_WEBRTC_STUN_URLS", value: $WEBRTC_STUN_URLS},
                 {name: "BRIVVA_WEBRTC_UDP_PORT_MIN", value: $WEBRTC_UDP_PORT_MIN},
                 {name: "BRIVVA_WEBRTC_UDP_PORT_MAX", value: $WEBRTC_UDP_PORT_MAX},
+                {name: "BRIVVA_FORCE_RTMP_NOT_RTMPS", value: $FORCE_RTMP_NOT_RTMPS},
                 {name: "NVIDIA_DRIVER_CAPABILITIES", value: $NVIDIA_DRIVER_CAPABILITIES},
                 {name: "BRIVVA_VIDEO_ENCODER", value: $VIDEO_ENCODER}
               ]

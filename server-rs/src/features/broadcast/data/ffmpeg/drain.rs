@@ -137,6 +137,14 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
             );
         }
         chunk_count += 1;
+        if chunk_count == 1 {
+            tracing::info!(
+                stream_id = %stream_id,
+                bytes = n,
+                delay_ms = delay.as_millis() as u64,
+                "ffmpeg video first h264 chunk written to stdin"
+            );
+        }
         last_write_ms.store(now_unix_ms(), Ordering::Release);
         if let Some(m) = &metrics {
             m.record_bytes_out(n);
@@ -417,6 +425,16 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
                     eprintln!(
                         "[AUDIO:{}] fifo write backpressure would_blocks={}",
                         stream_id, would_blocks
+                    );
+                }
+                if tick_count == 1 {
+                    tracing::info!(
+                        stream_id = %stream_id,
+                        bytes = n,
+                        delay_ms = delay.as_millis() as u64,
+                        is_source,
+                        host_gain,
+                        "ffmpeg audio first pcm tick written to fifo"
                     );
                 }
                 last_write_ms.store(now_unix_ms(), Ordering::Release);

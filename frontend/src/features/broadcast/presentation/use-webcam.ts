@@ -298,11 +298,21 @@ function attachConnectionDiagnostics(
 function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
-    const onStateChange = () => {
-      if (peer.iceGatheringState !== "complete") return;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(timeout);
       peer.removeEventListener("icegatheringstatechange", onStateChange);
       resolve();
     };
+    const onStateChange = () => {
+      if (peer.iceGatheringState === "complete") finish();
+    };
+    // Do not let a slow/broken STUN path block the Record button and delay
+    // YouTube ingest. Chrome can spend ~50s here in headless/Linux while audio
+    // is already flowing; send the best local SDP after a short bounded wait.
+    const timeout = window.setTimeout(finish, 2000);
     peer.addEventListener("icegatheringstatechange", onStateChange);
   });
 }

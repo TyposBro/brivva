@@ -24,9 +24,17 @@ pub const PASS_LANG_CODE: &str = "pass";
 /// spawning FFmpeg.
 pub fn maybe_downgrade_rtmps(url: &str, force_rtmp: bool) -> String {
     if force_rtmp && let Some(rest) = url.strip_prefix("rtmps://") {
+        // YouTube returns hosts like a.rtmps.youtube.com for RTMPS ingest.
+        // A scheme-only rewrite produces rtmp://a.rtmps.youtube.com/..., which
+        // YouTube accepts poorly/no-data. Downgrade both scheme and known host.
+        let rest = rest.replace(".rtmps.youtube.com", ".rtmp.youtube.com");
         return format!("rtmp://{}", rest);
     }
     url.to_string()
+}
+
+fn should_apply_rtmp_downgrade(stream: &Stream, force_rtmp: bool) -> bool {
+    force_rtmp && stream.platform.eq_ignore_ascii_case("youtube")
 }
 
 /// Per-stream pipeline flags derived from the Workers-provided stream row +
@@ -86,7 +94,10 @@ fn full_rtmp_url(stream: &Stream, force_rtmp: bool) -> Option<String> {
     } else {
         format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
     };
-    Some(maybe_downgrade_rtmps(&full_url_with_key, force_rtmp))
+    Some(maybe_downgrade_rtmps(
+        &full_url_with_key,
+        should_apply_rtmp_downgrade(stream, force_rtmp),
+    ))
 }
 
 struct EncodedFanoutSpawn {
@@ -387,11 +398,13 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         } else {
             format!("{}/{}", rtmp_url.trim_end_matches('/'), stream_key)
         };
-        let full_url = maybe_downgrade_rtmps(&full_url_with_key, force_rtmp);
-        if force_rtmp && full_url != full_url_with_key {
+        let stream_force_rtmp = should_apply_rtmp_downgrade(s, force_rtmp);
+        let full_url = maybe_downgrade_rtmps(&full_url_with_key, stream_force_rtmp);
+        if stream_force_rtmp && full_url != full_url_with_key {
             tracing::warn!(
                 stream_id = %s.id,
-                "kill-switch FORCE_RTMP_NOT_RTMPS: downgraded rtmps:// to rtmp://"
+                platform = %s.platform,
+                "kill-switch FORCE_RTMP_NOT_RTMPS: downgraded YouTube rtmps:// to rtmp://"
             );
         }
         // User explicitly picked "Passthrough (source)" on this destination.
@@ -616,6 +629,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn maybe_downgrade_rtmps_rewrites_youtube_rtmps_host() {
+        assert_eq!(
+            maybe_downgrade_rtmps("rtmps://a.rtmps.youtube.com/live2/KEY", true),
+            "rtmp://a.rtmp.youtube.com/live2/KEY"
+        );
+    }
+
     fn stream(id: &str, lang: &str, platform: &str) -> Stream {
         Stream {
             id: id.into(),
@@ -632,6 +653,25 @@ mod tests {
             created_at: 0,
             watch_url: None,
         }
+    }
+
+    #[test]
+    fn full_rtmp_url_only_downgrades_youtube_when_kill_switch_enabled() {
+        let mut youtube = stream("yt", "ko", "youtube");
+        youtube.rtmp_url = Some("rtmps://a.rtmps.youtube.com/live2".into());
+        youtube.stream_key = Some("KEY".into());
+        let mut grip = stream("grip", "ko", "grip");
+        grip.rtmp_url = Some("rtmps://grip.example/live".into());
+        grip.stream_key = Some("KEY".into());
+
+        assert_eq!(
+            full_rtmp_url(&youtube, true).as_deref(),
+            Some("rtmp://a.rtmp.youtube.com/live2/KEY")
+        );
+        assert_eq!(
+            full_rtmp_url(&grip, true).as_deref(),
+            Some("rtmps://grip.example/live/KEY")
+        );
     }
 
     #[test]

@@ -1063,6 +1063,7 @@ impl RtmpManager {
             stream_id = %args.stream_id,
             lang = %args.lang,
             destination_platform = %args.destination_platform,
+            ffmpeg_args = ?ffmpeg_args.iter().map(|arg| redact_rtmp_secrets(arg)).collect::<Vec<_>>(),
             video_encoder = encoder.codec_name(),
             input_fps = video_profile.input_fps,
             output_fps = video_profile.output_fps,
