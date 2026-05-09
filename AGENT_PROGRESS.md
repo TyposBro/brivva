@@ -57,7 +57,7 @@ Debug and fix production case where WebRTC browser ingest is healthy but YouTube
 - Deploy frontend and ECS server.
 - Verify prod asset/server task definition.
 - Commit analyzer startup-drop/speed false-positive fix.
-- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should receive server capabilities and compare cleanly.
+- Finalize status/report. Grip remains blocked by missing Infisical login/session.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
 ## Tests run
@@ -96,6 +96,10 @@ Current turn:
 - Re-analyzed `tmp/prod-media-stress-runs/20260509-brave-webcodecs-capability-smoke` — pass after startup-drop classification.
 - Re-analyzed `tmp/prod-media-ingest-ab-runs/20260509-brave-youtube-ingest-ab-after-capability/webrtc` — pass after removing provider-health slow-alert speed samples.
 - Re-analyzed `tmp/prod-media-stress-runs/20260509-brave-webcodecs-vp8-keyframe-smoke` — still fail only due noisy TTS drift on 60s smoke (`-2100 ms/min`); media/WebCodecs gates pass.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave E2E_TEST_SHAPE=translated E2E_RECORD_SECONDS=120 ... bun run test:e2e:media-ingest-ab` — completed; artifact `tmp/prod-media-ingest-ab-runs/20260509-brave-youtube-ingest-ab-brivva6`. Overall wrapper exit failed because WebRTC baseline failed, but WebCodecs passed all gates.
+- A/B WebRTC leg: provider live ratio `0.8988` (threshold `0.9`), VOD 720x1280@30, FFmpeg restarts/exits 0/0, capture FPS p50 30, outbound FPS p50 27, but failed speed min `0.862`, host audio stale drops `54`, ready host bytes dropped `1,555,848`, TTS drift `-679.5 ms/min`.
+- A/B WebCodecs leg: **pass**. Provider live ratio `0.9824`, VOD 720x1280@30, FFmpeg speed min/p50 `1.04/1.08`, restarts/exits 0/0, sent `3690`, browser dropped `0`, server accepted `3660`, WS buffer p95 `0.016 MB`, queue p95 `0 ms`, host audio stale drops `0`, TTS p95 `2313 ms`, TTS drift `-37 ms/min`, WebCodecs capability/start/ready/keyframe gates all pass.
+- Comparison decision hint: `webcodecs_ws_candidate_webrtc_failed`.
 
 Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
@@ -119,6 +123,11 @@ Previous automation commit:
 - `cargo test -p server-rs` — pass
 
 ## Commits
+- `147bee5 fix(e2e): allow startup video catchup`
+- `a5e9e3a fix(webcodecs): detect VP8 keyframes`
+- `49b526f fix(webcodecs): send capabilities early`
+- `ef489c2 fix(e2e): ignore empty CF exceptions`
+- `7b8f83a fix(streaming): confirm YouTube ingest`
 - `f1967ca fix(webcodecs): preselect VP8 ingest`
 - `f8a32d9 fix(e2e): serve fixture over HTTPS`
 - `6a04e5b chore(deploy): expose WebCodecs flag`
@@ -128,4 +137,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit analyzer classification fix, then rerun 120s Brave WebRTC/WebCodecs A/B on deployed `brivva:6`.
+Report completion: WebCodecs is production candidate from latest A/B; WebRTC baseline still has media/audio degradation under the same 120s stress shape; Grip remains blocked by missing Infisical login/session.
