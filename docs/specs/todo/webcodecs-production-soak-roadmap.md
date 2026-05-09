@@ -1,6 +1,6 @@
 # WebCodecs Production Soak, Flags, and WS Congestion Roadmap
 
-Status: todo
+Status: implemented (automation complete 2026-05-09; production soak evidence pending credentials/operator window)
 Owner: Brivva engineering
 Target env: Cloudflare Pages frontend + Cloudflare Workers API + AWS Rust media server + YouTube Live + Grip
 Related:
@@ -241,6 +241,8 @@ Create `/api/session/video` and move video off the audio/control socket if any p
 - WebCodecs does not increase TTS delay p95/drift versus WebRTC beyond 10%.
 
 ## Execution phases
+
+Automation for these phases now exists in `scripts/prod-media-stress-e2e.mjs`, `scripts/prod-media-ingest-ab-e2e.mjs`, and `scripts/analyze-prod-media-stress.mjs`. Run artifacts become the dated decision record via parent `summary.json` + `verdict.md`.
 
 ### Phase 1 — Flagged production smoke
 

@@ -1,6 +1,6 @@
 # WebCodecs Ingest Production E2E A/B Stress Test Plan
 
-Status: todo
+Status: implemented (automation complete 2026-05-09; production credential runs pending)
 Owner: Brivva engineering
 Target env: Cloudflare Pages frontend + Cloudflare Workers API + AWS Rust media server + YouTube Live + Grip
 Related:
@@ -33,10 +33,11 @@ The runner must prove, with production artifacts, whether WebCodecs VP8-over-Web
 
 ## Existing automation baseline
 
-Current entrypoints already exist:
+Current entrypoints:
 
 ```bash
 bun run test:e2e:prod-media-stress
+bun run test:e2e:media-ingest-ab
 bun run analyze:e2e:prod-media-stress -- <run-dir>
 bun run compare:e2e:media-ingest -- <out-dir> <run-dir...>
 ```
@@ -509,7 +510,7 @@ bun run compare:e2e:media-ingest -- \
   tmp/prod-media-stress-runs/<webcodecs-run>
 ```
 
-### Future full matrix wrapper
+### Full matrix wrapper
 
 ```bash
 E2E_BROWSER_MATRIX=brave,chromium \
@@ -517,7 +518,7 @@ E2E_MEDIA_INGEST_MATRIX=webrtc,webcodecs_ws \
 E2E_PLATFORM_MATRIX=youtube,grip \
 E2E_TEST_SHAPE=translated \
 E2E_RECORD_SECONDS=600 \
-node scripts/prod-media-ingest-ab-e2e.mjs
+bun run test:e2e:media-ingest-ab
 ```
 
 ## Failure triage map
@@ -535,15 +536,15 @@ node scripts/prod-media-ingest-ab-e2e.mjs
 
 ## Implementation tasks
 
-- [ ] Add mode assertion gates in runner.
-- [ ] Add WebCodecs event extraction to analyzer CloudWatch/session-log parser.
-- [ ] Add `webcodecs_queue_ms_p95` and better bufferedAmount percentile extraction.
-- [ ] Add paired-run wrapper or matrix mode.
-- [ ] Add Grip Level 1 manual RTMP/evidence support.
-- [ ] Add Grip Level 2 API polling when credentials/API are available.
-- [ ] Add network throttling/CPU stress knobs.
-- [ ] Add decision-hint output in comparison summary.
-- [ ] Add final dated A/B decision template.
+- [x] Add mode assertion gates in runner.
+- [x] Add WebCodecs event extraction to analyzer session-log/WebSocket parser.
+- [x] Add `webcodecs_queue_ms_p95` and better bufferedAmount percentile extraction.
+- [x] Add paired-run wrapper / matrix mode (`scripts/prod-media-ingest-ab-e2e.mjs`).
+- [x] Add Grip Level 1 manual RTMP/evidence support.
+- [x] Add Grip Level 2 artifact parser (`grip-provider-health.ndjson`) for API polling when credentials/API are available.
+- [x] Add network throttling/CPU stress knobs.
+- [x] Add decision-hint output in comparison summary.
+- [x] Add dated comparison verdict/decision output (`verdict.md`, `decision_hint`).
 
 ## Done when
 

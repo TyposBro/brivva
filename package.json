@@ -25,6 +25,7 @@
     "test:e2e:prod-parity": "./scripts/local-prod-parity.sh",
     "test:e2e:release": "./scripts/local-prod-parity.sh && ./scripts/test-e2e-auto.sh",
     "test:e2e:prod-media-stress": "node scripts/prod-media-stress-e2e.mjs",
+    "test:e2e:media-ingest-ab": "node scripts/prod-media-ingest-ab-e2e.mjs",
     "analyze:e2e:prod-media-stress": "node scripts/analyze-prod-media-stress.mjs",
     "compare:e2e:media-ingest": "node scripts/analyze-prod-media-stress.mjs --compare"
   }

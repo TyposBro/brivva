@@ -30,6 +30,7 @@ let fixtureServer;
 let cfTail;
 let monitor;
 let poller;
+let cpuStress;
 let sessionId = null;
 let streamRecords = [];
 let finalError = null;
@@ -81,6 +82,7 @@ try {
       host_gain: stream.host_gain ?? null,
     })),
   });
+  writeGripOperatorNotes(config, streamRecords);
   log('session.created', {
     sessionId,
     streamCount: streamRecords.length,
@@ -121,33 +123,53 @@ try {
       outDir: config.outDir,
     });
     pageVideos.push({ page: watcher, target: `watcher-video-${stream.artifactName}.webm` });
-    await watcher.goto(stream.watch_url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((error) => log('watch.goto_failed', { streamId: stream.id, message: error.message }));
+    if (stream.platform === 'grip') pageVideos.push({ page: watcher, target: `grip-live-evidence-${stream.artifactName}.webm` });
+    await watcher.goto(stream.watch_url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((error) => log('watch.goto_failed', { streamId: stream.id, platform: stream.platform, message: error.message }));
     await watcher.waitForTimeout(5000).catch(() => {});
     await watcher.mouse.click(720, 520).catch(() => {});
     await safeScreenshot(watcher, `screenshots/watch-before-${stream.artifactName}.png`);
+    if (stream.platform === 'grip') await safeScreenshot(watcher, `grip-watch-before-${stream.artifactName}.png`);
     fs.writeFileSync(path.join(config.outDir, `watch-body-before-${stream.artifactName}.txt`), await bodyText(watcher));
+    if (stream.platform === 'grip') fs.copyFileSync(path.join(config.outDir, `watch-body-before-${stream.artifactName}.txt`), path.join(config.outDir, `grip-body-before-${stream.artifactName}.txt`));
     watchers.push({ page: watcher, stream });
     log('watch.opened', { streamId: stream.id, kind: stream.kind, watchUrl: stream.watch_url });
   }
 
   await openHostSession(host, sessionId, config);
+  const setupModeInfo = await assertSetupMediaIngestMode(host, config);
+  Object.assign(config, setupModeInfo);
+  writeMeta();
   await safeScreenshot(host, 'screenshots/setup.png');
   fs.writeFileSync(path.join(config.outDir, 'setup-body.txt'), await bodyText(host));
   await skipVoiceIfNeeded(host);
   await clickGoLive(host, sessionId);
+  await assertRecordReadyForMode(host, config);
+  const networkInfo = await applyNetworkProfile(host, config);
+  Object.assign(config, networkInfo);
+  cpuStress = startCpuStress(config);
+  writeMeta();
   await safeScreenshot(host, 'screenshots/live-before-record.png');
   await clickRecord(host);
+  const liveModeInfo = await assertLiveMediaIngestMode(host, config);
+  Object.assign(config, liveModeInfo);
+  writeMeta();
   log('record.started', { sessionId, durationSec: config.durationSec });
 
   monitor = startBrowserMonitor({ host, watchers, config });
   await wait(config.durationSec * 1000);
   await stopMonitor(monitor);
+  if (cpuStress) {
+    await stopCpuStress(cpuStress);
+    cpuStress = null;
+  }
 
   await safeScreenshot(host, 'screenshots/live-end.png');
   fs.writeFileSync(path.join(config.outDir, 'host-body-final.txt'), await bodyText(host));
   for (const { page, stream } of watchers) {
     await safeScreenshot(page, `screenshots/watch-end-${stream.artifactName}.png`);
+    if (stream.platform === 'grip') await safeScreenshot(page, `grip-watch-end-${stream.artifactName}.png`);
     fs.writeFileSync(path.join(config.outDir, `watch-body-final-${stream.artifactName}.txt`), await bodyText(page));
+    if (stream.platform === 'grip') fs.copyFileSync(path.join(config.outDir, `watch-body-final-${stream.artifactName}.txt`), path.join(config.outDir, `grip-body-final-${stream.artifactName}.txt`));
   }
 
   await clickStop(host);
@@ -158,7 +180,9 @@ try {
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(3000).catch(() => {});
     await safeScreenshot(page, `screenshots/watch-poststop-${stream.artifactName}.png`);
+    if (stream.platform === 'grip') await safeScreenshot(page, `grip-watch-poststop-${stream.artifactName}.png`);
     fs.writeFileSync(path.join(config.outDir, `watch-body-poststop-${stream.artifactName}.txt`), await bodyText(page));
+    if (stream.platform === 'grip') fs.copyFileSync(path.join(config.outDir, `watch-body-poststop-${stream.artifactName}.txt`), path.join(config.outDir, `grip-body-poststop-${stream.artifactName}.txt`));
   }
 } catch (error) {
   failed = true;
@@ -168,6 +192,7 @@ try {
   config.failed = failed;
   if (finalError) config.error = finalError.message;
   if (monitor) await stopMonitor(monitor).catch(() => {});
+  if (cpuStress) await stopCpuStress(cpuStress).catch(() => {});
   if (poller) await poller.stop().catch(() => {});
 
   if (context) {
@@ -212,10 +237,12 @@ function loadConfig(startMs) {
   const sourceLang = process.env.E2E_SOURCE_LANG || 'en';
   const targetLang = process.env.E2E_YOUTUBE_LANG || 'ko';
   const durationSec = number(process.env.E2E_RECORD_SECONDS, 1800);
-  const mediaIngestMode = validateMediaIngestMode(process.env.E2E_MEDIA_INGEST_MODE || process.env.MEDIA_INGEST_MODE || 'auto');
-  const runId = `${formatRunDate(startMs)}-${browser}-${shape}-${mediaIngestMode}`;
+  const requestedMediaIngestMode = validateMediaIngestMode(process.env.E2E_MEDIA_INGEST_MODE || process.env.MEDIA_INGEST_MODE || 'auto');
+  const resolvedMediaIngestMode = resolveMediaIngestMode(requestedMediaIngestMode);
+  const runId = safeName(process.env.E2E_RUN_ID || `${formatRunDate(startMs)}-${browser}-${shape}-${requestedMediaIngestMode}`);
   const artifactRoot = process.env.E2E_ARTIFACT_ROOT || path.join(ROOT, 'tmp', 'prod-media-stress-runs');
-  const outDir = path.join(artifactRoot, runId);
+  const outDir = process.env.E2E_OUT_DIR ? path.resolve(expandHome(process.env.E2E_OUT_DIR)) : path.join(artifactRoot, runId);
+  const platformMatrix = parseCsv(process.env.E2E_PLATFORM_MATRIX || 'youtube').map(validatePlatform);
   return {
     root: ROOT,
     runId,
@@ -231,7 +258,17 @@ function loadConfig(startMs) {
     headless,
     mediaFile: expandHome(process.env.E2E_MEDIA_FILE || path.join(os.homedir(), 'Desktop', 'text.mp4')),
     mediaMode: (process.env.E2E_MEDIA_MODE || (bool(process.env.E2E_MEDIA_SHIM, true) ? 'shim' : 'fake-device')).toLowerCase(),
-    mediaIngestMode,
+    mediaIngestMode: resolvedMediaIngestMode,
+    requestedMediaIngestMode,
+    resolvedMediaIngestMode,
+    platformMatrix,
+    networkProfile: validateNetworkProfile(process.env.E2E_NETWORK_PROFILE || 'normal'),
+    cpuStressEnabled: bool(process.env.E2E_CPU_STRESS, false),
+    cpuStressWorkers: number(process.env.E2E_CPU_STRESS_WORKERS, Math.max(1, Math.floor(os.cpus().length / 2))),
+    expectVideoDrops: bool(process.env.E2E_EXPECT_VIDEO_DROPS, false),
+    maxWebCodecsBufferedMb: number(process.env.E2E_MAX_WEBCODECS_BUFFERED_MB, 4),
+    maxWebCodecsQueueMs: number(process.env.E2E_MAX_WEBCODECS_QUEUE_MS, 500),
+    maxWebCodecsDropRate: number(process.env.E2E_MAX_WEBCODECS_DROP_RATE, 0.001),
     durationSec,
     providerPollSeconds: number(process.env.E2E_PROVIDER_POLL_SECONDS, 10),
     screenshotSeconds: number(process.env.E2E_SCREENSHOT_SECONDS, 30),
@@ -244,6 +281,10 @@ function loadConfig(startMs) {
     youtubeDelayMs: number(process.env.E2E_YOUTUBE_DELAY_MS, 4000),
     translatedHostGain: number(process.env.E2E_HOST_GAIN, 0.2),
     privacyStatus: process.env.E2E_YOUTUBE_PRIVACY_STATUS || 'unlisted',
+    gripRtmpUrl: process.env.E2E_GRIP_RTMP_URL || '',
+    gripStreamKey: process.env.E2E_GRIP_STREAM_KEY || '',
+    gripProductId: process.env.E2E_GRIP_PRODUCT_ID || '',
+    gripWatchUrl: process.env.E2E_GRIP_WATCH_URL || '',
     minProviderLiveRatio: number(process.env.E2E_MIN_PROVIDER_LIVE_RATIO, 0.9),
     minFfmpegSpeed: number(process.env.E2E_MIN_FFMPEG_SPEED, 0.98),
     minTtsCompletionRatio: number(process.env.E2E_MIN_TTS_COMPLETION_RATIO, 0.95),
@@ -271,6 +312,22 @@ function publicMeta() {
     mediaFile: config.mediaFile,
     mediaMode: config.mediaMode,
     mediaIngestMode: config.mediaIngestMode,
+    requestedMediaIngestMode: config.requestedMediaIngestMode,
+    resolvedMediaIngestMode: config.resolvedMediaIngestMode,
+    activeMediaIngestMode: config.activeMediaIngestMode ?? null,
+    webCodecsFrontendEnabled: config.webCodecsFrontendEnabled ?? null,
+    webCodecsBrowserSupported: config.webCodecsBrowserSupported ?? null,
+    webCodecsServerAdvertised: config.webCodecsServerAdvertised ?? null,
+    platformMatrix: config.platformMatrix,
+    networkProfile: config.networkProfile,
+    networkThrottle: config.networkThrottle ?? null,
+    cpuStressEnabled: config.cpuStressEnabled,
+    cpuStressWorkers: config.cpuStressWorkers,
+    cpuStressActive: config.cpuStressActive ?? false,
+    expectVideoDrops: config.expectVideoDrops,
+    maxWebCodecsBufferedMb: config.maxWebCodecsBufferedMb,
+    maxWebCodecsQueueMs: config.maxWebCodecsQueueMs,
+    maxWebCodecsDropRate: config.maxWebCodecsDropRate,
     durationSec: config.durationSec,
     providerPollSeconds: config.providerPollSeconds,
     screenshotSeconds: config.screenshotSeconds,
@@ -322,19 +379,84 @@ async function createProductionSession() {
 }
 
 function buildPlatforms(cfg) {
+  const destinations = buildStreamDestinations(cfg);
+  const platforms = [];
+  for (const platform of cfg.platformMatrix) {
+    destinations.forEach((destination, index) => {
+      if (platform === 'youtube') {
+        platforms.push({
+          platform: 'youtube',
+          lang: destination.lang,
+          delay_ms: destination.delay_ms,
+          host_gain: destination.host_gain,
+        });
+        return;
+      }
+      if (platform === 'grip') {
+        platforms.push(buildGripPlatform(cfg, destination, index, destinations.length));
+        return;
+      }
+      throw new Error(`unsupported platform=${platform}`);
+    });
+  }
+  return platforms;
+}
+
+function buildStreamDestinations(cfg) {
   if (cfg.shape === 'source') {
-    return [{ platform: 'youtube', lang: cfg.sourceLang, delay_ms: 0, host_gain: 1.0 }];
+    return [{ kind: 'source', lang: cfg.sourceLang, delay_ms: 0, host_gain: 1.0 }];
   }
   if (cfg.shape === 'translated') {
-    return [{ platform: 'youtube', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain }];
+    return [{ kind: 'translated', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain }];
   }
   if (cfg.shape === 'dual') {
     return [
-      { platform: 'youtube', lang: cfg.sourceLang, delay_ms: 0, host_gain: 1.0 },
-      { platform: 'youtube', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain },
+      { kind: 'source', lang: cfg.sourceLang, delay_ms: 0, host_gain: 1.0 },
+      { kind: 'translated', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain },
     ];
   }
   throw new Error(`unsupported E2E_TEST_SHAPE=${cfg.shape}; use source, translated, or dual`);
+}
+
+function buildGripPlatform(cfg, destination, index, gripDestinationCount) {
+  const suffixes = gripEnvSuffixes(destination, index);
+  const productId = firstEnv([...suffixes.map((suffix) => `E2E_GRIP_PRODUCT_ID_${suffix}`), 'E2E_GRIP_PRODUCT_ID']) || cfg.gripProductId;
+  if (productId) {
+    return {
+      platform: 'grip',
+      lang: destination.lang,
+      product_id: productId,
+      delay_ms: destination.delay_ms,
+      host_gain: destination.host_gain,
+    };
+  }
+  const rtmpUrl = firstEnv([...suffixes.map((suffix) => `E2E_GRIP_RTMP_URL_${suffix}`), gripDestinationCount === 1 ? 'E2E_GRIP_RTMP_URL' : '']);
+  const streamKey = firstEnv([...suffixes.map((suffix) => `E2E_GRIP_STREAM_KEY_${suffix}`), gripDestinationCount === 1 ? 'E2E_GRIP_STREAM_KEY' : '']);
+  if (!rtmpUrl || !streamKey) {
+    throw new Error(`E2E_PLATFORM_MATRIX includes grip ${destination.kind}/${destination.lang}, but Grip credentials are missing. Set E2E_GRIP_RTMP_URL/E2E_GRIP_STREAM_KEY for one Grip stream, per-destination E2E_GRIP_RTMP_URL_${suffixes[0]}/E2E_GRIP_STREAM_KEY_${suffixes[0]}, or E2E_GRIP_PRODUCT_ID.`);
+  }
+  return {
+    platform: 'grip',
+    lang: destination.lang,
+    rtmp_url: rtmpUrl,
+    stream_key: streamKey,
+    delay_ms: destination.delay_ms,
+    host_gain: destination.host_gain,
+  };
+}
+
+function gripEnvSuffixes(destination, index) {
+  const lang = String(destination.lang || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  const kind = String(destination.kind || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  return [`${index}`, kind, lang].filter(Boolean);
+}
+
+function firstEnv(names) {
+  for (const name of names.filter(Boolean)) {
+    const value = process.env[name];
+    if (value) return value;
+  }
+  return '';
 }
 
 function buildStreamRecords(streams, cfg) {
@@ -346,9 +468,36 @@ function buildStreamRecords(streams, cfg) {
       id: stream.id ?? `stream-${index}`,
       kind,
       artifactName,
-      watch_url: stream.watch_url || (stream.platform_broadcast_id ? `https://www.youtube.com/watch?v=${stream.platform_broadcast_id}` : null),
+      watch_url: stream.watch_url || gripWatchUrlFor(stream, index) || (stream.platform_broadcast_id ? `https://www.youtube.com/watch?v=${stream.platform_broadcast_id}` : null),
     };
   });
+}
+
+function writeGripOperatorNotes(cfg, streams) {
+  const gripStreams = streams.filter((stream) => stream.platform === 'grip');
+  if (!gripStreams.length) return;
+  const lines = [
+    '# Grip Operator Evidence',
+    '',
+    `Run: ${cfg.runId}`,
+    `Session: ${cfg.sessionId ?? 'unknown'}`,
+    '',
+    'Fill this during/after the run if Grip API/watch automation cannot prove live state.',
+    '',
+    '| Stream | Kind | Lang | Watch URL | Operator live? | Notes |',
+    '| --- | --- | --- | --- | --- | --- |',
+    ...gripStreams.map((stream) => `| ${stream.id} | ${stream.kind} | ${stream.lang ?? ''} | ${stream.watch_url ?? ''} |  |  |`),
+    '',
+    'Evidence accepted by analyzer: Grip watch/seller page body/screenshots/video, `grip-provider-health.ndjson`, or this file edited with operator live confirmation.',
+  ];
+  fs.writeFileSync(path.join(cfg.outDir, 'grip-operator-notes.md'), `${lines.join('\n')}\n`);
+}
+
+function gripWatchUrlFor(stream, index) {
+  if (stream.platform !== 'grip') return null;
+  const kind = classifyKind(stream, config);
+  const suffixes = gripEnvSuffixes({ kind, lang: stream.lang }, index);
+  return firstEnv([...suffixes.map((suffix) => `E2E_GRIP_WATCH_URL_${suffix}`), 'E2E_GRIP_WATCH_URL']) || null;
 }
 
 function classifyKind(stream, cfg) {
@@ -364,8 +513,78 @@ async function openHostSession(host, sessionId, cfg) {
   await host.evaluate((mode) => {
     localStorage.setItem('brivva:sessionLogs', '1');
     localStorage.setItem('brivva:mediaIngestMode', mode);
-  }, cfg.mediaIngestMode);
+  }, cfg.requestedMediaIngestMode);
   await host.goto(`${cfg.frontend}/session/${sessionId}/setup`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+}
+
+async function assertSetupMediaIngestMode(host, cfg) {
+  await host.locator('input[name="media-ingest-mode"]').first().waitFor({ state: 'attached', timeout: 30000 });
+  const info = await host.evaluate((requested) => {
+    const input = document.querySelector(`input[name="media-ingest-mode"][value="${requested}"]`);
+    const webcodecs = document.querySelector('input[name="media-ingest-mode"][value="webcodecs_ws"]');
+    const body = document.body?.innerText || '';
+    const runtime = window;
+    return {
+      localStorageMode: localStorage.getItem('brivva:mediaIngestMode'),
+      requestedChecked: Boolean(input && input.checked),
+      requestedDisabled: Boolean(input && input.disabled),
+      webCodecsRadioDisabled: Boolean(webcodecs && webcodecs.disabled),
+      webCodecsBrowserSupported: typeof runtime.VideoEncoder !== 'undefined' && typeof runtime.VideoFrame !== 'undefined' && typeof runtime.MediaStreamTrackProcessor !== 'undefined',
+      frontendFlagOff: /VITE_WEBCODECS_INGEST_ENABLED is off/i.test(body),
+      bodySample: body.slice(0, 2000),
+    };
+  }, cfg.requestedMediaIngestMode);
+  if (info.localStorageMode !== cfg.requestedMediaIngestMode) {
+    throw new Error(`media ingest localStorage mismatch: expected ${cfg.requestedMediaIngestMode}, got ${info.localStorageMode}`);
+  }
+  if (!info.requestedChecked) {
+    throw new Error(`setup UI did not select requested media ingest mode ${cfg.requestedMediaIngestMode}`);
+  }
+  if (cfg.requestedMediaIngestMode === 'webcodecs_ws' && info.requestedDisabled) {
+    throw new Error(`explicit WebCodecs requested but setup UI disabled it: ${info.bodySample}`);
+  }
+  log('mode.setup_asserted', {
+    requested: cfg.requestedMediaIngestMode,
+    resolved: cfg.resolvedMediaIngestMode,
+    webCodecsRadioDisabled: info.webCodecsRadioDisabled,
+    webCodecsBrowserSupported: info.webCodecsBrowserSupported,
+    frontendFlagOff: info.frontendFlagOff,
+  });
+  return {
+    setupMediaIngestMode: cfg.requestedMediaIngestMode,
+    webCodecsFrontendEnabled: !info.frontendFlagOff,
+    webCodecsBrowserSupported: info.webCodecsBrowserSupported,
+  };
+}
+
+async function assertRecordReadyForMode(host, cfg) {
+  const record = host.getByRole('button', { name: /^Record$/i });
+  await record.waitFor({ state: 'visible', timeout: 60000 });
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    if (!(await record.isDisabled().catch(() => true))) {
+      log('mode.record_ready', { requested: cfg.requestedMediaIngestMode, resolved: cfg.resolvedMediaIngestMode });
+      return;
+    }
+    await wait(1000);
+  }
+  const body = await bodyText(host);
+  throw new Error(`Record stayed disabled for requested media ingest mode ${cfg.requestedMediaIngestMode}: ${body.slice(0, 2000)}`);
+}
+
+async function assertLiveMediaIngestMode(host, cfg) {
+  const expectedLabel = cfg.resolvedMediaIngestMode === 'webcodecs_ws' ? 'WebCodecs over WebSocket' : 'WebRTC';
+  const deadline = Date.now() + 20000;
+  let body = '';
+  while (Date.now() < deadline) {
+    body = await bodyText(host);
+    if (body.includes('Media ingest') && body.includes(expectedLabel)) {
+      log('mode.live_asserted', { requested: cfg.requestedMediaIngestMode, resolved: cfg.resolvedMediaIngestMode, expectedLabel });
+      return { activeMediaIngestMode: cfg.resolvedMediaIngestMode };
+    }
+    await wait(1000);
+  }
+  throw new Error(`live diagnostics did not show ${expectedLabel}: ${body.slice(0, 2000)}`);
 }
 
 async function skipVoiceIfNeeded(host) {
@@ -538,6 +757,61 @@ async function launchBrowser(cfg, fakeDevice) {
   }
   log('browser.launch', { browser: cfg.browser, headless: cfg.headless, executablePath: executablePath || null, args });
   return { browser: await browserType.launch(launchOptions) };
+}
+
+async function applyNetworkProfile(page, cfg) {
+  if (cfg.networkProfile === 'normal') return { networkThrottle: { applied: false, profile: 'normal' } };
+  if (!['chromium', 'brave'].includes(cfg.browser)) {
+    const throttle = { applied: false, profile: cfg.networkProfile, reason: 'CDP network emulation is Chromium/Brave-only' };
+    writeJson(path.join(cfg.outDir, 'network-throttle.json'), throttle);
+    log('network.throttle_skipped', throttle);
+    return { networkThrottle: throttle };
+  }
+  const profiles = {
+    moderate_uplink: { downloadThroughput: 5_000_000 / 8, uploadThroughput: 2_200_000 / 8, latency: 60 },
+    severe_uplink: { downloadThroughput: 3_000_000 / 8, uploadThroughput: 1_200_000 / 8, latency: 120 },
+  };
+  const selected = profiles[cfg.networkProfile];
+  const session = await page.context().newCDPSession(page);
+  await session.send('Network.enable');
+  await session.send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: selected.latency,
+    downloadThroughput: selected.downloadThroughput,
+    uploadThroughput: selected.uploadThroughput,
+    connectionType: 'cellular3g',
+  });
+  const throttle = { applied: true, profile: cfg.networkProfile, ...selected };
+  writeJson(path.join(cfg.outDir, 'network-throttle.json'), throttle);
+  log('network.throttle_applied', throttle);
+  return { networkThrottle: throttle };
+}
+
+function startCpuStress(cfg) {
+  if (!cfg.cpuStressEnabled) return null;
+  const workers = Math.max(1, Math.min(64, Math.floor(cfg.cpuStressWorkers || 1)));
+  const children = [];
+  const code = 'let x=0; setInterval(()=>{}, 1000); while (true) { x = (x + Math.random()) % 1000000 }';
+  for (let i = 0; i < workers; i++) {
+    children.push(spawn(process.execPath, ['-e', code], { stdio: 'ignore' }));
+  }
+  const info = { enabled: true, workers, pids: children.map((child) => child.pid).filter(Boolean), started_at: new Date().toISOString() };
+  cfg.cpuStressActive = true;
+  writeJson(path.join(cfg.outDir, 'cpu-stress.json'), info);
+  log('cpu_stress.started', info);
+  return { children, info };
+}
+
+async function stopCpuStress(handle) {
+  for (const child of handle.children) {
+    if (child.exitCode === null) child.kill('SIGTERM');
+  }
+  await Promise.all(handle.children.map((child) => waitForExit(child, 2000).then((exit) => {
+    if (!exit && child.exitCode === null) child.kill('SIGKILL');
+  })));
+  config.cpuStressActive = false;
+  writeJson(path.join(config.outDir, 'cpu-stress.json'), { ...handle.info, stopped_at: new Date().toISOString() });
+  log('cpu_stress.stopped', { workers: handle.info.workers });
 }
 
 function chromiumArgs(fakeDevice) {
@@ -1011,6 +1285,27 @@ function validateMediaIngestMode(value) {
   const mode = String(value || 'auto').trim().toLowerCase();
   if (['auto', 'webrtc', 'webcodecs_ws'].includes(mode)) return mode;
   throw new Error(`unsupported E2E_MEDIA_INGEST_MODE=${value}; use auto, webrtc, or webcodecs_ws`);
+}
+
+function resolveMediaIngestMode(requested) {
+  return requested === 'webcodecs_ws' ? 'webcodecs_ws' : 'webrtc';
+}
+
+function validatePlatform(value) {
+  const platform = String(value || '').trim().toLowerCase();
+  if (['youtube', 'grip'].includes(platform)) return platform;
+  throw new Error(`unsupported E2E_PLATFORM_MATRIX entry=${value}; use youtube, grip, or youtube,grip`);
+}
+
+function validateNetworkProfile(value) {
+  const profile = String(value || 'normal').trim().toLowerCase();
+  if (['normal', 'moderate_uplink', 'severe_uplink'].includes(profile)) return profile;
+  throw new Error(`unsupported E2E_NETWORK_PROFILE=${value}; use normal, moderate_uplink, or severe_uplink`);
+}
+
+function parseCsv(value) {
+  const items = String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+  return items.length ? [...new Set(items)] : [];
 }
 
 function formatRunDate(ms) {
