@@ -377,7 +377,11 @@ function preferWebRtcVideoCodecs(peer: RTCPeerConnection) {
   );
   const vp8 = codecs.filter((c) => c.mimeType.toLowerCase() === "video/vp8");
   const rtx = codecs.filter((c) => c.mimeType.toLowerCase() === "video/rtx");
-  const preferred = [...h264, ...vp8, ...rtx];
+  // Firefox's H.264 sender often advertises SPS/PPS only in SDP instead of
+  // repeating them in-band on the RTP stream. Prefer VP8 there so YouTube
+  // ingest starts reliably while Chromium/Brave keep the proven H.264 path.
+  const firefox = /firefox/i.test(navigator.userAgent);
+  const preferred = firefox ? [...vp8, ...h264, ...rtx] : [...h264, ...vp8, ...rtx];
   if (preferred.length > 0) transceiver.setCodecPreferences(preferred);
 }
 

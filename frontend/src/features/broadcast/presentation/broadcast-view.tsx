@@ -193,6 +193,7 @@ export function BroadcastView({
             streams={streams}
             translations={translations}
             isRecording={isRecording}
+            providerStreams={providerStreams}
           />
         )}
 
@@ -306,6 +307,9 @@ function ProviderHealthPanel({
   return (
     <div className="bg-surface-container-low rounded-xl px-4 py-3 font-label text-xs space-y-2">
       <p className="text-on-surface font-bold">Provider health</p>
+      <p className="text-on-surface-variant">
+        YouTube is only live after it reports <span className="font-mono">stream=active</span>. <span className="font-mono">ready/noData</span> means YouTube has not seen usable RTMP ingest yet.
+      </p>
       <div className="space-y-1.5">
         {streams.map((stream) => (
           <div
@@ -455,9 +459,11 @@ interface StreamCardsProps {
   streams: api.StreamInfo[];
   translations: Record<string, { id: number; text: string }>;
   isRecording: boolean;
+  providerStreams: api.ProviderHealthStream[];
 }
 
-function StreamCards({ streams, translations, isRecording }: StreamCardsProps) {
+function StreamCards({ streams, translations, isRecording, providerStreams }: StreamCardsProps) {
+  const providerByStreamId = new Map(providerStreams.map((stream) => [stream.streamId, stream]));
   return (
     <section>
       <div className="flex items-center gap-3 mb-3">
@@ -474,6 +480,8 @@ function StreamCards({ streams, translations, isRecording }: StreamCardsProps) {
           const watchUrl =
             s.watch_url ??
             (s.broadcast_id ? `https://www.youtube.com/watch?v=${s.broadcast_id}` : null);
+          const provider = providerByStreamId.get(s.id);
+          const badge = streamProviderBadge(s, provider, isRecording);
           return (
             <div key={s.id} className="bg-surface-container-low rounded-xl p-4 space-y-2">
               <div className="flex items-center gap-2">
@@ -486,18 +494,20 @@ function StreamCards({ streams, translations, isRecording }: StreamCardsProps) {
                 <span
                   className={cn(
                     "ml-auto text-[10px] font-label font-bold uppercase tracking-widest px-2 py-0.5 rounded",
-                    s.error
-                      ? "text-error bg-error-container/30"
-                      : isRecording
-                        ? "text-success bg-success/10"
-                        : "text-on-surface-variant bg-surface-container-highest",
+                    badge.className,
                   )}
+                  title={badge.title}
                 >
-                  {s.error ? "ERR" : isRecording ? "LIVE" : "READY"}
+                  {badge.label}
                 </span>
               </div>
 
               {s.error && <p className="text-error text-xs font-label">{s.error}</p>}
+              {badge.detail && !s.error && (
+                <p className="text-on-surface-variant text-[10px] font-label leading-snug">
+                  {badge.detail}
+                </p>
+              )}
 
               {translations[s.lang ?? ""] && (
                 <p className="text-on-surface text-sm font-label leading-snug border-l-2 border-primary/40 pl-2">
@@ -543,6 +553,64 @@ function StreamCards({ streams, translations, isRecording }: StreamCardsProps) {
       </div>
     </section>
   );
+}
+
+type StreamBadge = {
+  label: string;
+  className: string;
+  title: string;
+  detail?: string;
+};
+
+function streamProviderBadge(
+  stream: api.StreamInfo,
+  provider: api.ProviderHealthStream | undefined,
+  isRecording: boolean,
+): StreamBadge {
+  if (stream.error) {
+    return {
+      label: "ERR",
+      className: "text-error bg-error-container/30",
+      title: stream.error,
+    };
+  }
+  if (!isRecording) {
+    return {
+      label: "READY",
+      className: "text-on-surface-variant bg-surface-container-highest",
+      title: "Destination is provisioned; recording has not started.",
+    };
+  }
+  if (provider?.error) {
+    return {
+      label: "ERROR",
+      className: "text-error bg-error-container/30",
+      title: provider.error,
+      detail: provider.error,
+    };
+  }
+  if (provider?.providerConfirmedLive || provider?.streamStatus === "active") {
+    return {
+      label: "LIVE",
+      className: "text-success bg-success/10",
+      title: "Provider confirmed live ingest.",
+    };
+  }
+  if (stream.platform === "youtube") {
+    const streamStatus = provider?.streamStatus ?? "waiting";
+    const healthStatus = provider?.healthStatus ?? "waiting";
+    return {
+      label: "STARTING",
+      className: "text-warning bg-warning/10",
+      title: `YouTube has not confirmed ingest yet: stream=${streamStatus} health=${healthStatus}`,
+      detail: `YouTube not live yet: stream=${streamStatus} health=${healthStatus}`,
+    };
+  }
+  return {
+    label: "RECORDING",
+    className: "text-success bg-success/10",
+    title: "Recording is active; this provider has no live-health API check.",
+  };
 }
 
 function WatchUrlRow({ url }: { url: string }) {

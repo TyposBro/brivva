@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::Message;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ice::udp_network::{EphemeralUDP, UDPNetwork};
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use serde::Deserialize;
@@ -129,11 +131,13 @@ async fn accept_webrtc_video(
         .build();
     let peer = Arc::new(api.new_peer_connection(webrtc_config()).await?);
 
+    let h264_parameter_sets = h264_parameter_sets_from_sdp(&offer.sdp).map(Arc::new);
     wire_video_track(
         peer.clone(),
         live_sessions.clone(),
         live_session_id.to_string(),
         timeline_shadow,
+        h264_parameter_sets,
     );
 
     let remote = RTCSessionDescription::offer(offer.sdp)?;
@@ -335,6 +339,7 @@ fn wire_video_track(
     live_sessions: LiveSessions,
     live_session_id: String,
     timeline_shadow: bool,
+    h264_parameter_sets: Option<Arc<Vec<u8>>>,
 ) {
     let peer_for_track = peer.clone();
     peer.on_track(Box::new(move |track, _, _| {
@@ -342,6 +347,7 @@ fn wire_video_track(
         let live_sessions = live_sessions.clone();
         let live_session_id = live_session_id.clone();
         let timeline_shadow = timeline_shadow_enabled(timeline_shadow);
+        let h264_parameter_sets = h264_parameter_sets.clone();
         Box::pin(async move {
             if track.kind() != RTPCodecType::Video {
                 return;
@@ -372,6 +378,7 @@ fn wire_video_track(
                 live_sessions,
                 live_session_id,
                 timeline_shadow,
+                h264_parameter_sets,
             )
             .await;
         })
@@ -450,6 +457,7 @@ async fn forward_track_rtp(
     live_sessions: LiveSessions,
     live_session_id: String,
     timeline_shadow: bool,
+    h264_parameter_sets: Option<Arc<Vec<u8>>>,
 ) {
     tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
     if let Some(manager) = live_sessions
@@ -461,7 +469,10 @@ async fn forward_track_rtp(
         );
     }
     let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
-    let mut depacketizer = H264AnnexBDepacketizer::default();
+    let mut depacketizer = h264_parameter_sets
+        .as_deref()
+        .map(|sets| H264AnnexBDepacketizer::with_parameter_sets(sets.clone()))
+        .unwrap_or_default();
     let mut clock = VideoRtpClock::default();
     let mut fps_estimator = VideoFpsEstimator::default();
     let mut observed_dimensions: Option<(u32, u32)> = None;
@@ -730,12 +741,22 @@ struct H264AnnexBDepacketizer {
     inner: H264Packet,
     has_parameter_set: bool,
     parameter_sets_annex_b: Vec<u8>,
+    waiting_keyframe: bool,
     active_fu_a: bool,
     last_sequence_number: Option<u16>,
     access_unit: Vec<u8>,
 }
 
 impl H264AnnexBDepacketizer {
+    fn with_parameter_sets(parameter_sets_annex_b: Vec<u8>) -> Self {
+        Self {
+            has_parameter_set: !parameter_sets_annex_b.is_empty(),
+            parameter_sets_annex_b,
+            waiting_keyframe: true,
+            ..Default::default()
+        }
+    }
+
     fn depacketize(&mut self, packet: &Packet) -> Option<Vec<u8>> {
         if packet.payload.is_empty() {
             return None;
@@ -805,7 +826,14 @@ impl H264AnnexBDepacketizer {
             {
                 self.parameter_sets_annex_b = parameter_sets;
             }
-            if annex_b_contains_type(&access_unit, 5)
+            let contains_idr = annex_b_contains_type(&access_unit, 5);
+            if self.waiting_keyframe {
+                if !contains_idr {
+                    return None;
+                }
+                self.waiting_keyframe = false;
+            }
+            if contains_idr
                 && !annex_b_contains_type(&access_unit, SPS_NALU_TYPE)
                 && !self.parameter_sets_annex_b.is_empty()
             {
@@ -822,10 +850,45 @@ impl H264AnnexBDepacketizer {
 
     fn reset_after_loss(&mut self) {
         self.inner = H264Packet::default();
-        self.has_parameter_set = false;
+        self.has_parameter_set = !self.parameter_sets_annex_b.is_empty();
+        self.waiting_keyframe = self.has_parameter_set;
         self.active_fu_a = false;
         self.access_unit.clear();
     }
+}
+
+fn h264_parameter_sets_from_sdp(sdp: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for line in sdp.lines() {
+        let Some(value) = fmtp_value(line, "sprop-parameter-sets") else {
+            continue;
+        };
+        for encoded in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            let Ok(nalu) = BASE64_STANDARD.decode(encoded) else {
+                continue;
+            };
+            if nalu.is_empty() {
+                continue;
+            }
+            let nalu_type = nalu[0] & NALU_TYPE_BITMASK;
+            if nalu_type != SPS_NALU_TYPE && nalu_type != PPS_NALU_TYPE {
+                continue;
+            }
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(&nalu);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn fmtp_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let line = line.trim();
+    if !line.starts_with("a=fmtp:") {
+        return None;
+    }
+    let start = line.find(key)? + key.len();
+    let rest = line.get(start..)?.strip_prefix('=')?;
+    Some(rest.split([';', ' ', '\r', '\n']).next()?.trim())
 }
 
 fn payload_has_sps(payload: &[u8]) -> bool {
@@ -1194,6 +1257,42 @@ mod tests {
                 height: 1080
             })
         );
+    }
+
+    #[test]
+    fn sdp_sprop_parameter_sets_are_converted_to_annex_b() {
+        let sdp = "v=0\r\na=fmtp:125 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f;sprop-parameter-sets=ZwECAw==,aAQF\r\n";
+        let out = h264_parameter_sets_from_sdp(sdp).expect("sprop parameter sets");
+        assert!(out.starts_with(&[0, 0, 0, 1, 0x67]));
+        assert!(out.windows(5).any(|window| window == [0, 0, 0, 1, 0x68]));
+    }
+
+    #[test]
+    fn depacketizer_seeded_from_sdp_waits_for_idr_and_prefixes_parameter_sets() {
+        let parameter_sets = vec![0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 0, 1, 0x68, 4, 5];
+        let mut depacketizer = H264AnnexBDepacketizer::with_parameter_sets(parameter_sets);
+        let delta = Packet {
+            header: Header {
+                marker: true,
+                sequence_number: 1,
+                ..Default::default()
+            },
+            payload: vec![0x61, 9, 9, 9].into(),
+        };
+        assert!(depacketizer.depacketize(&delta).is_none());
+
+        let idr = Packet {
+            header: Header {
+                marker: true,
+                sequence_number: 2,
+                ..Default::default()
+            },
+            payload: vec![0x65, 4, 5, 6].into(),
+        };
+        let out = depacketizer.depacketize(&idr).expect("seeded IDR access unit");
+        assert!(out.starts_with(&[0, 0, 0, 1, 0x67]));
+        assert!(out.windows(5).any(|window| window == [0, 0, 0, 1, 0x68]));
+        assert!(out.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
     }
 
     #[test]

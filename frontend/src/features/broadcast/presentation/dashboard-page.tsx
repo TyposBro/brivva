@@ -91,7 +91,7 @@ function browserCompatibilityWarning(): string | null {
   const isFirefox = /Firefox|FxiOS/i.test(ua);
   const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR/i.test(ua);
   if (isFirefox) {
-    return "Firefox may prefer VP8 for WebRTC. Brivva will try to connect, but current server ingest is strongest with H.264 until the VP8 ingest path lands.";
+    return "Firefox uses VP8 for WebRTC on Brivva to avoid H.264 startup issues. Keep the tab foregrounded and watch provider health after Record.";
   }
   if (isSafari) {
     return "Safari supports WebRTC/H.264, but camera/network behavior differs from Chromium. Keep the tab foregrounded and watch provider health after Record.";

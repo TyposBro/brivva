@@ -49,6 +49,7 @@ vi.mock("./use-host-session", async (orig) => {
 });
 
 const getSession = vi.fn();
+const getProviderHealth = vi.fn();
 vi.mock("../data/api-client", async () => {
   const actual = await vi.importActual<typeof import("../data/api-client")>(
     "../data/api-client",
@@ -56,6 +57,7 @@ vi.mock("../data/api-client", async () => {
   return {
     ...actual,
     getSession: (...args: unknown[]) => getSession(...args),
+    getProviderHealth: (...args: unknown[]) => getProviderHealth(...args),
   };
 });
 
@@ -66,6 +68,7 @@ describe("BroadcastView", () => {
   beforeEach(() => {
     navigate.mockReset();
     getSession.mockReset();
+    getProviderHealth.mockReset();
     session.connectSession.mockClear();
     session.skipVoiceSetup.mockClear();
     session.closeSession.mockClear();
@@ -165,6 +168,101 @@ describe("BroadcastView", () => {
     expect(
       screen.getByText(/Japanese TTS not billable while rate limited/i),
     ).toBeInTheDocument();
+  });
+
+  it("shows YouTube STARTING until provider confirms active ingest", async () => {
+    session.status = "recording" as unknown as "ready";
+    getSession.mockResolvedValue({
+      session: {
+        id: "s1",
+        user_id: "u1",
+        voice_id: "v1",
+        title: "Live test",
+        source_lang: "en",
+        target_langs: '["ja"]',
+        status: "live",
+        live_session_id: null,
+        created_at: 1,
+      },
+      streams: [
+        {
+          id: "st1",
+          session_id: "s1",
+          lang: "ja",
+          platform: "youtube",
+          rtmp_url: "rtmps://a.rtmps.youtube.com/live2",
+          stream_key: "k",
+          status: "ready",
+          delay_ms: 1500,
+          host_gain: 0.2,
+          created_at: 1,
+        },
+      ],
+    });
+    getProviderHealth.mockResolvedValue({
+      sessionId: "s1",
+      streams: [
+        {
+          streamId: "st1",
+          platform: "youtube",
+          provider: "youtube",
+          streamStatus: "ready",
+          healthStatus: "noData",
+          providerConfirmedLive: false,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <BroadcastView sessionId="s1" sourceLang="en" userId="u1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("STARTING")).toBeInTheDocument();
+    expect(screen.getByText(/YouTube not live yet: stream=ready health=noData/i)).toBeInTheDocument();
+  });
+
+  it("shows YouTube LIVE only after provider confirms active ingest", async () => {
+    session.status = "recording" as unknown as "ready";
+    getSession.mockResolvedValue({
+      session: null,
+      streams: [
+        {
+          id: "st1",
+          session_id: "s1",
+          lang: "ja",
+          platform: "youtube",
+          rtmp_url: "rtmps://a.rtmps.youtube.com/live2",
+          stream_key: "k",
+          status: "ready",
+          delay_ms: 1500,
+          host_gain: 0.2,
+          created_at: 1,
+        },
+      ],
+    });
+    getProviderHealth.mockResolvedValue({
+      sessionId: "s1",
+      streams: [
+        {
+          streamId: "st1",
+          platform: "youtube",
+          provider: "youtube",
+          streamStatus: "active",
+          healthStatus: "noData",
+          providerConfirmedLive: true,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <BroadcastView sessionId="s1" sourceLang="en" userId="u1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("LIVE")).toBeInTheDocument();
   });
 
   it("Back button closes the session and navigates (sad)", async () => {

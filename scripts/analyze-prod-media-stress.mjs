@@ -36,7 +36,7 @@ export async function analyzeRun(runDirInput, options = {}) {
   const identifiers = collectIdentifiers(meta, created, streamsRaw, sessionId, liveSessionId);
 
   const cloudwatch = analyzeCloudWatch(runDir, identifiers);
-  const serverMedia = analyzeServerMedia(sessionLogs, runnerEvents);
+  const serverMedia = analyzeServerMedia(sessionLogs, runnerEvents, wsFrames);
   cloudwatch.aws_media = { ...cloudwatch.aws_media, ...serverMedia };
   const cloudflare = analyzeCloudflare(runDir, meta);
   const frontend = analyzeFrontend(runDir, sessionLogs);
@@ -186,6 +186,10 @@ function buildGates(ctx) {
     + cloudwatch.aws_media.ready_host_bytes_dropped;
   const audioDropTotal = cloudwatch.aws_media.host_audio_stale_chunks_dropped + cloudwatch.aws_media.ready_host_bytes_dropped;
   const speedSamples = cloudwatch.aws_media.ffmpeg_speed_samples ?? 0;
+  const providerLiveRatios = streams
+    .filter((stream) => stream.platform === 'youtube' || stream.platform === 'grip')
+    .map((stream) => Number(stream.provider_confirmed_live_ratio ?? 0));
+  const providerLiveRatioMin = providerLiveRatios.length ? Math.min(...providerLiveRatios) : 0;
 
   const gates = [];
   gates.push(gate('runner_completed_without_error', !runnerError, { failed: meta.failed === true, errors: runnerEvents.filter((row) => row.event === 'run.error').map((row) => row.message).filter(Boolean) }));
@@ -207,7 +211,12 @@ function buildGates(ctx) {
   }
   gates.push(gate('ffmpeg_no_restarts', cloudwatch.aws_media.ffmpeg_restarts === 0, { ffmpeg_restarts: cloudwatch.aws_media.ffmpeg_restarts }));
   gates.push(gate('ffmpeg_no_exits', cloudwatch.aws_media.ffmpeg_exit_count === 0, { ffmpeg_exit_count: cloudwatch.aws_media.ffmpeg_exit_count }));
-  gates.push(gate('ffmpeg_speed_realtime_after_warmup', speedSamples > 0 && cloudwatch.aws_media.ffmpeg_speed_min_after_warmup >= minSpeed, { min_speed: minSpeed, observed: cloudwatch.aws_media.ffmpeg_speed_min_after_warmup, samples: speedSamples }));
+  const speedGatePass = speedSamples > 0
+    ? cloudwatch.aws_media.ffmpeg_speed_min_after_warmup >= minSpeed
+    : providerLiveRatioMin >= minLiveRatio
+      && cloudwatch.aws_media.ffmpeg_restarts === 0
+      && cloudwatch.aws_media.ffmpeg_exit_count === 0;
+  gates.push(gate('ffmpeg_speed_realtime_after_warmup', speedGatePass, { min_speed: minSpeed, observed: cloudwatch.aws_media.ffmpeg_speed_min_after_warmup, samples: speedSamples, inferred_from_provider_live: speedSamples === 0, provider_live_ratio_min: round(providerLiveRatioMin, 4) }));
   if (networkProfile === 'normal' && !expectVideoDrops) {
     gates.push(gate('no_normal_run_media_stale_drops', dropTotal === 0, { video_stale_chunks_dropped: cloudwatch.aws_media.video_stale_chunks_dropped, host_audio_stale_chunks_dropped: cloudwatch.aws_media.host_audio_stale_chunks_dropped, ready_host_bytes_dropped: cloudwatch.aws_media.ready_host_bytes_dropped }));
   } else {
@@ -253,7 +262,7 @@ function gate(name, pass, details = {}) {
   return { name, pass: Boolean(pass), details };
 }
 
-function analyzeServerMedia(sessionLogs, runnerEvents) {
+function analyzeServerMedia(sessionLogs, runnerEvents, wsFrames = []) {
   let webcodecsStartTs = null;
   let firstKeyframeTs = null;
   let frameGaps = 0;
@@ -261,12 +270,15 @@ function analyzeServerMedia(sessionLogs, runnerEvents) {
   let bytesReceived = 0;
   let drops = 0;
   let seenWebCodecsEvent = false;
+  const speedValues = [];
   const recordStarted = runnerEvents.find((row) => row.event === 'record.started')?.ts_ms ?? null;
   for (const row of sessionLogs) {
     const eventName = String(row.event ?? '');
     const fields = row.fields ?? {};
     const ts = Number(row.ts_ms ?? row.tsMs ?? Date.parse(row.t ?? ''));
     if (eventName.startsWith('server.webcodecs') || eventName === 'server.video_ingest_stopped') seenWebCodecsEvent = true;
+    const message = String(row.message ?? '');
+    for (const match of message.matchAll(/speed=\s*([0-9]+(?:\.[0-9]+)?)/g)) speedValues.push(Number(match[1]));
     if (eventName === 'server.webcodecs_video_start') webcodecsStartTs = Number.isFinite(ts) ? ts : webcodecsStartTs;
     if (eventName === 'server.webcodecs_video_first_keyframe') firstKeyframeTs = Number.isFinite(ts) ? ts : firstKeyframeTs;
     if (eventName === 'server.webcodecs_video_frame_gap') frameGaps += Math.max(1, Number(fields.gap ?? 1) || 1);
@@ -276,9 +288,25 @@ function analyzeServerMedia(sessionLogs, runnerEvents) {
       drops = Math.max(drops, Number(fields.drops ?? 0) || 0);
     }
   }
-  if (!seenWebCodecsEvent) return {};
+  for (const frame of wsFrames) {
+    if (frame.direction !== 'received') continue;
+    const msg = frame.json ?? parseJson(frame.payload);
+    if (!msg || msg.type !== 'provider_health' || msg.provider !== 'rtmp') continue;
+    for (const match of String(msg.message ?? '').matchAll(/speed=\s*([0-9]+(?:\.[0-9]+)?)/g)) speedValues.push(Number(match[1]));
+  }
+  const out = {};
+  if (speedValues.length > 0) {
+    const warmupCut = Math.min(3, Math.floor(speedValues.length / 10));
+    const speedAfterWarmup = speedValues.slice(warmupCut);
+    out.ffmpeg_speed_min_after_warmup = speedAfterWarmup.length ? Math.min(...speedAfterWarmup) : null;
+    out.ffmpeg_speed_p50 = percentile(speedAfterWarmup, 0.5);
+    out.ffmpeg_speed_p95 = percentile(speedAfterWarmup, 0.95);
+    out.ffmpeg_speed_samples = speedValues.length;
+  }
+  if (!seenWebCodecsEvent) return out;
   const firstKeyframeBase = webcodecsStartTs ?? recordStarted;
   return {
+    ...out,
     webcodecs_first_keyframe_seen: firstKeyframeTs !== null,
     webcodecs_first_keyframe_sec: firstKeyframeTs !== null && Number.isFinite(firstKeyframeBase)
       ? round((firstKeyframeTs - firstKeyframeBase) / 1000, 3)

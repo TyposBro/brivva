@@ -406,6 +406,9 @@ function buildStreamDestinations(cfg) {
   if (cfg.shape === 'source') {
     return [{ kind: 'source', lang: cfg.sourceLang, delay_ms: 0, host_gain: 1.0 }];
   }
+  if (cfg.shape === 'passthrough') {
+    return [{ kind: 'passthrough', lang: 'pass', delay_ms: 0, host_gain: 1.0 }];
+  }
   if (cfg.shape === 'translated') {
     return [{ kind: 'translated', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain }];
   }
@@ -415,7 +418,13 @@ function buildStreamDestinations(cfg) {
       { kind: 'translated', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain },
     ];
   }
-  throw new Error(`unsupported E2E_TEST_SHAPE=${cfg.shape}; use source, translated, or dual`);
+  if (cfg.shape === 'translated-pass' || cfg.shape === 'pass-translated') {
+    return [
+      { kind: 'passthrough', lang: 'pass', delay_ms: 0, host_gain: 1.0 },
+      { kind: 'translated', lang: cfg.targetLang, delay_ms: cfg.youtubeDelayMs, host_gain: cfg.translatedHostGain },
+    ];
+  }
+  throw new Error(`unsupported E2E_TEST_SHAPE=${cfg.shape}; use source, passthrough, translated, dual, or translated-pass`);
 }
 
 function buildGripPlatform(cfg, destination, index, gripDestinationCount) {
@@ -503,6 +512,7 @@ function gripWatchUrlFor(stream, index) {
 function classifyKind(stream, cfg) {
   const delay = Number(stream.delay_ms);
   const gain = Number(stream.host_gain);
+  if (stream.lang === 'pass') return 'passthrough';
   if (stream.lang === cfg.sourceLang && (delay === 0 || gain === 1)) return 'source';
   return 'translated';
 }

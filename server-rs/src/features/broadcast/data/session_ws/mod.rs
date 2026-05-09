@@ -138,6 +138,7 @@ async fn handle_host(mut socket: HostSocket) {
     let timestamped_audio = socket.state.v2_timestamped_audio;
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
+    let host_tx_for_capabilities = host_tx.clone();
     let workers_api = Arc::new(WorkersApi::new(
         &socket.state.workers_api_url,
         &socket.state.internal_secret,
@@ -228,11 +229,9 @@ async fn handle_host(mut socket: HostSocket) {
         }
     });
 
-    if let Some(session) = live_sessions.get(&live_session_id) {
-        session.send_to_host(server_capabilities_message(
-            socket.state.webcodecs_ingest_enabled,
-        ));
-    }
+    let _ = host_tx_for_capabilities.send(server_capabilities_message(
+        socket.state.webcodecs_ingest_enabled,
+    ));
     session_log.info(
         "server.capabilities",
         serde_json::json!({

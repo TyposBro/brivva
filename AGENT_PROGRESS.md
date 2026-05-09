@@ -1,9 +1,13 @@
-# Agent Progress — WebCodecs Production Soak + E2E A/B Automation
+# Agent Progress — YouTube RTMP noData + WebCodecs Soak
 
 ## Goal
-Implement and execute WebCodecs production soak / A/B stress automation using Infisical-provided YouTube/Grip credentials.
+Debug and fix production case where WebRTC browser ingest is healthy but YouTube provider health stays `stream=ready health=noData`; also preserve WebCodecs A/B progress.
 
 ## Checklist
+- [ ] Reproduce/diagnose YouTube `ready/noData` with WebRTC, especially multi-destination/pass-through shape.
+- [ ] Fix misleading UI that labels destinations LIVE only because local recording is active.
+- [ ] Fix Brivva server → YouTube RTMP publish path or observability gap causing `noData`.
+- [ ] Deploy fix and verify provider-confirmed YouTube live.
 - [x] Implement local runner/analyzer/wrapper automation.
 - [x] Commit automation implementation.
 - [x] Inspect Infisical prod secret names without printing values.
@@ -13,10 +17,19 @@ Implement and execute WebCodecs production soak / A/B stress automation using In
 - [x] Analyze smoke artifacts and record interim verdict.
 - [x] Commit deploy-script fix.
 - [x] Commit HTTPS fixture runner fix.
-- [ ] Commit analyzer + WebCodecs startup codec hint fix.
-- [ ] Deploy analyzer-independent frontend/server fix and rerun A/B.
+- [x] Commit analyzer + WebCodecs startup codec hint fix.
+- [x] Deploy analyzer-independent frontend/server fix.
+- [ ] Rerun passing production YouTube A/B after WebCodecs capability-advertisement regression is fixed.
 
 ## Completed
+- Identified user's failing session from prod list: `20ac130c-c8ce-42dd-aa0d-8c57b3171e5a` (`clone`, Firefox 150, KO + pass/source YouTube). It ran ~186s, WebRTC browser stats showed H.264 frames, but provider health stayed `ready/noData`; logs had no provider-confirmed RTMP/live evidence.
+- Reproduced KO + pass/source YouTube with Brave; both dual and explicit `translated-pass` shapes reached provider-confirmed live, narrowing the user's `noData` case toward Firefox/H.264 startup instead of generic multi-destination/pass-through RTMP.
+- Patched server WebRTC H.264 ingest to seed Annex-B SPS/PPS from SDP `sprop-parameter-sets` and wait for an IDR before writing seeded streams, covering browsers that do not repeat parameter sets in-band.
+- Patched frontend WebRTC codec preference to prefer VP8 on Firefox while keeping Chromium/Brave on H.264.
+- Patched destination cards to stop showing YouTube `LIVE` merely because local recording is active; YouTube cards now show `STARTING` until provider health reports active/confirmed ingest.
+- Patched server capability send path to push `server:capabilities` directly through the host WS channel, avoiding the WebCodecs UI stuck on “Checking media server WebCodecs capability…”.
+- Extended prod media stress runner with `passthrough` and `translated-pass` shapes.
+- Patched analyzer to use WS/session RTMP health and infer the FFmpeg speed gate from provider-confirmed live when CloudWatch progress logs are absent.
 - Automation implementation committed: `75a4466 test(e2e): automate WebCodecs soak A/B`.
 - User authorized Infisical YouTube and Grip stream keys.
 - Confirmed `infisical` CLI is installed.
@@ -31,16 +44,35 @@ Implement and execute WebCodecs production soak / A/B stress automation using In
 - YouTube A/B smoke artifacts: `tmp/prod-media-ingest-ab-runs/20260509-161048-media-ingest-ab`.
 - Smoke result: both modes reached YouTube live (~0.97 provider-live ratio); WebCodecs sent 3720 frames, 0 browser drops, server accepted 3660.
 - Smoke failures after analyzer fix: WebRTC slow FFmpeg min speed 0.926 + ready audio drops; WebCodecs initial FFmpeg restart/exit + 42 video stale drops. Root cause for WebCodecs likely RTMP spawned as H264 then restarted when WebCodecs VP8 mode selected.
-- Patched frontend/server to pass `mediaIngestMode=webcodecs_ws` on WS connect and start RTMP with VP8 input codec before FFmpeg spawn; not deployed yet.
+- Patched frontend/server to pass `mediaIngestMode=webcodecs_ws` on WS connect and start RTMP with VP8 input codec before FFmpeg spawn.
+- Committed analyzer counter fix + WebCodecs startup codec hint: `f1967ca fix(webcodecs): preselect VP8 ingest`.
+- Deployed frontend with WebCodecs enabled; verified prod JS contains `mediaIngestMode` and `webcodecs_ws`.
+- Deployed ECS server task definition `brivva:3` from `f1967ca` with `BRIVVA_WEBCODECS_INGEST_ENABLED=1`, `BRIVVA_SESSION_LOGS=1`, `BRIVVA_VIDEO_ENCODER=nvenc`; service stabilized at desired/running 1/1.
+- Reran YouTube A/B artifacts: `tmp/prod-media-ingest-ab-runs/20260509-163146-media-ingest-ab`.
+- Latest WebRTC leg reached YouTube live (`provider_confirmed_live_ratio_min=0.9854`, capture FPS p50 30, outbound FPS p50 28, 0 restarts/exits) but analyzer failed `ffmpeg_speed_realtime_after_warmup` because FFmpeg speed samples were absent.
+- Latest WebCodecs leg failed before recording: host WS opened with `mediaIngestMode=webcodecs_ws`, frontend selected `webcodecs_ws`, server accepted/bootstrap completed, but UI stayed on “Checking media server WebCodecs capability…” and record stayed disabled. Need fix capability advertisement/ready message path, then retest.
 
 ## Remaining work
-- Commit analyzer counter fix + WebCodecs startup codec hint.
-- Deploy frontend/server with the startup codec hint.
-- Rerun production YouTube A/B.
+- Commit the Firefox/YouTube noData + truthful UI + analyzer/capability fixes.
+- Deploy frontend and ECS server.
+- Verify prod asset/server task definition.
+- Rerun production YouTube Firefox `translated-pass` WebRTC smoke; expected Firefox VP8 and provider-confirmed live.
+- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should now receive server capabilities.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
 ## Tests run
 Current turn:
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave ... bun run test:e2e:media-stress` — pass for KO + source/pass YouTube WebRTC dual shape; provider-confirmed live.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave E2E_STREAM_SHAPE=translated-pass ... node scripts/prod-media-stress-e2e.mjs` — pass after analyzer rerun; artifact `tmp/prod-media-stress-runs/20260509-192515-brave-translated-pass-webrtc`.
+- `node --check scripts/prod-media-stress-e2e.mjs` — pass
+- `node --check scripts/analyze-prod-media-stress.mjs` — pass
+- `node scripts/analyze-prod-media-stress.mjs --self-test` — pass
+- `bun run typecheck:frontend` — pass
+- `bun run --cwd frontend test broadcast-view dashboard-page` — pass (16 tests)
+- `cargo test -p server-rs` — pass (391 unit tests + integration; 2 ignored/manual debt)
+- One combined targeted cargo command failed only because Cargo accepts one test filter at a time; rerun via full `cargo test -p server-rs` passed.
+
+Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
 - `node --check scripts/analyze-prod-media-stress.mjs` — pass
 - `node scripts/analyze-prod-media-stress.mjs --self-test` — pass
@@ -62,6 +94,7 @@ Previous automation commit:
 - `cargo test -p server-rs` — pass
 
 ## Commits
+- `f1967ca fix(webcodecs): preselect VP8 ingest`
 - `f8a32d9 fix(e2e): serve fixture over HTTPS`
 - `6a04e5b chore(deploy): expose WebCodecs flag`
 - `75a4466 test(e2e): automate WebCodecs soak A/B`
@@ -70,4 +103,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit analyzer counter fix + WebCodecs startup codec hint, deploy frontend/server, then rerun YouTube production WebRTC/WebCodecs A/B.
+Commit current fixes, deploy frontend/server, then rerun Firefox `translated-pass` WebRTC smoke and Brave WebRTC/WebCodecs A/B.

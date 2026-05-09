@@ -383,7 +383,7 @@ describe("DashboardPage", () => {
     await u.click(await screen.findByRole("button", { name: /Add destination/i }));
     await u.click(screen.getByRole("button", { name: /^YouTube$/i }));
 
-    expect(screen.getByText(/Firefox may prefer VP8/i)).toBeInTheDocument();
+    expect(screen.getByText(/Firefox uses VP8/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Go Live$/i })).toBeEnabled();
   });
 
