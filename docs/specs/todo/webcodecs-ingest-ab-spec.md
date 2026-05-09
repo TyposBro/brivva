@@ -5,6 +5,8 @@ Owner: Brivva engineering
 Related:
 
 - `docs/specs/todo/prod-e2e-automation-stress-test.md`
+- `docs/specs/todo/webcodecs-production-soak-roadmap.md`
+- `docs/specs/todo/webcodecs-prod-e2e-stress-test.md`
 - `docs/browser-webrtc-ingest-roadmap.md`
 - `docs/launch-browser-and-media-runbook.md`
 - `frontend/src/features/broadcast/presentation/use-webcam.ts`
