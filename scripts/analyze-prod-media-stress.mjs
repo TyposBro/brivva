@@ -617,25 +617,28 @@ function analyzeCloudflare(runDir, meta) {
     const lower = line.toLowerCase();
     if (/provider-health/.test(lower)) providerHealthPolls += 1;
     if (/session[_ -]?logs?|session-log/.test(lower)) sessionLogWrites += 1;
-    if (/exception|outcome["': ]+exception|uncaught/.test(lower)) workerExceptions += 1;
+    // Wrangler tail is pretty-printed JSON. Do not count the normal
+    // `"exceptions": []` field on every request as a Worker exception.
+    if (/outcome["':\s]+exception|uncaught/.test(lower) || /"exceptions"\s*:\s*\[\s*[{\"]/.test(line)) workerExceptions += 1;
     if (/\berror\b|\bfailed\b/.test(lower)) workerErrors += 1;
     if (/youtube/.test(lower) && /(error|failed|401|403|429|500|502|503)/.test(lower)) youtubeApiErrors += 1;
     if (/\bd1\b|database|sqlite/.test(lower)) {
       if (/(error|failed|exception)/.test(lower)) d1Errors += 1;
     }
     if (/session[_ -]?logs?|session-log/.test(lower)) {
-      if (/(error|failed|exception)/.test(lower)) sessionLogWriteErrors += 1;
+      if (/(error|failed|exception|uncaught)/.test(lower)) sessionLogWriteErrors += 1;
     }
   }
 
+  const useTailCounts = lines.length > 0;
   const summary = {
-    worker_errors: existing?.worker_errors ?? workerErrors,
-    worker_exceptions: existing?.worker_exceptions ?? workerExceptions,
-    youtube_api_errors: existing?.youtube_api_errors ?? youtubeApiErrors,
-    d1_errors: existing?.d1_errors ?? d1Errors,
-    provider_health_polls: existing?.provider_health_polls ?? providerHealthPolls,
-    session_log_writes: existing?.session_log_writes ?? sessionLogWrites,
-    session_log_write_errors: existing?.session_log_write_errors ?? sessionLogWriteErrors,
+    worker_errors: useTailCounts ? workerErrors : existing?.worker_errors ?? workerErrors,
+    worker_exceptions: useTailCounts ? workerExceptions : existing?.worker_exceptions ?? workerExceptions,
+    youtube_api_errors: useTailCounts ? youtubeApiErrors : existing?.youtube_api_errors ?? youtubeApiErrors,
+    d1_errors: useTailCounts ? d1Errors : existing?.d1_errors ?? d1Errors,
+    provider_health_polls: useTailCounts ? providerHealthPolls : existing?.provider_health_polls ?? providerHealthPolls,
+    session_log_writes: useTailCounts ? sessionLogWrites : existing?.session_log_writes ?? sessionLogWrites,
+    session_log_write_errors: useTailCounts ? sessionLogWriteErrors : existing?.session_log_write_errors ?? sessionLogWriteErrors,
     tail_captured: lines.length > 0 || existing?.tail_captured === true,
     error: existing?.error ?? readJson(path.join(runDir, 'cf-worker-tail-error.json'))?.message ?? null,
   };

@@ -56,7 +56,6 @@ Debug and fix production case where WebRTC browser ingest is healthy but YouTube
 - Commit the Firefox/YouTube noData + truthful UI + analyzer/capability fixes.
 - Deploy frontend and ECS server.
 - Verify prod asset/server task definition.
-- Rerun production YouTube Firefox `translated-pass` WebRTC smoke; expected Firefox VP8 and provider-confirmed live.
 - Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should now receive server capabilities.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
@@ -71,6 +70,13 @@ Current turn:
 - `bun run --cwd frontend test broadcast-view dashboard-page` — pass (16 tests)
 - `cargo test -p server-rs` — pass (391 unit tests + integration; 2 ignored/manual debt)
 - One combined targeted cargo command failed only because Cargo accepts one test filter at a time; rerun via full `cargo test -p server-rs` passed.
+- `VITE_WEBCODECS_INGEST_ENABLED=true bun run deploy:frontend` — pass; Pages deployment `https://f09c7483.brivva.pages.dev`, prod asset `assets/index-D-tUUXe0.js` contains `Firefox uses VP8`, `STARTING`, `ready/noData`, `server:capabilities`, `webcodecs_ws`.
+- `AWS_PROFILE=brivva-admin BRIVVA_WEBCODECS_INGEST_ENABLED=1 BRIVVA_SESSION_LOGS=1 BRIVVA_VIDEO_ENCODER=nvenc ./deploy.sh --gpu` — pass; deployed ECS task definition `brivva:4`, rollout completed desired/running 1/1.
+- `E2E_BROWSER=firefox ... translated-pass ... node scripts/prod-media-stress-e2e.mjs` — first failed because Playwright Firefox was not installed; second failed because system Firefox is Snap and timed out under Playwright.
+- `bunx playwright install firefox` — pass; installed Playwright Firefox 148.0.2.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=firefox E2E_TEST_SHAPE=translated-pass E2E_MEDIA_INGEST_MODE=webrtc E2E_RECORD_SECONDS=120 ... node scripts/prod-media-stress-e2e.mjs` — runtime reached both YouTube streams live; initial analyzer falsely failed on `worker_exceptions` due pretty-printed `"exceptions": []` lines.
+- Patched analyzer to avoid counting empty Cloudflare `exceptions` arrays and to prefer fresh tail counts over stale summary counts.
+- `node scripts/analyze-prod-media-stress.mjs tmp/prod-media-stress-runs/20260509-firefox-translated-pass-webrtc-vp8-pw` — pass; both Firefox YouTube streams provider-confirmed live ratio `0.9333`, VODs 720x1280@30, 0 FFmpeg restarts/exits, 0 stale drops, TTS completion 64/64.
 
 Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
@@ -103,4 +109,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit current fixes, deploy frontend/server, then rerun Firefox `translated-pass` WebRTC smoke and Brave WebRTC/WebCodecs A/B.
+Commit analyzer false-positive fix and progress update, then rerun Brave WebRTC/WebCodecs A/B on deployed `brivva:4`.
