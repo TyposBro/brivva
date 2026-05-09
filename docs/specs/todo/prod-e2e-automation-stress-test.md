@@ -1,6 +1,6 @@
 # Prod E2E Media Automation Stress Test Plan
 
-Status: todo
+Status: implemented (automation scripts added)
 Owner: Brivva engineering
 Target env: Cloudflare Pages frontend + Cloudflare Workers API + AWS Rust media server + YouTube Live
 Related docs: `docs/2026.05.06-report.md`, `docs/browser-webrtc-ingest-roadmap.md`, `docs/launch-browser-and-media-runbook.md`, `docs/rust-stress-test/tracker.md`
@@ -54,6 +54,20 @@ It already:
 - exports AWS CloudWatch logs.
 
 Needed upgrade: turn it into a browser/media stress harness with fixture injection, browser matrix, multi-output watch, objective metrics, Cloudflare Observability capture, and `summary.json` pass/fail gates.
+
+Implemented automation entrypoints:
+
+```bash
+node scripts/prod-media-stress-e2e.mjs
+node scripts/analyze-prod-media-stress.mjs tmp/prod-media-stress-runs/<run-id>
+```
+
+Package aliases:
+
+```bash
+bun run test:e2e:prod-media-stress
+bun run analyze:e2e:prod-media-stress -- tmp/prod-media-stress-runs/<run-id>
+```
 
 ## Browser matrix
 

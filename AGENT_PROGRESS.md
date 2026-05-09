@@ -1,68 +1,72 @@
-# Agent Progress — TURN Hardening
+# Agent Progress — Prod E2E Media Automation Stress Test
 
 ## Goal
-Replace static frontend TURN creds with ephemeral HMAC TURN credentials and use a DNS hostname instead of raw EC2 IP where possible.
+Implement `docs/specs/todo/prod-e2e-automation-stress-test.md` end-to-end: production browser/media stress runner, analyzer, observability capture, objective artifacts, and pass/fail summary.
 
 ## Checklist
-- [x] Add Worker `/api/turn-credentials` endpoint.
-- [x] Add frontend runtime fetch for ephemeral TURN ICE servers.
-- [x] Configure coturn with `--use-auth-secret` + shared static secret.
-- [x] Store shared TURN secret in AWS task definition and Cloudflare Worker secret.
-- [x] Deploy backend/Worker/frontend.
-- [x] Run/verify prod WebRTC E2E over forced relay with ephemeral credentials.
-- [x] Attempt DNS `turn.brivva.spiko.uz` automation.
-- [x] Commit and push stable chunks.
+- [x] Inspect existing prod YouTube E2E runner and API/UI contracts.
+- [x] Add `scripts/prod-media-stress-e2e.mjs` runner.
+- [x] Add cross-browser browser/media shim and Chromium fake-device fallback.
+- [x] Add multi-output YouTube watcher automation.
+- [x] Add provider-health/summary/usage polling artifacts.
+- [x] Add Cloudflare tail + AWS CloudWatch exporters with redaction.
+- [x] Add `scripts/analyze-prod-media-stress.mjs` analyzer producing `summary.json` + `verdict.md`.
+- [x] Add machine gates for provider live time, FFmpeg speed/restarts/drops, WebRTC failures, TTS delay/drift/overflow, Cloudflare/AWS errors.
+- [x] Add package/doc entrypoints.
+- [x] Run syntax/self-tests/typechecks.
+- [x] Commit stable logical chunk.
 
 ## Completed
-- Worker endpoint added: `GET /api/turn-credentials`.
-  - Returns `iceServers` with short-lived TURN username `${expiresAt}:${userId}`.
-  - Credential is base64 HMAC-SHA1 over username using `TURN_STATIC_AUTH_SECRET`.
-  - TTL defaults to 600s and clamps 60-3600s.
-- Frontend now fetches ephemeral TURN credentials at WebRTC start when `VITE_WEBRTC_TURN_CREDENTIALS` is enabled.
-  - Falls back to static `VITE_WEBRTC_ICE_SERVERS` or default STUN if fetch fails.
-- Cloudflare Worker secrets configured:
-  - `TURN_STATIC_AUTH_SECRET`
-  - `TURN_HOST=52.203.38.225`
-  - `TURN_TTL_SECONDS=600`
-- ECS coturn changed to long-term HMAC mode:
-  - `--use-auth-secret`
-  - `--static-auth-secret=<shared secret>`
-  - `--external-ip=52.203.38.225`
-- Deployed:
-  - Worker version `8096ada6-180c-4252-bf0c-51d160288ddc`.
-  - ECS task definition `brivva:71`.
-  - Frontend ephemeral TURN Pages deployment `https://5dbe7c5f.brivva.pages.dev`.
-- Verified endpoint returns ephemeral username and credential without frontend static password.
-- Prod forced-relay E2E passed with ephemeral TURN credentials:
-  - session `1bb7261e-99ef-4e50-bd4f-bca584482807`;
-  - browser RTCPeerConnection monkey-patched to `iceTransportPolicy: relay`;
-  - runtime ICE config used `turn:52.203.38.225:3478` with username `1778235114:<user_id>` and credential present;
-  - UI: `YouTube LIVE`;
-  - provider health: `stream=active health=good`;
-  - CloudWatch: `Global turn allocation count incremented`, `ICE connection state changed: connected`.
-- Stopped test stream after verification.
-- DNS attempt:
-  - Wrangler token has `zone:read` only, not DNS write.
-  - Cloudflare API `A turn.brivva.spiko.uz -> 52.203.38.225` create/update returned `403`.
-  - Raw EC2 IP remains in TURN config until DNS write permission/API token is available.
+- Read spec and existing `scripts/prod-youtube-oauth-e2e.mjs` baseline.
+- Confirmed current date is Saturday KST, so commit-window rule allows commits.
+- Implemented production stress runner:
+  - real prod frontend/API session creation;
+  - `E2E_BROWSER=chromium|brave|firefox|zen` and `E2E_HEADLESS` support;
+  - local range-capable fixture server for `E2E_MEDIA_FILE` + Playwright media shim;
+  - Chromium/Brave fake-device conversion fallback (`E2E_MEDIA_MODE=fake-device`);
+  - source/translated/dual YouTube output shapes;
+  - multi-watch YouTube pages, screenshots, videos, body snapshots, console logs;
+  - host WebSocket frame capture for source/final/translation/TTS timing;
+  - provider-health/summary/usage NDJSON polling;
+  - Cloudflare `wrangler tail` capture with fallback syntax;
+  - AWS CloudWatch export;
+  - optional `yt-dlp` VOD metadata artifact;
+  - redaction for stream keys/tokens/RTMP URLs.
+- Implemented analyzer:
+  - `summary.json` and `verdict.md`;
+  - provider-confirmed-live seconds/ratio;
+  - frontend capture/outbound media stats;
+  - CloudWatch FFmpeg speed/restart/drop/TTS overflow extraction;
+  - WebSocket-based TTS delay/drift metrics;
+  - Cloudflare Observability summary;
+  - pass/fail gates for smoke/soak operator use.
+- Added package scripts:
+  - `bun run test:e2e:prod-media-stress`
+  - `bun run analyze:e2e:prod-media-stress -- <run-dir>`
+- Updated spec status/entrypoints.
+
+## Remaining work
+- None for implementation.
+- Optional operator action after merge: run real Brave/Chromium 30–60m production soak with `~/Desktop/text.mp4` and credentials.
 
 ## Tests run
-- `bun run --cwd workers typecheck` — pass.
-- `bun run --cwd frontend typecheck` — pass.
-- `bun run --cwd frontend build` with ephemeral TURN enabled — pass.
-- `bunx wrangler deploy --config workers/wrangler.toml` — pass.
-- `bunx wrangler pages deploy frontend/dist --project-name brivva` — pass.
-- `curl -fsS https://brivva-api.milliytechnology.workers.dev/api/turn-credentials?user_id=test` — pass.
-- `curl -fsS https://brivva.spiko.uz/health` — pass.
-- `AWS_PROFILE=personal aws ecs wait services-stable --cluster brivva --services brivva --region us-east-1` — pass.
-- Prod forced-relay E2E — pass.
-- CloudWatch verification — pass.
+- `node --check scripts/analyze-prod-media-stress.mjs` — pass.
+- `node --check scripts/prod-media-stress-e2e.mjs` — pass.
+- `node scripts/analyze-prod-media-stress.mjs --self-test` — pass.
+- `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package ok')"` — pass.
+- `bun run typecheck:frontend` — pass.
+- `bun run typecheck:workers` — pass.
+- `bun run test:workers` — pass (261 tests).
+- `bun run test:frontend` — fails in existing frontend tests unrelated to this script-only change:
+  - `dashboard-page.test.tsx` expects old voice/source mismatch banner and Firefox blocking copy.
+  - `use-host-session.test.tsx` expects no-H.264 startRecording to stay ready.
+  - No frontend source files were modified in this task.
 
 ## Commits
-- Pending code/progress commit.
+- `feat(e2e): add prod media stress harness`.
 
 ## Blockers
-- DNS hostname automation blocked by Cloudflare token lacking DNS write permission (`403`). This is non-critical because TURN works with raw EC2 IP.
+- None.
 
 ## Exact next action
-Commit code/progress. Optional later: provide Cloudflare API token with DNS edit permission or create `turn.brivva.spiko.uz` manually/unblock via dashboard.
+Final response: summarize commit, files changed, tests run, and remaining risks. Keep pre-existing deleted docs (`2026.05.05.md`, `docs/brivva-aws-migration.md`) unstaged/unmodified.
