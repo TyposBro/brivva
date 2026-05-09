@@ -106,8 +106,14 @@ pub(super) fn video_drain_loop(ctx: VideoDrainCtx) {
             last_stats = now;
         }
 
-        let Some(drain) = drain_next_video_live(&video_buf, now, delay, max_lag, &mut need_keyframe, input_codec)
-        else {
+        let Some(drain) = drain_next_video_live(
+            &video_buf,
+            now,
+            delay,
+            max_lag,
+            &mut need_keyframe,
+            input_codec,
+        ) else {
             thread::sleep(Duration::from_millis(2));
             continue;
         };
@@ -308,7 +314,11 @@ fn vp8_ivf_frame_is_keyframe(packet: &[u8]) -> bool {
     // 0x9d012a sync code after the 3-byte frame tag. The sync-code check
     // prevents corrupt/partial/inter frames from opening a fresh FFmpeg pipe
     // after VP8 codec-switch restarts.
-    let offset = if packet.starts_with(b"DKIF") { 32 + 12 } else { 12 };
+    let offset = if packet.starts_with(b"DKIF") {
+        32 + 12
+    } else {
+        12
+    };
     packet.get(offset).is_some_and(|b| b & 0x01 == 0)
         && packet
             .get(offset + 3..offset + 6)

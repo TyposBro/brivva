@@ -1027,7 +1027,11 @@ impl RtmpManager {
         self.restart_stream_with_codec(args, self.video_input_codec);
     }
 
-    fn restart_stream_with_codec(&mut self, args: RestartStreamArgs, video_input_codec: VideoInputCodec) {
+    fn restart_stream_with_codec(
+        &mut self,
+        args: RestartStreamArgs,
+        video_input_codec: VideoInputCodec,
+    ) {
         emit_output_health(
             self.output_health_tx.as_ref(),
             args.output_controls_enabled,

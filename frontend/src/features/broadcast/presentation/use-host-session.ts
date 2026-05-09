@@ -194,18 +194,19 @@ export function useHostSession() {
     await startWebcam();
     activeSessionIdRef.current = opts.sessionId ?? null;
     activeUserIdRef.current = opts.userId;
+    const requestedMediaIngestMode = readStoredMediaIngestMode();
+    const resolvedMediaIngestMode = resolveMediaIngestMode(requestedMediaIngestMode);
     if (opts.sessionId) {
       configureSessionLogger({
         sessionId: opts.sessionId,
         userId: opts.userId,
       });
-      const requestedMediaIngestMode = readStoredMediaIngestMode();
       sessionLog("info", "frontend.session_connect_requested", {
         source_lang: opts.sourceLang ?? "en",
       });
       sessionLog("info", "frontend.media_ingest_mode_selected", {
         requested: requestedMediaIngestMode,
-        resolved: resolveMediaIngestMode(requestedMediaIngestMode),
+        resolved: resolvedMediaIngestMode,
       });
     }
 
@@ -216,7 +217,10 @@ export function useHostSession() {
       sourceLang: opts.sourceLang ?? "en",
       token,
     };
-    if (opts.sessionId) params.sessionId = opts.sessionId;
+    if (opts.sessionId) {
+      params.sessionId = opts.sessionId;
+      params.mediaIngestMode = resolvedMediaIngestMode;
+    }
     socket.current.connect(params, {
       onOpen: () => {
         dispatch({ type: "connected" });

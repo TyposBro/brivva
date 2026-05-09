@@ -453,9 +453,9 @@ function analyzeCloudWatch(runDir, identifiers) {
   const speedValues = [];
   let ffmpegRestarts = 0;
   let ffmpegExitCount = 0;
-  let videoDrops = 0;
-  let audioDrops = 0;
-  let readyDrops = 0;
+  const videoDropCounters = new Map();
+  const audioDropCounters = new Map();
+  const readyDropCounters = new Map();
   let overflows = 0;
   let hardRecovery = 0;
   let ttsComplete = 0;
@@ -484,12 +484,12 @@ function analyzeCloudWatch(runDir, identifiers) {
 
   for (const message of messages) {
     const lower = message.toLowerCase();
-    if (/ffmpeg/.test(lower) && /(restart|restarting|max ffmpeg restart|rtmp process crashed)/.test(lower)) ffmpegRestarts += 1;
-    if (/(rtmp process crashed|ffmpeg[^\n]*(crash|failed)|exit_code=-(?:\d+)|exit_code=(?!0\b)\d+)/.test(lower) && !/intentional|stopped by operator|normal stop|session ended/.test(lower)) ffmpegExitCount += 1;
+    if (isFfmpegRestartEvent(lower)) ffmpegRestarts += 1;
+    if (isFfmpegCrashEvent(lower)) ffmpegExitCount += 1;
     for (const match of message.matchAll(/speed=\s*([0-9]+(?:\.[0-9]+)?)x/g)) speedValues.push(Number(match[1]));
-    videoDrops += sumKeyValues(message, 'video_stale_chunks_dropped');
-    audioDrops += sumKeyValues(message, 'host_audio_stale_chunks_dropped');
-    readyDrops += sumKeyValues(message, 'ready_host_bytes_dropped');
+    recordCounterMax(videoDropCounters, message, 'video_stale_chunks_dropped');
+    recordCounterMax(audioDropCounters, message, 'host_audio_stale_chunks_dropped');
+    recordCounterMax(readyDropCounters, message, 'ready_host_bytes_dropped');
     if (/tts segment queue overflow/i.test(message)) overflows += 1;
     if (/hard[_ -]?recovery|policy=hard_recovery|policy = hard_recovery/i.test(message)) hardRecovery += 1;
     if (/tts complete/i.test(message)) ttsComplete += 1;
@@ -500,6 +500,9 @@ function analyzeCloudWatch(runDir, identifiers) {
   const warmupCut = Math.min(3, Math.floor(speedValues.length / 10));
   const speedAfterWarmup = speedValues.slice(warmupCut);
   const speedMin = speedAfterWarmup.length ? Math.min(...speedAfterWarmup) : null;
+  const videoDrops = sumMapValues(videoDropCounters);
+  const audioDrops = sumMapValues(audioDropCounters);
+  const readyDrops = sumMapValues(readyDropCounters);
   const summary = {
     ffmpeg_restarts: ffmpegRestarts,
     ffmpeg_exit_count: ffmpegExitCount,
@@ -527,6 +530,35 @@ function analyzeCloudWatch(runDir, identifiers) {
     events: filtered,
     aws_media: summary,
   };
+}
+
+function isFfmpegRestartEvent(lowerMessage) {
+  return /"event":"output\.restarting"|event=output\.restarting|output\.restarting/.test(lowerMessage)
+    || /rtmp process crashed, scheduling restart|max ffmpeg restart|ffmpeg idle beyond threshold/.test(lowerMessage);
+}
+
+function isFfmpegCrashEvent(lowerMessage) {
+  if (/intentional|stopped by operator|normal stop|session ended/.test(lowerMessage)) return false;
+  return /"event":"output\.restarting"[^\n]*ffmpegcrash|output\.restarting[^\n]*ffmpegcrash/.test(lowerMessage)
+    || /rtmp process crashed|ffmpeg[^\n]*(crash|failed)|exit_code=-(?:\d+)|exit_code=(?!0\b)\d+/.test(lowerMessage);
+}
+
+function recordCounterMax(counters, message, key) {
+  const value = sumKeyValues(message, key);
+  if (value <= 0) return;
+  const scope = counterScope(message, key);
+  counters.set(scope, Math.max(counters.get(scope) ?? 0, value));
+}
+
+function counterScope(message, key) {
+  return message.match(/\[(?:VIDEO|AUDIO):([^\]]+)\]/)?.[1]
+    ?? message.match(/"stream_id":"([^"]+)"/)?.[1]
+    ?? message.match(/stream_id[=:]\s*"?([a-zA-Z0-9_.:-]+)/)?.[1]
+    ?? `__global:${key}`;
+}
+
+function sumMapValues(map) {
+  return [...map.values()].reduce((sum, value) => sum + value, 0);
 }
 
 function filterCloudWatchEvents(events, identifiers) {
@@ -999,6 +1031,13 @@ function safeName(value) {
 }
 
 async function runSelfTest() {
+  assert.equal(isFfmpegRestartEvent('ffmpeg health snapshot restart_count=0 state=Publishing'), false);
+  assert.equal(isFfmpegRestartEvent('{"event":"output.restarting","degradation":"Some(FfmpegCrash)"}'), true);
+  const cumulativeCounters = new Map();
+  recordCounterMax(cumulativeCounters, '[VIDEO:stream-a] stats video_stale_chunks_dropped=42', 'video_stale_chunks_dropped');
+  recordCounterMax(cumulativeCounters, '[VIDEO:stream-a] stats video_stale_chunks_dropped=42', 'video_stale_chunks_dropped');
+  assert.equal(sumMapValues(cumulativeCounters), 42);
+
   const dir = path.join(os.tmpdir(), 'brivva-prod-media-stress-analyzer-self-test');
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });

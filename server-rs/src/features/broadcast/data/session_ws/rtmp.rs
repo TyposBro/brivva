@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::core::contracts::workers::{SessionBundle, Stream};
+use crate::features::broadcast::data::ffmpeg::VideoInputCodec;
 use crate::features::broadcast::domain::output_health::{
     OutputDegradationLabel, OutputHealthSnapshot, OutputHealthState, OutputId,
 };
@@ -253,6 +254,7 @@ pub(super) struct RtmpStartArgs<'a> {
     pub sid: &'a str,
     pub ffmpeg_monitor_stop: Arc<AtomicBool>,
     pub metrics: Arc<SessionMetrics>,
+    pub preferred_video_input_codec: Option<VideoInputCodec>,
 }
 
 pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
@@ -263,6 +265,7 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         sid,
         ffmpeg_monitor_stop,
         metrics,
+        preferred_video_input_codec,
     } = args;
     if bundle.streams.is_empty() {
         return;
@@ -272,6 +275,9 @@ pub(super) fn start_rtmp_streams(args: RtmpStartArgs<'_>) {
         manager.set_output_health_tx(health_tx);
     }
     manager.set_metrics(metrics);
+    if let Some(codec) = preferred_video_input_codec {
+        manager.switch_video_input_codec(codec);
+    }
     manager.set_video_encoder(live_session.pipeline_config.video_encoder);
     manager.set_video_profile_caps(
         crate::features::broadcast::data::ffmpeg::VideoProfileCaps::new(
@@ -547,7 +553,9 @@ fn spawn_rtmp_health_bridge(
 
 fn rtmp_snapshot_to_provider_health(snapshot: OutputHealthSnapshot) -> Option<ProviderHealthEvent> {
     let (state, recoverable, billable, reason) = match snapshot.state {
-        OutputHealthState::Starting | OutputHealthState::Publishing | OutputHealthState::Live => return None,
+        OutputHealthState::Starting | OutputHealthState::Publishing | OutputHealthState::Live => {
+            return None;
+        }
         OutputHealthState::Degraded => (
             "degraded",
             true,

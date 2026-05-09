@@ -130,6 +130,8 @@ pub struct SessionQuery {
     pub source_lang: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
+    #[serde(rename = "mediaIngestMode")]
+    pub media_ingest_mode: Option<String>,
     /// JWT issued by Workers. Verified in `session_ws_handler`.
     pub token: Option<String>,
 }

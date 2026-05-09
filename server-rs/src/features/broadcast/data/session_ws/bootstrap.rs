@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::core::contracts::workers::SessionBundle;
+use crate::features::broadcast::data::ffmpeg::VideoInputCodec;
 use crate::features::broadcast::data::metrics::spawn_metrics_reporter;
 use crate::features::broadcast::data::workers_api::WorkersApi;
 use crate::features::broadcast::domain::{Lang, LiveSession, LiveSessions, SessionMetrics};
@@ -29,6 +30,7 @@ pub(super) struct BootstrapArgs<'a> {
     pub live_session_id: &'a str,
     pub ffmpeg_monitor_stop: Arc<AtomicBool>,
     pub live_sessions: LiveSessions,
+    pub preferred_video_input_codec: Option<VideoInputCodec>,
 }
 
 pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutcome {
@@ -41,6 +43,7 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
         live_session_id,
         ffmpeg_monitor_stop,
         live_sessions,
+        preferred_video_input_codec,
     } = args;
 
     let bundle = match workers_api.fetch_session_bundle(sid).await {
@@ -135,6 +138,7 @@ pub(super) async fn bootstrap_session(args: BootstrapArgs<'_>) -> BootstrapOutco
         sid,
         ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
         metrics: metrics.clone(),
+        preferred_video_input_codec,
     });
     spawn_live_status_update(
         workers_api.clone(),

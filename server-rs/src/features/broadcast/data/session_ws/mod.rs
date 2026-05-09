@@ -15,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::features::broadcast::data::auth;
+use crate::features::broadcast::data::ffmpeg::VideoInputCodec;
 use crate::features::broadcast::data::session_log::SessionLogEmitter;
 use crate::features::broadcast::data::state::BroadcastState;
 use crate::features::broadcast::data::workers_api::WorkersApi;
@@ -61,6 +62,13 @@ async fn handle_host_socket(socket: WebSocket, state: BroadcastState, query: Ses
         .as_deref()
         .and_then(Lang::from_str)
         .unwrap_or(Lang::En);
+    let preferred_video_input_codec = if query.media_ingest_mode.as_deref() == Some("webcodecs_ws")
+        && state.webcodecs_ingest_enabled
+    {
+        Some(VideoInputCodec::Vp8Ivf)
+    } else {
+        None
+    };
     let (sender, receiver) = socket.split();
     handle_host(HostSocket {
         sender,
@@ -69,6 +77,7 @@ async fn handle_host_socket(socket: WebSocket, state: BroadcastState, query: Ses
         user_id: claims.sub,
         source_lang,
         session_id: query.session_id,
+        preferred_video_input_codec,
     })
     .await;
 }
@@ -118,6 +127,7 @@ struct HostSocket {
     user_id: String,
     source_lang: Lang,
     session_id: Option<String>,
+    preferred_video_input_codec: Option<VideoInputCodec>,
 }
 
 async fn handle_host(mut socket: HostSocket) {
@@ -178,6 +188,7 @@ async fn handle_host(mut socket: HostSocket) {
             live_session_id: &live_session_id,
             ffmpeg_monitor_stop: ffmpeg_monitor_stop.clone(),
             live_sessions: live_sessions.clone(),
+            preferred_video_input_codec: socket.preferred_video_input_codec,
         })
         .await;
         match outcome {
