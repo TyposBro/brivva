@@ -1,3 +1,10 @@
+import type {
+  MediaIngestMode,
+  MediaServerCapabilities,
+  ResolvedMediaIngestMode,
+} from "./media-ingest-mode";
+import type { WebCodecsVideoStats } from "./use-webcodecs-video";
+
 export type HostStatus =
   | "idle"
   | "creating"
@@ -10,8 +17,23 @@ export type HostStatus =
 export type HostUtterance = { id: number; transcript: string };
 
 export interface MediaDiagnostics {
+  mediaIngest?: {
+    requested: MediaIngestMode;
+    resolved: ResolvedMediaIngestMode;
+    active?: ResolvedMediaIngestMode;
+    codec?: string;
+  };
   source?: { width?: number; height?: number; frameRate?: number };
-  outbound?: { frameWidth?: number; frameHeight?: number; framesPerSecond?: number; framesSent?: number; qualityLimitationReason?: unknown };
+  outbound?: {
+    frameWidth?: number;
+    frameHeight?: number;
+    framesPerSecond?: number;
+    framesSent?: number;
+    qualityLimitationReason?: unknown;
+    codec?: unknown;
+    candidatePair?: unknown;
+  };
+  webcodecs?: WebCodecsVideoStats;
 }
 
 export interface ProviderHealthNotice {
@@ -35,6 +57,8 @@ export interface HostState {
   error: string | null;
   voiceReady: boolean;
   mediaDiagnostics: MediaDiagnostics | null;
+  mediaServerCapabilities: MediaServerCapabilities | null;
+  activeMediaIngestMode: ResolvedMediaIngestMode | null;
   connectionIssue: string | null;
   providerHealth: ProviderHealthNotice[];
 }
@@ -46,13 +70,19 @@ export type HostAction =
   | { type: "final"; id: number; transcript: string }
   | { type: "translation"; id: number; targetLang: string; text: string }
   | { type: "error"; message: string }
-  | { type: "recording_started"; analyser: AnalyserNode }
+  | {
+      type: "recording_started";
+      analyser: AnalyserNode;
+      requestedMediaIngestMode: MediaIngestMode;
+      mediaIngestMode: ResolvedMediaIngestMode;
+    }
   | { type: "recording_stopped" }
   | { type: "disconnected" }
   | { type: "voice_cloning" }
   | { type: "voice_ready" }
   | { type: "skip_voice_setup" }
   | { type: "media_diagnostics"; diagnostics: MediaDiagnostics }
+  | { type: "server_capabilities"; capabilities: MediaServerCapabilities }
   | { type: "connection_issue"; message: string }
   | { type: "provider_health"; notice: ProviderHealthNotice };
 
@@ -65,6 +95,8 @@ export const INITIAL_STATE: HostState = {
   error: null,
   voiceReady: false,
   mediaDiagnostics: null,
+  mediaServerCapabilities: null,
+  activeMediaIngestMode: null,
   connectionIssue: null,
   providerHealth: [],
 };
@@ -103,7 +135,21 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
       return { ...state, error: action.message };
 
     case "recording_started":
-      return { ...state, status: "recording", analyser: action.analyser, connectionIssue: null };
+      return {
+        ...state,
+        status: "recording",
+        analyser: action.analyser,
+        activeMediaIngestMode: action.mediaIngestMode,
+        mediaDiagnostics: {
+          ...state.mediaDiagnostics,
+          mediaIngest: {
+            requested: action.requestedMediaIngestMode,
+            resolved: action.mediaIngestMode,
+            active: action.mediaIngestMode,
+          },
+        },
+        connectionIssue: null,
+      };
 
     case "recording_stopped":
       return {
@@ -125,7 +171,13 @@ export function hostReducer(state: HostState, action: HostAction): HostState {
       return { ...state, status: "ready" };
 
     case "media_diagnostics":
-      return { ...state, mediaDiagnostics: action.diagnostics };
+      return {
+        ...state,
+        mediaDiagnostics: { ...state.mediaDiagnostics, ...action.diagnostics },
+      };
+
+    case "server_capabilities":
+      return { ...state, mediaServerCapabilities: action.capabilities };
 
     case "connection_issue":
       return { ...state, connectionIssue: action.message };

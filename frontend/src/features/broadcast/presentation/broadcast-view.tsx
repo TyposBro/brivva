@@ -40,6 +40,9 @@ export function BroadcastView({
     mediaDiagnostics,
     connectionIssue,
     providerHealth,
+    recordDisabledReason,
+    requestedMediaIngestMode,
+    resolvedMediaIngestMode,
     videoRef,
     facingMode,
     connectSession,
@@ -240,8 +243,18 @@ export function BroadcastView({
           </span>
         </div>
 
-        {isReady && mediaDiagnostics && (
-          <MediaDiagnosticsPanel diagnostics={mediaDiagnostics} />
+        {isReady && (
+          <MediaDiagnosticsPanel
+            diagnostics={mediaDiagnostics}
+            requestedMode={requestedMediaIngestMode}
+            resolvedMode={resolvedMediaIngestMode}
+          />
+        )}
+
+        {isReady && recordDisabledReason && !isRecording && (
+          <div className="bg-error-container/20 text-error px-4 py-3 rounded-lg font-label text-sm">
+            {recordDisabledReason}
+          </div>
         )}
 
         {isReady && (
@@ -250,6 +263,8 @@ export function BroadcastView({
             analyser={analyser}
             onStart={startRecording}
             onStop={handleStopBroadcast}
+            disabled={Boolean(recordDisabledReason) && !isRecording}
+            disabledReason={recordDisabledReason ?? undefined}
           />
         )}
 
@@ -351,31 +366,75 @@ function ProviderHealthPanel({
 
 function MediaDiagnosticsPanel({
   diagnostics,
+  requestedMode,
+  resolvedMode,
 }: {
-  diagnostics: MediaDiagnostics;
+  diagnostics: MediaDiagnostics | null;
+  requestedMode: string;
+  resolvedMode: string;
 }) {
-  const src = diagnostics.source;
-  const out = diagnostics.outbound;
+  const src = diagnostics?.source;
+  const out = diagnostics?.outbound;
+  const webcodecs = diagnostics?.webcodecs;
+  const activeMode = diagnostics?.mediaIngest?.active ?? resolvedMode;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-label">
       <div className="bg-surface-container-low rounded-xl px-4 py-3">
-        <p className="text-on-surface font-bold mb-1">Browser capture</p>
+        <p className="text-on-surface font-bold mb-1">Media ingest</p>
         <p className="text-on-surface-variant">
-          {src?.width ?? "?"}×{src?.height ?? "?"} @ {src?.frameRate ?? "?"}fps
+          {activeMode === "webcodecs_ws" ? "WebCodecs over WebSocket" : "WebRTC"}
+          {requestedMode === "auto" ? " · Auto fallback" : ""}
         </p>
-      </div>
-      <div className="bg-surface-container-low rounded-xl px-4 py-3">
-        <p className="text-on-surface font-bold mb-1">WebRTC outbound</p>
-        <p className="text-on-surface-variant">
-          {out?.frameWidth ?? "?"}×{out?.frameHeight ?? "?"} @ {out?.framesPerSecond ?? "?"}fps
-          {typeof out?.framesSent === "number" ? ` · ${out.framesSent} frames` : ""}
-        </p>
-        {out?.qualityLimitationReason !== undefined && out.qualityLimitationReason !== "none" && (
-          <p className="text-warning mt-1">Limited by {String(out.qualityLimitationReason)}</p>
+        {diagnostics?.mediaIngest?.codec && (
+          <p className="text-on-surface-variant mt-1">Codec: {diagnostics.mediaIngest.codec.toUpperCase()}</p>
         )}
       </div>
+      <div className="bg-surface-container-low rounded-xl px-4 py-3">
+        <p className="text-on-surface font-bold mb-1">Browser capture</p>
+        <p className="text-on-surface-variant">
+          {src?.width ?? webcodecs?.capture.width ?? "?"}×{src?.height ?? webcodecs?.capture.height ?? "?"} @ {src?.frameRate ?? webcodecs?.capture.fps ?? "?"}fps
+        </p>
+      </div>
+      {activeMode === "webcodecs_ws" ? (
+        <div className="bg-surface-container-low rounded-xl px-4 py-3 sm:col-span-2">
+          <p className="text-on-surface font-bold mb-1">WebCodecs over WebSocket</p>
+          <p className="text-on-surface-variant">
+            Encoded: {webcodecs?.encoded.width ?? "?"}×{webcodecs?.encoded.height ?? "?"} @ {webcodecs?.encoded.fps ?? "?"}fps · Sent {webcodecs?.sentFrames ?? 0} · Dropped {webcodecs?.droppedFrames ?? 0}
+          </p>
+          <p className="text-on-surface-variant mt-1">
+            WS buffered: {formatBytes(webcodecs?.wsBufferedBytes ?? 0)} · Server accepted: {webcodecs?.serverAcceptedFrames ?? "?"} · Server latest PTS: {formatUs(webcodecs?.serverLatestMediaPtsUs)}
+          </p>
+        </div>
+      ) : (
+        <div className="bg-surface-container-low rounded-xl px-4 py-3">
+          <p className="text-on-surface font-bold mb-1">WebRTC outbound</p>
+          <p className="text-on-surface-variant">
+            {out?.frameWidth ?? "?"}×{out?.frameHeight ?? "?"} @ {out?.framesPerSecond ?? "?"}fps
+            {typeof out?.framesSent === "number" ? ` · ${out.framesSent} frames` : ""}
+          </p>
+          {out?.codec !== undefined && (
+            <p className="text-on-surface-variant mt-1">Codec: {String(out.codec)}</p>
+          )}
+          {out?.candidatePair !== undefined && (
+            <p className="text-on-surface-variant mt-1">ICE: {String(out.candidatePair)}</p>
+          )}
+          {out?.qualityLimitationReason !== undefined && out.qualityLimitationReason !== "none" && (
+            <p className="text-warning mt-1">Limited by {String(out.qualityLimitationReason)}</p>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatUs(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "?";
+  return `${(value / 1_000_000).toFixed(2)}s`;
 }
 
 function displayUrl(url: string): string {

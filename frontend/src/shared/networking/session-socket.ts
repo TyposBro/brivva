@@ -64,11 +64,19 @@ export class SessionSocket {
   }
 
   sendAudio(buffer: ArrayBuffer): void {
+    this.sendBinary(buffer);
+  }
+
+  sendBinary(buffer: ArrayBuffer): void {
     if (this.isOpen) this.ws!.send(buffer);
   }
 
   sendJson(msg: object): void {
     if (this.isOpen) this.ws!.send(JSON.stringify(msg));
+  }
+
+  get bufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0;
   }
 
   get isOpen(): boolean {

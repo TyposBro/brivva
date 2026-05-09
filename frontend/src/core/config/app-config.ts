@@ -23,6 +23,8 @@ export interface AppConfig {
   webRtcIceServers: RTCIceServer[] | null;
   /** Fetch short-lived TURN credentials from Workers at WebRTC start. */
   webRtcTurnCredentialsEnabled: boolean;
+  /** Advanced A/B option: browser WebCodecs VP8 chunks over the media WS. */
+  webCodecsIngestEnabled: boolean;
 }
 
 let current: AppConfig | null = null;

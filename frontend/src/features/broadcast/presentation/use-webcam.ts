@@ -144,6 +144,9 @@ export function useWebcam(
     stopCfrUplink(cfrUplinkRef);
   }, []);
 
+  const getVideoStream = useCallback(() => streamRef.current, []);
+  const getVideoProfile = useCallback(() => readVideoProfile(streamRef.current), []);
+
   const flipCamera = useCallback(() => {
     // Only relevant on mobile — desktop browsers typically ignore facingMode.
     // Stop the active WebRTC uplink, release the old camera, and restart with
@@ -173,6 +176,8 @@ export function useWebcam(
     startFrameStreaming,
     stopFrameStreaming,
     handleWebRtcMessage,
+    getVideoStream,
+    getVideoProfile,
   };
 }
 
@@ -251,6 +256,8 @@ async function collectOutboundVideoStats(
   if (!stats) return undefined;
   for (const report of stats.values()) {
     if (report.type === "outbound-rtp" && report.kind === "video") {
+      const codec = codecLabel(stats, report.codecId);
+      const candidatePair = selectedCandidatePairLabel(stats);
       return {
         framesEncoded: report.framesEncoded,
         framesPerSecond: report.framesPerSecond,
@@ -262,10 +269,44 @@ async function collectOutboundVideoStats(
         encoderImplementation: report.encoderImplementation,
         targetBitrate: report.targetBitrate,
         totalEncodeTime: report.totalEncodeTime,
+        codec,
+        candidatePair,
       };
     }
   }
   return undefined;
+}
+
+function codecLabel(stats: RTCStatsReport, codecId: unknown): string | undefined {
+  if (typeof codecId !== "string") return undefined;
+  const codec = stats.get(codecId) as { mimeType?: unknown; sdpFmtpLine?: unknown } | undefined;
+  if (!codec || typeof codec.mimeType !== "string") return undefined;
+  return [codec.mimeType, codec.sdpFmtpLine].filter(Boolean).join(" ");
+}
+
+function selectedCandidatePairLabel(stats: RTCStatsReport): string | undefined {
+  let selected: { localCandidateId?: unknown; remoteCandidateId?: unknown } | undefined;
+  for (const report of stats.values()) {
+    if (
+      report.type === "candidate-pair" &&
+      (report.selected === true || report.nominated === true || report.state === "succeeded")
+    ) {
+      selected = report;
+      break;
+    }
+  }
+  if (!selected) return undefined;
+  const local =
+    typeof selected.localCandidateId === "string"
+      ? (stats.get(selected.localCandidateId) as { candidateType?: unknown } | undefined)
+      : undefined;
+  const remote =
+    typeof selected.remoteCandidateId === "string"
+      ? (stats.get(selected.remoteCandidateId) as { candidateType?: unknown } | undefined)
+      : undefined;
+  const localType = typeof local?.candidateType === "string" ? local.candidateType : "?";
+  const remoteType = typeof remote?.candidateType === "string" ? remote.candidateType : "?";
+  return `${localType}/${remoteType}`;
 }
 
 function attachConnectionDiagnostics(

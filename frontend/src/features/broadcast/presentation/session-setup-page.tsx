@@ -10,6 +10,10 @@ import { useVoiceRecorder } from "../../../shared/audio/voice-recorder";
 import { VoicePresetPicker } from "./voice-preset-picker";
 import { VoiceSetupCard } from "./voice-setup-card";
 import { SOURCE_LANGS, type SourceLang } from "./source-lang-picker";
+import {
+  AdvancedMediaIngestSettings,
+  useMediaIngestModePreference,
+} from "./media-ingest-settings";
 
 const MIN_SEC = 30;
 const MAX_SEC = 180;
@@ -38,6 +42,7 @@ function SetupInner() {
   const [presetSaving, setPresetSaving] = useState(false);
   const [recordMode, setRecordMode] = useState(false);
   const [error, setError] = useState("");
+  const [mediaIngestMode, setMediaIngestMode] = useMediaIngestModePreference();
 
   const reload = useCallback(async () => {
     if (!id) return;
@@ -228,6 +233,11 @@ function SetupInner() {
             onReRecord={() => setRecordMode(true)}
           />
         )}
+
+        <AdvancedMediaIngestSettings
+          value={mediaIngestMode}
+          onChange={setMediaIngestMode}
+        />
 
         <button
           className={cn(

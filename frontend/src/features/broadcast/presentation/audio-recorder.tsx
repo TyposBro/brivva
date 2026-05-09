@@ -7,6 +7,8 @@ interface AudioRecorderProps {
   analyser: AnalyserNode | null;
   onStart: () => void;
   onStop: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 export function AudioRecorder({
@@ -14,6 +16,8 @@ export function AudioRecorder({
   analyser,
   onStart,
   onStop,
+  disabled = false,
+  disabledReason,
 }: AudioRecorderProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -44,9 +48,13 @@ export function AudioRecorder({
           "flex items-center gap-2 px-8 py-3 rounded-xl font-headline font-bold transition-all",
           isRecording
             ? "bg-error-container text-on-error-container hover:opacity-90"
-            : "monolith-gradient text-white hover:scale-[0.98] shadow-xl"
+            : disabled
+              ? "bg-surface-container-high text-on-surface-variant cursor-not-allowed"
+              : "monolith-gradient text-white hover:scale-[0.98] shadow-xl"
         )}
         onClick={isRecording ? onStop : onStart}
+        disabled={!isRecording && disabled}
+        title={!isRecording ? disabledReason : undefined}
       >
         {isRecording ? (
           <>

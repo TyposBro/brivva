@@ -13,6 +13,13 @@ import { hostReducer, INITIAL_STATE } from "./reducer";
 import { createMessageHandler } from "./message-handler";
 import { useWebcam, type ClientMediaStats } from "./use-webcam";
 import { useVoiceClone } from "./use-voice-clone";
+import {
+  parseServerCapabilities,
+  readStoredMediaIngestMode,
+  resolveMediaIngestMode,
+  webCodecsRecordBlocker,
+} from "./media-ingest-mode";
+import { useWebCodecsVideoIngest } from "./use-webcodecs-video";
 
 export type { UtteranceTiming };
 export type { HostStatus, HostUtterance } from "./reducer";
@@ -46,22 +53,71 @@ export function useHostSession() {
     startWebcam,
     stopWebcam,
     flipCamera,
-    startFrameStreaming,
-    stopFrameStreaming,
+    startFrameStreaming: startFrameStreamingWebRtc,
+    stopFrameStreaming: stopFrameStreamingWebRtc,
     handleWebRtcMessage,
+    getVideoStream,
+    getVideoProfile,
   } = useWebcam(
     (msg) => socket.current.sendJson(msg),
     () => socket.current.isOpen,
     (stats) => {
       dispatch({
         type: "media_diagnostics",
-        diagnostics: toDiagnostics(stats),
+        diagnostics: toDiagnostics(
+          stats,
+          readStoredMediaIngestMode(),
+          resolveMediaIngestMode(readStoredMediaIngestMode()),
+        ),
       });
       sessionLog("debug", "frontend.media_stats", { stats });
     },
     (issue) => {
       dispatch({ type: "connection_issue", message: issue.message });
       sessionLog("warn", "frontend.webrtc_issue", { issue }, issue.message);
+    },
+  );
+
+  const {
+    startFrameStreaming: startFrameStreamingWebCodecs,
+    stopFrameStreaming: stopFrameStreamingWebCodecs,
+    handleWebCodecsMessage,
+  } = useWebCodecsVideoIngest(
+    (msg) => socket.current.sendJson(msg),
+    (data) => socket.current.sendBinary(data),
+    () => socket.current.isOpen,
+    () => socket.current.bufferedAmount,
+    (stats) => {
+      dispatch({
+        type: "media_diagnostics",
+        diagnostics: {
+          mediaIngest: {
+            requested: readStoredMediaIngestMode(),
+            resolved: "webcodecs_ws",
+            active: "webcodecs_ws",
+            codec: stats.codec,
+          },
+          webcodecs: stats,
+        },
+      });
+      sessionLog("debug", "frontend.webcodecs_stats", { stats });
+    },
+    (drop) => {
+      sessionLog(
+        "warn",
+        "frontend.webcodecs_video_drop",
+        {
+          reason: drop.reason,
+          dropped_frames: drop.droppedFrames,
+          buffered_amount: drop.bufferedAmount,
+          queue_ms: drop.queueMs,
+        },
+        "WebCodecs video dropped frames due to local backpressure",
+      );
+    },
+    (issue) => {
+      dispatch({ type: "connection_issue", message: issue.message });
+      sessionLog("warn", "frontend.webcodecs_issue", { issue }, issue.message);
     },
   );
 
@@ -103,7 +159,8 @@ export function useHostSession() {
 
   const stopRecording = () => {
     audio.current.stop();
-    stopFrameStreaming();
+    stopFrameStreamingWebRtc();
+    stopFrameStreamingWebCodecs();
     dispatch({ type: "recording_stopped" });
     sessionLog("info", "frontend.recording_stopped");
   };
@@ -142,8 +199,13 @@ export function useHostSession() {
         sessionId: opts.sessionId,
         userId: opts.userId,
       });
+      const requestedMediaIngestMode = readStoredMediaIngestMode();
       sessionLog("info", "frontend.session_connect_requested", {
         source_lang: opts.sourceLang ?? "en",
+      });
+      sessionLog("info", "frontend.media_ingest_mode_selected", {
+        requested: requestedMediaIngestMode,
+        resolved: resolveMediaIngestMode(requestedMediaIngestMode),
       });
     }
 
@@ -161,6 +223,16 @@ export function useHostSession() {
         sessionLog("info", "frontend.ws_open");
       },
       onMessage: (msg) => {
+        const capabilities = parseServerCapabilities(msg);
+        if (capabilities) {
+          dispatch({ type: "server_capabilities", capabilities });
+          sessionLog("info", "frontend.media_server_capabilities", {
+            videoIngestModes: capabilities.videoIngestModes,
+            webcodecsCodecs: capabilities.webcodecsCodecs,
+          });
+          return;
+        }
+        if (handleWebCodecsMessage(msg)) return;
         if (handleWebRtcMessage(msg)) return;
         handleMessage(msg);
       },
@@ -175,29 +247,60 @@ export function useHostSession() {
 
   const startRecording = async () => {
     if (!socket.current.isOpen) return;
+    const requestedMediaIngestMode = readStoredMediaIngestMode();
+    const mediaIngestMode = resolveMediaIngestMode(requestedMediaIngestMode);
+    const blocker = webCodecsRecordBlocker(
+      requestedMediaIngestMode,
+      state.mediaServerCapabilities,
+    );
+    if (blocker) {
+      dispatch({ type: "connection_issue", message: blocker });
+      sessionLog(
+        "warn",
+        "frontend.recording_start_blocked",
+        { requested: requestedMediaIngestMode, resolved: mediaIngestMode, reason: blocker },
+        blocker,
+      );
+      return;
+    }
+
     let analyser: AnalyserNode;
     try {
+      if (mediaIngestMode === "webcodecs_ws") {
+        await startFrameStreamingWebCodecs(getVideoStream(), getVideoProfile());
+      }
       analyser = await audio.current.start(
         (buf) => socket.current.sendAudio(buf),
         { timestampedAudio: appConfig().timestampedAudioEnabled },
       );
-      await startFrameStreaming();
+      if (mediaIngestMode === "webrtc") {
+        await startFrameStreamingWebRtc();
+      }
     } catch (e) {
       audio.current.stop();
-      stopFrameStreaming();
+      stopFrameStreamingWebRtc();
+      stopFrameStreamingWebCodecs();
       const message = e instanceof Error ? e.message : "Media start failed";
       dispatch({ type: "connection_issue", message });
       sessionLog(
         "warn",
         "frontend.recording_start_failed",
-        { error: message },
+        { error: message, requested: requestedMediaIngestMode, resolved: mediaIngestMode },
         message,
       );
       return;
     }
-    dispatch({ type: "recording_started", analyser });
-    sessionLog("info", "frontend.recording_started");
-    sessionLog("info", "frontend.video_uplink_started");
+    dispatch({
+      type: "recording_started",
+      analyser,
+      requestedMediaIngestMode,
+      mediaIngestMode,
+    });
+    sessionLog("info", "frontend.recording_started", {
+      requested_media_ingest_mode: requestedMediaIngestMode,
+      media_ingest_mode: mediaIngestMode,
+    });
+    sessionLog("info", "frontend.video_uplink_started", { mode: mediaIngestMode });
   };
 
   const closeSession = () => {
@@ -205,17 +308,28 @@ export function useHostSession() {
     socket.current.sendJson({ type: "host:end" });
     socket.current.close();
     stopRecording();
-    stopFrameStreaming();
+    stopFrameStreamingWebRtc();
+    stopFrameStreamingWebCodecs();
     stopWebcam();
     void flushSessionLogs();
     configureSessionLogger(null);
   };
+
+  const requestedMediaIngestMode = readStoredMediaIngestMode();
+  const resolvedMediaIngestMode = resolveMediaIngestMode(requestedMediaIngestMode);
+  const recordDisabledReason = webCodecsRecordBlocker(
+    requestedMediaIngestMode,
+    state.mediaServerCapabilities,
+  );
 
   return {
     ...state,
     timings,
     videoRef,
     facingMode,
+    requestedMediaIngestMode,
+    resolvedMediaIngestMode,
+    recordDisabledReason,
     connectSession,
     startRecording,
     stopRecording,
@@ -232,9 +346,19 @@ export function useHostSession() {
   };
 }
 
-function toDiagnostics(stats: ClientMediaStats) {
+function toDiagnostics(
+  stats: ClientMediaStats,
+  requested: ReturnType<typeof readStoredMediaIngestMode>,
+  resolved: ReturnType<typeof resolveMediaIngestMode>,
+) {
   const outbound = stats.outboundVideo ?? {};
   return {
+    mediaIngest: {
+      requested,
+      resolved,
+      active: resolved,
+      codec: typeof outbound.codec === "string" ? outbound.codec : undefined,
+    },
     source: {
       width: stats.sourceTrack?.width,
       height: stats.sourceTrack?.height,
@@ -258,6 +382,8 @@ function toDiagnostics(stats: ClientMediaStats) {
           ? outbound.framesSent
           : undefined,
       qualityLimitationReason: outbound.qualityLimitationReason,
+      codec: outbound.codec,
+      candidatePair: outbound.candidatePair,
     },
   };
 }

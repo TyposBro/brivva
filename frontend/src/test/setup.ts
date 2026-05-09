@@ -13,6 +13,7 @@ _setAppConfig({
   timestampedAudioEnabled: false,
   webRtcIceServers: null,
   webRtcTurnCredentialsEnabled: false,
+  webCodecsIngestEnabled: false,
 });
 
 afterEach(() => {

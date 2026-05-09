@@ -66,6 +66,9 @@ export function bootstrap(): void {
 		webRtcTurnCredentialsEnabled: envEnabledByDefault(
 			import.meta.env.VITE_WEBRTC_TURN_CREDENTIALS,
 		),
+		webCodecsIngestEnabled: envFlag(
+			import.meta.env.VITE_WEBCODECS_INGEST_ENABLED,
+		),
 	});
 
 	configureAuth({

@@ -11,6 +11,13 @@ vi.mock("../../../shared/auth/auth-store", () => ({
   ensureFreshToken: vi.fn(),
 }));
 
+class FakeStorage {
+  private store = new Map<string, string>();
+  getItem(k: string) { return this.store.get(k) ?? null; }
+  setItem(k: string, v: string) { this.store.set(k, String(v)); }
+  removeItem(k: string) { this.store.delete(k); }
+}
+
 type Callbacks = {
   onOpen?: () => void;
   onMessage: (m: unknown) => void;
@@ -28,6 +35,8 @@ type SockInst = {
   params: Record<string, string> | null;
   sent: unknown[];
   audio: ArrayBuffer[];
+  binary: ArrayBuffer[];
+  bufferedAmount: number;
   _open: boolean;
   fireOpen: () => void;
   fireMessage: (m: unknown) => void;
@@ -61,6 +70,8 @@ const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } =
       params: Record<string, string> | null = null;
       sent: unknown[] = [];
       audio: ArrayBuffer[] = [];
+      binary: ArrayBuffer[] = [];
+      bufferedAmount = 0;
       _open = false;
       constructor() {
         socketInstances.push(this);
@@ -88,6 +99,9 @@ const { pipelineInstances, socketInstances, FakePipeline, FakeSocket } =
       }
       sendAudio(b: ArrayBuffer) {
         this.audio.push(b);
+      }
+      sendBinary(b: ArrayBuffer) {
+        this.binary.push(b);
       }
       close() {
         this._open = false;
@@ -217,6 +231,7 @@ describe("useHostSession", () => {
     socketInstances.length = 0;
     mockedEnsureFreshToken.mockReset();
     mockedCloneSessionVoice.mockReset();
+    vi.stubGlobal("localStorage", new FakeStorage());
     installMedia();
   });
 

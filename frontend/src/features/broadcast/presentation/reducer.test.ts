@@ -112,9 +112,15 @@ describe("hostReducer", () => {
   describe("recording_started", () => {
     it("sets status=recording + analyser", () => {
       const a = mkAnalyser();
-      const next = hostReducer(INITIAL_STATE, { type: "recording_started", analyser: a });
+      const next = hostReducer(INITIAL_STATE, {
+        type: "recording_started",
+        analyser: a,
+        requestedMediaIngestMode: "auto",
+        mediaIngestMode: "webrtc",
+      });
       expect(next.status).toBe("recording");
       expect(next.analyser).toBe(a);
+      expect(next.activeMediaIngestMode).toBe("webrtc");
     });
   });
 
@@ -172,7 +178,7 @@ describe("hostReducer", () => {
         outbound: { frameWidth: 1280, frameHeight: 720, framesPerSecond: 30 },
       };
       const next = hostReducer(INITIAL_STATE, { type: "media_diagnostics", diagnostics });
-      expect(next.mediaDiagnostics).toBe(diagnostics);
+      expect(next.mediaDiagnostics).toEqual(diagnostics);
     });
 
     it("stores connection issue message", () => {
@@ -190,7 +196,12 @@ describe("hostReducer", () => {
       expect(s.status).toBe("voice_setup");
       s = hostReducer(s, { type: "skip_voice_setup" });
       expect(s.status).toBe("ready");
-      s = hostReducer(s, { type: "recording_started", analyser: mkAnalyser() });
+      s = hostReducer(s, {
+        type: "recording_started",
+        analyser: mkAnalyser(),
+        requestedMediaIngestMode: "auto",
+        mediaIngestMode: "webrtc",
+      });
       expect(s.status).toBe("recording");
       s = hostReducer(s, { type: "recording_stopped" });
       expect(s.status).toBe("ready");
