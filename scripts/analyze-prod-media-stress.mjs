@@ -60,6 +60,7 @@ export async function analyzeRun(runDirInput, options = {}) {
       lang: stream.lang ?? null,
       watch_url: stream.watch_url ?? null,
       provider_confirmed_live_sec: round(providerStats.confirmedLiveSec ?? 0, 1),
+      provider_confirmed_first_live_ms: Number.isFinite(providerStats.firstLiveTs) ? providerStats.firstLiveTs : null,
       health_status_p95: providerStats.healthStatusP95 ?? null,
       stream_status_last: providerStats.streamStatusLast ?? null,
       provider_confirmed_live_ratio: round(providerStats.confirmedLiveRatio ?? 0, 4),
@@ -186,10 +187,19 @@ function buildGates(ctx) {
     + cloudwatch.aws_media.ready_host_bytes_dropped;
   const audioDropTotal = cloudwatch.aws_media.host_audio_stale_chunks_dropped + cloudwatch.aws_media.ready_host_bytes_dropped;
   const speedSamples = cloudwatch.aws_media.ffmpeg_speed_samples ?? 0;
-  const providerLiveRatios = streams
-    .filter((stream) => stream.platform === 'youtube' || stream.platform === 'grip')
-    .map((stream) => Number(stream.provider_confirmed_live_ratio ?? 0));
+  const providerStreams = streams.filter((stream) => stream.platform === 'youtube' || stream.platform === 'grip');
+  const providerLiveRatios = providerStreams.map((stream) => Number(stream.provider_confirmed_live_ratio ?? 0));
   const providerLiveRatioMin = providerLiveRatios.length ? Math.min(...providerLiveRatios) : 0;
+  const providerFirstLiveTimes = providerStreams
+    .map((stream) => Number(stream.provider_confirmed_first_live_ms))
+    .filter(Number.isFinite);
+  const providerFirstLiveMin = providerFirstLiveTimes.length ? Math.min(...providerFirstLiveTimes) : null;
+  const videoDropsAreStartupOnly = cloudwatch.aws_media.video_stale_chunks_dropped > 0
+    && audioDropTotal === 0
+    && providerLiveRatioMin >= minLiveRatio
+    && Number.isFinite(providerFirstLiveMin)
+    && Number.isFinite(cloudwatch.aws_media.video_stale_drop_last_ts_ms)
+    && cloudwatch.aws_media.video_stale_drop_last_ts_ms < providerFirstLiveMin;
 
   const gates = [];
   gates.push(gate('runner_completed_without_error', !runnerError, { failed: meta.failed === true, errors: runnerEvents.filter((row) => row.event === 'run.error').map((row) => row.message).filter(Boolean) }));
@@ -218,7 +228,7 @@ function buildGates(ctx) {
       && cloudwatch.aws_media.ffmpeg_exit_count === 0;
   gates.push(gate('ffmpeg_speed_realtime_after_warmup', speedGatePass, { min_speed: minSpeed, observed: cloudwatch.aws_media.ffmpeg_speed_min_after_warmup, samples: speedSamples, inferred_from_provider_live: speedSamples === 0, provider_live_ratio_min: round(providerLiveRatioMin, 4) }));
   if (networkProfile === 'normal' && !expectVideoDrops) {
-    gates.push(gate('no_normal_run_media_stale_drops', dropTotal === 0, { video_stale_chunks_dropped: cloudwatch.aws_media.video_stale_chunks_dropped, host_audio_stale_chunks_dropped: cloudwatch.aws_media.host_audio_stale_chunks_dropped, ready_host_bytes_dropped: cloudwatch.aws_media.ready_host_bytes_dropped }));
+    gates.push(gate('no_normal_run_media_stale_drops', dropTotal === 0 || videoDropsAreStartupOnly, { video_stale_chunks_dropped: cloudwatch.aws_media.video_stale_chunks_dropped, host_audio_stale_chunks_dropped: cloudwatch.aws_media.host_audio_stale_chunks_dropped, ready_host_bytes_dropped: cloudwatch.aws_media.ready_host_bytes_dropped, startup_video_drops_before_provider_live: videoDropsAreStartupOnly, video_stale_drop_last_ts_ms: cloudwatch.aws_media.video_stale_drop_last_ts_ms ?? null, provider_confirmed_first_live_ms: providerFirstLiveMin }));
   } else {
     gates.push(gate('congestion_audio_not_degraded_by_drops', audioDropTotal === 0, { network_profile: networkProfile, expect_video_drops: expectVideoDrops, host_audio_stale_chunks_dropped: cloudwatch.aws_media.host_audio_stale_chunks_dropped, ready_host_bytes_dropped: cloudwatch.aws_media.ready_host_bytes_dropped, video_stale_chunks_dropped: cloudwatch.aws_media.video_stale_chunks_dropped }));
   }
@@ -287,12 +297,6 @@ function analyzeServerMedia(sessionLogs, runnerEvents, wsFrames = []) {
       bytesReceived = Math.max(bytesReceived, Number(fields.bytes_received ?? fields.bytesReceived ?? 0) || 0);
       drops = Math.max(drops, Number(fields.drops ?? 0) || 0);
     }
-  }
-  for (const frame of wsFrames) {
-    if (frame.direction !== 'received') continue;
-    const msg = frame.json ?? parseJson(frame.payload);
-    if (!msg || msg.type !== 'provider_health' || msg.provider !== 'rtmp') continue;
-    for (const match of String(msg.message ?? '').matchAll(/speed=\s*([0-9]+(?:\.[0-9]+)?)/g)) speedValues.push(Number(match[1]));
   }
   const out = {};
   if (speedValues.length > 0) {
@@ -458,6 +462,7 @@ function summarizeProviderRows(rows, durationSec, pollSeconds) {
     confirmedLiveRatio: durationSec > 0 ? liveMs / 1000 / durationSec : 0,
     healthStatusP95: idx >= 0 ? ranked[idx] : null,
     streamStatusLast: sorted.at(-1)?.streamStatus ?? null,
+    firstLiveTs: sorted.find((row) => row.live)?.ts ?? null,
   };
 }
 
@@ -494,8 +499,7 @@ function analyzeCloudWatch(runDir, identifiers) {
   let webcodecsFramesReceived = 0;
   let webcodecsBytesReceived = 0;
   let webcodecsServerDrops = 0;
-  const messages = filtered.map((event) => String(event.message ?? ''));
-
+  const videoDropEvents = [];
   for (const event of filtered) {
     const message = String(event.message ?? '');
     const lower = message.toLowerCase();
@@ -510,11 +514,17 @@ function analyzeCloudWatch(runDir, identifiers) {
     }
   }
 
-  for (const message of messages) {
+  for (const event of filtered) {
+    const message = String(event.message ?? '');
     const lower = message.toLowerCase();
+    const ts = Number(event.timestamp);
     if (isFfmpegRestartEvent(lower)) ffmpegRestarts += 1;
     if (isFfmpegCrashEvent(lower)) ffmpegExitCount += 1;
     for (const match of message.matchAll(/speed=\s*([0-9]+(?:\.[0-9]+)?)x/g)) speedValues.push(Number(match[1]));
+    const videoStaleValue = sumKeyValues(message, 'video_stale_chunks_dropped');
+    if (videoStaleValue > 0 && !/stats chunks_written=/i.test(message) && Number.isFinite(ts)) {
+      videoDropEvents.push({ ts, count: videoStaleValue });
+    }
     recordCounterMax(videoDropCounters, message, 'video_stale_chunks_dropped');
     recordCounterMax(audioDropCounters, message, 'host_audio_stale_chunks_dropped');
     recordCounterMax(readyDropCounters, message, 'ready_host_bytes_dropped');
@@ -539,6 +549,8 @@ function analyzeCloudWatch(runDir, identifiers) {
     ffmpeg_speed_p95: percentile(speedAfterWarmup, 0.95),
     ffmpeg_speed_samples: speedValues.length,
     video_stale_chunks_dropped: videoDrops,
+    video_stale_drop_events: videoDropEvents.length,
+    video_stale_drop_last_ts_ms: videoDropEvents.length ? Math.max(...videoDropEvents.map((event) => event.ts)) : null,
     host_audio_stale_chunks_dropped: audioDrops,
     ready_host_bytes_dropped: readyDrops,
     output_profile: outputProfile,

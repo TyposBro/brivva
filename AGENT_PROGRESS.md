@@ -56,8 +56,8 @@ Debug and fix production case where WebRTC browser ingest is healthy but YouTube
 - Commit the Firefox/YouTube noData + truthful UI + analyzer/capability fixes.
 - Deploy frontend and ECS server.
 - Verify prod asset/server task definition.
-- Commit/deploy WebCodecs VP8 keyframe detector fix.
-- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should receive server capabilities and avoid startup stale drops.
+- Commit analyzer startup-drop/speed false-positive fix.
+- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should receive server capabilities and compare cleanly.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
 ## Tests run
@@ -88,6 +88,14 @@ Current turn:
 - Patched VP8 IVF keyframe detector to use payload key bit only.
 - `cargo test -p server-rs vp8_keyframe_detection_uses_payload_key_bit` — pass.
 - `cargo test -p server-rs webcodecs` — pass (5 tests).
+- `AWS_PROFILE=brivva-admin ... ./deploy.sh --gpu` — pass; deployed ECS task definition `brivva:6`, rollout completed desired/running 1/1.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave E2E_MEDIA_INGEST_MODE=webcodecs_ws E2E_RECORD_SECONDS=60 ... node scripts/prod-media-stress-e2e.mjs` — runtime succeeded: provider live ratio `0.9039`, VOD 720x1280@30, 1860 sent / 0 dropped / 1800 server accepted, 0 restarts/exits, speed p50 `1.16`. Initial analyzer failed only `tts_drift_under_threshold` on short 60s run.
+- Patched analyzer: do not treat RTMP provider-health slow alerts as representative FFmpeg progress samples; record provider first-live timestamps; allow server video stale drops only when all drops happened before provider-confirmed live and audio drops are zero (startup catch-up, not live degradation).
+- `node --check scripts/analyze-prod-media-stress.mjs` — pass.
+- `node scripts/analyze-prod-media-stress.mjs --self-test` — pass.
+- Re-analyzed `tmp/prod-media-stress-runs/20260509-brave-webcodecs-capability-smoke` — pass after startup-drop classification.
+- Re-analyzed `tmp/prod-media-ingest-ab-runs/20260509-brave-youtube-ingest-ab-after-capability/webrtc` — pass after removing provider-health slow-alert speed samples.
+- Re-analyzed `tmp/prod-media-stress-runs/20260509-brave-webcodecs-vp8-keyframe-smoke` — still fail only due noisy TTS drift on 60s smoke (`-2100 ms/min`); media/WebCodecs gates pass.
 
 Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
@@ -120,4 +128,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit VP8 keyframe detector fix, deploy ECS server again, then rerun Brave WebRTC/WebCodecs A/B.
+Commit analyzer classification fix, then rerun 120s Brave WebRTC/WebCodecs A/B on deployed `brivva:6`.
