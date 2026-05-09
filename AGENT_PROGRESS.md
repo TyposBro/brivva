@@ -56,8 +56,8 @@ Debug and fix production case where WebRTC browser ingest is healthy but YouTube
 - Commit the Firefox/YouTube noData + truthful UI + analyzer/capability fixes.
 - Deploy frontend and ECS server.
 - Verify prod asset/server task definition.
-- Commit/deploy direct early capability frame fix.
-- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should now receive server capabilities.
+- Commit/deploy WebCodecs VP8 keyframe detector fix.
+- Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should receive server capabilities and avoid startup stale drops.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
 ## Tests run
@@ -82,6 +82,12 @@ Current turn:
 - Root cause likely capability frame still too late/channeled after bootstrap; patched server to send `server:capabilities` directly on the WebSocket immediately after accept, before bootstrap and before channel send task.
 - `cargo test -p server-rs session_ws::webcodecs::tests::parser_accepts_valid_btv1_frame` — pass.
 - `cargo test -p server-rs --test integration_app websocket_forwards_binary_and_text_without_panicking_before_host_end` — pass.
+- `AWS_PROFILE=brivva-admin ... ./deploy.sh --gpu` — pass; deployed ECS task definition `brivva:5`, rollout completed desired/running 1/1.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave E2E_MEDIA_INGEST_MODE=webcodecs_ws E2E_RECORD_SECONDS=45 E2E_STRICT_GATES=false ... node scripts/prod-media-stress-e2e.mjs` — WebCodecs capability fixed and stream reached YouTube live (provider live ratio `0.9682`, VOD 720x1280@30, 1530 sent / 0 dropped / 1500 server accepted, speed p50 `1.2`, 0 restarts/exits) but strict analyzer would still fail on 41 startup video stale drops.
+- Root cause for WebCodecs stale drops: VP8 IVF keyframe detection required the optional VP8 sync-code pattern even though WebCodecs chunks are complete frame boundaries and the durable keyframe signal is VP8 payload bit 0. This made the first WebCodecs keyframe look like a delta to the FFmpeg drain.
+- Patched VP8 IVF keyframe detector to use payload key bit only.
+- `cargo test -p server-rs vp8_keyframe_detection_uses_payload_key_bit` — pass.
+- `cargo test -p server-rs webcodecs` — pass (5 tests).
 
 Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
@@ -114,4 +120,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit early capability frame fix, deploy ECS server again, then rerun Brave WebRTC/WebCodecs A/B.
+Commit VP8 keyframe detector fix, deploy ECS server again, then rerun Brave WebRTC/WebCodecs A/B.

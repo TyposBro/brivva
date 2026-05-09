@@ -310,19 +310,17 @@ fn video_chunk_is_keyframe(packet: &[u8], input_codec: VideoInputCodec) -> bool 
 
 fn vp8_ivf_frame_is_keyframe(packet: &[u8]) -> bool {
     // IVF stream header is 32 bytes; per-frame header is 12 bytes. VP8
-    // keyframes have bit 0 clear in the first payload byte and carry the
-    // 0x9d012a sync code after the 3-byte frame tag. The sync-code check
-    // prevents corrupt/partial/inter frames from opening a fresh FFmpeg pipe
-    // after VP8 codec-switch restarts.
+    // keyframes have bit 0 clear in the first payload byte. WebCodecs VP8
+    // chunks are already complete frame boundaries, so the bit check is the
+    // durable signal; requiring the optional sync-code pattern made Chromium
+    // WebCodecs startup keyframes look like deltas and caused needless live
+    // startup drops before FFmpeg received its first frame.
     let offset = if packet.starts_with(b"DKIF") {
         32 + 12
     } else {
         12
     };
     packet.get(offset).is_some_and(|b| b & 0x01 == 0)
-        && packet
-            .get(offset + 3..offset + 6)
-            .is_some_and(|sync| sync == [0x9d, 0x01, 0x2a])
 }
 
 fn h264_annexb_contains_idr(packet: &[u8]) -> bool {
@@ -1015,14 +1013,14 @@ mod tests {
     }
 
     #[test]
-    fn vp8_keyframe_detection_requires_sync_code() {
+    fn vp8_keyframe_detection_uses_payload_key_bit() {
         let mut keyframe = vec![0; 12];
         keyframe.extend_from_slice(&[0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a]);
         assert!(vp8_ivf_frame_is_keyframe(&keyframe));
 
-        let mut false_positive = vec![0; 12];
-        false_positive.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x02, 0x03]);
-        assert!(!vp8_ivf_frame_is_keyframe(&false_positive));
+        let mut keyframe_without_sync_code = vec![0; 12];
+        keyframe_without_sync_code.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x02, 0x03]);
+        assert!(vp8_ivf_frame_is_keyframe(&keyframe_without_sync_code));
 
         let mut interframe = vec![0; 12];
         interframe.extend_from_slice(&[0x01, 0x00, 0x00, 0x9d, 0x01, 0x2a]);
