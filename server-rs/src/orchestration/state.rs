@@ -32,6 +32,7 @@ pub fn broadcast_state() -> BroadcastState {
         v2_shared_decode: cfg.v2_shared_decode,
         v2_gpu_workers: cfg.v2_gpu_workers,
         v2_encoded_fanout: cfg.v2_encoded_fanout,
+        webcodecs_ingest_enabled: cfg.webcodecs_ingest_enabled,
         video_encoder: cfg.video_encoder,
         video_max_width: cfg.video_max_width,
         video_max_height: cfg.video_max_height,

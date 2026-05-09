@@ -29,6 +29,7 @@ mod rtmp;
 mod teardown;
 mod timeline_shadow;
 mod timestamped_audio;
+mod webcodecs;
 mod webrtc;
 
 pub use active_voice_refresh::refresh_active_voice_once;
@@ -40,6 +41,7 @@ use eviction::evict_stale_live_sessions;
 use ids::next_available_live_session_id;
 use messages::{BinaryArgs, handle_binary, handle_text};
 use teardown::{TeardownArgs, teardown_session};
+use webcodecs::server_capabilities_message;
 
 /// WS entry. Accepts only authenticated hosts — no guests, no join codes.
 pub async fn session_ws_handler(
@@ -215,6 +217,27 @@ async fn handle_host(mut socket: HostSocket) {
         }
     });
 
+    if let Some(session) = live_sessions.get(&live_session_id) {
+        session.send_to_host(server_capabilities_message(
+            socket.state.webcodecs_ingest_enabled,
+        ));
+    }
+    session_log.info(
+        "server.capabilities",
+        serde_json::json!({
+            "videoIngestModes": if socket.state.webcodecs_ingest_enabled {
+                vec!["webrtc", "webcodecs_ws"]
+            } else {
+                vec!["webrtc"]
+            },
+            "webcodecsCodecs": if socket.state.webcodecs_ingest_enabled {
+                vec!["vp8"]
+            } else {
+                Vec::<&str>::new()
+            },
+        }),
+    );
+
     let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
     let mut last_audio_timeline_shadow_log_at: Option<Instant> = None;
     while let Some(Ok(msg)) = socket.receiver.next().await {
@@ -243,6 +266,7 @@ async fn handle_host(mut socket: HostSocket) {
                     &live_session_id,
                     &session_log,
                     timeline_shadow,
+                    socket.state.webcodecs_ingest_enabled,
                 )
                 .await;
             }

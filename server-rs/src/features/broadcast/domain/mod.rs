@@ -4,6 +4,7 @@ pub mod media_timeline;
 pub mod metrics;
 pub mod output_health;
 pub mod render_graph;
+pub mod video_ingest;
 
 use axum::extract::ws::Message;
 use dashmap::DashMap;
@@ -14,6 +15,9 @@ use tokio::sync::mpsc;
 use webrtc::peer_connection::RTCPeerConnection;
 
 pub use metrics::SessionMetrics;
+pub use video_ingest::{
+    EncodedVideoChunk, EncodedVideoCodec, VideoIngestKind, WebCodecsVideoIngestState,
+};
 
 // Fargate is host-only. There are no guest WebSockets — all translated
 // audio leaves the server via RTMP to streaming platforms. The WS exists
@@ -425,6 +429,10 @@ pub struct LiveSession {
     /// Host WebRTC peer carrying encoded camera video into Fargate. Stored so
     /// the peer connection remains alive until session teardown.
     pub webrtc_peer: Option<Arc<RTCPeerConnection>>,
+    /// Active camera ingest transport for conflict rejection and diagnostics.
+    pub video_ingest_kind: VideoIngestKind,
+    /// State for WebCodecs-over-WebSocket VP8 ingest.
+    pub webcodecs_video: Option<WebCodecsVideoIngestState>,
     /// Target languages being streamed via RTMP (one entry per configured stream).
     pub rtmp_langs: Vec<Lang>,
     /// Optional host-provided product/brand/offer terms for STT/translation context.
@@ -463,6 +471,8 @@ impl LiveSession {
             session_id,
             rtmp_manager: None,
             webrtc_peer: None,
+            video_ingest_kind: VideoIngestKind::None,
+            webcodecs_video: None,
             rtmp_langs: Vec::new(),
             translation_terms: Vec::new(),
             pipeline_config,

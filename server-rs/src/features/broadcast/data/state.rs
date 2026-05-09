@@ -43,6 +43,8 @@ pub struct BroadcastState {
     pub v2_gpu_workers: bool,
     /// V2 FFmpeg tee fanout. Off by default until Grip validation.
     pub v2_encoded_fanout: bool,
+    /// Experimental WebCodecs VP8-over-WebSocket ingest flag.
+    pub webcodecs_ingest_enabled: bool,
     /// FFmpeg video encoder backend for live outputs.
     pub video_encoder: VideoEncoderKind,
     pub video_max_width: u32,
@@ -73,6 +75,7 @@ impl BroadcastState {
             v2_shared_decode: false,
             v2_gpu_workers: false,
             v2_encoded_fanout: false,
+            webcodecs_ingest_enabled: false,
             video_encoder: VideoEncoderKind::X264,
             video_max_width: 1920,
             video_max_height: 1080,
@@ -113,6 +116,7 @@ mod tests {
         assert!(!s.v2_shared_decode);
         assert!(!s.v2_gpu_workers);
         assert!(!s.v2_encoded_fanout);
+        assert!(!s.webcodecs_ingest_enabled);
         assert_eq!(s.video_encoder, VideoEncoderKind::X264);
         assert_eq!(s.video_max_width, 1920);
         assert_eq!(s.video_max_height, 1080);

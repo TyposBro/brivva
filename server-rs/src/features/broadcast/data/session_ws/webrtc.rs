@@ -28,7 +28,7 @@ use webrtc::rtp_transceiver::rtp_codec::{
 };
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::features::broadcast::domain::LiveSessions;
+use crate::features::broadcast::domain::{LiveSessions, VideoIngestKind};
 
 use super::timeline_shadow::{VideoTimelineShadow, timeline_shadow_enabled};
 
@@ -52,10 +52,34 @@ pub(super) async fn handle_webrtc_offer(
     live_session_id: &str,
     timeline_shadow: bool,
 ) {
+    let active_kind = live_sessions
+        .get(live_session_id)
+        .map(|session| session.video_ingest_kind)
+        .unwrap_or(VideoIngestKind::None);
+    match active_kind {
+        VideoIngestKind::None => {}
+        VideoIngestKind::WebRtc => {
+            reject_webrtc(
+                live_sessions,
+                live_session_id,
+                "WebRTC video ingest is already active for this live session",
+            );
+            return;
+        }
+        VideoIngestKind::WebCodecsWs => {
+            reject_webrtc(
+                live_sessions,
+                live_session_id,
+                "WebCodecs video ingest is already active for this live session",
+            );
+            return;
+        }
+    }
     match accept_webrtc_video(offer, live_sessions, live_session_id, timeline_shadow).await {
         Ok(peer) => {
             if let Some(mut session) = live_sessions.get_mut(live_session_id) {
                 session.webrtc_peer = Some(peer);
+                session.video_ingest_kind = VideoIngestKind::WebRtc;
             }
         }
         Err(error) => {
@@ -64,18 +88,23 @@ pub(super) async fn handle_webrtc_offer(
                 error = %error,
                 "webrtc offer rejected"
             );
-            if let Some(session) = live_sessions.get(live_session_id) {
-                session.send_to_host(Message::Text(
-                    serde_json::json!({
-                        "type": "webrtc:error",
-                        "message": error.to_string(),
-                    })
-                    .to_string()
-                    .into(),
-                ));
-            }
+            reject_webrtc(live_sessions, live_session_id, &error.to_string());
         }
     }
+}
+
+fn reject_webrtc(live_sessions: &LiveSessions, live_session_id: &str, message: &str) {
+    if let Some(session) = live_sessions.get(live_session_id) {
+        session.send_to_host(Message::Text(
+            serde_json::json!({
+                "type": "webrtc:error",
+                "message": message,
+            })
+            .to_string()
+            .into(),
+        ));
+    }
+    tracing::warn!(live_session_id = %live_session_id, message, "webrtc offer rejected");
 }
 
 async fn accept_webrtc_video(
@@ -361,10 +390,9 @@ async fn forward_track_vp8_rtp(
         .get(&live_session_id)
         .and_then(|session| session.rtmp_manager.clone())
     {
-        manager
-            .lock()
-            .await
-            .switch_video_input_codec(crate::features::broadcast::data::ffmpeg::VideoInputCodec::Vp8Ivf);
+        manager.lock().await.switch_video_input_codec(
+            crate::features::broadcast::data::ffmpeg::VideoInputCodec::Vp8Ivf,
+        );
     }
     let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
     let mut depacketizer = Vp8IvfDepacketizer::default();
@@ -424,6 +452,14 @@ async fn forward_track_rtp(
     timeline_shadow: bool,
 ) {
     tracing::info!(live_session_id = %live_session_id, "webrtc H.264 video track started");
+    if let Some(manager) = live_sessions
+        .get(&live_session_id)
+        .and_then(|session| session.rtmp_manager.clone())
+    {
+        manager.lock().await.switch_video_input_codec(
+            crate::features::broadcast::data::ffmpeg::VideoInputCodec::H264AnnexB,
+        );
+    }
     let pli_task = spawn_periodic_pli(peer, track.ssrc(), live_session_id.clone());
     let mut depacketizer = H264AnnexBDepacketizer::default();
     let mut clock = VideoRtpClock::default();
@@ -1088,13 +1124,20 @@ mod tests {
     fn vp8_depacketizer_does_not_leak_descriptor_flags_between_packets() {
         let mut depacketizer = Vp8IvfDepacketizer::default();
         let first = Packet {
-            header: Header { marker: true, ..Default::default() },
+            header: Header {
+                marker: true,
+                ..Default::default()
+            },
             payload: vec![0x90, 0x80, 0x01, 0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
         };
         assert!(depacketizer.depacketize(&first).is_some());
 
         let second = Packet {
-            header: Header { marker: true, sequence_number: 1, ..Default::default() },
+            header: Header {
+                marker: true,
+                sequence_number: 1,
+                ..Default::default()
+            },
             payload: vec![0x10, 0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a].into(),
         };
         let out = depacketizer
@@ -1109,8 +1152,14 @@ mod tests {
         assert_eq!(&stream_header[0..4], b"DKIF");
         assert_eq!(&stream_header[8..12], b"VP80");
         let frame_header = ivf_frame_header(3, 7);
-        assert_eq!(u32::from_le_bytes(frame_header[0..4].try_into().unwrap()), 3);
-        assert_eq!(u64::from_le_bytes(frame_header[4..12].try_into().unwrap()), 7);
+        assert_eq!(
+            u32::from_le_bytes(frame_header[0..4].try_into().unwrap()),
+            3
+        );
+        assert_eq!(
+            u64::from_le_bytes(frame_header[4..12].try_into().unwrap()),
+            7
+        );
     }
 
     #[test]

@@ -13,6 +13,10 @@ use super::timeline_shadow::{
     timeline_shadow_log_due,
 };
 use super::timestamped_audio::{BinaryAudioPayload, decode_binary_audio};
+use super::webcodecs::{
+    WebCodecsStart, handle_webcodecs_binary, handle_webcodecs_start, handle_webcodecs_stop,
+    is_webcodecs_video_frame,
+};
 use super::webrtc::{WebRtcOffer, handle_webrtc_offer};
 
 pub(super) struct BinaryArgs<'a> {
@@ -41,6 +45,10 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         session_started_at,
         last_audio_timeline_shadow_log_at,
     } = args;
+    if is_webcodecs_video_frame(&data) {
+        handle_webcodecs_binary(&data, live_sessions, live_session_id, session_log);
+        return;
+    }
     let queue_was_initialized = audio_tx.is_some();
     let now = Instant::now();
     let decoded = decode_binary_audio(&data, timestamped_audio);
@@ -158,6 +166,7 @@ pub(super) async fn handle_text(
     live_session_id: &str,
     session_log: &SessionLogEmitter,
     timeline_shadow: bool,
+    webcodecs_ingest_enabled: bool,
 ) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
@@ -173,6 +182,26 @@ pub(super) async fn handle_text(
                 "invalid webrtc offer"
             ),
         },
+        Some("video:webcodecs_start") => match serde_json::from_value::<WebCodecsStart>(json) {
+            Ok(start) => {
+                handle_webcodecs_start(
+                    start,
+                    live_sessions,
+                    live_session_id,
+                    session_log,
+                    webcodecs_ingest_enabled,
+                )
+                .await
+            }
+            Err(error) => tracing::warn!(
+                live_session_id = %live_session_id,
+                error = %error,
+                "invalid webcodecs start"
+            ),
+        },
+        Some("video:webcodecs_stop") => {
+            handle_webcodecs_stop(live_sessions, live_session_id, session_log).await;
+        }
         Some("client:media_stats") => {
             let stats = json
                 .get("stats")
@@ -334,6 +363,42 @@ mod tests {
         ));
         assert!(alerts.contains(&"outbound below 30fps floor: 17.0fps".to_string()));
         assert!(alerts.contains(&"outbound quality limited: cpu".to_string()));
+    }
+
+    #[test]
+    fn webcodecs_binary_is_routed_before_audio_decoder() {
+        let live_sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
+        let mut audio_tx = None;
+        let mut last_audio_timeline_shadow_log_at = None;
+        let session_log = SessionLogEmitter::new(
+            false,
+            false,
+            Arc::new(crate::features::broadcast::data::workers_api::WorkersApi::new("", "")),
+            None,
+            "ROOM".into(),
+        );
+        let mut data = vec![0u8; 56];
+        data[0..4].copy_from_slice(b"BTV1");
+        data[4] = 1;
+        data[5] = 1;
+        data[6] = 1;
+        data[48..52].copy_from_slice(&4u32.to_le_bytes());
+        data[52..56].copy_from_slice(&[0, 0x9d, 0x01, 0x2a]);
+
+        handle_binary(BinaryArgs {
+            data,
+            live_sessions: &live_sessions,
+            live_session_id: "ROOM",
+            source_lang: &Lang::En,
+            audio_tx: &mut audio_tx,
+            session_log: &session_log,
+            timeline_shadow: false,
+            timestamped_audio: false,
+            session_started_at: Instant::now(),
+            last_audio_timeline_shadow_log_at: &mut last_audio_timeline_shadow_log_at,
+        });
+
+        assert!(audio_tx.is_none());
     }
 
     #[test]
