@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -820,7 +820,10 @@ function chromiumArgs(fakeDevice) {
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
-    '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
+    '--disable-web-security',
+    '--allow-running-insecure-content',
+    '--allow-insecure-localhost',
+    '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
     '--use-fake-ui-for-media-stream',
   ];
   if (fakeDevice) {
@@ -907,17 +910,59 @@ function writeInputMediaProbe(file, outDir) {
   }
 }
 
+function privateNetworkCorsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': 'Range, Content-Type, Access-Control-Request-Private-Network',
+    'Access-Control-Allow-Private-Network': 'true',
+  };
+}
+
+function createFixtureTlsOptions() {
+  const certDir = path.join(config.outDir, 'fixture-tls');
+  fs.mkdirSync(certDir, { recursive: true });
+  const key = path.join(certDir, 'key.pem');
+  const cert = path.join(certDir, 'cert.pem');
+  if (!fs.existsSync(key) || !fs.existsSync(cert)) {
+    execFileSync('openssl', [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-keyout',
+      key,
+      '-out',
+      cert,
+      '-sha256',
+      '-days',
+      '1',
+      '-subj',
+      '/CN=127.0.0.1',
+      '-addext',
+      'subjectAltName=IP:127.0.0.1,DNS:localhost',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  }
+  return { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
+}
+
 async function startFixtureServer(file) {
   const stat = fs.statSync(file);
   const contentType = contentTypeFor(file);
-  const server = http.createServer((req, res) => {
-    const url = new URL(req.url || '/', 'http://127.0.0.1');
+  const tls = createFixtureTlsOptions();
+  const server = https.createServer(tls, (req, res) => {
+    const url = new URL(req.url || '/', 'https://127.0.0.1');
     if (url.pathname !== '/fixture') {
       res.writeHead(404).end('not found');
       return;
     }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, privateNetworkCorsHeaders()).end();
+      return;
+    }
     const range = req.headers.range;
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    for (const [name, value] of Object.entries(privateNetworkCorsHeaders())) res.setHeader(name, value);
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', contentType);
@@ -929,14 +974,23 @@ async function startFixtureServer(file) {
         res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` }).end();
         return;
       }
+      const clampedEnd = Math.min(end, stat.size - 1);
       res.writeHead(206, {
-        'Content-Length': end - start + 1,
-        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+        'Content-Length': clampedEnd - start + 1,
+        'Content-Range': `bytes ${start}-${clampedEnd}/${stat.size}`,
       });
-      fs.createReadStream(file, { start, end }).pipe(res);
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      fs.createReadStream(file, { start, end: clampedEnd }).pipe(res);
       return;
     }
     res.writeHead(200, { 'Content-Length': stat.size });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     fs.createReadStream(file).pipe(res);
   });
   await new Promise((resolve, reject) => {
@@ -945,7 +999,7 @@ async function startFixtureServer(file) {
   });
   const address = server.address();
   return {
-    url: `http://127.0.0.1:${address.port}/fixture`,
+    url: `https://127.0.0.1:${address.port}/fixture`,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
