@@ -357,7 +357,7 @@ describe("useHostSession", () => {
     });
   });
 
-  it("startRecording without H.264 → stays ready and shows supported-device guidance", async () => {
+  it("startRecording with VP8-only capabilities → records and sends offer", async () => {
     Object.defineProperty(globalThis, "RTCRtpSender", {
       configurable: true,
       value: {
@@ -378,14 +378,15 @@ describe("useHostSession", () => {
       await result.current.startRecording();
     });
 
-    expect(result.current.status).toBe("ready");
-    expect(result.current.connectionIssue).toBe(
-      "Your browser/device can’t provide launch-safe H.264 video for live streaming. Please use desktop Chrome or Brave.",
-    );
-    expect(pipelineInstances[0].stopped).toBe(true);
-    expect(socketInstances[0].sent).not.toContainEqual(
-      expect.objectContaining({ type: "webrtc:offer" }),
-    );
+    expect(result.current.status).toBe("recording");
+    expect(result.current.connectionIssue).toBeNull();
+    expect(pipelineInstances[0].started).toBe(true);
+    expect(pipelineInstances[0].stopped).toBe(false);
+    expect(socketInstances[0].sent).toContainEqual({
+      type: "webrtc:offer",
+      sdp: "offer-sdp",
+      videoProfile: { width: 720, height: 1280, fps: 30 },
+    });
   });
 
   it("stopRecording → pipeline stop + status=ready", async () => {

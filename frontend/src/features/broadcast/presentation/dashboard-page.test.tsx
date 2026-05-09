@@ -202,14 +202,11 @@ describe("DashboardPage", () => {
     expect((selects[1] as HTMLSelectElement).value).toBe("ja");
   });
 
-  it("renders voice/source-lang mismatch banner when voice.source_lang !== sourceLang (sad)", async () => {
-    // Dashboard's `sourceLang` state defaults to "ko" (see state init). A
-    // voice enrolled in English means the clone would synthesize Korean
-    // with an English accent — Workers rejects with 400, the FE catches it
-    // upfront here.
-    getUser.mockResolvedValue(
-      fullUser({ active_voice_id: "v-en" }),
-    );
+  it("renders voice/source-lang mismatch banner once translation is needed (sad)", async () => {
+    // Dashboard's `sourceLang` state defaults to "ko". A voice enrolled in
+    // English only matters once the host adds a translated destination; pure
+    // setup/no-destination state should not block the page.
+    getUser.mockResolvedValue(fullUser({ active_voice_id: "v-en" }));
     listVoices.mockResolvedValue({
       voices: [
         {
@@ -231,6 +228,14 @@ describe("DashboardPage", () => {
         <DashboardPage />
       </MemoryRouter>,
     );
+
+    await screen.findByText("BRIVVA");
+    expect(screen.queryByTestId("voice-lang-mismatch-banner")).not.toBeInTheDocument();
+
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const u = userEvent.setup();
+    await u.click(await screen.findByRole("button", { name: /Add destination/i }));
+    await u.click(screen.getByRole("button", { name: /^TikTok$/i }));
 
     const banner = await screen.findByTestId("voice-lang-mismatch-banner");
     expect(banner).toBeInTheDocument();
@@ -356,7 +361,7 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("button", { name: /^Go Live$/i })).toBeEnabled();
   });
 
-  it("blocks Firefox host browser before Go Live", async () => {
+  it("warns Firefox hosts but lets runtime diagnostics decide", async () => {
     Object.defineProperty(navigator, "userAgent", {
       configurable: true,
       value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0",
@@ -378,10 +383,8 @@ describe("DashboardPage", () => {
     await u.click(await screen.findByRole("button", { name: /Add destination/i }));
     await u.click(screen.getByRole("button", { name: /^YouTube$/i }));
 
-    expect(screen.getByText(/Use Chrome or Brave to host live/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Use Chrome or Brave to go live/i }),
-    ).toBeDisabled();
+    expect(screen.getByText(/Firefox may prefer VP8/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Go Live$/i })).toBeEnabled();
   });
 
   it("recent sessions render in the list (happy)", async () => {
