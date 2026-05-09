@@ -1,55 +1,57 @@
-# Agent Progress — Prod E2E Media Automation Stress Test
+# Agent Progress — WebRTC vs WebCodecs Ingest A/B
 
 ## Goal
-Implement `docs/specs/todo/prod-e2e-automation-stress-test.md` end-to-end: production browser/media stress runner, analyzer, observability capture, objective artifacts, pass/fail summary, and keep the tree clean.
+Implement `docs/specs/todo/webcodecs-ingest-ab-spec.md` end-to-end: operator-selectable media ingest mode, WebCodecs VP8-over-WebSocket frontend + server ingest, FFmpeg VP8 IVF feed, diagnostics/logging, E2E override/analyzer support, and tests.
 
 ## Checklist
-- [x] Inspect existing prod YouTube E2E runner and API/UI contracts.
-- [x] Add `scripts/prod-media-stress-e2e.mjs` runner.
-- [x] Add cross-browser browser/media shim and Chromium fake-device fallback.
-- [x] Add multi-output YouTube watcher automation.
-- [x] Add provider-health/summary/usage polling artifacts.
-- [x] Add Cloudflare tail + AWS CloudWatch exporters with redaction.
-- [x] Add `scripts/analyze-prod-media-stress.mjs` analyzer producing `summary.json` + `verdict.md`.
-- [x] Add machine gates for provider live time, FFmpeg speed/restarts/drops, WebRTC failures, TTS delay/drift/overflow, Cloudflare/AWS errors.
-- [x] Add package/doc entrypoints.
-- [x] Update stale frontend tests for current Firefox/VP8/voice-mismatch behavior.
-- [x] Run syntax/self-tests/typechecks/tests.
-- [x] Commit stable logical chunks.
+- [x] Read spec and inspect current WebRTC/audio/RTMP/session UI paths.
+- [x] Add frontend media ingest mode types, localStorage persistence, capability detection, advanced setup UI, and live diagnostics.
+- [x] Add WebCodecs VP8 sender with BTV1 binary framing, start/stop JSON, backpressure/drop stats, and server capability handling.
+- [x] Add server feature flag/capabilities, video ingest state/conflict rules, BTV1 parser, WebCodecs start/stop handlers, VP8 IVF wrapping/feed to FFmpeg.
+- [x] Extend prod media stress E2E runner/analyzer for ingest mode matrix/metadata and comparison output.
+- [x] Add frontend/server tests for persistence, UI blocking, BTV1 layout/parser, routing/conflicts, IVF wrapping.
+- [x] Run full targeted tests, typechecks, and lint/format where available.
+- [x] Commit stable logical chunks and verify clean tree.
 
 ## Completed
-- Implemented production stress runner and analyzer.
-- Added package scripts:
-  - `bun run test:e2e:prod-media-stress`
-  - `bun run analyze:e2e:prod-media-stress -- <run-dir>`
+- Implemented advanced setup accordion with localStorage key `brivva:mediaIngestMode`.
+- Added frontend flag `VITE_WEBCODECS_INGEST_ENABLED` and server flag `BRIVVA_WEBCODECS_INGEST_ENABLED` (default off).
+- Added WebCodecs VP8 encoder sender over existing media WS using BTV1 binary frames.
+- Added WS `server:capabilities`, `video:webcodecs_start/ready/error/stop/stats` handling.
+- Added server BTV1 parser, WebCodecs VP8 IVF wrapping, video ingest state/conflict rejection, and FFmpeg codec switching.
+- Added live diagnostics for WebRTC/WebCodecs, WebRTC codec/ICE stats, WebCodecs WS/server stats.
+- Added E2E env override `E2E_MEDIA_INGEST_MODE` and analyzer A/B comparison mode.
 - Updated spec status/entrypoints.
-- Fixed stale frontend expectations:
-  - voice/source mismatch banner now only appears when translated output is needed;
-  - Firefox host path warns instead of hard-blocking;
-  - VP8-only WebRTC capability path records/sends offer instead of forcing H.264-only failure.
-- User requested committing everything and leaving no working-tree residue; staged all remaining changes including pre-existing deleted docs.
+- Found and fixed a DashMap reentrant-read deadlock in WebCodecs/WebRTC conflict rejection during tests.
+- Committed all work in three logical chunks.
 
 ## Remaining work
-- None.
+- None for code implementation. Production YouTube/Grip soak still pending because it requires explicit production run/credentials/destination time.
 
 ## Tests run
+- `bun run --cwd frontend typecheck` — pass.
+- `bun run --cwd frontend test src/features/broadcast/presentation/media-ingest-mode.test.ts src/features/broadcast/presentation/media-ingest-settings.test.tsx src/features/broadcast/presentation/webcodecs-frame.test.ts src/features/broadcast/presentation/reducer.test.ts src/features/broadcast/presentation/use-host-session.test.tsx src/features/broadcast/presentation/session-setup-page.test.tsx src/features/broadcast/presentation/broadcast-view.test.tsx` — pass (53 tests).
+- `cargo check -p server-rs` — pass.
+- `cargo test -p server-rs webcodecs -- --nocapture` — pass (5 tests; first run exposed DashMap reentrant deadlock, fixed and reran pass).
+- `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package ok')"` — pass.
 - `node --check scripts/analyze-prod-media-stress.mjs` — pass.
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass.
-- `node scripts/analyze-prod-media-stress.mjs --self-test` — pass.
-- `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package ok')"` — pass.
-- `bun run --cwd frontend test src/features/broadcast/presentation/dashboard-page.test.tsx src/features/broadcast/presentation/use-host-session.test.tsx` — pass (25 tests).
-- `bun run test:frontend` — pass (258 tests).
 - `bun run typecheck:frontend` — pass.
+- `bun run test:frontend` — pass (266 tests).
+- `cargo test -p server-rs` — pass (389 unit + integration suites; 2 ignored/manual-existing).
+- `node scripts/analyze-prod-media-stress.mjs --self-test` — pass.
+- `node scripts/analyze-prod-media-stress.mjs --compare /tmp/brivva-media-compare-self-test /tmp/brivva-prod-media-stress-analyzer-self-test /tmp/brivva-prod-media-stress-analyzer-self-test` — pass.
 - `bun run typecheck:workers` — pass.
 - `bun run test:workers` — pass (261 tests).
+- `git diff --check` — pass.
 
 ## Commits
-- `cbd89ca feat(e2e): add prod media stress harness`.
-- `f3f84cf test(frontend): align media compatibility specs`.
-- Pending cleanup commit for progress + pre-existing doc deletions.
+- `3a7efb8 feat(frontend): add media ingest selector`
+- `61a026b feat(server): ingest WebCodecs VP8 over WS`
+- `test(e2e): add media ingest A/B controls` (HEAD at completion)
 
 ## Blockers
 - None.
 
 ## Exact next action
-Commit all remaining changes with `git add -A`, verify clean working tree, final response.
+Final response with commits, files changed, tests, and remaining risks.

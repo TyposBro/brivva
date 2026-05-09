@@ -85,6 +85,7 @@ export async function analyzeRun(runDirInput, options = {}) {
     browser: meta.browser ?? meta.e2eBrowser ?? null,
     headless: boolOrNull(meta.headless),
     shape: meta.shape ?? meta.testShape ?? null,
+    media_ingest_mode: meta.mediaIngestMode ?? meta.media_ingest_mode ?? null,
     duration_sec: durationSec,
     session_id: sessionId,
     live_session_id: liveSessionId,
@@ -103,6 +104,26 @@ export async function analyzeRun(runDirInput, options = {}) {
     throw new Error(`prod media stress gates failed; see ${path.join(runDir, 'verdict.md')}`);
   }
   return summary;
+}
+
+export async function compareRuns(outDirInput, runDirInputs) {
+  if (!runDirInputs.length) throw new Error('compare requires at least one run dir');
+  const outDir = path.resolve(outDirInput);
+  fs.mkdirSync(outDir, { recursive: true });
+  const runs = [];
+  for (const runDir of runDirInputs) {
+    const summary = await analyzeRun(runDir);
+    runs.push(summary);
+  }
+  const comparison = {
+    result: runs.every((run) => run.result === 'pass') ? 'pass' : 'fail',
+    generated_at: new Date().toISOString(),
+    run_count: runs.length,
+    modes: runs.map(compareRow),
+  };
+  writeJson(path.join(outDir, 'summary.json'), comparison);
+  writeCompareVerdict(path.join(outDir, 'verdict.md'), comparison);
+  return comparison;
 }
 
 function buildGates(ctx) {
@@ -144,6 +165,10 @@ function buildGates(ctx) {
   gates.push(gate('ffmpeg_speed_realtime_after_warmup', speedSamples > 0 && cloudwatch.aws_media.ffmpeg_speed_min_after_warmup >= minSpeed, { min_speed: minSpeed, observed: cloudwatch.aws_media.ffmpeg_speed_min_after_warmup, samples: speedSamples }));
   gates.push(gate('no_normal_run_media_stale_drops', dropTotal === 0, { video_stale_chunks_dropped: cloudwatch.aws_media.video_stale_chunks_dropped, host_audio_stale_chunks_dropped: cloudwatch.aws_media.host_audio_stale_chunks_dropped, ready_host_bytes_dropped: cloudwatch.aws_media.ready_host_bytes_dropped }));
   gates.push(gate('webrtc_no_failed_or_closed_before_stop', frontend.webrtc_disconnects === 0, { webrtc_disconnects: frontend.webrtc_disconnects }));
+  if (String(meta.mediaIngestMode ?? meta.media_ingest_mode ?? '').toLowerCase() === 'webcodecs_ws') {
+    gates.push(gate('webcodecs_no_failed_or_blocked_start', frontend.webcodecs_failures === 0, { webcodecs_failures: frontend.webcodecs_failures }));
+    gates.push(gate('webcodecs_frames_reached_server', frontend.webcodecs_server_accepted_frames > 0, { server_accepted_frames: frontend.webcodecs_server_accepted_frames, sent_frames: frontend.webcodecs_sent_frames }));
+  }
   if (translatedShape) {
     gates.push(gate('tts_completion_ratio', tts.utterances_source > 0 && tts.completion_ratio >= minTtsCompletion, { min_ratio: minTtsCompletion, observed: tts.completion_ratio, source: tts.utterances_source, completed: tts.utterances_tts_completed }));
     gates.push(gate('tts_delay_observed', tts.delay_samples > 0, { delay_samples: tts.delay_samples }));
@@ -288,7 +313,7 @@ function analyzeCloudWatch(runDir, identifiers) {
 
 function filterCloudWatchEvents(events, identifiers) {
   const ids = [...identifiers].filter((id) => id && String(id).length >= 4).map(String);
-  const keyword = /ffmpeg|webrtc|provider_health|provider health|tts|soniox|elevenlabs|rtmp|video_stale|host_audio_stale|ready_host|output\.live|output\.publishing|streamStatus|healthStatus/i;
+  const keyword = /ffmpeg|webrtc|webcodecs|video_ingest|provider_health|provider health|tts|soniox|elevenlabs|rtmp|video_stale|host_audio_stale|ready_host|output\.live|output\.publishing|streamStatus|healthStatus/i;
   return events.filter((event) => {
     const message = String(event.message ?? '');
     if (!keyword.test(message)) return false;
@@ -348,12 +373,25 @@ function analyzeFrontend(runDir, sessionLogs) {
   const outboundHeights = [];
   const outboundFps = [];
   let disconnects = 0;
+  let webcodecsFailures = 0;
+  let webcodecsSentFrames = 0;
+  let webcodecsDroppedFrames = 0;
+  let webcodecsServerAcceptedFrames = 0;
+  const webcodecsBufferedBytes = [];
 
   for (const event of sessionLogs) {
     const eventName = String(event.event ?? '');
     if (eventName === 'frontend.webrtc_issue') disconnects += 1;
+    if (eventName === 'frontend.webcodecs_issue' || eventName === 'frontend.recording_start_blocked') webcodecsFailures += 1;
     if (eventName === 'frontend.ws_closed') continue;
     const stats = event?.fields?.stats;
+    const webcodecs = stats?.webcodecsVideo ?? event?.fields?.stats;
+    if (webcodecs && typeof webcodecs === 'object') {
+      webcodecsSentFrames = Math.max(webcodecsSentFrames, Number(webcodecs.sentFrames ?? 0) || 0);
+      webcodecsDroppedFrames = Math.max(webcodecsDroppedFrames, Number(webcodecs.droppedFrames ?? 0) || 0);
+      webcodecsServerAcceptedFrames = Math.max(webcodecsServerAcceptedFrames, Number(webcodecs.serverAcceptedFrames ?? 0) || 0);
+      pushNum(webcodecsBufferedBytes, webcodecs.wsBufferedBytes);
+    }
     if (!stats || typeof stats !== 'object') continue;
     pushNum(captureWidths, stats?.sourceTrack?.width);
     pushNum(captureHeights, stats?.sourceTrack?.height);
@@ -388,6 +426,11 @@ function analyzeFrontend(runDir, sessionLogs) {
     outbound_height: percentile(outboundHeights, 0.5),
     outbound_fps_p50: percentile(outboundFps, 0.5),
     webrtc_disconnects: disconnects,
+    webcodecs_failures: webcodecsFailures,
+    webcodecs_sent_frames: webcodecsSentFrames,
+    webcodecs_dropped_frames: webcodecsDroppedFrames,
+    webcodecs_server_accepted_frames: webcodecsServerAcceptedFrames,
+    webcodecs_ws_buffered_mb_p95: percentile(webcodecsBufferedBytes, 0.95) === null ? null : round(percentile(webcodecsBufferedBytes, 0.95) / 1024 / 1024, 3),
   };
 }
 
@@ -621,6 +664,30 @@ function writeNdjson(file, rows) {
   fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''));
 }
 
+function compareRow(run) {
+  const ratios = run.streams.map((stream) => stream.provider_confirmed_live_ratio ?? 0);
+  return {
+    run_id: run.run_id,
+    media_ingest_mode: run.media_ingest_mode ?? 'unknown',
+    browser: run.browser,
+    result: run.result,
+    provider_confirmed_live_ratio_min: ratios.length ? round(Math.min(...ratios), 4) : 0,
+    ffmpeg_speed_min_after_warmup: run.aws_media.ffmpeg_speed_min_after_warmup,
+    ffmpeg_speed_p50: run.aws_media.ffmpeg_speed_p50,
+    ffmpeg_restarts: run.aws_media.ffmpeg_restarts,
+    ffmpeg_exit_count: run.aws_media.ffmpeg_exit_count,
+    capture_fps_p50: run.frontend.capture_fps_p50,
+    outbound_fps_p50: run.frontend.outbound_fps_p50,
+    webcodecs_sent_frames: run.frontend.webcodecs_sent_frames,
+    webcodecs_dropped_frames: run.frontend.webcodecs_dropped_frames,
+    webcodecs_server_accepted_frames: run.frontend.webcodecs_server_accepted_frames,
+    tts_delay_ms_p95: run.tts.delay_ms_p95,
+    tts_drift_ms_per_min: run.tts.drift_ms_per_min,
+    failed_gates: run.gates.filter((gate) => !gate.pass).map((gate) => gate.name),
+    artifacts_dir: run.artifacts_dir,
+  };
+}
+
 function writeVerdict(file, summary) {
   const failed = summary.gates.filter((gate) => !gate.pass);
   const lines = [
@@ -629,6 +696,7 @@ function writeVerdict(file, summary) {
     `- Run: \`${summary.run_id}\``,
     `- Browser: ${summary.browser ?? 'unknown'} (${summary.headless ? 'headless' : 'headed'})`,
     `- Shape: ${summary.shape ?? 'unknown'}`,
+    `- Media ingest: ${summary.media_ingest_mode ?? 'unknown'}`,
     `- Session: ${summary.session_id ?? 'unknown'}`,
     `- Artifacts: \`${summary.artifacts_dir}\``,
     '',
@@ -642,6 +710,28 @@ function writeVerdict(file, summary) {
     for (const gate of failed) {
       lines.push(`### ${gate.name}`, '', '```json', JSON.stringify(gate.details, null, 2), '```', '');
     }
+  }
+  fs.writeFileSync(file, `${lines.join('\n')}\n`);
+}
+
+function writeCompareVerdict(file, comparison) {
+  const lines = [
+    `# Media Ingest A/B Verdict — ${comparison.result.toUpperCase()}`,
+    '',
+    `- Runs: ${comparison.run_count}`,
+    '',
+    '| Mode | Browser | Result | Live ratio min | FFmpeg speed min | Restarts | Capture FPS | Outbound FPS | WebCodecs sent/drop/server | TTS p95 |',
+    '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    ...comparison.modes.map((run) => `| ${run.media_ingest_mode} | ${run.browser ?? 'unknown'} | ${run.result} | ${run.provider_confirmed_live_ratio_min} | ${run.ffmpeg_speed_min_after_warmup ?? '?'} | ${run.ffmpeg_restarts ?? '?'} | ${run.capture_fps_p50 ?? '?'} | ${run.outbound_fps_p50 ?? '?'} | ${(run.webcodecs_sent_frames ?? 0)}/${(run.webcodecs_dropped_frames ?? 0)}/${(run.webcodecs_server_accepted_frames ?? 0)} | ${run.tts_delay_ms_p95 ?? '?'} |`),
+    '',
+  ];
+  const failed = comparison.modes.filter((run) => run.failed_gates.length > 0);
+  if (failed.length) {
+    lines.push('## Failed gates', '');
+    for (const run of failed) {
+      lines.push(`- ${run.media_ingest_mode} / ${run.run_id}: ${run.failed_gates.join(', ')}`);
+    }
+    lines.push('');
   }
   fs.writeFileSync(file, `${lines.join('\n')}\n`);
 }
@@ -660,6 +750,7 @@ async function runSelfTest() {
     browser: 'chromium',
     headless: true,
     shape: 'translated',
+    mediaIngestMode: 'webrtc',
     durationSec: 120,
     providerPollSeconds: 10,
     sourceLang: 'en',
@@ -708,12 +799,22 @@ if (DIRECT) {
   const arg = process.argv[2];
   if (arg === '--self-test') {
     await runSelfTest();
+  } else if (arg === '--compare') {
+    const outDir = process.argv[3];
+    const runDirs = process.argv.slice(4).filter((value) => value !== '--strict');
+    if (!outDir || runDirs.length === 0) {
+      console.error('usage: node scripts/analyze-prod-media-stress.mjs --compare <out-dir> <run-dir...> [--strict]');
+      process.exit(2);
+    }
+    const comparison = await compareRuns(outDir, runDirs);
+    console.log(JSON.stringify({ result: comparison.result, summary: path.join(path.resolve(outDir), 'summary.json') }));
+    if (comparison.result !== 'pass' && process.argv.includes('--strict')) process.exit(1);
   } else if (arg) {
     const summary = await analyzeRun(arg, { throwOnFail: process.argv.includes('--strict') });
     console.log(JSON.stringify({ result: summary.result, summary: path.join(path.resolve(arg), 'summary.json') }));
     if (summary.result !== 'pass' && process.argv.includes('--strict')) process.exit(1);
   } else {
-    console.error('usage: node scripts/analyze-prod-media-stress.mjs <run-dir> [--strict]\n       node scripts/analyze-prod-media-stress.mjs --self-test');
+    console.error('usage: node scripts/analyze-prod-media-stress.mjs <run-dir> [--strict]\n       node scripts/analyze-prod-media-stress.mjs --compare <out-dir> <run-dir...> [--strict]\n       node scripts/analyze-prod-media-stress.mjs --self-test');
     process.exit(2);
   }
 }

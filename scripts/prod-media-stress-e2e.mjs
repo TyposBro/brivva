@@ -212,7 +212,8 @@ function loadConfig(startMs) {
   const sourceLang = process.env.E2E_SOURCE_LANG || 'en';
   const targetLang = process.env.E2E_YOUTUBE_LANG || 'ko';
   const durationSec = number(process.env.E2E_RECORD_SECONDS, 1800);
-  const runId = `${formatRunDate(startMs)}-${browser}-${shape}`;
+  const mediaIngestMode = validateMediaIngestMode(process.env.E2E_MEDIA_INGEST_MODE || process.env.MEDIA_INGEST_MODE || 'auto');
+  const runId = `${formatRunDate(startMs)}-${browser}-${shape}-${mediaIngestMode}`;
   const artifactRoot = process.env.E2E_ARTIFACT_ROOT || path.join(ROOT, 'tmp', 'prod-media-stress-runs');
   const outDir = path.join(artifactRoot, runId);
   return {
@@ -230,6 +231,7 @@ function loadConfig(startMs) {
     headless,
     mediaFile: expandHome(process.env.E2E_MEDIA_FILE || path.join(os.homedir(), 'Desktop', 'text.mp4')),
     mediaMode: (process.env.E2E_MEDIA_MODE || (bool(process.env.E2E_MEDIA_SHIM, true) ? 'shim' : 'fake-device')).toLowerCase(),
+    mediaIngestMode,
     durationSec,
     providerPollSeconds: number(process.env.E2E_PROVIDER_POLL_SECONDS, 10),
     screenshotSeconds: number(process.env.E2E_SCREENSHOT_SECONDS, 30),
@@ -268,6 +270,7 @@ function publicMeta() {
     headless: config.headless,
     mediaFile: config.mediaFile,
     mediaMode: config.mediaMode,
+    mediaIngestMode: config.mediaIngestMode,
     durationSec: config.durationSec,
     providerPollSeconds: config.providerPollSeconds,
     screenshotSeconds: config.screenshotSeconds,
@@ -358,7 +361,10 @@ function classifyKind(stream, cfg) {
 async function openHostSession(host, sessionId, cfg) {
   await host.goto(`${cfg.frontend}/?user_id=${encodeURIComponent(cfg.userId)}#token=${encodeURIComponent(cfg.authToken)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await host.waitForURL(/\/dashboard\b/, { timeout: 30000 }).catch(() => {});
-  await host.evaluate(() => localStorage.setItem('brivva:sessionLogs', '1'));
+  await host.evaluate((mode) => {
+    localStorage.setItem('brivva:sessionLogs', '1');
+    localStorage.setItem('brivva:mediaIngestMode', mode);
+  }, cfg.mediaIngestMode);
   await host.goto(`${cfg.frontend}/session/${sessionId}/setup`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 }
 
@@ -999,6 +1005,12 @@ function bool(value, fallback = false) {
   if (typeof value === 'boolean') return value;
   if (value === undefined || value === null || value === '') return fallback;
   return !['0', 'false', 'no', 'off'].includes(String(value).toLowerCase());
+}
+
+function validateMediaIngestMode(value) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'webrtc', 'webcodecs_ws'].includes(mode)) return mode;
+  throw new Error(`unsupported E2E_MEDIA_INGEST_MODE=${value}; use auto, webrtc, or webcodecs_ws`);
 }
 
 function formatRunDate(ms) {

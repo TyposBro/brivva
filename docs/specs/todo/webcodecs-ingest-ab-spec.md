@@ -1,6 +1,6 @@
 # WebRTC vs WebCodecs Ingest A/B Spec
 
-Status: todo
+Status: implemented (code complete 2026-05-09; production soak pending)
 Owner: Brivva engineering
 Related:
 
@@ -736,6 +736,16 @@ Do not share one unbounded WebSocket queue for audio and video without measureme
 ```
 
 Phase 1 can use one socket for speed, but production promotion requires proving audio delay does not worsen under video congestion.
+
+## Implementation entrypoints
+
+- Frontend setting/storage: `frontend/src/features/broadcast/presentation/media-ingest-mode.ts`, `media-ingest-settings.tsx`.
+- Frontend WebCodecs VP8 sender + BTV1 framing: `use-webcodecs-video.ts`, `webcodecs-frame.ts`.
+- Server WebCodecs VP8 ingest + IVF wrapping: `server-rs/src/features/broadcast/data/session_ws/webcodecs.rs`.
+- Server generic video ingest domain state: `server-rs/src/features/broadcast/domain/video_ingest.rs`.
+- Feature flags: `VITE_WEBCODECS_INGEST_ENABLED`, `BRIVVA_WEBCODECS_INGEST_ENABLED` (both default off).
+- E2E override: `E2E_MEDIA_INGEST_MODE=auto|webrtc|webcodecs_ws bun run test:e2e:prod-media-stress`.
+- A/B comparison: `bun run compare:e2e:media-ingest -- <out-dir> <webrtc-run-dir> <webcodecs-run-dir>`.
 
 ## Done when
 
