@@ -138,7 +138,6 @@ async fn handle_host(mut socket: HostSocket) {
     let timestamped_audio = socket.state.v2_timestamped_audio;
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel::<Message>();
-    let host_tx_for_capabilities = host_tx.clone();
     let workers_api = Arc::new(WorkersApi::new(
         &socket.state.workers_api_url,
         &socket.state.internal_secret,
@@ -156,6 +155,23 @@ async fn handle_host(mut socket: HostSocket) {
             "source_lang": socket.source_lang.to_string(),
         }),
     );
+    let capabilities = serde_json::json!({
+        "videoIngestModes": if socket.state.webcodecs_ingest_enabled {
+            vec!["webrtc", "webcodecs_ws"]
+        } else {
+            vec!["webrtc"]
+        },
+        "webcodecsCodecs": if socket.state.webcodecs_ingest_enabled {
+            vec!["vp8"]
+        } else {
+            Vec::<&str>::new()
+        },
+    });
+    let _ = socket
+        .sender
+        .send(server_capabilities_message(socket.state.webcodecs_ingest_enabled))
+        .await;
+    session_log.info("server.capabilities", capabilities);
 
     let mut live_session = LiveSession::new(
         live_session_id.clone(),
@@ -228,25 +244,6 @@ async fn handle_host(mut socket: HostSocket) {
             }
         }
     });
-
-    let _ = host_tx_for_capabilities.send(server_capabilities_message(
-        socket.state.webcodecs_ingest_enabled,
-    ));
-    session_log.info(
-        "server.capabilities",
-        serde_json::json!({
-            "videoIngestModes": if socket.state.webcodecs_ingest_enabled {
-                vec!["webrtc", "webcodecs_ws"]
-            } else {
-                vec!["webrtc"]
-            },
-            "webcodecsCodecs": if socket.state.webcodecs_ingest_enabled {
-                vec!["vp8"]
-            } else {
-                Vec::<&str>::new()
-            },
-        }),
-    );
 
     let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
     let mut last_audio_timeline_shadow_log_at: Option<Instant> = None;

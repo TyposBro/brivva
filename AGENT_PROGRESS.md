@@ -56,6 +56,7 @@ Debug and fix production case where WebRTC browser ingest is healthy but YouTube
 - Commit the Firefox/YouTube noData + truthful UI + analyzer/capability fixes.
 - Deploy frontend and ECS server.
 - Verify prod asset/server task definition.
+- Commit/deploy direct early capability frame fix.
 - Rerun production YouTube Brave WebRTC/WebCodecs A/B; WebCodecs should now receive server capabilities.
 - Run Grip path only if local Grip credentials/API/watch evidence become available.
 
@@ -77,6 +78,10 @@ Current turn:
 - `AWS_PROFILE=brivva-admin E2E_BROWSER=firefox E2E_TEST_SHAPE=translated-pass E2E_MEDIA_INGEST_MODE=webrtc E2E_RECORD_SECONDS=120 ... node scripts/prod-media-stress-e2e.mjs` — runtime reached both YouTube streams live; initial analyzer falsely failed on `worker_exceptions` due pretty-printed `"exceptions": []` lines.
 - Patched analyzer to avoid counting empty Cloudflare `exceptions` arrays and to prefer fresh tail counts over stale summary counts.
 - `node scripts/analyze-prod-media-stress.mjs tmp/prod-media-stress-runs/20260509-firefox-translated-pass-webrtc-vp8-pw` — pass; both Firefox YouTube streams provider-confirmed live ratio `0.9333`, VODs 720x1280@30, 0 FFmpeg restarts/exits, 0 stale drops, TTS completion 64/64.
+- `AWS_PROFILE=brivva-admin E2E_BROWSER=brave ... bun run test:e2e:media-ingest-ab` — fail; artifact `tmp/prod-media-ingest-ab-runs/20260509-brave-youtube-ingest-ab-after-capability`. WebRTC leg reached live but WebCodecs leg still saw no WS frame/capability and record stayed disabled.
+- Root cause likely capability frame still too late/channeled after bootstrap; patched server to send `server:capabilities` directly on the WebSocket immediately after accept, before bootstrap and before channel send task.
+- `cargo test -p server-rs session_ws::webcodecs::tests::parser_accepts_valid_btv1_frame` — pass.
+- `cargo test -p server-rs --test integration_app websocket_forwards_binary_and_text_without_panicking_before_host_end` — pass.
 
 Earlier this task:
 - `node --check scripts/prod-media-stress-e2e.mjs` — pass
@@ -109,4 +114,4 @@ Previous automation commit:
 - Grip prod credentials cannot be fetched locally because `infisical run --env=prod` has no active Infisical session/login.
 
 ## Exact next action
-Commit analyzer false-positive fix and progress update, then rerun Brave WebRTC/WebCodecs A/B on deployed `brivva:4`.
+Commit early capability frame fix, deploy ECS server again, then rerun Brave WebRTC/WebCodecs A/B.
