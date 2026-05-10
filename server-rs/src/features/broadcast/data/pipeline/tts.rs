@@ -92,6 +92,25 @@ const TTS_EXPANSION_HARD_PREDICTED_MILLI: u32 = 2_200;
 const TTS_CONCISE_BACKLOG_MS: u64 = 5_000;
 const TTS_HARD_RECOVERY_BACKLOG_MS: u64 = 15_000;
 
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Text shortening/speed control is a quality tradeoff, not a correctness
+/// requirement. Default to natural translations and a FIFO TTS queue; operators
+/// can opt back into the old emergency concision path with this flag if a live
+/// incident prefers latency over translation fidelity.
+fn tts_concision_enabled() -> bool {
+    env_flag_enabled("BRIVVA_TTS_CONCISION_ENABLED")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TtsExpansionPolicy {
     Normal,
@@ -256,6 +275,31 @@ pub(crate) fn live_commerce_text_for_policy(
     policy: TtsExpansionPolicy,
 ) -> String {
     live_commerce_text_for_policy_with_budget(text, target_lang, policy, None)
+}
+
+fn tts_text_for_policy_with_mode(
+    text: &str,
+    target_lang: &Lang,
+    policy: TtsExpansionPolicy,
+    estimated_source_duration_ms: Option<u64>,
+    concision_enabled: bool,
+) -> String {
+    if !concision_enabled
+        || !matches!(
+            policy,
+            TtsExpansionPolicy::CatchUp
+                | TtsExpansionPolicy::Concise
+                | TtsExpansionPolicy::HardRecovery
+        )
+    {
+        return text.to_string();
+    }
+    live_commerce_text_for_policy_with_budget(
+        text,
+        target_lang,
+        policy,
+        estimated_source_duration_ms,
+    )
 }
 
 pub(crate) fn live_commerce_text_for_policy_with_budget(
@@ -544,44 +588,40 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
             estimated_source_duration_ms,
             initial_backlog_ms,
         );
-    let tts_speed = tts_speed_for_policy(initial_policy);
-    let tts_text = if matches!(
-        initial_policy,
-        TtsExpansionPolicy::CatchUp
-            | TtsExpansionPolicy::Concise
-            | TtsExpansionPolicy::HardRecovery
-    ) {
-        let concise = live_commerce_text_for_policy_with_budget(
-            &req.text,
-            &req.target_lang,
-            initial_policy,
-            Some(estimated_source_duration_ms),
-        );
-        if concise != req.text {
-            tracing::warn!(
-                live_session_id = %req.handle.id,
-                utterance_id = req.utterance_id,
-                target_lang = %req.target_lang,
-                backlog_ms = initial_backlog_ms,
-                estimated_source_duration_ms,
-                source_timing_method = ?source_timing.timing_method,
-                available_window_method = ?source_timing.available_window_method,
-                source_speech_duration_ms,
-                available_window_ms = ?source_timing.available_window_ms,
-                tts_budget_ms = estimated_source_duration_ms,
-                predicted_tts_duration_ms,
-                predicted_expansion_ratio_milli,
-                tts_speed,
-                original_chars = req.text.chars().count(),
-                concise_chars = concise.chars().count(),
-                policy = initial_policy.as_str(),
-                "tts concise live-commerce mode applied before synthesis"
-            );
-        }
-        concise
+    let concision_enabled = tts_concision_enabled();
+    let tts_speed = if concision_enabled {
+        tts_speed_for_policy(initial_policy)
     } else {
-        req.text.clone()
+        None
     };
+    let tts_text = tts_text_for_policy_with_mode(
+        &req.text,
+        &req.target_lang,
+        initial_policy,
+        Some(estimated_source_duration_ms),
+        concision_enabled,
+    );
+    if concision_enabled && tts_text != req.text {
+        tracing::warn!(
+            live_session_id = %req.handle.id,
+            utterance_id = req.utterance_id,
+            target_lang = %req.target_lang,
+            backlog_ms = initial_backlog_ms,
+            estimated_source_duration_ms,
+            source_timing_method = ?source_timing.timing_method,
+            available_window_method = ?source_timing.available_window_method,
+            source_speech_duration_ms,
+            available_window_ms = ?source_timing.available_window_ms,
+            tts_budget_ms = estimated_source_duration_ms,
+            predicted_tts_duration_ms,
+            predicted_expansion_ratio_milli,
+            tts_speed,
+            original_chars = req.text.chars().count(),
+            concise_chars = tts_text.chars().count(),
+            policy = initial_policy.as_str(),
+            "tts concise live-commerce mode applied before synthesis"
+        );
+    }
     let tts_deadline = compute_tts_deadline(&tts_text);
     // §0.5.4: operators reading logs need to distinguish "deadline too
     // tight" (scale bug) from "utterance dropped for another reason".
@@ -600,6 +640,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         tts_budget_ms = estimated_source_duration_ms,
         initial_backlog_ms,
         initial_policy = initial_policy.as_str(),
+        tts_concision_enabled = concision_enabled,
         predicted_tts_duration_ms,
         predicted_expansion_ratio_milli,
         tts_speed,
@@ -1093,7 +1134,12 @@ async fn push_tts_into_rtmp(args: PushTtsArgs<'_>) {
         Ok(pcm) => {
             let tts_duration_ms = (pcm.len() as u64).saturating_mul(1_000) / 88_200u64;
             let ratio = expansion_ratio_milli(tts_duration_ms, args.estimated_source_duration_ms);
-            let policy = classify_tts_expansion(ratio, args.initial_backlog_ms);
+            let observed_policy = classify_tts_expansion(ratio, args.initial_backlog_ms);
+            let policy = if tts_concision_enabled() {
+                observed_policy
+            } else {
+                TtsExpansionPolicy::Normal
+            };
             tracing::info!(
                 live_session_id = %req.handle.id,
                 utterance_id = req.utterance_id,
@@ -1104,6 +1150,7 @@ async fn push_tts_into_rtmp(args: PushTtsArgs<'_>) {
                 expansion_ratio_milli = ratio,
                 backlog_ms = args.initial_backlog_ms,
                 initial_policy = args.initial_policy.as_str(),
+                observed_pressure_policy = observed_policy.as_str(),
                 final_policy = policy.as_str(),
                 text_chars = args.tts_text.chars().count(),
                 "tts expansion measured"
@@ -1378,6 +1425,35 @@ mod tests {
         assert_eq!(policy, TtsExpansionPolicy::Concise);
         assert!(ratio.unwrap() > TTS_EXPANSION_CATCHUP_MILLI, "{ratio:?}");
         assert!(predicted_ms > source_ms);
+    }
+
+    #[test]
+    fn natural_queue_mode_keeps_full_text_even_when_policy_predicts_concision() {
+        let text = "皆さん本当にありがとうございます。こちらの商品は今日だけ29,000ウォンで、在庫は50個です。ぜひ今すぐ購入してください。";
+        let natural = tts_text_for_policy_with_mode(
+            text,
+            &Lang::Ja,
+            TtsExpansionPolicy::Concise,
+            Some(6_500),
+            false,
+        );
+
+        assert_eq!(natural, text);
+    }
+
+    #[test]
+    fn legacy_concision_can_still_be_opted_in() {
+        let text = "皆さん本当にありがとうございます。こちらの商品は今日だけ29,000ウォンで、在庫は50個です。ぜひ今すぐ購入してください。";
+        let concise = tts_text_for_policy_with_mode(
+            text,
+            &Lang::Ja,
+            TtsExpansionPolicy::Concise,
+            Some(6_500),
+            true,
+        );
+
+        assert!(concise.chars().count() < text.chars().count(), "{concise}");
+        assert!(concise.contains("29,000"));
     }
 
     #[test]

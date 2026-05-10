@@ -49,6 +49,25 @@ const TTS_CATCHUP_START_BYTES: usize = 88_200;
 const TTS_CATCHUP_STRONG_BYTES: usize = 3 * 88_200;
 const TTS_CATCHUP_CRITICAL_BYTES: usize = 5 * 88_200;
 
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Keep translated speech natural by default. The old catch-up path consumed
+/// >20 ms of TTS PCM per 20 ms output tick, which reduced latency but audibly
+/// squeezed speech. Operators can opt back in during an incident with
+/// BRIVVA_TTS_AUDIO_CATCHUP_ENABLED=1.
+fn tts_audio_catchup_enabled() -> bool {
+    env_flag_enabled("BRIVVA_TTS_AUDIO_CATCHUP_ENABLED")
+}
+
 pub(super) type TimedChunk = (Instant, Arc<[u8]>);
 
 // ── Video ─────────────────────────────────────────────────
@@ -747,6 +766,13 @@ fn commit_tts_drain(tts_queue: &StdMutex<VecDeque<TtsSegment>>, bytes: usize) {
 }
 
 fn tts_catchup_speed(backlog_bytes: usize) -> f32 {
+    tts_catchup_speed_with_mode(backlog_bytes, tts_audio_catchup_enabled())
+}
+
+fn tts_catchup_speed_with_mode(backlog_bytes: usize, catchup_enabled: bool) -> f32 {
+    if !catchup_enabled {
+        return 1.0;
+    }
     if backlog_bytes >= TTS_CATCHUP_CRITICAL_BYTES {
         1.3
     } else if backlog_bytes >= TTS_CATCHUP_STRONG_BYTES {
@@ -948,15 +974,35 @@ mod tests {
     }
 
     #[test]
-    fn tts_catchup_speed_reaches_emergency_rate_before_hard_recovery_backlog() {
+    fn tts_catchup_speed_defaults_to_natural_rate() {
         assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES - 1), 1.0);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES), 1.15);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_STRONG_BYTES), 1.3);
-        assert_eq!(tts_catchup_speed(TTS_CATCHUP_CRITICAL_BYTES), 1.3);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_START_BYTES), 1.0);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_STRONG_BYTES), 1.0);
+        assert_eq!(tts_catchup_speed(TTS_CATCHUP_CRITICAL_BYTES), 1.0);
     }
 
     #[test]
-    fn tts_catchup_consumes_whole_pcm_samples() {
+    fn tts_catchup_speed_can_be_opted_in_for_incident_recovery() {
+        assert_eq!(
+            tts_catchup_speed_with_mode(TTS_CATCHUP_START_BYTES - 1, true),
+            1.0
+        );
+        assert_eq!(
+            tts_catchup_speed_with_mode(TTS_CATCHUP_START_BYTES, true),
+            1.15
+        );
+        assert_eq!(
+            tts_catchup_speed_with_mode(TTS_CATCHUP_STRONG_BYTES, true),
+            1.3
+        );
+        assert_eq!(
+            tts_catchup_speed_with_mode(TTS_CATCHUP_CRITICAL_BYTES, true),
+            1.3
+        );
+    }
+
+    #[test]
+    fn tts_natural_queue_consumes_one_tick_even_when_backlogged() {
         let queue = tts_queue(vec![0u8; TTS_CATCHUP_STRONG_BYTES]);
         let out = build_tick_output(TickOutputArgs {
             host_chunk: vec![0u8; AUDIO_BYTES_PER_TICK],
@@ -965,7 +1011,7 @@ mod tests {
             tts_queue: &queue,
         });
         assert_eq!(out.tts_bytes_consumed % 2, 0);
-        assert_eq!(out.tts_bytes_consumed, 2_292);
+        assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
 
         commit_tts_drain(&queue, out.tts_bytes_consumed);
         assert_eq!(tts_queue_bytes(&queue.lock().unwrap()) % 2, 0);

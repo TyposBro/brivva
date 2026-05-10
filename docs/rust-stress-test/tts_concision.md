@@ -5,19 +5,30 @@ turning the translation layer into hand-tuned language hacks.
 
 ## Current Safety Net
 
-The server currently uses deterministic fallback concision only when translated
-audio is already at risk:
+As of 2026-05-10, production defaults to natural translated speech: send the
+Soniox translation to ElevenLabs unchanged, do not request ElevenLabs speed-up,
+and drain exactly one 20 ms TTS PCM tick per output tick. This favors voice
+quality over tight latency and lets translated speech play naturally in the
+queue.
+
+The old deterministic fallback concision path remains available only as an
+explicit incident lever:
+
+- `BRIVVA_TTS_CONCISION_ENABLED=1`: allow text shortening / TTS speed control.
+- `BRIVVA_TTS_AUDIO_CATCHUP_ENABLED=1`: allow faster-than-realtime PCM drain.
+
+When enabled, the legacy policies are:
 
 - `normal`: send Soniox translation to ElevenLabs unchanged.
-- `catch_up`: keep text unchanged and drain translated PCM faster.
+- `catch_up`: keep text unchanged and request mild TTS speed-up.
 - `concise`: shorten translated text before ElevenLabs.
 - `hard_recovery`: shorten more aggressively before ElevenLabs and rely on
   whole-segment queue drops only if the live cap is still exceeded.
 
-This is deliberately a safety net, not the desired primary translation style.
-It is cheap, local, testable, and preserves critical commerce markers better
-than dropping arbitrary PCM bytes. It is still hand-written logic and should not
-become the main quality layer.
+This is deliberately an emergency safety net, not the desired primary
+translation style. It is cheap, local, testable, and preserves critical commerce
+markers better than dropping arbitrary PCM bytes, but it is still hand-written
+logic and should not become the main quality layer.
 
 Important timing principle: translated TTS is a continuous live speech lane. It
 does not need to fit perfectly inside the exact original utterance duration.
@@ -26,7 +37,8 @@ has time to arrive. Current production default is `4000ms`, enforced by the
 Rust server through `BRIVVA_TRANSLATED_STREAM_DELAY_MS` with
 `BROADCAST_DELAY_MS` as a legacy fallback. Source/pass-through outputs stay at
 zero delay. If the queue still grows after this delay, prefer better chunking
-and concise translation over making the voice too fast to understand.
+and a longer natural queue first; use concise/speed controls only as an explicit
+incident tradeoff.
 
 The deterministic fallback does three things:
 

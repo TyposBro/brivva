@@ -225,7 +225,7 @@ fn live_commerce_translation_context(terms: &[String]) -> SonioxContext {
         },
         SonioxContextItem {
             key: "instructions".into(),
-            value: "Translate in concise spoken live-commerce style. Preserve prices, product names, stock counts, discounts, dates, and calls to action exactly. Avoid filler, repeated greetings, and excessive politeness.".into(),
+            value: "Translate in natural spoken live-commerce style. Preserve the host's meaning, tone, prices, product names, stock counts, discounts, dates, and calls to action exactly. Do not summarize or omit details.".into(),
         },
     ];
     if !terms.is_empty() {
@@ -335,8 +335,8 @@ mod tests {
             .iter()
             .find(|item| item.key == "instructions")
             .expect("has instructions");
-        assert!(instructions.value.contains("concise"));
-        assert!(instructions.value.contains("Preserve prices"));
+        assert!(instructions.value.contains("natural spoken"));
+        assert!(instructions.value.contains("Do not summarize"));
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
         let json = serde_json::to_string(&mode.build_config("k")).unwrap();
         assert!(json.contains("\"context\""), "serialized: {json}");
         assert!(json.contains("live commerce"), "serialized: {json}");
-        assert!(json.contains("concise spoken"), "serialized: {json}");
+        assert!(json.contains("natural spoken"), "serialized: {json}");
         assert!(
             json.contains("\"max_endpoint_delay_ms\":500"),
             "serialized: {json}"
