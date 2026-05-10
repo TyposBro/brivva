@@ -20,7 +20,10 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-use super::mixer::{apply_gain, mix_pcm_s16le};
+use super::mixer::{
+    DEFAULT_LIMITER_CEILING, LimitStats, MixStats, analyze_pcm_s16le, apply_gain, duck_gain,
+    limit_pcm_s16le, mix_pcm_s16le_with_stats,
+};
 use super::{TtsSegment, VideoInputCodec, tts_queue_bytes};
 use crate::features::broadcast::domain::SessionMetrics;
 
@@ -48,6 +51,8 @@ const MAX_AUDIO_FIFO_WRITE_BUDGET: Duration = Duration::from_millis(100);
 const TTS_CATCHUP_START_BYTES: usize = 88_200;
 const TTS_CATCHUP_STRONG_BYTES: usize = 3 * 88_200;
 const TTS_CATCHUP_CRITICAL_BYTES: usize = 5 * 88_200;
+const DEFAULT_AUDIO_DUCKING_DB: f32 = 6.0;
+const MAX_AUDIO_DUCKING_DB: f32 = 24.0;
 
 fn env_flag_enabled(name: &str) -> bool {
     matches!(
@@ -66,6 +71,29 @@ fn env_flag_enabled(name: &str) -> bool {
 /// BRIVVA_TTS_AUDIO_CATCHUP_ENABLED=1.
 fn tts_audio_catchup_enabled() -> bool {
     env_flag_enabled("BRIVVA_TTS_AUDIO_CATCHUP_ENABLED")
+}
+
+fn audio_limiter_enabled() -> bool {
+    !matches!(
+        std::env::var("BRIVVA_AUDIO_LIMITER_ENABLED")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn audio_ducking_enabled() -> bool {
+    env_flag_enabled("BRIVVA_AUDIO_DUCKING_ENABLED")
+}
+
+fn audio_ducking_db_from_env() -> f32 {
+    std::env::var("BRIVVA_AUDIO_DUCKING_DB")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(DEFAULT_AUDIO_DUCKING_DB)
+        .clamp(0.0, MAX_AUDIO_DUCKING_DB)
 }
 
 pub(super) type TimedChunk = (Instant, Arc<[u8]>);
@@ -372,6 +400,9 @@ pub(super) struct AudioDrainCtx {
     pub delay: Duration,
     pub is_source: bool,
     pub host_gain: f32,
+    pub lang: String,
+    pub destination_platform: String,
+    pub passthrough: bool,
     pub stop: Arc<AtomicBool>,
     /// Unix-ms wall clock updated after each successful FIFO write.
     pub last_write_ms: Arc<AtomicI64>,
@@ -387,6 +418,9 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
         delay,
         is_source,
         host_gain,
+        lang,
+        destination_platform,
+        passthrough,
         stop,
         last_write_ms,
         metrics,
@@ -409,15 +443,23 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
     let max_lag = audio_max_lag_from_env();
     let max_ready_ticks = audio_max_ready_ticks(max_lag);
     let fifo_write_budget = audio_fifo_write_budget_from_env();
+    let limiter_enabled = audio_limiter_enabled();
+    let ducking_enabled = audio_ducking_enabled();
+    let ducking_db = audio_ducking_db_from_env();
+    let mut quality_stats = AudioQualityStats::default();
 
     eprintln!(
-        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2}, max_lag_ms={}, fifo_write_budget_ms={})",
+        "[AUDIO:{}] drain started (20 ms, delay={}ms, source={}, host_gain={:.2}, max_lag_ms={}, fifo_write_budget_ms={}, limiter_enabled={}, limiter_ceiling={}, ducking_enabled={}, ducking_db={:.1})",
         stream_id,
         delay.as_millis(),
         is_source,
         host_gain,
         max_lag.as_millis(),
-        fifo_write_budget.as_millis()
+        fifo_write_budget.as_millis(),
+        limiter_enabled,
+        DEFAULT_LIMITER_CEILING,
+        ducking_enabled,
+        ducking_db
     );
 
     while !stop.load(Ordering::Acquire) {
@@ -431,7 +473,7 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             };
             let tts_playback_speed = tts_catchup_speed(tts_buffered_bytes);
             eprintln!(
-                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} tts_buffered_segments={} tts_playback_speed={:.2} tts_catchup_active={} fifo_would_blocks={} fifo_skipped_ticks={} host_audio_stale_chunks_dropped={} ready_host_bytes_dropped={}",
+                "[AUDIO:{}] stats ticks={} host_buffered_chunks={} ready_host_bytes={} tts_buffered_bytes={} tts_buffered_segments={} tts_playback_speed={:.2} tts_catchup_active={} fifo_would_blocks={} fifo_skipped_ticks={} host_audio_stale_chunks_dropped={} ready_host_bytes_dropped={} audio_peak_before_limiter={} audio_peak_after_limiter={} audio_limited_samples={} audio_clipped_samples_pre_limiter={} audio_ducked_ticks={} audio_ducking_db={:.1}",
                 stream_id,
                 tick_count,
                 host_buffered_chunks,
@@ -443,8 +485,31 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
                 fifo_would_blocks,
                 fifo_skipped_ticks,
                 host_stale_chunks_dropped,
-                ready_host_bytes_dropped
+                ready_host_bytes_dropped,
+                quality_stats.peak_before_limiter,
+                quality_stats.peak_after_limiter,
+                quality_stats.limited_samples,
+                quality_stats.clipped_samples_pre_limiter,
+                quality_stats.ducked_ticks,
+                ducking_db
             );
+            tracing::info!(
+                stream_id = %stream_id,
+                lang = %lang,
+                destination_platform = %destination_platform,
+                passthrough,
+                is_source,
+                audio_peak_before_limiter = quality_stats.peak_before_limiter,
+                audio_peak_after_limiter = quality_stats.peak_after_limiter,
+                audio_limited_samples = quality_stats.limited_samples,
+                audio_clipped_samples_pre_limiter = quality_stats.clipped_samples_pre_limiter,
+                audio_ducked_ticks = quality_stats.ducked_ticks,
+                audio_ducking_db = ducking_db,
+                limiter_enabled,
+                ducking_enabled,
+                "ffmpeg audio quality stats"
+            );
+            quality_stats = AudioQualityStats::default();
             last_stats = actual;
         }
 
@@ -480,7 +545,11 @@ pub(super) fn audio_drain_loop(ctx: AudioDrainCtx) {
             is_source,
             host_gain,
             tts_queue: &tts_queue,
+            limiter_enabled,
+            ducking_enabled,
+            ducking_db,
         });
+        quality_stats.record(&output);
 
         let bytes = if output.bytes.is_empty() {
             &silence_chunk
@@ -710,11 +779,47 @@ struct TickOutputArgs<'a> {
     is_source: bool,
     host_gain: f32,
     tts_queue: &'a StdMutex<VecDeque<TtsSegment>>,
+    limiter_enabled: bool,
+    ducking_enabled: bool,
+    ducking_db: f32,
 }
 
 struct TickOutput {
     bytes: Vec<u8>,
     tts_bytes_consumed: usize,
+    mix_stats: MixStats,
+    limit_stats: LimitStats,
+    pre_limiter_clipped_samples: usize,
+    ducked: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AudioQualityStats {
+    peak_before_limiter: i16,
+    peak_after_limiter: i16,
+    limited_samples: u64,
+    clipped_samples_pre_limiter: u64,
+    ducked_ticks: u64,
+}
+
+impl AudioQualityStats {
+    fn record(&mut self, output: &TickOutput) {
+        self.peak_before_limiter = self
+            .peak_before_limiter
+            .max(output.limit_stats.peak_before)
+            .max(output.mix_stats.peak_abs);
+        self.peak_after_limiter = self.peak_after_limiter.max(output.limit_stats.peak_after);
+        self.limited_samples = self
+            .limited_samples
+            .saturating_add(output.limit_stats.limited_samples as u64);
+        self.clipped_samples_pre_limiter = self
+            .clipped_samples_pre_limiter
+            .saturating_add(output.pre_limiter_clipped_samples as u64)
+            .saturating_add(output.mix_stats.clipped_samples as u64);
+        if output.ducked {
+            self.ducked_ticks = self.ducked_ticks.saturating_add(1);
+        }
+    }
 }
 
 fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
@@ -723,36 +828,79 @@ fn build_tick_output(args: TickOutputArgs<'_>) -> TickOutput {
         is_source,
         host_gain,
         tts_queue,
+        limiter_enabled,
+        ducking_enabled,
+        ducking_db,
     } = args;
     if is_source {
-        // Source streams never queue TTS — skip the mix entirely.
+        // Source streams never queue TTS — skip the mix and ducking entirely.
         let bytes = if (host_gain - 1.0).abs() < f32::EPSILON {
             host_chunk
         } else {
             apply_gain(&host_chunk, host_gain)
         };
-        TickOutput {
-            bytes,
-            tts_bytes_consumed: 0,
-        }
+        return finalize_tick_output(bytes, 0, MixStats::default(), false, limiter_enabled);
+    }
+
+    let (mut tts_padded, tts_bytes_consumed): (Vec<u8>, usize) = {
+        let q = tts_queue.lock().unwrap();
+        let backlog_bytes = tts_queue_bytes(&q);
+        let speed = tts_catchup_speed(backlog_bytes);
+        let consume = ((AUDIO_BYTES_PER_TICK as f32) * speed).round() as usize;
+        let consume = align_pcm_s16le_bytes(consume.max(AUDIO_BYTES_PER_TICK));
+        let raw = peek_tts_bytes(&q, consume);
+        let out = resample_pcm_s16le_mono_nearest(&raw, AUDIO_BYTES_PER_TICK);
+        (out, raw.len())
+    };
+    if tts_padded.len() < AUDIO_BYTES_PER_TICK {
+        tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
+    }
+    let tts_active = tts_padded.chunks_exact(2).any(|chunk| chunk != [0, 0]);
+    let ducked = ducking_enabled && tts_active;
+    let effective_host_gain = if ducking_enabled {
+        duck_gain(tts_active, host_gain, ducking_db)
     } else {
-        let (mut tts_padded, tts_bytes_consumed): (Vec<u8>, usize) = {
-            let q = tts_queue.lock().unwrap();
-            let backlog_bytes = tts_queue_bytes(&q);
-            let speed = tts_catchup_speed(backlog_bytes);
-            let consume = ((AUDIO_BYTES_PER_TICK as f32) * speed).round() as usize;
-            let consume = align_pcm_s16le_bytes(consume.max(AUDIO_BYTES_PER_TICK));
-            let raw = peek_tts_bytes(&q, consume);
-            let out = resample_pcm_s16le_mono_nearest(&raw, AUDIO_BYTES_PER_TICK);
-            (out, raw.len())
-        };
-        if tts_padded.len() < AUDIO_BYTES_PER_TICK {
-            tts_padded.resize(AUDIO_BYTES_PER_TICK, 0);
-        }
-        TickOutput {
-            bytes: mix_pcm_s16le(&host_chunk, host_gain, &tts_padded, 1.0),
-            tts_bytes_consumed,
-        }
+        host_gain
+    };
+    let (mixed, mix_stats) =
+        mix_pcm_s16le_with_stats(&host_chunk, effective_host_gain, &tts_padded, 1.0);
+    finalize_tick_output(
+        mixed,
+        tts_bytes_consumed,
+        mix_stats,
+        ducked,
+        limiter_enabled,
+    )
+}
+
+fn finalize_tick_output(
+    bytes: Vec<u8>,
+    tts_bytes_consumed: usize,
+    mix_stats: MixStats,
+    ducked: bool,
+    limiter_enabled: bool,
+) -> TickOutput {
+    let pre_limiter = analyze_pcm_s16le(&bytes, DEFAULT_LIMITER_CEILING);
+    let (bytes, limit_stats) = if limiter_enabled {
+        limit_pcm_s16le(&bytes, DEFAULT_LIMITER_CEILING)
+    } else {
+        (
+            bytes,
+            LimitStats {
+                samples: pre_limiter.samples,
+                limited_samples: 0,
+                peak_before: pre_limiter.peak_abs,
+                peak_after: pre_limiter.peak_abs,
+            },
+        )
+    };
+    TickOutput {
+        bytes,
+        tts_bytes_consumed,
+        mix_stats,
+        limit_stats,
+        pre_limiter_clipped_samples: pre_limiter.clipped_samples,
+        ducked,
     }
 }
 
@@ -911,6 +1059,9 @@ mod tests {
             is_source: true,
             host_gain: 1.0,
             tts_queue: &q,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
         assert_eq!(out.bytes, host);
         assert_eq!(out.tts_bytes_consumed, 0);
@@ -924,6 +1075,9 @@ mod tests {
             is_source: true,
             host_gain: 0.5,
             tts_queue: &q,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
         let sample = i16::from_le_bytes([out.bytes[0], out.bytes[1]]);
         assert_eq!(sample, 5_000);
@@ -942,6 +1096,9 @@ mod tests {
             is_source: false,
             host_gain: 0.2,
             tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
         // host 10_000 * 0.2 = 2_000; plus TTS 5_000 = 7_000.
         assert_eq!(i16::from_le_bytes([out.bytes[0], out.bytes[1]]), 7_000);
@@ -960,6 +1117,9 @@ mod tests {
             is_source: false,
             host_gain: 0.2,
             tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
         assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
         assert_eq!(
@@ -971,6 +1131,80 @@ mod tests {
             tts_queue_bytes(&queue.lock().unwrap()),
             AUDIO_BYTES_PER_TICK
         );
+    }
+
+    #[test]
+    fn build_tick_output_limits_target_mix_before_fifo_write() {
+        let queue = tts_queue(20_000_i16.to_le_bytes().to_vec());
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk: 20_000_i16.to_le_bytes().to_vec(),
+            is_source: false,
+            host_gain: 1.0,
+            tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
+        });
+
+        assert_eq!(
+            i16::from_le_bytes([out.bytes[0], out.bytes[1]]),
+            DEFAULT_LIMITER_CEILING
+        );
+        assert_eq!(out.limit_stats.limited_samples, 1);
+        assert!(out.pre_limiter_clipped_samples > 0);
+    }
+
+    #[test]
+    fn build_tick_output_ducks_host_only_when_tts_is_active() {
+        let queue = tts_queue(10_000_i16.to_le_bytes().to_vec());
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk: 10_000_i16.to_le_bytes().to_vec(),
+            is_source: false,
+            host_gain: 1.0,
+            tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: true,
+            ducking_db: 6.0,
+        });
+
+        let mixed = i16::from_le_bytes([out.bytes[0], out.bytes[1]]);
+        assert!((14_900..=15_100).contains(&mixed));
+        assert!(out.ducked);
+    }
+
+    #[test]
+    fn build_tick_output_does_not_duck_target_when_tts_is_silent() {
+        let queue = tts_queue(0_i16.to_le_bytes().to_vec());
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk: 10_000_i16.to_le_bytes().to_vec(),
+            is_source: false,
+            host_gain: 1.0,
+            tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: true,
+            ducking_db: 6.0,
+        });
+
+        assert_eq!(i16::from_le_bytes([out.bytes[0], out.bytes[1]]), 10_000);
+        assert!(!out.ducked);
+    }
+
+    #[test]
+    fn build_tick_output_source_stream_never_ducks_even_when_queue_has_tts() {
+        let queue = tts_queue(10_000_i16.to_le_bytes().to_vec());
+        let out = build_tick_output(TickOutputArgs {
+            host_chunk: 10_000_i16.to_le_bytes().to_vec(),
+            is_source: true,
+            host_gain: 1.0,
+            tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: true,
+            ducking_db: 24.0,
+        });
+
+        assert_eq!(i16::from_le_bytes([out.bytes[0], out.bytes[1]]), 10_000);
+        assert_eq!(out.tts_bytes_consumed, 0);
+        assert!(!out.ducked);
     }
 
     #[test]
@@ -1009,6 +1243,9 @@ mod tests {
             is_source: false,
             host_gain: 0.2,
             tts_queue: &queue,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
         assert_eq!(out.tts_bytes_consumed % 2, 0);
         assert_eq!(out.tts_bytes_consumed, AUDIO_BYTES_PER_TICK);
@@ -1029,6 +1266,9 @@ mod tests {
             is_source: false,
             host_gain: 0.2,
             tts_queue: &tts_queue,
+            limiter_enabled: true,
+            ducking_enabled: false,
+            ducking_db: DEFAULT_AUDIO_DUCKING_DB,
         });
 
         assert!(ready_host.is_empty());
@@ -1367,6 +1607,9 @@ mod tests {
             delay: Duration::from_millis(0),
             is_source: false,
             host_gain: 1.0,
+            lang: "ja".into(),
+            destination_platform: "test".into(),
+            passthrough: false,
             stop: Arc::new(AtomicBool::new(true)),
             last_write_ms: Arc::new(AtomicI64::new(0)),
             metrics: None,
@@ -1386,6 +1629,9 @@ mod tests {
             delay: Duration::from_millis(0),
             is_source: true,
             host_gain: 1.0,
+            lang: "en".into(),
+            destination_platform: "test".into(),
+            passthrough: true,
             stop: Arc::new(AtomicBool::new(false)),
             last_write_ms: Arc::new(AtomicI64::new(0)),
             metrics: None,
