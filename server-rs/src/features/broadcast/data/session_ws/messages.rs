@@ -12,7 +12,9 @@ use super::timeline_shadow::{
     AudioTimelineShadowSample, TimestampedAudioTimelineShadowSample, timeline_shadow_enabled,
     timeline_shadow_log_due,
 };
-use super::timestamped_audio::{BinaryAudioPayload, decode_binary_audio};
+use super::timestamped_audio::{
+    BinaryAudioPayload, HostAudioClockMapper, HostAudioClockMapping, decode_binary_audio,
+};
 use super::webcodecs::{
     WebCodecsStart, handle_webcodecs_binary, handle_webcodecs_start, handle_webcodecs_stop,
     is_webcodecs_video_frame,
@@ -28,6 +30,7 @@ pub(super) struct BinaryArgs<'a> {
     pub session_log: &'a SessionLogEmitter,
     pub timeline_shadow: bool,
     pub timestamped_audio: bool,
+    pub host_audio_clock: &'a mut HostAudioClockMapper,
     pub session_started_at: Instant,
     pub last_audio_timeline_shadow_log_at: &'a mut Option<Instant>,
 }
@@ -42,6 +45,7 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         session_log,
         timeline_shadow,
         timestamped_audio,
+        host_audio_clock,
         session_started_at,
         last_audio_timeline_shadow_log_at,
     } = args;
@@ -52,17 +56,30 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
     let queue_was_initialized = audio_tx.is_some();
     let now = Instant::now();
     let decoded = decode_binary_audio(&data, timestamped_audio);
-    let (pcm_data, timestamped_sample) = match decoded {
-        BinaryAudioPayload::RawPcm(pcm) => (pcm.to_vec(), None),
+    let (pcm_data, timestamped_sample, audio_clock_mapping) = match decoded {
+        BinaryAudioPayload::RawPcm(pcm) => (pcm.to_vec(), None, None),
         BinaryAudioPayload::TimestampedPcm(frame) => {
+            let media_pts = frame.media_pts();
+            let clock_mapping = host_audio_clock.map(media_pts, now);
+            if let Some(reason) = clock_mapping.resync_reason {
+                tracing::warn!(
+                    live_session_id = %live_session_id,
+                    audio_clock_source = "media_pts",
+                    audio_media_pts_us = clock_mapping.media_pts.as_micros(),
+                    audio_mapped_capture_age_ms = clock_mapping.mapped_capture_age.as_millis() as u64,
+                    audio_clock_resync_count = clock_mapping.resync_count,
+                    audio_clock_resync_reason = reason.as_str(),
+                    "timestamped host audio clock resynced"
+                );
+            }
             let sample = TimestampedAudioTimelineShadowSample::from_bridge(
                 frame.pcm.len(),
                 frame.sample_index,
                 frame.sample_rate,
                 frame.client_capture_time_us,
-                frame.media_pts(),
+                media_pts,
             );
-            (frame.pcm.to_vec(), Some(sample))
+            (frame.pcm.to_vec(), Some(sample), Some(clock_mapping))
         }
         BinaryAudioPayload::RejectedTimestamped(error) => {
             tracing::warn!(
@@ -77,18 +94,27 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         && timeline_shadow_log_due(last_audio_timeline_shadow_log_at, now)
     {
         let payload = timestamped_sample
-            .map(|sample| sample.to_log_payload())
+            .map(|sample| {
+                let mut payload = sample.to_log_payload();
+                if let Some(mapping) = audio_clock_mapping {
+                    enrich_audio_clock_payload(&mut payload, mapping);
+                }
+                payload
+            })
             .unwrap_or_else(|| {
-                AudioTimelineShadowSample::from_arrival(
+                let mut payload = AudioTimelineShadowSample::from_arrival(
                     pcm_data.len(),
                     queue_was_initialized,
                     session_started_at,
                     now,
                 )
-                .to_log_payload()
+                .to_log_payload();
+                payload["audio_clock_source"] = serde_json::json!("arrival");
+                payload
             });
         tracing::info!(
             live_session_id = %live_session_id,
+            audio_clock_source = payload.get("audio_clock_source").and_then(|v| v.as_str()).unwrap_or("unknown"),
             payload = %payload,
             "v2 timeline shadow audio"
         );
@@ -118,10 +144,28 @@ pub(super) fn handle_binary(args: BinaryArgs<'_>) {
         .get(live_session_id)
         .and_then(|r| r.rtmp_manager.clone());
     if let Some(mgr) = rtmp_mgr {
+        let rtmp_capture_at = audio_clock_mapping.map(|mapping| mapping.captured_at);
         tokio::spawn(async move {
-            mgr.lock().await.push_host_audio(&pcm_data);
+            let mgr = mgr.lock().await;
+            if let Some(captured_at) = rtmp_capture_at {
+                mgr.push_host_audio_at(&pcm_data, captured_at);
+            } else {
+                mgr.push_host_audio(&pcm_data);
+            }
         });
     }
+}
+
+fn enrich_audio_clock_payload(payload: &mut serde_json::Value, mapping: HostAudioClockMapping) {
+    payload["audio_clock_source"] = serde_json::json!("media_pts");
+    payload["audio_media_pts_us"] = serde_json::json!(mapping.media_pts.as_micros());
+    payload["audio_mapped_capture_age_ms"] =
+        serde_json::json!(mapping.mapped_capture_age.as_millis() as u64);
+    payload["audio_clock_resync_count"] = serde_json::json!(mapping.resync_count);
+    payload["audio_clock_resync_reason"] = mapping
+        .resync_reason
+        .map(|reason| serde_json::json!(reason.as_str()))
+        .unwrap_or(serde_json::Value::Null);
 }
 
 fn spawn_stt_pipeline(
@@ -369,6 +413,7 @@ mod tests {
     fn webcodecs_binary_is_routed_before_audio_decoder() {
         let live_sessions: LiveSessions = Arc::new(dashmap::DashMap::new());
         let mut audio_tx = None;
+        let mut host_audio_clock = HostAudioClockMapper::default();
         let mut last_audio_timeline_shadow_log_at = None;
         let session_log = SessionLogEmitter::new(
             false,
@@ -394,6 +439,7 @@ mod tests {
             session_log: &session_log,
             timeline_shadow: false,
             timestamped_audio: false,
+            host_audio_clock: &mut host_audio_clock,
             session_started_at: Instant::now(),
             last_audio_timeline_shadow_log_at: &mut last_audio_timeline_shadow_log_at,
         });

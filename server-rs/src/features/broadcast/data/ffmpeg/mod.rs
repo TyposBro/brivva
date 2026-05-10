@@ -763,15 +763,21 @@ impl RtmpManager {
 
     /// Push raw host PCM (s16le 44.1 kHz mono) into every stream's delay buffer.
     pub fn push_host_audio(&self, pcm: &[u8]) {
+        self.push_host_audio_at(pcm, Instant::now());
+    }
+
+    /// Push raw host PCM using the source media clock, not wall-clock arrival.
+    /// Timestamped WebSocket audio can arrive with jitter; using the browser
+    /// sample clock keeps RTMP delay buffers paced by capture cadence.
+    pub fn push_host_audio_at(&self, pcm: &[u8], captured_at: Instant) {
         let even_len = align_pcm_s16le_len(pcm.len());
         if even_len == 0 {
             return;
         }
-        let now = Instant::now();
         let shared_pcm: Arc<[u8]> = Arc::from(&pcm[..even_len]);
         for stream in self.streams.values() {
             let mut buf = stream.buffers.audio.lock().unwrap();
-            buf.push_back((now, shared_pcm.clone()));
+            buf.push_back((captured_at, shared_pcm.clone()));
             // Cap total bytes across queued chunks.
             let mut total: usize = buf.iter().map(|(_, b)| b.len()).sum();
             while total > HOST_AUDIO_CAP_BYTES {

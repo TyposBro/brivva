@@ -68,6 +68,46 @@ fn push_host_audio_on_empty_manager_is_a_noop() {
 }
 
 #[test]
+fn push_host_audio_at_uses_supplied_media_clock_time() {
+    let mut m = RtmpManager::new();
+    m.streams.insert(
+        "fake".into(),
+        fake_exited_stream("fake_audio_at", "ja", false),
+    );
+    let base = Instant::now();
+
+    m.push_host_audio_at(&[1, 0, 2, 0], base);
+    m.push_host_audio_at(&[3, 0, 4, 0], base + Duration::from_millis(20));
+
+    let stream = m.streams.get("fake").expect("fake stream exists");
+    let audio = stream.buffers.audio.lock().unwrap();
+    assert_eq!(audio.len(), 2);
+    assert_eq!(audio[0].0, base);
+    assert_eq!(
+        audio[1].0.duration_since(audio[0].0),
+        Duration::from_millis(20)
+    );
+}
+
+#[test]
+fn push_host_audio_at_preserves_raw_pcm_fallback_trimming() {
+    let mut m = RtmpManager::new();
+    m.streams.insert(
+        "fake".into(),
+        fake_exited_stream("fake_audio_trim", "ja", false),
+    );
+    let captured_at = Instant::now();
+
+    m.push_host_audio_at(&[1, 0, 2], captured_at);
+
+    let stream = m.streams.get("fake").expect("fake stream exists");
+    let audio = stream.buffers.audio.lock().unwrap();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0].0, captured_at);
+    assert_eq!(&*audio[0].1, &[1, 0]);
+}
+
+#[test]
 fn push_tts_bumps_metrics_even_when_no_stream_matches_lang() {
     let mut m = RtmpManager::new();
     let metrics = SessionMetrics::new();

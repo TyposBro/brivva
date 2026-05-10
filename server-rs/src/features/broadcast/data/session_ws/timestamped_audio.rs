@@ -1,4 +1,11 @@
+use std::time::{Duration, Instant};
+
 use crate::features::broadcast::domain::media_timeline::MediaTime;
+
+const BACKWARD_TIMESTAMP_TOLERANCE: Duration = Duration::from_millis(100);
+const FUTURE_CAPTURE_TOLERANCE: Duration = Duration::from_secs(1);
+const STALE_CAPTURE_TOLERANCE: Duration = Duration::from_secs(2);
+const LARGE_MEDIA_GAP_TOLERANCE: Duration = Duration::from_secs(2);
 
 const MAGIC: &[u8; 4] = b"BTA2";
 const VERSION: u8 = 1;
@@ -30,6 +37,118 @@ pub(super) enum TimestampedPcmParseError {
     InvalidSampleRate(u32),
     EmptyPcm,
     OddPcmLength,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostAudioClockResyncReason {
+    BackwardJump,
+    LargeMediaGap,
+    MappedTooFarFuture,
+    MappedTooStale,
+}
+
+impl HostAudioClockResyncReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BackwardJump => "backward_jump",
+            Self::LargeMediaGap => "large_media_gap",
+            Self::MappedTooFarFuture => "mapped_too_far_future",
+            Self::MappedTooStale => "mapped_too_stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HostAudioClockMapping {
+    pub captured_at: Instant,
+    pub media_pts: MediaTime,
+    pub mapped_capture_age: Duration,
+    pub resync_count: u64,
+    pub resync_reason: Option<HostAudioClockResyncReason>,
+}
+
+/// Maps browser audio media PTS (`BTA2` sample index/sample rate) onto server
+/// `Instant`s used by the existing RTMP delay buffers. Arrival time only
+/// anchors or resyncs the clock; steady-state cadence comes from media PTS.
+#[derive(Debug, Default, Clone)]
+pub(super) struct HostAudioClockMapper {
+    base_media_pts: Option<MediaTime>,
+    base_server_instant: Option<Instant>,
+    last_media_pts: Option<MediaTime>,
+    resync_count: u64,
+}
+
+impl HostAudioClockMapper {
+    pub fn map(&mut self, media_pts: MediaTime, now: Instant) -> HostAudioClockMapping {
+        if self.base_media_pts.is_none() || self.base_server_instant.is_none() {
+            self.anchor(media_pts, now);
+            return self.mapping(media_pts, now, now, None);
+        }
+
+        if let Some(last) = self.last_media_pts {
+            if media_pts < last
+                && last.saturating_duration_since(media_pts) > BACKWARD_TIMESTAMP_TOLERANCE
+            {
+                return self.resync(media_pts, now, HostAudioClockResyncReason::BackwardJump);
+            }
+            if media_pts.saturating_duration_since(last) > LARGE_MEDIA_GAP_TOLERANCE {
+                return self.resync(media_pts, now, HostAudioClockResyncReason::LargeMediaGap);
+            }
+        }
+
+        let base_media_pts = self.base_media_pts.expect("checked above");
+        let base_server_instant = self.base_server_instant.expect("checked above");
+        let captured_at = base_server_instant
+            .checked_add(media_pts.saturating_duration_since(base_media_pts))
+            .unwrap_or(now);
+
+        if captured_at > now && captured_at.duration_since(now) > FUTURE_CAPTURE_TOLERANCE {
+            return self.resync(
+                media_pts,
+                now,
+                HostAudioClockResyncReason::MappedTooFarFuture,
+            );
+        }
+        if now > captured_at && now.duration_since(captured_at) > STALE_CAPTURE_TOLERANCE {
+            return self.resync(media_pts, now, HostAudioClockResyncReason::MappedTooStale);
+        }
+
+        self.last_media_pts = Some(media_pts);
+        self.mapping(media_pts, captured_at, now, None)
+    }
+
+    fn anchor(&mut self, media_pts: MediaTime, now: Instant) {
+        self.base_media_pts = Some(media_pts);
+        self.base_server_instant = Some(now);
+        self.last_media_pts = Some(media_pts);
+    }
+
+    fn resync(
+        &mut self,
+        media_pts: MediaTime,
+        now: Instant,
+        reason: HostAudioClockResyncReason,
+    ) -> HostAudioClockMapping {
+        self.resync_count = self.resync_count.saturating_add(1);
+        self.anchor(media_pts, now);
+        self.mapping(media_pts, now, now, Some(reason))
+    }
+
+    fn mapping(
+        &self,
+        media_pts: MediaTime,
+        captured_at: Instant,
+        now: Instant,
+        resync_reason: Option<HostAudioClockResyncReason>,
+    ) -> HostAudioClockMapping {
+        HostAudioClockMapping {
+            captured_at,
+            media_pts,
+            mapped_capture_age: now.saturating_duration_since(captured_at),
+            resync_count: self.resync_count,
+            resync_reason,
+        }
+    }
 }
 
 impl<'a> TimestampedPcmFrame<'a> {
@@ -199,6 +318,114 @@ mod tests {
         assert_eq!(
             parse_timestamped_pcm(&frame(0, 44_100, 0, &[1])).unwrap_err(),
             TimestampedPcmParseError::OddPcmLength
+        );
+    }
+
+    #[test]
+    fn host_audio_clock_maps_media_pts_independent_of_arrival_jitter() {
+        let mut mapper = HostAudioClockMapper::default();
+        let now = Instant::now();
+
+        let first = mapper.map(MediaTime::from_micros(1_000_000), now);
+        let second = mapper.map(
+            MediaTime::from_micros(1_020_000),
+            now + Duration::from_millis(80),
+        );
+        let third = mapper.map(
+            MediaTime::from_micros(1_040_000),
+            now + Duration::from_millis(10),
+        );
+
+        assert_eq!(first.captured_at, now);
+        assert_eq!(
+            second.captured_at.duration_since(first.captured_at),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            third.captured_at.duration_since(second.captured_at),
+            Duration::from_millis(20)
+        );
+        assert_eq!(third.resync_count, 0);
+        assert_eq!(third.resync_reason, None);
+    }
+
+    #[test]
+    fn host_audio_clock_resyncs_on_large_backward_jump() {
+        let mut mapper = HostAudioClockMapper::default();
+        let now = Instant::now();
+
+        mapper.map(MediaTime::from_micros(1_000_000), now);
+        mapper.map(
+            MediaTime::from_micros(1_040_000),
+            now + Duration::from_millis(40),
+        );
+        let reset = mapper.map(
+            MediaTime::from_micros(100_000),
+            now + Duration::from_millis(60),
+        );
+
+        assert_eq!(reset.captured_at, now + Duration::from_millis(60));
+        assert_eq!(reset.resync_count, 1);
+        assert_eq!(
+            reset.resync_reason,
+            Some(HostAudioClockResyncReason::BackwardJump)
+        );
+    }
+
+    #[test]
+    fn host_audio_clock_resyncs_on_large_forward_gap() {
+        let mut mapper = HostAudioClockMapper::default();
+        let now = Instant::now();
+
+        mapper.map(MediaTime::from_micros(1_000_000), now);
+        let jumped = mapper.map(
+            MediaTime::from_micros(4_000_000),
+            now + Duration::from_millis(20),
+        );
+
+        assert_eq!(jumped.captured_at, now + Duration::from_millis(20));
+        assert_eq!(jumped.resync_count, 1);
+        assert_eq!(
+            jumped.resync_reason,
+            Some(HostAudioClockResyncReason::LargeMediaGap)
+        );
+    }
+
+    #[test]
+    fn host_audio_clock_resyncs_when_mapping_is_too_stale() {
+        let mut mapper = HostAudioClockMapper::default();
+        let now = Instant::now();
+
+        mapper.map(MediaTime::from_micros(1_000_000), now);
+        let stale = mapper.map(
+            MediaTime::from_micros(1_020_000),
+            now + Duration::from_secs(3),
+        );
+
+        assert_eq!(stale.captured_at, now + Duration::from_secs(3));
+        assert_eq!(stale.resync_count, 1);
+        assert_eq!(
+            stale.resync_reason,
+            Some(HostAudioClockResyncReason::MappedTooStale)
+        );
+    }
+
+    #[test]
+    fn host_audio_clock_resyncs_when_mapping_is_too_far_future() {
+        let mut mapper = HostAudioClockMapper::default();
+        let now = Instant::now();
+
+        mapper.map(MediaTime::from_micros(1_000_000), now);
+        let future = mapper.map(
+            MediaTime::from_micros(2_500_000),
+            now + Duration::from_millis(10),
+        );
+
+        assert_eq!(future.captured_at, now + Duration::from_millis(10));
+        assert_eq!(future.resync_count, 1);
+        assert_eq!(
+            future.resync_reason,
+            Some(HostAudioClockResyncReason::MappedTooFarFuture)
         );
     }
 }

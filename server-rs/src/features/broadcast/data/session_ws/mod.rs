@@ -169,7 +169,9 @@ async fn handle_host(mut socket: HostSocket) {
     });
     let _ = socket
         .sender
-        .send(server_capabilities_message(socket.state.webcodecs_ingest_enabled))
+        .send(server_capabilities_message(
+            socket.state.webcodecs_ingest_enabled,
+        ))
         .await;
     session_log.info("server.capabilities", capabilities);
 
@@ -246,6 +248,7 @@ async fn handle_host(mut socket: HostSocket) {
     });
 
     let mut audio_tx: Option<mpsc::Sender<Vec<u8>>> = None;
+    let mut host_audio_clock = timestamped_audio::HostAudioClockMapper::default();
     let mut last_audio_timeline_shadow_log_at: Option<Instant> = None;
     while let Some(Ok(msg)) = socket.receiver.next().await {
         match msg {
@@ -259,6 +262,7 @@ async fn handle_host(mut socket: HostSocket) {
                     session_log: &session_log,
                     timeline_shadow,
                     timestamped_audio,
+                    host_audio_clock: &mut host_audio_clock,
                     session_started_at,
                     last_audio_timeline_shadow_log_at: &mut last_audio_timeline_shadow_log_at,
                 });
