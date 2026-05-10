@@ -8,7 +8,7 @@ const HOST_VIDEO_IDEAL_WIDTH = 720;
 const HOST_VIDEO_IDEAL_HEIGHT = 1280;
 const HOST_VIDEO_MIN_FPS = 30;
 const HOST_VIDEO_IDEAL_FPS = 30;
-const HOST_VIDEO_MAX_BITRATE_BPS = 2_800_000;
+const HOST_VIDEO_MAX_BITRATE_BPS = 4_500_000;
 
 type VideoProfile = {
   width: number;

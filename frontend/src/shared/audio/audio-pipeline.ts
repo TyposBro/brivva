@@ -6,6 +6,18 @@ const TIMESTAMPED_AUDIO_HEADER_BYTES = 28;
 const TIMESTAMPED_AUDIO_MAGIC = "BTA2";
 const TIMESTAMPED_AUDIO_VERSION = 1;
 
+const HIGH_FIDELITY_MIC_CONSTRAINTS: MediaTrackConstraints = {
+  channelCount: { ideal: 1 },
+  sampleRate: { ideal: SAMPLE_RATE },
+  sampleSize: { ideal: 16 },
+  // These browser call-processing filters are useful for meetings, but they
+  // smear/duck speech badly when we rebroadcast the host voice. Capture clean
+  // PCM and let STT/TTS/RTMP handle the downstream processing.
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+};
+
 export type AudioPipelineStartOptions = {
   timestampedAudio?: boolean;
 };
@@ -73,13 +85,7 @@ export class AudioPipeline {
 
   private captureMic(): Promise<MediaStream> {
     return navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: SAMPLE_RATE,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
+      audio: HIGH_FIDELITY_MIC_CONSTRAINTS,
     });
   }
 

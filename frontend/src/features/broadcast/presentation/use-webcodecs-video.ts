@@ -5,7 +5,7 @@ import { detectWebCodecsSupport } from "./media-ingest-mode";
 const DEFAULT_WIDTH = 720;
 const DEFAULT_HEIGHT = 1280;
 const DEFAULT_FPS = 30;
-const DEFAULT_BITRATE_BPS = 2_800_000;
+const DEFAULT_BITRATE_BPS = 4_500_000;
 const KEYFRAME_INTERVAL_MS = 1000;
 const MAX_WS_BUFFERED_BYTES = 4 * 1024 * 1024;
 const MAX_QUEUED_VIDEO_MS = 500;

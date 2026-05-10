@@ -3,6 +3,15 @@ import { useCallback, useRef, useState } from "react";
 const VOICE_SAMPLE_RATE = 44100;
 const PROGRESS_TICK_MS = 250;
 
+const HIGH_FIDELITY_VOICE_CONSTRAINTS: MediaTrackConstraints = {
+  channelCount: { ideal: 1 },
+  sampleRate: { ideal: VOICE_SAMPLE_RATE },
+  sampleSize: { ideal: 16 },
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+};
+
 export interface VoiceRecorderOptions {
   minSec: number;
   maxSec: number;
@@ -13,6 +22,7 @@ export interface VoiceRecorderOptions {
 
 interface ActiveRecorder {
   ctx: AudioContext;
+  stream: MediaStream;
   source: MediaStreamAudioSourceNode;
   processor: ScriptProcessorNode;
 }
@@ -105,6 +115,7 @@ export function useVoiceRecorder({ minSec, maxSec, onAutoStop }: VoiceRecorderOp
     setIsRecording(false);
     rec.processor.disconnect();
     rec.source.disconnect();
+    rec.stream.getTracks().forEach((track) => track.stop());
     rec.ctx.close();
     recorderRef.current = null;
     const samples = mergePcmChunks(pcmRef.current);
@@ -116,7 +127,9 @@ export function useVoiceRecorder({ minSec, maxSec, onAutoStop }: VoiceRecorderOp
     if (recorderRef.current) return;
     pcmRef.current = [];
     setElapsedSec(0);
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: HIGH_FIDELITY_VOICE_CONSTRAINTS,
+    });
     const ctx = new AudioContext({ sampleRate: VOICE_SAMPLE_RATE });
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
@@ -125,7 +138,7 @@ export function useVoiceRecorder({ minSec, maxSec, onAutoStop }: VoiceRecorderOp
     };
     source.connect(processor);
     processor.connect(ctx.destination);
-    recorderRef.current = { ctx, source, processor };
+    recorderRef.current = { ctx, stream, source, processor };
     setIsRecording(true);
 
     const startedAt = Date.now();

@@ -133,16 +133,16 @@ impl VideoProfile {
     fn as_mobile_portrait_output(self) -> Self {
         let output_fps = self.output_fps.min(30);
         // bufsize ≥ 2× bitrate avoids NVENC "limited by bandwidth" warnings.
-        // 5000k gives the VBV buffer enough headroom for CBR at 2500k while
+        // 9000k gives the VBV buffer enough headroom for CBR at 4500k while
         // keeping RTMP latency bounded for live commerce.
         Self {
             input_fps: self.input_fps,
             output_fps,
             max_width: 720,
             max_height: 1280,
-            bitrate_kbps: 2_500,
-            maxrate_kbps: 2_800,
-            bufsize_kbps: 5_000,
+            bitrate_kbps: 4_500,
+            maxrate_kbps: 5_500,
+            bufsize_kbps: 9_000,
             keyframe_interval_frames: output_fps * 2,
             pad_to_canvas: true,
         }
@@ -275,7 +275,7 @@ pub(super) fn build_ffmpeg_args_with_profile_and_encoder(
         "-ac:a".into(),
         "2".into(),
         "-b:a".into(),
-        "128k".into(),
+        "192k".into(),
         // Low-latency FLV/RTMP muxing. These do not fix timestamp bugs, but
         // once video is CFR they keep FFmpeg from intentionally batching.
         "-muxdelay".into(),
@@ -714,7 +714,7 @@ mod tests {
     fn build_ffmpeg_args_keeps_audio_encoding_for_rtmp() {
         let args = build_ffmpeg_args("/tmp/fifo", "rtmp://x");
         let b_a_idx = args.iter().position(|s| s == "-b:a").unwrap();
-        assert_eq!(args[b_a_idx + 1], "128k");
+        assert_eq!(args[b_a_idx + 1], "192k");
     }
 
     #[test]
@@ -807,8 +807,8 @@ mod tests {
         assert_eq!(profile.output_fps, 30);
         assert_eq!(profile.max_width, 720);
         assert_eq!(profile.max_height, 1280);
-        assert_eq!(profile.bitrate_kbps, 2_500);
-        assert_eq!(profile.maxrate_kbps, 2_800);
+        assert_eq!(profile.bitrate_kbps, 4_500);
+        assert_eq!(profile.maxrate_kbps, 5_500);
         assert_eq!(profile.keyframe_interval_frames, 60);
         assert!(profile.pad_to_canvas);
     }
@@ -828,7 +828,7 @@ mod tests {
 
         assert!(joined.contains("-vf fps=30,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"));
         assert!(joined.contains("-g 60 -keyint_min 60"));
-        assert!(joined.contains("-b:v 2500k -maxrate 2800k -bufsize 5000k"));
+        assert!(joined.contains("-b:v 4500k -maxrate 5500k -bufsize 9000k"));
     }
 
     #[test]
