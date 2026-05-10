@@ -1,11 +1,51 @@
-import { useEffect } from "react";
+import { type ComponentType, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Radio } from "lucide-react";
+import { Building2, Clock3, Radio, ShieldCheck, Upload, WandSparkles } from "lucide-react";
 import {
   FrontendOAuthLandingQuerySchema,
   FrontendOAuthTokenFragmentSchema,
 } from "@brivva/contracts/oauth";
 import { signIn, isSignedIn } from "../../../shared/auth/auth-store";
+
+type IconComponent = ComponentType<{ className?: string }>;
+
+function VoiceTierCard({
+  icon: Icon,
+  eyebrow,
+  title,
+  body,
+}: {
+  icon: IconComponent;
+  eyebrow: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <article className="bg-surface-container-low/80 border border-outline-variant/30 rounded-2xl p-5 backdrop-blur text-left">
+      <div className="flex items-center justify-between gap-3 mb-5">
+        <Icon className="w-6 h-6 text-primary" />
+        <span className="text-primary text-xs uppercase tracking-widest font-label font-bold">
+          {eyebrow}
+        </span>
+      </div>
+      <h2 className="font-headline font-bold text-lg text-on-surface mb-2">
+        {title}
+      </h2>
+      <p className="text-on-surface-variant text-sm leading-relaxed font-label">
+        {body}
+      </p>
+    </article>
+  );
+}
+
+function TrustPoint({ icon: Icon, label }: { icon: IconComponent; label: string }) {
+  return (
+    <div className="flex items-center gap-3 bg-surface-container/60 rounded-xl px-4 py-3 text-on-surface-variant font-label text-sm">
+      <Icon className="w-4 h-4 text-primary shrink-0" />
+      <span>{label}</span>
+    </div>
+  );
+}
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -56,10 +96,38 @@ export default function HomePage() {
             <span className="text-primary">LANGUAGE</span>{" "}
             BARRIER IN REAL-TIME.
           </h1>
-          <p className="max-w-2xl mx-auto text-on-surface-variant text-lg md:text-xl mb-16 leading-relaxed">
+          <p className="max-w-2xl mx-auto text-on-surface-variant text-lg md:text-xl mb-10 leading-relaxed">
             Real-time multilingual live commerce broadcasting. One host speaks;
-            every platform receives translated audio in the host's cloned voice.
+            every platform receives translated audio with natural voice options,
+            from instant clones to verified enterprise voice models.
           </p>
+
+          <div className="grid md:grid-cols-3 gap-4 mb-14 text-left">
+            <VoiceTierCard
+              icon={WandSparkles}
+              title="Instant clone"
+              eyebrow="~2 minutes"
+              body="Go live fast with Brivva's instant Yuna and Gitae voice presets, available across every supported language."
+            />
+            <VoiceTierCard
+              icon={Upload}
+              title="Host voice upload"
+              eyebrow="Up to 10 minutes"
+              body="Upload or record a longer host sample when you want translated audio to keep more of the speaker's own timbre."
+            />
+            <VoiceTierCard
+              icon={Building2}
+              title="Enterprise B2B voice"
+              eyebrow="3+ hours + on-site verification"
+              body="For brands, celebrities, and agencies that need higher-fidelity cloning with consent checks and guided capture."
+            />
+          </div>
+
+          <div className="mb-14 grid sm:grid-cols-3 gap-3 text-left">
+            <TrustPoint icon={Clock3} label="Live setup in minutes" />
+            <TrustPoint icon={ShieldCheck} label="Consent-first voice workflows" />
+            <TrustPoint icon={Radio} label="RTMP output for live platforms" />
+          </div>
 
           {/* Sole CTA — Brivva is host-only; viewer-side flows live on the
               broadcast platforms themselves (vision.md "What's Intentionally

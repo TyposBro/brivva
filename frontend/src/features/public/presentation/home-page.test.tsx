@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import HomePage from "./home-page";
@@ -53,6 +53,16 @@ describe("HomePage OAuth callback", () => {
     expect(getUserId()).toBeNull();
     expect(getCachedToken()).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("markets voice cloning tiers on the landing page", () => {
+    renderAt("/");
+    expect(screen.getByRole("heading", { name: "Instant clone" })).toBeInTheDocument();
+    expect(screen.getByText(/~2 minutes/i)).toBeInTheDocument();
+    expect(screen.getByText(/Host voice upload/i)).toBeInTheDocument();
+    expect(screen.getByText(/Up to 10 minutes/i)).toBeInTheDocument();
+    expect(screen.getByText(/Enterprise B2B voice/i)).toBeInTheDocument();
+    expect(screen.getByText(/3\+ hours \+ on-site verification/i)).toBeInTheDocument();
   });
 
   it("persists user_id + JWT in memory and navigates to /dashboard (happy)", () => {

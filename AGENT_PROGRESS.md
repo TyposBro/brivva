@@ -1,45 +1,25 @@
 # AGENT_PROGRESS
 
 ## Current task
-Add Yuna and Gitae instant-clone voice presets available for every target language.
+Update Brivva landing page to reflect voice cloning tiers.
 
 ## Checklist
-- [x] Read current voice preset flow across frontend, Workers contracts, and server-rs TTS.
-- [x] Extend shared voice preset contracts to include `yuna` and `gitae`.
-- [x] Add frontend picker options alongside default female/male voices.
-- [x] Add server-rs preset enum + ElevenLabs voice IDs.
-- [x] Route Yuna/Gitae through cloned TTS path with target-language steering.
-- [x] Add/update tests.
-- [x] Run validation.
+- [x] Inspect landing page and tests.
+- [x] Add landing copy for instant 2-minute cloning, 10-minute voice upload, and enterprise B2B high-quality cloning.
+- [x] Run focused frontend tests/typecheck.
 - [ ] Commit and push.
+- [ ] Deploy frontend.
 
-## Voice IDs
-- Yuna instant clone: `TGckuO5QVcA50jWnQibB`
-- Gitae instant clone: `K0oVfsHF8uZXht1iFdGi`
-
-## Completed work
-- Added `yuna` and `gitae` to contract `VoicePresetSchema`, OpenAPI, generated frontend/Rust contracts, Workers DB type, and frontend API type.
-- Added Yuna/Gitae options to `VoicePresetPicker`.
-- Let built-in presets show in setup even without `session.voice_id`.
-- Added `VoicePreset::Yuna` and `VoicePreset::Gitae` on server-rs.
-- Mapped presets to ElevenLabs voice IDs.
-- Routed built-in instant clones as cloned TTS voices with `language_code` set to the target language so they work across every target language.
-- Preserved user cloned voice behavior: user clones still use enrollment-language steering when known.
+## Notes
+- User screenshot path is local to their Mac and not accessible from this environment, but requested copy is clear.
+- Previous Yuna/Gitae preset code has been deployed to Workers/Pages/server after user reported options were not visible.
 
 ## Tests run
-- `bun run contracts:generate` ✅
-- `bun run --cwd frontend test voice-preset-picker session-setup-page` ✅
-- `bun run typecheck:workers` ✅
+- `bun run --cwd frontend test home-page` ✅
 - `bun run typecheck:frontend` ✅
-- `cargo test -p server-rs tts --lib` ✅
-- `cargo test -p server-rs --test tts_cross_lang_clone` ✅
-- `cargo test -p server-rs` ✅
 
 ## Commits
-- Pending.
-
-## Blockers
-- None.
+- None yet.
 
 ## Next action
-Commit and push.
+Commit/push and deploy frontend.
