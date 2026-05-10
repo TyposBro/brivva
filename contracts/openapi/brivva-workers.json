@@ -352,7 +352,9 @@
             "enum": [
               "cloned",
               "female",
-              "male"
+              "male",
+              "yuna",
+              "gitae"
             ]
           },
           "created_at": {
@@ -988,7 +990,9 @@
             "enum": [
               "cloned",
               "female",
-              "male"
+              "male",
+              "yuna",
+              "gitae"
             ]
           }
         }

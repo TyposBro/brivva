@@ -26,6 +26,7 @@ pub struct ResolveVoiceArgs<'a> {
 pub struct ResolvedVoice {
     pub voice_id: String,
     pub is_cloned: bool,
+    pub language_code_lang: Option<Lang>,
 }
 
 /// Pure voice-selection decision. Exposed for kill-switch tests.
@@ -34,13 +35,15 @@ pub struct ResolvedVoice {
 /// 1. `force_default_voice` kill-switch wins over everything else and always
 ///    yields the female library default.
 /// 2. `voice_preset == Female|Male` uses the matching library default.
-/// 3. `voice_preset == Cloned` with a supplied `selected_voice_id` returns
+/// 3. `voice_preset == Yuna|Gitae` uses Brivva-owned instant clones that are
+///    available for every target language through ElevenLabs language steering.
+/// 4. `voice_preset == Cloned` with a supplied `selected_voice_id` returns
 ///    the clone regardless of enrollment-vs-target language. Cross-lingual
 ///    synthesis is delegated to ElevenLabs via the `language_code` body
 ///    field set by `build_tts_request_body` (commit cd5943f) — that knob is
 ///    what anchors `eleven_flash_v2_5` to the target language while keeping
 ///    the cloned timbre.
-/// 4. `voice_preset == Cloned` with no supplied id falls back to the female
+/// 5. `voice_preset == Cloned` with no supplied id falls back to the female
 ///    default.
 pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
     if args.force_default_voice {
@@ -49,6 +52,15 @@ pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
     match args.voice_preset {
         VoicePreset::Female => default_voice(args.target_lang, VoicePreset::Female),
         VoicePreset::Male => default_voice(args.target_lang, VoicePreset::Male),
+        VoicePreset::Yuna | VoicePreset::Gitae => ResolvedVoice {
+            voice_id: args
+                .voice_preset
+                .instant_clone_voice_id()
+                .expect("instant clone preset has a voice id")
+                .to_string(),
+            is_cloned: true,
+            language_code_lang: Some(args.target_lang.clone()),
+        },
         VoicePreset::Cloned => {
             let Some(clone_id) = args.selected_voice_id else {
                 return default_voice(args.target_lang, VoicePreset::Female);
@@ -56,6 +68,7 @@ pub fn resolve_voice(args: ResolveVoiceArgs<'_>) -> ResolvedVoice {
             ResolvedVoice {
                 voice_id: clone_id.to_string(),
                 is_cloned: true,
+                language_code_lang: args.enrollment_lang.cloned(),
             }
         }
     }
@@ -69,6 +82,7 @@ fn default_voice(target_lang: &Lang, preset: VoicePreset) -> ResolvedVoice {
     ResolvedVoice {
         voice_id: voice_id.to_string(),
         is_cloned: false,
+        language_code_lang: None,
     }
 }
 
@@ -703,6 +717,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
     }
     let mut voice_id = resolved.voice_id;
     let mut is_cloned = resolved.is_cloned;
+    let language_code_lang = resolved.language_code_lang;
     // Unified on eleven_flash_v2_5 for both cloned + default paths. Flash v2.5
     // supports Instant Voice Cloning with `language_code` in the request body
     // (commit cd5943f), so cross-lingual cloned synthesis is routed through
@@ -721,7 +736,7 @@ pub async fn broadcast_translated_tts(req: TtsRequest) {
         model_id,
         is_cloned,
         lang: &req.target_lang,
-        enrollment_lang: req.selected_voice_enrollment_lang.as_ref(),
+        enrollment_lang: language_code_lang.as_ref(),
         speed: tts_speed,
         deadline: tts_deadline,
     })
@@ -1608,6 +1623,29 @@ mod tests {
         });
         assert!(!resolved.is_cloned);
         assert_eq!(resolved.voice_id, Lang::Zh.voice_id_female());
+    }
+
+    #[test]
+    fn resolve_voice_builtin_instant_clone_presets_ignore_user_clone_id() {
+        let yuna = resolve_voice(ResolveVoiceArgs {
+            selected_voice_id: Some("user_clone_ignored"),
+            enrollment_lang: None,
+            target_lang: &Lang::Ja,
+            voice_preset: VoicePreset::Yuna,
+            force_default_voice: false,
+        });
+        assert!(yuna.is_cloned);
+        assert_eq!(yuna.voice_id, "TGckuO5QVcA50jWnQibB");
+
+        let gitae = resolve_voice(ResolveVoiceArgs {
+            selected_voice_id: Some("user_clone_ignored"),
+            enrollment_lang: None,
+            target_lang: &Lang::Ko,
+            voice_preset: VoicePreset::Gitae,
+            force_default_voice: false,
+        });
+        assert!(gitae.is_cloned);
+        assert_eq!(gitae.voice_id, "K0oVfsHF8uZXht1iFdGi");
     }
 
     #[test]

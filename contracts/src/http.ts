@@ -47,7 +47,7 @@ export const VoiceSchema = z.object({
   created_at: z.number().int(),
 });
 
-export const VoicePresetSchema = z.enum(["cloned", "female", "male"]);
+export const VoicePresetSchema = z.enum(["cloned", "female", "male", "yuna", "gitae"]);
 
 export const SessionSchema = z.object({
   id: z.string().min(1),

@@ -110,6 +110,8 @@ pub enum VoicePreset {
     Cloned,
     Female,
     Male,
+    Yuna,
+    Gitae,
 }
 
 impl VoicePreset {
@@ -117,7 +119,17 @@ impl VoicePreset {
         match s {
             "cloned" => Self::Cloned,
             "male" => Self::Male,
+            "yuna" => Self::Yuna,
+            "gitae" => Self::Gitae,
             _ => Self::Female,
+        }
+    }
+
+    pub fn instant_clone_voice_id(self) -> Option<&'static str> {
+        match self {
+            Self::Yuna => Some("TGckuO5QVcA50jWnQibB"),
+            Self::Gitae => Some("K0oVfsHF8uZXht1iFdGi"),
+            _ => None,
         }
     }
 }
@@ -652,6 +664,20 @@ mod tests {
         ];
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), 4, "every lang should map to a distinct voice");
+    }
+
+    #[test]
+    fn voice_preset_from_wire_accepts_builtin_instant_clones() {
+        assert_eq!(VoicePreset::from_wire("yuna"), VoicePreset::Yuna);
+        assert_eq!(VoicePreset::from_wire("gitae"), VoicePreset::Gitae);
+        assert_eq!(
+            VoicePreset::Yuna.instant_clone_voice_id(),
+            Some("TGckuO5QVcA50jWnQibB")
+        );
+        assert_eq!(
+            VoicePreset::Gitae.instant_clone_voice_id(),
+            Some("K0oVfsHF8uZXht1iFdGi")
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ export function cloneSessionVoice(
   );
 }
 
-export type VoicePreset = "cloned" | "female" | "male";
+export type VoicePreset = "cloned" | "female" | "male" | "yuna" | "gitae";
 
 export function updateSessionVoicePreset(
   sessionId: string,

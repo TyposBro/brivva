@@ -401,7 +401,7 @@ export async function updateSessionVoiceId(
 export async function updateSessionVoicePreset(
   db: D1Database,
   id: string,
-  preset: "cloned" | "female" | "male",
+  preset: "cloned" | "female" | "male" | "yuna" | "gitae",
 ): Promise<void> {
   await wrap(db)
     .update(schema.sessions)

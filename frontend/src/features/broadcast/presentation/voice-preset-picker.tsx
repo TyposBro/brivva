@@ -1,4 +1,4 @@
-import { Check, Mic, User, UserRound } from "lucide-react";
+import { Check, Mic, Sparkles, User, UserRound } from "lucide-react";
 import { cn } from "../../../core/cn";
 import type { VoicePreset } from "../data/api-client";
 
@@ -30,6 +30,8 @@ export function VoicePresetPicker({ value, onChange, hasClone, onReRecord }: Pro
     },
     { id: "female", label: "Default female", subtitle: "Library voice, per language", icon: UserRound },
     { id: "male", label: "Default male", subtitle: "Library voice, per language", icon: User },
+    { id: "yuna", label: "Yuna", subtitle: "Instant clone, every language", icon: Sparkles },
+    { id: "gitae", label: "Gitae", subtitle: "Instant clone, every language", icon: Sparkles },
   ];
 
   return (

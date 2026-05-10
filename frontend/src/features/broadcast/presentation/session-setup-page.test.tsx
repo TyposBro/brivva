@@ -14,6 +14,7 @@ vi.mock("react-router-dom", async (orig) => {
 
 const getSession = vi.fn();
 const cloneSessionVoice = vi.fn();
+const updateSessionVoicePreset = vi.fn();
 vi.mock("../data/api-client", async () => {
   const actual = await vi.importActual<typeof import("../data/api-client")>(
     "../data/api-client",
@@ -22,6 +23,7 @@ vi.mock("../data/api-client", async () => {
     ...actual,
     getSession: (...args: unknown[]) => getSession(...args),
     cloneSessionVoice: (...args: unknown[]) => cloneSessionVoice(...args),
+    updateSessionVoicePreset: (...args: unknown[]) => updateSessionVoicePreset(...args),
   };
 });
 
@@ -74,6 +76,7 @@ describe("SessionSetupPage", () => {
     navigate.mockReset();
     getSession.mockReset();
     cloneSessionVoice.mockReset();
+    updateSessionVoicePreset.mockReset();
     recorder.start.mockReset();
     recorder.stop.mockReset();
     recorder.elapsedSec = 0;
@@ -106,6 +109,21 @@ describe("SessionSetupPage", () => {
     await screen.findByRole("heading", { name: /Setup test/i });
     expect(screen.getByRole("button", { name: /Go Live/i })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: /Skip/i }));
+    expect(screen.getByRole("button", { name: /Go Live/i })).not.toBeDisabled();
+  });
+
+  it("built-in instant clone preset does not require a recorded voice", async () => {
+    getSession.mockResolvedValue({
+      session: makeSession({ voice_id: null, voice_preset: "yuna" }),
+      streams: [],
+    });
+    render(
+      <MemoryRouter initialEntries={["/session/s1/setup"]}>
+        <SessionSetupPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: /Yuna/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Go Live/i })).not.toBeDisabled();
   });
 

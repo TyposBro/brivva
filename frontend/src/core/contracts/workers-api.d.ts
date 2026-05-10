@@ -1803,7 +1803,7 @@ export interface components {
             status: string;
             live_session_id: string | null;
             /** @enum {string} */
-            voice_preset: "cloned" | "female" | "male";
+            voice_preset: "cloned" | "female" | "male" | "yuna" | "gitae";
             created_at: number;
             translation_terms: string | null;
         };
@@ -1974,7 +1974,7 @@ export interface components {
         };
         UpdateSessionVoicePresetRequest: {
             /** @enum {string} */
-            voice_preset: "cloned" | "female" | "male";
+            voice_preset: "cloned" | "female" | "male" | "yuna" | "gitae";
         };
         UpdateSessionVoicePresetResponse: {
             session: components["schemas"]["Session"];

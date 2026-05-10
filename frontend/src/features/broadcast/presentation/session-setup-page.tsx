@@ -210,7 +210,7 @@ function SetupInner() {
             <Loader2 className="w-5 h-5 animate-spin text-primary" />
             Cloning your voice…
           </div>
-        ) : recordMode || !session.voice_id ? (
+        ) : recordMode || (voicePreset === "cloned" && !session.voice_id) ? (
           <VoiceSetupCard
             elapsedSec={recorder.elapsedSec}
             isRecording={recorder.isRecording}

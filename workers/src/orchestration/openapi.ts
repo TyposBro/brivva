@@ -236,7 +236,7 @@ const schemas = {
       target_langs: { type: "string" },
       status: { type: "string" },
       live_session_id: { type: "string", nullable: true },
-      voice_preset: { type: "string", enum: ["cloned", "female", "male"] },
+      voice_preset: { type: "string", enum: ["cloned", "female", "male", "yuna", "gitae"] },
       created_at: { type: "integer" },
       translation_terms: { type: "string", nullable: true },
     },
@@ -560,7 +560,7 @@ const schemas = {
     type: "object",
     required: ["voice_preset"],
     properties: {
-      voice_preset: { type: "string", enum: ["cloned", "female", "male"] },
+      voice_preset: { type: "string", enum: ["cloned", "female", "male", "yuna", "gitae"] },
     },
   },
   UpdateSessionVoicePresetResponse: {

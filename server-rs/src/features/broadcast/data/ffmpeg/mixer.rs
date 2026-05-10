@@ -40,6 +40,7 @@ pub(super) fn apply_gain(pcm: &[u8], gain: f32) -> Vec<u8> {
 
 /// Mix two PCM streams (s16le little-endian, same length) with per-source gain
 /// and clip to the i16 range. Output length = min(a.len(), b.len()).
+#[cfg(test)]
 pub(super) fn mix_pcm_s16le(a: &[u8], a_gain: f32, b: &[u8], b_gain: f32) -> Vec<u8> {
     mix_pcm_s16le_with_stats(a, a_gain, b, b_gain).0
 }
@@ -71,6 +72,7 @@ pub(super) fn mix_pcm_s16le_with_stats(
     (out, stats)
 }
 
+#[cfg(test)]
 pub(super) fn count_clipped_samples(pcm: &[u8], threshold: i16) -> usize {
     let threshold = threshold.unsigned_abs();
     pcm.chunks_exact(2)
