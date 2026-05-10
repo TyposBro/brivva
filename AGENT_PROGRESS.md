@@ -12,8 +12,8 @@ Implement GitHub issue #15: Add server-side audio limiter and ducking.
 - [x] Add periodic stream-level clipping/limiter/ducking logs.
 - [x] Add unit tests for limiter, clipping stats, ducking, odd-byte/silence, source/pass-through natural path.
 - [x] Run validation: `cargo test -p server-rs mixer --lib`, `cargo test -p server-rs ffmpeg --lib`, `cargo test -p server-rs`.
-- [ ] Commit and push.
-- [ ] Close issue #15 and move project item to Done.
+- [x] Commit and push.
+- [x] Close issue #15 and move project item to Done.
 
 ## Completed work
 - Added mixer primitives:
@@ -41,10 +41,14 @@ Implement GitHub issue #15: Add server-side audio limiter and ducking.
 - `cargo test -p server-rs` ✅
 
 ## Commits
-- Pending.
+- `7d6dbd1 fix(audio): limit and duck mixed output`
+
+## GitHub sync
+- Issue #15 closed.
+- Project #6 item for #15 moved to `Done`.
 
 ## Blockers
 - None.
 
 ## Next action
-Commit/push and sync GitHub issue #15/project.
+Proceed to next ready project issue.
