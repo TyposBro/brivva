@@ -25,6 +25,19 @@ Instagram egress, ElevenLabs for voice, plus Whisper and Deepgram for speech to
 text. Per-platform RTMP egress is a first-class concept, because each destination
 has its own key, its own failure mode and its own retry budget.
 
+## Demo
+
+A recorded end-to-end test from 16 April 2026: a real host presenting to camera,
+pushed through the Brivva pipeline, with the translated output going out as a
+normal YouTube live stream. Roughly 16 minutes; the host segment starts about 20
+seconds in.
+
+This is test footage recorded during development, not a product demo. The
+translation quality you hear is what the pipeline produced on that day with the
+providers named above.
+
+https://www.youtube.com/watch?v=1BaK5CdfYc8
+
 ## Layout
 
 | Path | What it is |
