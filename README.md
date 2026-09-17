@@ -21,8 +21,8 @@ transcript, synthesized speech in the host's cloned voice, and pushed a
 separate stream to each destination platform.
 
 Provider work in the codebase: RTMP and GRIP ingest, YouTube, TikTok and
-Instagram egress, ElevenLabs for voice, plus Whisper and Deepgram for speech to
-text. Per-platform RTMP egress is a first-class concept, because each destination
+Instagram egress, Soniox for real-time speech to text and translation, and
+ElevenLabs for voice cloning and synthesis. Per-platform RTMP egress is a first-class concept, because each destination
 has its own key, its own failure mode and its own retry budget.
 
 ## Demo
